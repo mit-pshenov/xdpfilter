@@ -173,10 +173,10 @@ struct AttachConfig { std::string iface; std::vector<xdpmf_mac> allow; };
 
 // Returns prog_id on success. Throws std::system_error with codes from
 // the LoaderError enum on failure (translated to exit code by main()).
-unsigned int attach(const AttachConfig& cfg);
+std::uint32_t attach(const AttachConfig& cfg);
 
 // Returns prog_id of the detached program on success.
-unsigned int detach(const std::string& iface);
+std::uint32_t detach(const std::string& iface);
 
 enum class LoaderError : int {
     LoadFailed         = 2,
@@ -316,6 +316,14 @@ network order), semantics, map key size, and all on-wire behaviour are
 unchanged. The `xdpmf_` project prefix is collision-safe and matches
 the C++ `namespace xdpmf` convention. Evidence: impl-notes.md
 (post-build report).
+
+### 5.16 Loader return type = `std::uint32_t` (fixed-width), not `unsigned int` — because
+Post-review housekeeping (reviewer INFO finding). BPF program IDs are a
+kernel-defined `__u32`; using `std::uint32_t` in the C++ loader API
+matches that contract exactly and is portable across LP64/LLP64
+(`unsigned int` is also 32-bit on x86_64 ABI but not guaranteed by the
+language). Behavioral no-op on supported targets; spec-vs-code alignment
+improvement only.
 
 ## 6. TestStrategy
 
