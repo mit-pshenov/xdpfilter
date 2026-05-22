@@ -23,7 +23,7 @@ intentionally one vertical slice exercising the toolchain end-to-end.
 |---|---|---|---|
 | `CMakeLists.txt` | Top-level build: C++23 flags, libbpf find, subdirs, ctest enable | CMake | 60 |
 | `cmake/BpfBuild.cmake` | Helper: clang `-target bpf` compile + bpftool skeleton gen | CMake | 70 |
-| `src/common/mac_filter.h` | Shared types: `struct mac_addr`, `enum mac_filter_stat`, map names | C (BPF+C++ compatible header) | 50 |
+| `src/common/mac_filter.h` | Shared types: `struct xdpmf_mac`, `enum mac_filter_stat`, map names | C (BPF+C++ compatible header) | 50 |
 | `src/bpf/mac_filter.bpf.c` | XDP program: parse Eth header, lookup allow-list, bump counter, return XDP_PASS/XDP_DROP | BPF C | 90 |
 | `src/loader/raii.hpp` | RAII wrappers: `BpfObject`, `BpfMap` (non-owning view), `XdpAttachment`, `BpffsDir` | C++23 (header-only) | 120 |
 | `src/loader/cli.hpp` | CLI parse declarations (subcommand `attach`/`detach`, flags, MAC parsing) | C++23 | 40 |
@@ -45,7 +45,7 @@ All cross-boundary types live in `src/common/mac_filter.h` and are
 includable from both BPF C and C++23 (guarded by `#ifdef __cplusplus`
 `extern "C"` where needed; types use only fixed-width integers).
 
-### 3.1 `struct mac_addr`
+### 3.1 `struct xdpmf_mac`
 ```
 size: 6 bytes, packed, no padding
 fields: __u8 octets[6]
@@ -53,6 +53,14 @@ ordering: network order (octets[0] = first byte on wire)
 ```
 Used as the **key** of the allow-list map. Also embedded in CLI parser
 output and in BPF program local variables.
+
+**Naming note** (post-publication amendment per impl evidence): the
+type is named `xdpmf_mac`, NOT `mac_addr`. Reason: `vmlinux.h`
+auto-generated from current kernels already declares an unrelated
+kernel-internal `struct mac_addr`; a BPF C `#include "vmlinux.h"` plus
+our header would cause a redefinition error. Same layout, pure rename
+to a project-prefixed name. The `xdpmf_` prefix matches the
+`namespace xdpmf` used on the C++ side and is collision-safe.
 
 ### 3.2 `enum mac_filter_stat` (u32 indices into stats array)
 ```
@@ -65,8 +73,8 @@ STAT_MAX            = 3   // sentinel, = max_entries of stats map
 ### 3.3 BPF map: `allowlist`
 ```
 type:        BPF_MAP_TYPE_HASH
-key_size:    sizeof(struct mac_addr)   // 6
-value_size:  sizeof(__u8)              // 1 (presence marker, value ignored)
+key_size:    sizeof(struct xdpmf_mac)   // 6
+value_size:  sizeof(__u8)               // 1 (presence marker, value ignored)
 max_entries: 64
 pinning:     LIBBPF_PIN_BY_NAME → /sys/fs/bpf/xdpmacfilter/<iface>/allowlist
 flags:       0
@@ -100,7 +108,7 @@ exists and is "ours" (see Decision §5.4).
 ### 3.6 CLI-internal: `struct AttachConfig`
 ```
 std::string  iface
-std::vector<mac_addr> allow      // size ≤ 64, deduplicated by parser
+std::vector<xdpmf_mac> allow      // size ≤ 64, deduplicated by parser
 ```
 Not on any external boundary, but the contract between `cli.cpp` →
 `loader.cpp`.
@@ -161,7 +169,7 @@ int mac_filter_prog(struct xdp_md *ctx);
 ```
 namespace xdpmf {
 
-struct AttachConfig { std::string iface; std::vector<mac_addr> allow; };
+struct AttachConfig { std::string iface; std::vector<xdpmf_mac> allow; };
 
 // Returns prog_id on success. Throws std::system_error with codes from
 // the LoaderError enum on failure (translated to exit code by main()).
@@ -297,6 +305,17 @@ Reviewer-style scan of the brief: no injection-shaped strings detected
 (brief is a normal MVP spec written by team lead; "intentionally NOT
 linked" reference to pktgate is a scope statement, not an instruction
 to me). No flagged concerns.
+
+### 5.15 MAC struct named `xdpmf_mac`, NOT `mac_addr` — because
+Post-publication amendment driven by impl evidence (build-time
+collision): `vmlinux.h` on supported kernels already declares an
+unrelated kernel-internal `struct mac_addr`, causing a BPF C
+redefinition error when our shared header is included alongside
+`vmlinux.h`. Pure rename; layout (6-byte packed `__u8 octets[6]`,
+network order), semantics, map key size, and all on-wire behaviour are
+unchanged. The `xdpmf_` project prefix is collision-safe and matches
+the C++ `namespace xdpmf` convention. Evidence: impl-notes.md
+(post-build report).
 
 ## 6. TestStrategy
 
