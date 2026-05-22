@@ -1,0 +1,29 @@
+# Build artifacts
+build/
+build-*/
+*.o
+*.bpf.o
+*.skel.h
+*.so
+
+# Generated for tooling
+compile_commands.json
+
+# Generated headers (regeneratable via bpftool btf dump)
+include/vmlinux.h
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+
+# Test/run logs
+*.log
+mint/test-run.log
+
+# Failsafe paths (out-of-tree by orchestrator)
+/tmp/mint-*
