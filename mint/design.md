@@ -25,14 +25,16 @@ intentionally one vertical slice exercising the toolchain end-to-end.
 | `cmake/BpfBuild.cmake` | Helper: clang `-target bpf` compile + bpftool skeleton gen | CMake | 70 |
 | `src/common/mac_filter.h` | Shared types: `struct xdpmf_mac`, `enum mac_filter_stat`, map names | C (BPF+C++ compatible header) | 50 |
 | `src/bpf/mac_filter.bpf.c` | XDP program: parse Eth header, lookup allow-list, bump counter, return XDP_PASS/XDP_DROP | BPF C | 90 |
-| `src/loader/raii.hpp` | RAII wrappers: `BpfObject`, `BpfMap` (non-owning view), `XdpAttachment`, `BpffsDir` | C++23 (header-only) | 120 |
+| `src/loader/raii.hpp` | RAII wrappers: `BpfSkeleton`, `XdpAttachment`, `BpffsDir` (see §5.17) | C++23 (header-only) | 120 |
 | `src/loader/cli.hpp` | CLI parse declarations (subcommand `attach`/`detach`, flags, MAC parsing) | C++23 | 40 |
 | `src/loader/cli.cpp` | CLI parser implementation: tokenization, MAC validation, usage text | C++23 | 130 |
-| `src/loader/loader.hpp` | Loader API: `attach()`, `detach()`, `populate_allowlist()`, error enum | C++23 | 50 |
+| `src/loader/loader.hpp` | Loader API: `attach()`, `detach()`, error enum (allow-list populated inline in `attach()` — see §5.17) | C++23 | 50 |
 | `src/loader/loader.cpp` | Open skeleton, pin maps under `/sys/fs/bpf/xdpmacfilter/<iface>/`, attach XDP (SKB mode), detect-and-detach prior instance | C++23 | 200 |
 | `src/loader/main.cpp` | `main()`: dispatch subcommand, map exceptions/errors to exit codes | C++23 | 60 |
+| `README.md` | Repo entry-point doc: what / prerequisites / build / run / test / where-docs-live (added MVP-1.1A) | Markdown | 50 |
 | `tests/CMakeLists.txt` | ctest registration (tester populates) | CMake | tester |
-| `tests/...` | Test scripts/binaries (tester populates per TestStrategy §6) | tester-chosen | tester |
+| `tests/T_SANITIZER_BUILD.sh` | ASAN+UBSAN sanitizer-build smoke: fresh `/tmp` build with `-DXDPMF_SANITIZERS=ON` + one end-to-end attach/inject/stats/detach + stderr grep (per §6.8, added MVP-1.1A) | bash | 60 |
+| `tests/...` | Other test scripts/binaries (tester populates per TestStrategy §6) | tester-chosen | tester |
 
 Total impl LOC est: ~870 (excluding tests).
 
@@ -325,6 +327,106 @@ matches that contract exactly and is portable across LP64/LLP64
 language). Behavioral no-op on supported targets; spec-vs-code alignment
 improvement only.
 
+### 5.17 §2 FileList drift correction (raii.hpp wrappers, loader.hpp exports) — because
+Post-publication amendment driven by the external 5-dimension hybrid
+review (`mint/hybrid-review.md`, HIGH finding **H4**, documentation
+dimension, uniquely caught — mint-reviewer's MVP-1 triangulation missed
+the cross-doc consistency check). The §2 FileList rows for
+`src/loader/raii.hpp` and `src/loader/loader.hpp` named symbols that do
+not exist in the impl tree:
+
+- `raii.hpp` row claimed `BpfObject`, `BpfMap (non-owning view)`,
+  `XdpAttachment`, `BpffsDir`. Actual code (per `raii.hpp:29,74,125`)
+  declares `BpfSkeleton`, `XdpAttachment`, `BpffsDir`. The `BpfObject`
+  and `BpfMap` placeholders were superseded when impl adopted the
+  bpftool-generated skeleton (`mac_filter.skel.h`) — the skeleton owns
+  the underlying `bpf_object *` and exposes typed map fd accessors
+  directly, so a hand-rolled non-owning `BpfMap` view was no longer
+  needed. `BpfSkeleton` is the new RAII type that owns the skeleton
+  handle and its destroyer.
+- `loader.hpp` row claimed an exported `populate_allowlist()` API.
+  Actual code (`loader.cpp:205-213`) populates the allow-list inline
+  inside `attach()`; `loader.hpp` exports only `attach()` and
+  `detach()`. The inline form is acceptable — the MAC table is a
+  transient sequence that never crosses a translation-unit boundary
+  after `attach()` returns.
+
+The §2 rows have been edited in place to match reality
+(`BpfSkeleton`/`XdpAttachment`/`BpffsDir` list for `raii.hpp`;
+`attach()`/`detach()`/error-enum list for `loader.hpp`, with an explicit
+note that allow-list population is inline). Pattern: identical to §5.15
+(rename amendment) and §5.16 (return-type amendment).
+
+**Going forward**: §2 FileList is the **authoritative contract**. Any
+future addition, removal, or rename of an exported symbol named in §2
+requires a same-PR edit to §2. Reviewer cross-doc-consistency check is
+hereby part of every future review pass. Evidence:
+`mint/hybrid-review.md` HIGH H4 (cited line offsets:
+`mint/design.md:28` + `mint/design.md:31`).
+
+### 5.18 Sanitizer-build option `XDPMF_SANITIZERS` (default OFF, ASAN+UBSAN combined, C++ targets only) — because
+Post-publication amendment driven by the external 5-dimension hybrid
+review (`mint/hybrid-review.md`, HIGH finding **H3**, testing dimension,
+uniquely caught). The MVP-1 C++ loader contains non-trivial ownership
+paths — three move-only RAII wrappers (§5.17), `std::filesystem::remove_all`
+on rollback, and a hand-rolled MAC tokenizer with pointer-style indexing
+— that the existing ctest harness cannot catch UB or use-after-free in
+(it inspects only exit codes and BPF map counters). Add a sanitizer
+build mode as an additive, test-only target.
+
+Decisions:
+
+- **CMake option name**: `XDPMF_SANITIZERS` (project-prefixed). Default
+  `OFF`. **When OFF, the build is byte-identical to the pre-amendment
+  build** — per brief acceptance #6, no flag injection, no extra
+  link-time deps, no behavioural difference.
+- **Sanitizer set**: ASAN + UBSAN **combined into a single build mode**.
+  Flags injected (both compile and link): `-fsanitize=address,undefined
+  -fno-omit-frame-pointer`. Combined coverage is strictly larger than
+  either alone, the runtime cost difference is irrelevant for a
+  test-only build, and the testing pack note (`test/bpf-xdp.md`)
+  explicitly permits this combination (ASAN+UBSAN coexist; the
+  prohibited combination is ASAN+TSAN). Separate `XDPMF_ASAN`/`XDPMF_UBSAN`
+  knobs are explicitly **not** added — single knob keeps the surface
+  minimal.
+- **TSAN explicitly out**: the C++ loader is single-threaded, no
+  atomics, no `std::thread`/`pthread` — TSAN would add zero signal and
+  conflict with ASAN.
+- **Scope — what gets the flag**:
+  - **Sanitized**: the `xdpmacfilter` binary and any future C++ target
+    in `src/loader/` (the loader's TU set). Flag is propagated to
+    compile AND link of these targets only.
+  - **NOT sanitized — BPF object**: `src/bpf/mac_filter.bpf.c` is
+    compiled with `clang -target bpf`; the BPF backend does **not**
+    support `-fsanitize=address` (no userspace runtime in the kernel
+    JIT path). `cmake/BpfBuild.cmake` MUST NOT propagate
+    `XDPMF_SANITIZERS` into the BPF compile command line — explicit
+    guard required.
+  - **NOT sanitized — libbpf**: external dependency consumed via
+    `pkg_check_modules(LIBBPF …)`; out of our build's reach. ASAN
+    tolerates a one-sided instrumentation across the C ABI for the
+    call directions we use (libbpf calls returning into instrumented
+    C++).
+- **Not shipped**: sanitizer build is test-only. No install target, no
+  release artifact, no CI step beyond ctest. The `T_SANITIZER_BUILD`
+  entry (§6.8) is the sole consumer.
+- **Interaction with `-Werror`**: sanitizer instrumentation occasionally
+  triggers compiler warnings (rare on clang-19, but possible on
+  edge-case code). Impl is permitted to add narrow `-Wno-*` suppressions
+  **only** if a sanitizer-build warning blocks the build AND the same
+  code is warning-clean in the default build; suppressions MUST be
+  conditional on `XDPMF_SANITIZERS=ON` (e.g. via
+  `target_compile_options(... $<$<BOOL:${XDPMF_SANITIZERS}>:-Wno-…>)`),
+  never unconditional.
+- **No runtime opt-out env var (`ASAN_OPTIONS` etc.)**: tester runs with
+  whatever the system default is; if sanitizer hits, that is a real
+  finding. Suppression files are not introduced in MVP-1.1A.
+
+Evidence: `mint/hybrid-review.md` HIGH H3 (testing reviewer, unique
+catch). Implementation surface: CMake option in top-level
+`CMakeLists.txt`; guard in `cmake/BpfBuild.cmake` to NOT propagate the
+flag into the BPF compile.
+
 ## 6. TestStrategy
 
 Test fixture (per `test/bpf-xdp.md` pack — exact mechanism is tester's
@@ -431,6 +533,69 @@ impl source to write these.
   pass for this entry, actual pass as test failure. If anyone breaks
   XDP and lets all frames pass, T_NEGATION_CONTROL flips and the suite
   catches the regression.
+
+### 6.8 T_SANITIZER_BUILD — userspace memory-safety smoke (per §5.18, MVP-1.1A)
+- **Setup** (one-shot, inside the test): use a fresh, isolated build
+  directory disjoint from the default `build/` so the default build is
+  untouched. Recommended: `BUILD_DIR=$(mktemp -d /tmp/xdpmf-asan-XXXXXX)`.
+- **Trigger** (sequential):
+  1. `cmake -S <repo_root> -B "$BUILD_DIR" -DXDPMF_SANITIZERS=ON`
+     (default generator; `-DCMAKE_BUILD_TYPE` left to impl/tester —
+     `Debug` or `RelWithDebInfo` for symbolized ASAN reports is fine).
+  2. `cmake --build "$BUILD_DIR" --parallel` — MUST exit 0 and produce
+     the `xdpmacfilter` binary somewhere under `"$BUILD_DIR"` at the
+     same relative path the default build produces it (tester resolves
+     via a small `find` or the known path).
+  3. Set up the standard veth fixture (`veth_a`/`veth_b`, separate
+     netns per the existing test convention).
+  4. Run the sanitized binary:
+     `<sanitized_xdpmacfilter> attach --iface veth_a --allow 02:00:00:00:00:01`
+     — capture stderr to a file.
+  5. Inject one Ethernet frame on `veth_b` with `src=MAC_GOOD,
+     dst=MAC_DST` (reuse the existing inject helper, same mechanism as
+     §6.3).
+  6. Read `stats` from the pinned map (reuse the existing read helper).
+  7. Run the sanitized binary:
+     `<sanitized_xdpmacfilter> detach --iface veth_a` — capture stderr.
+  8. Tear down the veth fixture.
+- **Outcome** (ALL must hold):
+  - Step 2 (build) exits 0 with no compiler warnings (per §5.12 policy;
+    if a warning escapes, it is a real failure, not a test-suite issue).
+  - Steps 4 and 7 (attach/detach) exit 0.
+  - `stats[STAT_PASS] == 1` — positive correctness check confirming the
+    sanitized binary actually executed the BPF-userspace hot path, not
+    just exited cleanly without doing work.
+  - Captured stderr from steps 4 and 7 contains **zero** lines matching
+    the ERE `AddressSanitizer|UndefinedBehavior` (case-sensitive). Either
+    token appearing — including in a "SUMMARY" line — fails the test,
+    because a clean sanitizer run prints nothing to stderr from the
+    sanitizer runtime.
+- **Assertion mechanism** (concrete):
+  - Exit-code: shell `[[ $? -eq 0 ]]` after each step.
+  - Stats: `bpftool map dump pinned /sys/fs/bpf/xdpmacfilter/veth_a/stats`
+    → parse → exact-equality `STAT_PASS == 1` (other slots not asserted
+    in this test — they are covered by §6.3–6.5).
+  - Sanitizer report: `grep -q -E 'AddressSanitizer|UndefinedBehavior'
+    "$stderr_file" && exit 1`. **Negation form**: a regex match means
+    the test fails.
+- **Ctest properties**:
+  - `TIMEOUT` ≥ 120 s — CMake configure + clean build of the sanitizer
+    target dominates the runtime; allow headroom for slow/CI hosts.
+  - `RESOURCE_LOCK xdp_fixture` — serializes against other veth-using
+    tests (same lock name as §6.3–6.5 and §6.6).
+  - Tester is free to add a label (e.g. `sanitizer`) for optional
+    filtering, but the default `ctest --test-dir build` run MUST
+    include this entry (per brief acceptance #8).
+- **Cleanup**: `trap 'rm -rf "$BUILD_DIR"; ...' EXIT` (mirrors the
+  existing `T_BUILD.sh` trap pattern). Veth/netns teardown reuses the
+  existing fixture helpers.
+- **Pre-existing tests are NOT modified** — this is purely additive;
+  the 7 MVP-1 tests remain byte-identical to before MVP-1.1A. This is
+  itself an assertion of the refactor-mode contract (brief acceptance
+  #9).
+- **Negation control NOT required** — per brief note for tester: the
+  suite-level sanity floor was satisfied in MVP-1 by §6.7
+  `T_NEGATION_CONTROL`; this additive pass does not need its own.
 
 ### Test ordering and isolation
 
