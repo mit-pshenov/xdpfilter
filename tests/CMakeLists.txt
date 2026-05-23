@@ -176,3 +176,64 @@ set_tests_properties(T_BPFFS_ROOT_SYMLINK PROPERTIES
     TIMEOUT 60
     SKIP_RETURN_CODE 77
 )
+
+# ─────────────────────────────────────────────────────────────────────────
+# MVP-2 Perf additions (§5.23 / §6.16-§6.19).
+#
+# T_MODE_GENERIC_DEFAULT (§6.16): attach without --mode defaults to
+# generic (SKB); RESOURCE_LOCK xdp_fixture (uses standard veth pair).
+#
+# T_MODE_NATIVE_UNSUPPORTED (§6.17): attach --mode native --iface lo →
+# exit 3.  NO RESOURCE_LOCK (does not touch the veth pair); SKIP 77 for
+# require_passwordless_sudo path.
+#
+# T_PERCPU_STATS_SUM (§6.18): seeds known per-CPU values via bpftool map
+# update, asserts read_stats sum matches; RESOURCE_LOCK xdp_fixture.
+#
+# T_MODE_DETACH_REJECTS (§6.19): detach --mode <X> → exit 1 + stderr
+# 'attach-only'.  Pure CLI parser test — NO root, NO RESOURCE_LOCK,
+# NO SKIP_RETURN_CODE.
+add_test(
+    NAME T_MODE_GENERIC_DEFAULT
+    COMMAND bash ${TEST_DIR}/T_MODE_GENERIC_DEFAULT.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_MODE_GENERIC_DEFAULT PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 60
+    SKIP_RETURN_CODE 77
+)
+
+add_test(
+    NAME T_MODE_NATIVE_UNSUPPORTED
+    COMMAND bash ${TEST_DIR}/T_MODE_NATIVE_UNSUPPORTED.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_MODE_NATIVE_UNSUPPORTED PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    TIMEOUT 30
+    SKIP_RETURN_CODE 77
+)
+
+add_test(
+    NAME T_PERCPU_STATS_SUM
+    COMMAND bash ${TEST_DIR}/T_PERCPU_STATS_SUM.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_PERCPU_STATS_SUM PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 30
+    SKIP_RETURN_CODE 77
+)
+
+add_test(
+    NAME T_MODE_DETACH_REJECTS
+    COMMAND bash ${TEST_DIR}/T_MODE_DETACH_REJECTS.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_MODE_DETACH_REJECTS PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    TIMEOUT 10
+)

@@ -45,6 +45,12 @@ if ! grep -q -F -- 'detach' "${stdout_file}"; then
     echo "FAIL[--help]: stdout missing 'detach' subcommand name" >&2
     fail=1
 fi
+# §5.23 Item 3 / §6.10 amendment (MVP-2 Perf): --mode flag MUST appear in
+# the help text so the new attach option is operator-discoverable.
+if ! grep -q -F -- '--mode' "${stdout_file}"; then
+    echo "FAIL[--help]: stdout missing '--mode' substring (§5.23 Item 3 amendment)" >&2
+    fail=1
+fi
 
 # ── Sub-case 2: --version ────────────────────────────────────────────────
 echo "=== sub-case 2: --version"

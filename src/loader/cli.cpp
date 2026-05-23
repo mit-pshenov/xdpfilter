@@ -78,7 +78,7 @@ std::string usage_text()
 {
     return std::format(
         "Usage:\n"
-        "  {0} attach --iface <IFNAME> [--allow <MAC>[,<MAC>...] ...]\n"
+        "  {0} attach --iface <IFNAME> [--allow <MAC>[,<MAC>...] ...] [--mode <M>]\n"
         "  {0} detach --iface <IFNAME>\n"
         "  {0} --help | --version\n"
         "\n"
@@ -88,9 +88,13 @@ std::string usage_text()
         "                              be a comma-separated list. Max {1} unique.\n"
         "                              Format: XX:XX:XX:XX:XX:XX (hex).\n"
         "                              Empty allow-list drops all frames.\n"
+        "  --mode {{generic|native|offload}}\n"
+        "                              XDP attach mode (attach only; default generic).\n"
+        "                              detach auto-detects from the attached program.\n"
         "\n"
         "Exit codes: 0 ok, 1 usage, 2 load-fail, 3 attach-fail,\n"
-        "            4 attach-refused-alien, 5 detach-fail, 6 permission.\n",
+        "            4 attach-refused-alien, 5 detach-fail, 6 permission,\n"
+        "            8 path-refused.\n",
         kProgName, XDPMF_ALLOWLIST_MAX);
 }
 
@@ -157,6 +161,18 @@ void parse_allow_token(std::string_view value, std::vector<xdpmf_mac>& out)
     throw CliError(std::format("unexpected argument: '{}'", tok));
 }
 
+/* §5.23 Item 2: map literal mode token → enum. Case-sensitive per design.
+ * Throws CliError with the §5.23-specified message on any unknown value
+ * (load-bearing for tester diagnostic). */
+[[nodiscard]] XdpMode parse_mode_token(std::string_view tok)
+{
+    if (tok == "generic") return XdpMode::Generic;
+    if (tok == "native")  return XdpMode::Native;
+    if (tok == "offload") return XdpMode::Offload;
+    throw CliError(std::format(
+        "--mode: expected one of {{generic, native, offload}}, got '{}'", tok));
+}
+
 ParsedCommand parse_attach(std::span<char* const> args)
 {
     AttachConfig cfg;
@@ -168,6 +184,9 @@ ParsedCommand parse_attach(std::span<char* const> args)
         } else if (tok == "--allow" || tok.starts_with("--allow=")) {
             std::string_view v = consume_flag_value(args, i, "allow");
             parse_allow_token(v, cfg.allow);
+        } else if (tok == "--mode" || tok.starts_with("--mode=")) {
+            std::string_view v = consume_flag_value(args, i, "mode");
+            cfg.mode = parse_mode_token(v);
         } else {
             throw CliError(std::format("unknown attach flag: '{}'", tok));
         }
@@ -186,6 +205,12 @@ ParsedCommand parse_detach(std::span<char* const> args)
         std::string_view tok{args[i]};
         if (tok == "--iface" || tok.starts_with("--iface=")) {
             cfg.iface = std::string{consume_flag_value(args, i, "iface")};
+        } else if (tok == "--mode" || tok.starts_with("--mode=")) {
+            // §5.23 Q1 Option A: --mode is attach-only. The substring
+            // "attach-only" is load-bearing for §6.19 tester grep.
+            throw CliError(
+                "detach: --mode is attach-only; mode is auto-detected from "
+                "the attached program");
         } else {
             throw CliError(std::format("unknown detach flag: '{}'", tok));
         }

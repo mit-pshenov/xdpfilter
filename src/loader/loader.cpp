@@ -62,8 +62,6 @@ namespace xdpmf {
 
 namespace {
 
-constexpr std::uint32_t kXdpFlags = XDP_FLAGS_SKB_MODE;
-
 /* §5.19 identity gate: the BPF program's SEC()-exported function name as
  * kernel-reported via bpf_prog_info.name. MUST match
  * src/bpf/mac_filter.bpf.c's `int mac_filter_prog(...)` symbol; renaming
@@ -77,19 +75,61 @@ constexpr std::string_view kOwnedProgName{"mac_filter_prog"};
 constexpr std::size_t kBpfTagSize = 8;  // BPF_TAG_SIZE
 using TagArray = std::array<std::uint8_t, kBpfTagSize>;
 
-/* §5.4 + §5.20: per-iface XDP slot classification. Stays anon-namespace
- * — no consumer outside loader.cpp (loader.hpp §4.3 unchanged). */
-enum class XdpMode : std::uint8_t { None, Skb, Native, Hw };
+/* §5.4 + §5.20: per-iface XDP slot classification as observed by the §5.20
+ * all-modes probe. Distinct from the public-API ::xdpmf::XdpMode (which
+ * carries the operator's --mode choice for attach); this enum is the
+ * kernel-side ground-truth read back from the netdev. Anon-namespace only. */
+enum class ProbedMode : std::uint8_t { None, Skb, Native, Hw };
 
+[[nodiscard]] constexpr std::string_view to_string(ProbedMode m) noexcept
+{
+    switch (m) {
+        case ProbedMode::None:   return "NONE";
+        case ProbedMode::Skb:    return "SKB";
+        case ProbedMode::Native: return "NATIVE";
+        case ProbedMode::Hw:     return "HW";
+    }
+    return "?";
+}
+
+/* §5.23 Item 2: map the public-API XdpMode (cli.cpp → AttachConfig.mode) to
+ * the kernel XDP_FLAGS_*_MODE bit used by bpf_xdp_attach.
+ * Kernel-ABI coupling stays in this TU (loader.hpp exposes the enum but
+ * no flag values — design.md §5.23 "do NOT map them directly to XDP_FLAGS_*"). */
+[[nodiscard]] constexpr std::uint32_t mode_to_flags(XdpMode m) noexcept
+{
+    switch (m) {
+        case XdpMode::Generic: return XDP_FLAGS_SKB_MODE;
+        case XdpMode::Native:  return XDP_FLAGS_DRV_MODE;
+        case XdpMode::Offload: return XDP_FLAGS_HW_MODE;
+    }
+    return XDP_FLAGS_SKB_MODE;  // unreachable; switch is exhaustive
+}
+
+/* Human label for the operator-selected mode. Used in attach()'s stderr
+ * format so §6.17 tester grep for "native" / "mode=native" matches. */
 [[nodiscard]] constexpr std::string_view to_string(XdpMode m) noexcept
 {
     switch (m) {
-        case XdpMode::None:   return "NONE";
-        case XdpMode::Skb:    return "SKB";
-        case XdpMode::Native: return "NATIVE";
-        case XdpMode::Hw:     return "HW";
+        case XdpMode::Generic: return "generic";
+        case XdpMode::Native:  return "native";
+        case XdpMode::Offload: return "offload";
     }
     return "?";
+}
+
+/* §5.23 Q1 detach() symmetry: the §5.20-probed XDP mode is what detach
+ * passes to bpf_xdp_detach (instead of hardcoded SKB). Probe mode None
+ * never reaches the detach call (state (b) precondition is prog_id != 0). */
+[[nodiscard]] constexpr std::uint32_t probed_mode_to_flags(ProbedMode m) noexcept
+{
+    switch (m) {
+        case ProbedMode::Skb:    return XDP_FLAGS_SKB_MODE;
+        case ProbedMode::Native: return XDP_FLAGS_DRV_MODE;
+        case ProbedMode::Hw:     return XDP_FLAGS_HW_MODE;
+        case ProbedMode::None:   return XDP_FLAGS_SKB_MODE;  // unreachable on detach state (b)
+    }
+    return XDP_FLAGS_SKB_MODE;
 }
 
 /* Single-syscall probe result (§5.19/§5.20/§5.22). `is_ours` is the
@@ -99,7 +139,7 @@ enum class XdpMode : std::uint8_t { None, Skb, Native, Hw };
  * failure, in which case `is_ours == false` via the name branch). */
 struct XdpProbe {
     std::uint32_t prog_id = 0;
-    XdpMode       mode    = XdpMode::None;
+    ProbedMode    mode    = ProbedMode::None;
     bool          is_ours = false;
     std::string   name;
     TagArray      tag{};
@@ -552,22 +592,23 @@ private:
     // Mode priority HW > NATIVE > SKB per §5.20.
     if (opts.hw_prog_id != 0) {
         out.prog_id = opts.hw_prog_id;
-        out.mode    = XdpMode::Hw;
+        out.mode    = ProbedMode::Hw;
     } else if (opts.drv_prog_id != 0) {
         out.prog_id = opts.drv_prog_id;
-        out.mode    = XdpMode::Native;
+        out.mode    = ProbedMode::Native;
     } else if (opts.skb_prog_id != 0) {
         out.prog_id = opts.skb_prog_id;
-        out.mode    = XdpMode::Skb;
+        out.mode    = ProbedMode::Skb;
     } else {
         return out;  // (a)/(d): nothing attached.
     }
 
-    // §5.22 Item 1: identity evaluation order — mode (cheapest), then name
-    // (compile-time literal compare), then tag (byte-array equality).
+    // §5.22 Item 1 + §5.23 Q1: identity evaluation order — mode (cheapest;
+    // ANY of SKB/NATIVE/HW since §5.23 relaxes the SKB-only restriction),
+    // then name (compile-time literal compare), then tag (byte-array equality).
     // Short-circuit on first failure.
     const bool name_matches = fetch_prog_identity(out.prog_id, out.name, out.tag);
-    out.is_ours = (out.mode == XdpMode::Skb)
+    out.is_ours = (out.mode != ProbedMode::None)
                   && name_matches
                   && (out.tag == self_tag);
     return out;
@@ -665,14 +706,18 @@ private:
         t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7]);
 }
 
-/* §5.4 state-(c) refusal message. Splits by which check failed: mode/name
- * sub-case keeps the pre-§5.22 message format (preserves §6.9 assertion
- * surface); tag-mismatch sub-case adds hex tag and the literal substring
- * `tag mismatch` (load-bearing for §6.14). */
+/* §5.4 state-(c) refusal message. Splits by which check failed:
+ *  - name-mismatch (or mode==None — defensive; unreachable when prog_id != 0)
+ *    keeps the pre-§5.22 message format (preserves §6.9 assertion surface).
+ *  - tag-mismatch adds hex tag and the literal substring `tag mismatch`
+ *    (load-bearing for §6.14).
+ * §5.23 Q1 relaxes the mode axis (any of SKB/NATIVE/HW is "ours-eligible"),
+ * so mode is no longer a refusal sub-case — it falls into the name branch
+ * via fetch_prog_identity's name comparison if the kernel rejects the
+ * identity fetch for any reason. */
 [[noreturn]] void throw_alien_refused(const XdpProbe& probe, const std::string& iface)
 {
-    if (probe.mode != XdpMode::Skb
-        || std::string_view{probe.name} != kOwnedProgName) {
+    if (std::string_view{probe.name} != kOwnedProgName) {
         throw_loader(
             LoaderError::AttachRefusedAlien,
             std::format("XDP prog id {} (mode {}, name '{}') already attached to {} "
@@ -680,7 +725,7 @@ private:
                         probe.prog_id, to_string(probe.mode),
                         probe.name, iface));
     }
-    // mode == SKB && name matches but is_ours is false → tag check failed.
+    // Name matches but is_ours is false → tag check failed.
     throw_loader(
         LoaderError::AttachRefusedAlien,
         std::format("XDP prog id {} (mode {}, name '{}', tag {}) already attached to {} "
@@ -720,7 +765,10 @@ std::uint32_t attach(const AttachConfig& cfg)
     if (probe.prog_id != 0) {
         if (probe.is_ours && pin_dir_exists) {
             // State (b): our prior instance — clean detach then proceed.
-            const int rc = bpf_xdp_detach(ifindex, static_cast<int>(kXdpFlags), nullptr);
+            // §5.23 Q1: detach in the probed mode (not hardcoded SKB), so we
+            // can reload an attach made in any mode (native/offload too).
+            const int rc = bpf_xdp_detach(ifindex,
+                                          probed_mode_to_flags(probe.mode), nullptr);
             if (rc < 0) {
                 throw_loader(classify(rc, LoaderError::AttachFailed),
                              std::format("bpf_xdp_detach (idempotent cleanup): {}",
@@ -783,20 +831,22 @@ std::uint32_t attach(const AttachConfig& cfg)
         }
     }
 
-    // Attach XDP in SKB (generic) mode.
+    // §5.23 Item 2: attach in the operator-selected XDP mode (default
+    // generic per AttachConfig.mode initializer; preserves MVP-1 baseline).
     const int prog_fd = bpf_program__fd(skel->progs.mac_filter_prog);
     if (prog_fd < 0) {
         throw_loader(LoaderError::AttachFailed, "mac_filter_prog fd unavailable");
     }
+    const std::uint32_t attach_flags = mode_to_flags(cfg.mode);
     {
-        const int rc = bpf_xdp_attach(ifindex, prog_fd,
-                                      static_cast<int>(kXdpFlags), nullptr);
+        const int rc = bpf_xdp_attach(ifindex, prog_fd, attach_flags, nullptr);
         if (rc < 0) {
             throw_loader(classify(rc, LoaderError::AttachFailed),
-                         std::format("bpf_xdp_attach: {}", std::strerror(-rc)));
+                         std::format("bpf_xdp_attach (mode={}): {}",
+                                     to_string(cfg.mode), std::strerror(-rc)));
         }
     }
-    XdpAttachment xdp_guard{ifindex, kXdpFlags};
+    XdpAttachment xdp_guard{ifindex, attach_flags};
 
     // Query the just-assigned prog id for stdout reporting. We re-use the
     // probe helper (passing self_tag for the is_ours predicate, though we
@@ -856,9 +906,9 @@ std::uint32_t detach(const std::string& iface)
         // State (c) on detach path → DetachFailed (exit 5) per existing
         // §5.4 semantics. Identity-check sub-case (name vs tag) is exposed
         // via stderr but the exit code stays 5 (not 4) — detach never
-        // returns AttachRefusedAlien.
-        if (probe.mode != XdpMode::Skb
-            || std::string_view{probe.name} != kOwnedProgName) {
+        // returns AttachRefusedAlien. §5.23 Q1: mode is no longer a
+        // refusal cause (any mode our name+tag match is "ours").
+        if (std::string_view{probe.name} != kOwnedProgName) {
             throw_loader(LoaderError::DetachFailed,
                          std::format("XDP prog id {} (mode {}, name '{}') on {} is not ours — "
                                      "refusing to detach",
@@ -872,8 +922,10 @@ std::uint32_t detach(const std::string& iface)
                                  probe.name, format_tag_hex(probe.tag), iface));
     }
 
-    // State (b): our prior instance.
-    const int rc = bpf_xdp_detach(ifindex, static_cast<int>(kXdpFlags), nullptr);
+    // State (b): our prior instance. §5.23 Q1 Option A: detach in the
+    // §5.20-probed mode (not hardcoded SKB) — operator did not supply
+    // --mode on detach; the kernel told us which slot to detach.
+    const int rc = bpf_xdp_detach(ifindex, probed_mode_to_flags(probe.mode), nullptr);
     if (rc < 0) {
         throw_loader(classify(rc, LoaderError::DetachFailed),
                      std::format("bpf_xdp_detach: {}", std::strerror(-rc)));

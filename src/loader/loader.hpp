@@ -19,12 +19,21 @@
 
 namespace xdpmf {
 
+/* XDP attach mode selection (§5.23, MVP-2 Perf). Maps to XDP_FLAGS_{SKB,DRV,HW}_MODE
+ * in loader.cpp's anon-namespace helper — kernel-ABI coupling stays out of this header. */
+enum class XdpMode : int {
+    Generic = 0,   // XDP_FLAGS_SKB_MODE — MVP-1 default, universally supported
+    Native  = 1,   // XDP_FLAGS_DRV_MODE — driver-native XDP, hardware-dependent
+    Offload = 2,   // XDP_FLAGS_HW_MODE  — NIC-offloaded XDP, rare hardware support
+};
+
 /* Inputs to attach() / detach(). Owned by loader.hpp so the control plane
  * does not depend on the CLI parser (cli.hpp includes us, not vice versa).
  * Layout is binary-compatible with the pre-MVP-1.1C placement in cli.hpp. */
 struct AttachConfig {
     std::string             iface;
     std::vector<xdpmf_mac>  allow;   // size ≤ XDPMF_ALLOWLIST_MAX, deduplicated
+    XdpMode                 mode = XdpMode::Generic;  // §5.23 MVP-2 Perf
 };
 
 struct DetachConfig {

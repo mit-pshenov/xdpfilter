@@ -23,19 +23,21 @@ struct {
 } allowlist SEC(".maps");
 
 /*
- * Stats counters. Single shared (not per-CPU) — see Decision §5.3.
+ * Stats counters. Per-CPU array (Decision §5.3 superseded by §5.23, MVP-2 Perf).
+ * bpf_map_lookup_elem on a PERCPU_ARRAY returns a pointer to the CURRENT CPU's
+ * slot — `*v += 1` is per-CPU local, no cross-CPU race, no atomic needed.
+ * Userspace (read_stats.py) sums across CPUs per key.
  * Index space is `enum mac_filter_stat`; size is STAT_MAX.
  */
 struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __type(key, __u32);
     __type(value, __u64);
     __uint(max_entries, STAT_MAX);
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } stats SEC(".maps");
 
-/* Non-atomic bump — race-tolerant for the MVP test fixture (single sender,
- * tester waits for quiescence before reading). See Decision §5.3. */
+/* PERCPU bump: pointer returned is to this CPU's slot only. No atomic. */
 static __always_inline void bump_stat(__u32 idx)
 {
     __u64 *v = bpf_map_lookup_elem(&stats, &idx);
