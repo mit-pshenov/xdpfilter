@@ -5,6 +5,19 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-05-23
+
+MVP-2 Robust — kernel-version probe + `T_VERIFIER_REJECT` (third MVP-2 pass).
+
+### Added
+- Kernel-version probe via `uname(2)` + parse `release` field; floor is `5.15`. Fires at the head of both `attach()` and `detach()` BEFORE any libbpf call — replaces cryptic `BPF_PROG_LOAD: Invalid argument` from deep libbpf with a clear `xdpmacfilter: kernel <maj>.<min> too old, need ≥ 5.15`.
+- New exit code 7 = `LoaderError::KernelUnsupported` (the long-reserved row in §4.1 is now active; enum is now contiguous-from-2 through code 8).
+- `T_VERIFIER_REJECT` — regression test for the verifier-reject path. Uses a deliberately-bad BPF fixture (`tests/fixtures/mac_filter_bad.bpf.c` — unbounded loop without `#pragma unroll`); asserts loader exits 2 (`LoadFailed`) with recognizable libbpf stderr. Degrades gracefully (`SKIP_RETURN_CODE 77`) if the running kernel happens to accept the bad fixture.
+- `XDPMF_BPF_OBJECT_PATH` environment variable — testing-only override of the compiled-in BPF object path; honored symmetrically in attach/detach. Intentionally undocumented in `--help` (production operators don't set it).
+
+### Operational notes
+- The probe is operator-UX, not a security mechanism — its purpose is replacing cryptic libbpf errors with a clear "upgrade your kernel" message. No `--no-version-probe` escape hatch; operators on backported kernels can locally patch `kKernelFloorMajor/Minor` constants in `loader.cpp` and rebuild.
+
 ## [0.2.1] — 2026-05-23
 
 MVP-2 Perf — PERCPU stats migration + `--mode {generic,native,offload}` CLI flag (second MVP-2 pass).
@@ -148,6 +161,7 @@ got stuck.
 | MVP-1.1C (polish batch) | 12 items × 4 sections + D4 detach idempotency | 60m | 18m | 10m | 88m | round 1 ✓ |
 | MVP-2 Sec (security pass) | 2 items + 2 tests + 3 architect decisions (Q1/Q2/Q3) + Phase B amendments (detach symmetry, §6.14 reshape, tag-stability finding) + 1-line loader.hpp relaxation | 34m | 34m | 7m | 75m | round 1 ✓ (0 findings) |
 | MVP-2 Perf (performance pass) | 3 items + 4 tests + 3 architect decisions (Q1/Q2/Q3) + Phase B test fixups (3 empirical issues: bpftool broadcast-only, jq numeric mode, stale-pin cleanup) + 2 OUT-OF-TRIANGULATION spec-wording fixes inline-merged + public-API relaxation (XdpMode enum + AttachConfig.mode field) | 14m | 24m | 10m | 48m | round 1 ✓ (0 findings) |
+| MVP-2 Robust (robustness pass) | 2 items + 1 test + 4 architect decisions (Q1=uname / Q2=5.15 / Q3=attach+detach / Q4=hybrid fixture) + Phase B fixups (libbpf 1.x substring reality EDIT-11, fixture-must-have-maps for skeleton-populate, TIMEOUT 30→60 EDIT-12) + 1-line loader.hpp relaxation (KernelUnsupported=7) | 14m | 26m | 9m | 49m | round 1 ✓ (1 negotiated minor) |
 
 Phase 1 ≈ architect time + human-gate read/approve.
 Phase 2–3 ≈ impl + tester running in parallel, plus the build-green / tests-ready handoff.
