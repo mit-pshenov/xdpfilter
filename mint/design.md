@@ -1590,9 +1590,13 @@ known per-CPU values, asserts sum equality — failure signal is
 unambiguous: "PERCPU sum logic is wrong".
 
 Implementation hint (mechanism-only; tester picks exact bytes):
-`nr_cpus=$(nproc --all); expected_sum=$(( nr_cpus * (nr_cpus + 1) / 2 ))`;
-seed each CPU slot with `c+1` for `c ∈ [0, nr_cpus-1]`; assert
-`read_stats.py` sum equals `expected_sum`.
+`nr_cpus=$(nproc --all); V=42; expected_sum=$(( nr_cpus * V ))`;
+seed broadcast value `V` to all CPU slots via `bpftool map update`
+(post-publication amendment 2026-05-23: bpftool CLI only supports
+broadcast, not per-CPU distinct seeding — see §6.18 amendment for
+full rationale); assert `read_stats.py` sum equals `expected_sum`.
+Discriminator preserved on multi-CPU: silent CPU-0-only read returns
+`V`, broadcast sum returns `nr_cpus * V`.
 
 #### Public-API surface diff (`loader.hpp` relaxation)
 
@@ -2627,14 +2631,14 @@ on. This test asserts that default end-to-end.
 - **Setup**: standard veth fixture (`setup_veth`, `${IFACE_A}`/`${IFACE_B}`). `RESOURCE_LOCK xdp_fixture`. Requires `require_passwordless_sudo`.
 - **Trigger** (sequential):
   1. `sudo "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"` (NO `--mode` flag — exercises the default).
-  2. Probe the attached mode via `ip -j link show "${IFACE_A}"` → JSON parse → `.[0].xdp.attached[*].mode` (kernel reports `xdp`, `xdpgeneric`, `xdpdrv`, or `xdpoffload`). The default-generic attach MUST report `xdpgeneric` or the kernel's `generic` synonym.
+  2. Probe the attached mode via `ip -j link show "${IFACE_A}"` → JSON parse → `.[0].xdp.attached[*].mode` (kernel/iproute2 emit `generic` / `xdpgeneric` / numeric `2` — see post-implementation amendment below).
 - **Outcome** (ALL must hold):
   - Step 1 exits 0.
-  - Step 2 confirms the attached XDP mode is generic/SKB (accept both `generic` and `xdpgeneric` for kernel-version variance).
+  - Step 2 confirms the attached XDP mode is generic/SKB. **Accept all three forms** for kernel/iproute2 variance: `generic`, `xdpgeneric`, OR numeric `2` (XDP_ATTACHED_SKB enum value per uapi/linux/if_link.h — NONE=0, DRV=1, **SKB=2**, HW=3, MULTI=4). Test SHOULD add explicit FAIL branches for `1`/`native`/`xdpdrv` and `3`/`offload`/`xdpoffload` as regression guards (catches a regression to a non-SKB default mode with a clear diagnostic, not a blanket "unknown mode" fall-through).
   - `/sys/fs/bpf/xdpmacfilter/${IFACE_A}/{allowlist,stats}` exist.
 - **Mechanism**:
   - Exit code: `[[ $? -eq 0 ]]`.
-  - Mode check: `ip -j link show "${IFACE_A}" | jq -r '.[0].xdp.attached[]?.mode // .[0].xdp.mode'` → must equal `generic` or `xdpgeneric`.
+  - Mode check: `ip -j link show "${IFACE_A}" | jq -r '.[0].xdp.attached[]?.mode // .[0].xdp.mode'` → must equal `generic`, `xdpgeneric`, OR numeric `2` (case branches). Post-publication note (2026-05-23): the spec wording originally said only `generic`/`xdpgeneric`; tester's empirical run on libbpf 1.1.2 / iproute2 on this host emits numeric `2`. Amendment adds numeric variant + diagnostic FAIL branches per `[OUT-OF-TRIANGULATION-1]` advisory in MVP-2 Perf review.
   - Pin paths: `sudo -n test -e "${PIN_DIR}/allowlist" && sudo -n test -e "${PIN_DIR}/stats"`.
 - **Cleanup**: `xdpmacfilter detach --iface "${IFACE_A}"` (NO `--mode` per Q1 Option A) + `cleanup_veth`.
 - **Ctest properties**: `TIMEOUT 60`, `RESOURCE_LOCK xdp_fixture`, `SKIP_RETURN_CODE 77`.
@@ -2678,20 +2682,21 @@ seeded total.
 - **Setup**: standard veth fixture (`setup_veth`, `${IFACE_A}`/`${IFACE_B}`). Run `xdpmacfilter attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"` (default mode) so the PERCPU `stats` map exists at `${PIN_DIR}/stats`. `RESOURCE_LOCK xdp_fixture`. Requires `require_passwordless_sudo`.
 - **Trigger** (sequential):
   1. `nr_cpus=$(nproc --all)` — number of possible CPUs (matches PERCPU map slot count).
-  2. Construct known per-CPU values: for CPU index `c ∈ [0, nr_cpus-1]`, value = `c + 1`. Expected sum = `nr_cpus * (nr_cpus + 1) / 2`.
-  3. Build 8-byte little-endian u64 byte sequence per CPU, concatenate (total `nr_cpus * 8` bytes).
-  4. Seed `STAT_PASS` slot (key 0) via `sudo -n bpftool map update pinned "${PIN_DIR}/stats" key hex 00 00 00 00 value hex <concatenated-bytes>`.
+  2. Pick a known broadcast value `V` (recommend non-zero magic number, e.g. `V = 0x2a = 42`). Expected sum = `nr_cpus * V`.
+  3. Build the 8-byte little-endian u64 byte sequence for `V` (exactly `value_size = 8` bytes; bpftool's PERCPU `map update` CLI accepts only one `value_size`-sized value and BROADCASTS it across all CPU slots — see post-publication amendment below).
+  4. Seed `STAT_PASS` slot (key 0) via `sudo -n bpftool map update pinned "${PIN_DIR}/stats" key hex 00 00 00 00 value hex <8-bytes-of-V>`.
   5. Read sum via `read_stats.py` (whatever invocation form `read_stats.py` exposes; tester uses the documented interface — script returns `<pass> <drop_deny> <drop_malformed>` per MVP-1 convention).
 - **Outcome** (ALL must hold):
   - Step 4 exits 0 (`bpftool map update` accepts the PERCPU value format).
-  - Step 5 exits 0 and the STAT_PASS field of the returned tuple equals `expected_sum`.
+  - Step 5 exits 0 and the STAT_PASS field of the returned tuple equals `expected_sum = nr_cpus * V`.
   - Other stats slots (`STAT_DROP_DENY`, `STAT_DROP_MALFORMED`) NOT asserted in this test (they're at default zero; the test focuses on the sum-correctness of STAT_PASS).
 - **Mechanism**:
   - `bpftool map update` exit: `[[ $? -eq 0 ]]`.
   - Sum equality: `read -r pass _ _ < <(read_stats); [[ "${pass}" == "${expected_sum}" ]] || fail`.
 - **Cleanup**: `xdpmacfilter detach --iface "${IFACE_A}"` + `cleanup_veth`.
 - **Ctest properties**: `TIMEOUT 30`, `RESOURCE_LOCK xdp_fixture`, `SKIP_RETURN_CODE 77`.
-- **Flakiness consideration**: `nproc --all` returns possible CPUs. Even on single-CPU runners (`nr_cpus == 1`), test is deterministic: expected_sum = 1, sole CPU's slot seeded with 1, sum reads back 1.
+- **Flakiness consideration**: `nproc --all` returns possible CPUs. Even on single-CPU runners (`nr_cpus == 1`), test is deterministic: expected_sum = `1 * V = V`, sole CPU's slot seeded with `V`, sum reads back `V`. Discriminator preserved on multi-CPU: if `read_stats.py` silently reads only CPU 0 (PERCPU sum bug), returns `V` ≠ `nr_cpus * V` on any host with `nr_cpus ≥ 2`.
+- **Post-publication amendment** (2026-05-23, per `[OUT-OF-TRIANGULATION-2]` advisory in MVP-2 Perf review): the original spec text said "seed each CPU slot with `c + 1` for `c ∈ [0, nr_cpus-1]`, expected_sum = `nr_cpus*(nr_cpus+1)/2`". Tester empirically established that bpftool's PERCPU `map update` CLI (v7.1.0 src/map.c `fill_per_cpu_value()`) reads exactly `value_size` bytes and BROADCASTS them to all CPU slots — there is no CLI syntax for distinct per-CPU values. Adapted to broadcast-V semantic above; preserves Q3 Option F's diagnostic intent (sum-correctness vs single-CPU-read bug discriminator) on multi-CPU hosts. Distinct per-CPU seeding would require raw `bpf()` syscall via Python ctypes — out of §6.18 unit-test scope.
 - **Negation control NOT required** — `read_stats.py` sum-logic failure propagates to §6.3–§6.8 immediately. §6.7 covers suite-level no-op floor.
 - **Diagnostic value**: if T_PERCPU_STATS_SUM fails but §6.3 passes, likely cause is `read_stats.py` reading CPU 0 only OR a bpftool JSON schema mismatch. If T_PERCPU_STATS_SUM passes but §6.3 fails, bug is in BPF program's PERCPU lookup-and-bump, NOT the sum logic — diagnostic separation is the point.
 
