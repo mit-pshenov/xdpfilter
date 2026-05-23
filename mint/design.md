@@ -28,7 +28,7 @@ intentionally one vertical slice exercising the toolchain end-to-end.
 | `src/loader/raii.hpp` | RAII wrappers: `BpfSkeleton`, `XdpAttachment`, `BpffsDir` (see §5.17) | C++23 (header-only) | 120 |
 | `src/loader/cli.hpp` | CLI parse declarations (subcommand `attach`/`detach`, flags, MAC parsing) | C++23 | 40 |
 | `src/loader/cli.cpp` | CLI parser implementation: tokenization, MAC validation, usage text | C++23 | 130 |
-| `src/loader/loader.hpp` | Loader API: `attach()`, `detach()`, error enum (allow-list populated inline in `attach()` — see §5.17). Post-§5.21 A1: also owns `AttachConfig`/`DetachConfig` structs (moved from `cli.hpp`). Post-§5.22: enum gains `PathRefused = 8` (single enumerator addition — see §5.22 Q3). | C++23 | 50 |
+| `src/loader/loader.hpp` | Loader API: `attach()`, `detach()`, error enum (allow-list populated inline in `attach()` — see §5.17). Post-§5.21 A1: also owns `AttachConfig`/`DetachConfig` structs (moved from `cli.hpp`). Post-§5.22: enum gains `PathRefused = 8` (single enumerator addition — see §5.22 Q3). Post-§5.24: enum gains `KernelUnsupported = 7` (single enumerator addition — see §5.24 Q1). | C++23 | 50 |
 | `src/loader/loader.cpp` | Open skeleton, pin maps under `/sys/fs/bpf/xdpmacfilter/<iface>/`, attach XDP (SKB mode), 4-state detect-and-(detach-ours / refuse-alien / recover-stale-pin) probe per §5.4 (revised MVP-1.1B: identity-verified ownership + all-modes XDP query — see §5.19, §5.20; MVP-1.1C D4: detach state (a) returns exit 0 — see §5.21; MVP-2 Sec §5.22: tag-check identity gate + O_PATH bpffs root fd hardening + symlink-refused exit 8) | C++23 | 290 |
 | `src/loader/main.cpp` | `main()`: dispatch subcommand, map exceptions/errors to exit codes (post-§5.22: exit 8 row added) | C++23 | 60 |
 | `README.md` | Repo entry-point doc: what / prerequisites / build / run / test / where-docs-live (added MVP-1.1A) | Markdown | 50 |
@@ -50,7 +50,7 @@ Total impl LOC est: ~960 (excluding tests; +60 from §5.22 — ~30 for the
 tag-check / probe extension and ~30 for the `BpffsRootFd` RAII + the
 `*at()` syscall conversion of `ensure_bpffs_dir`/`bpffs_remove_iface` per
 §5.22 Q2 Standard scope). `loader.hpp` grows by exactly **one line** —
-the `PathRefused = 8` enumerator — per §5.22 Q3.
+the `PathRefused = 8` enumerator — per §5.22 Q3. Plus the `KernelUnsupported = 7` enumerator — per §5.24 Q1.
 
 The generated BPF skeleton header (`mac_filter.skel.h`) lives in
 `${CMAKE_BINARY_DIR}` — not committed, not listed. Likewise the foreign
@@ -177,7 +177,7 @@ Exit codes (definitive):
 | 4 | Attach refused: a non-ours XDP program is already attached to iface (see §5.4 + §5.19; post-§5.22 the identity gate is name+tag, see §5.22 Q1) |
 | 5 | Detach failed: kernel error during `bpf_xdp_detach` (post-§5.21 D4: "nothing attached" and "pinned dir missing" cases no longer map to 5 — they return 0) |
 | 6 | Permission denied (need CAP_BPF / CAP_NET_ADMIN — typically run as root) |
-| 7 | *reserved* — earmarked for `KernelUnsupported` in MVP-2 Robust slice (do NOT consume in MVP-2 Sec) |
+| 7 | Kernel too old: `uname()`-reported kernel version is below the supported floor (5.15) — fast-fail at the head of `attach()`/`detach()` BEFORE any libbpf BPF_PROG_LOAD (added §5.24 Q1 = Option U + Q3 = Option B — `LoaderError::KernelUnsupported`) |
 | 8 | Path refused: bpffs root or per-iface entry exists as a symlink (`ELOOP` on `O_PATH|O_DIRECTORY|O_NOFOLLOW` open) — refusing to operate on attacker-controllable path (added §5.22 Q3 — `LoaderError::PathRefused`) |
 
 **MVP-1.1B note**: the 4-state §5.4 probe does NOT introduce any new
@@ -200,6 +200,13 @@ get a distinct signal from "an alien BPF prog was already attached"
 (code 4) and from "kernel said no" (code 6)). Code 7 stays reserved for
 the MVP-2 Robust slice; MVP-2 Sec deliberately takes the next
 contiguous slot (8) rather than 7. See §5.22 Q3 for full rationale.
+
+**MVP-2 Robust note** (per §5.24 Q1): row **7 = `KernelUnsupported`** is
+now active (was reserved in MVP-2 Sec). Mechanism: `uname(2)` + parse
+`utsname.release` leading `<major>.<minor>`; compare against `(5, 15)`;
+on fail, throw `LoaderError::KernelUnsupported`. Probe fires at the
+head of both `attach()` and `detach()` (Q3 Option B symmetry). See §5.24
+for full rationale.
 
 Stdout: human-readable status on success ("attached prog id N to <iface>",
 "detached prog id N from <iface>"). Stderr: errors. No JSON, no machine
@@ -245,6 +252,7 @@ enum class LoaderError : int {
     AttachRefusedAlien = 4,
     DetachFailed       = 5,
     Permission         = 6,
+    KernelUnsupported  = 7,   // §5.24 Q1: uname-based kernel-version probe failed
     PathRefused        = 8,   // §5.22 Q3: bpffs root or per-iface entry is a symlink
 };
 
@@ -278,6 +286,15 @@ should accept a one-line `git diff` confined to the enum body. All
 other §5.22 work (the `XdpProbe` tag field, the `BpffsRootFd` RAII, the
 `*at()` syscall conversion) lives entirely in `loader.cpp`'s anon
 namespace — zero further .hpp surface.
+
+**MVP-2 Robust note** (per §5.24 Q1): the `LoaderError` enum gains
+exactly **one** more enumerator — `KernelUnsupported = 7`. Same
+controlled relaxation pattern as `PathRefused = 8`. The probe is
+uname-based (Q1 Option U); fires at the head of both `attach()` and
+`detach()` (Q3 Option B); floor is 5.15 (Q2). See §5.24 for full
+rationale. After this addition the `LoaderError` enum is
+contiguous-from-2 (`{2,3,4,5,6,7,8}`), so the exit-code table is
+fully populated through code 8.
 
 ### 4.4 Observability (no API, just contract)
 
@@ -762,7 +779,10 @@ to re-derive from libbpf source):
   — single syscall, fills `opts->{skb,drv,hw}_prog_id` with all three
   mode-slot prog ids in one round-trip. Used when the probe needs to
   know **which** mode a non-zero attachment is in. Available since
-  libbpf 1.0 (project depends on libbpf ≥ 1.1 per `pkg_check_modules`).
+  libbpf 1.0 (project depends on libbpf ≥ 1.1 per `pkg_check_modules`;
+  project's runtime kernel floor is **5.15** per §5.24 Q2 — older
+  kernels can run libbpf 1.1 but lack BPF verifier improvements +
+  `bpf_loop()` that the project banks on).
 
 **Chosen mechanism** for the §5.4 probe: a single `bpf_xdp_query()`
 call with `flags = 0` and a zero-initialized `bpf_xdp_query_opts`
@@ -1739,6 +1759,184 @@ detection-layer closed in §5.20, CLI surface now closed here);
 `mint/task-brief.md` MVP-2 Perf (full brief). §5.3 + §5.6 supersede.
 §5.22 is_ours predicate mode-axis amendment.
 
+### 5.24 MVP-2 Robust: kernel-version probe + `T_VERIFIER_REJECT` (third MVP-2 pass, 2026-05-23) — amendment block
+
+Append-only amendment closing the two remaining MVP-2 items deferred to
+the Robust slice per §7 OOS (testing M7 in hybrid-review.md line 130):
+(1) **kernel-version probe + `LoaderError::KernelUnsupported` (exit 7)**
+— fast-fail with a clear error before any libbpf BPF_PROG_LOAD call
+that would otherwise yield a cryptic `Invalid argument` from the deep
+libbpf stack; (2) **`T_VERIFIER_REJECT`** — regression test asserting
+the loader produces a clean error (not a crash, not silent success) on
+a verifier-rejected program.
+
+This is the **third MVP-2 pass** (seventh /mint cycle) and the
+**smallest** of the MVP-2 slices: 1 impl item (the probe), 1 test
+(verifier-reject regression). No BPF C changes. `loader.hpp` gains
+**exactly one line** (`KernelUnsupported = 7,`) — same precedent as
+§5.22 Q3's `PathRefused = 8`.
+
+**Coverage delta**:
+
+| Vector / problem | Pre-§5.24 status | Post-§5.24 status |
+|---|---|---|
+| Operator runs `xdpmacfilter` on a kernel too old → libbpf returns cryptic `BPF_PROG_LOAD: Invalid argument` from deep inside `bpf_object__load` | Open — operator sees a generic libbpf message; root-cause guesswork | Closed — `kernel_version_probe()` fires at the head of `attach()`/`detach()` and throws `LoaderError::KernelUnsupported` (exit 7) with stderr literal `xdpmacfilter: kernel <maj>.<min> too old, need ≥ 5.15` |
+| Verifier-reject path silently passes or crashes — no regression coverage | Open — implicit reliance on `T_LOAD_ATTACH` happy-path | Closed — `T_VERIFIER_REJECT` (§6.20) loads a deliberately-bad `.bpf.o` fixture, asserts loader exits 2 (`LoadFailed`) with clear stderr; degrades gracefully (`SKIP_RETURN_CODE 77`) if fixture happens to load cleanly |
+| README ↔ design.md kernel-floor inconsistency | Open — divergent docs | Closed — single floor **5.15** (per Q2). design.md `≥ 5.7` references at lines 765 and 2670 reworded to `≥ 5.15`. README stays |
+
+#### Q1 decision — Detection mechanism = **Option U (uname syscall + version-string parse)**
+
+**Choice**: `uname(2)` syscall, parse the `release` field's leading
+`<major>.<minor>` numeric prefix, compare against floor constants
+`kKernelFloorMajor = 5` and `kKernelFloorMinor = 15`. On parse failure
+(defensive), fail closed → throw `LoaderError::KernelUnsupported`.
+
+**Rationale**: one syscall, no libbpf API churn, well-trodden parse
+pattern. Custom-backport edge case is rare; addressed via OOS fence +
+future escape hatch if demand emerges. Option F (libbpf feature probe)
+rejected: 5+ extra syscalls + libbpf probe API churn; cost-benefit
+poor for our feature set. Option C (uname + BPF_PROG_LOAD trivial
+probe) rejected: complexity + CAP_BPF mid-probe interaction. Option L
+(lazy) rejected: defeats the brief's "replace cryptic libbpf message"
+goal.
+
+#### Q2 decision — Minimum kernel version floor = **5.15**
+
+**Choice**: minimum kernel version is **5.15**. `kKernelFloorMajor = 5`,
+`kKernelFloorMinor = 15`. README.md:22 already correct; design.md
+references corrected in place (EDIT-7 + EDIT-8).
+
+**Rationale**: matches LTS reality (Debian Bookworm, Ubuntu 22.04,
+modern AlmaLinux/Rocky) + the README's existing claim. Includes BPF
+verifier improvements + `bpf_loop()`. 5.7-5.14 is the "untested, may
+work" gray zone — shipping "supported" against an untested band
+invites unreproducible bug reports. 6.x rejected as unjustified by
+current feature use.
+
+#### Q3 decision — Probe call-site placement = **Option B (attach + detach, symmetric)**
+
+**Choice**: probe fires at the head of BOTH `attach()` and `detach()`,
+before ANY libbpf API call (in particular: before the §5.22 early
+skeleton load step 2). Symmetric with the §5.22 detach() identity-gate
+symmetry pattern.
+
+**Impl flow** (per Q1 + Q3):
+
+```
+attach(cfg):
+  0. kernel_version_probe()                  [§5.24 Q3: NEW step 0]
+       — uname() → parse_major_minor() → compare floor
+       — fail → throw LoaderError::KernelUnsupported (exit 7)
+  1. resolve ifindex via if_nametoindex      [unchanged]
+  2. open + load skeleton (BpfSkeleton RAII) [§5.22 early-load]
+  3. self_tag capture                         [§5.22]
+  4. open BpffsRootFd                         [§5.22 Q2]
+  5. probe = probe_attached_xdp(...)          [§5.22 Q1]
+  6. branch on §5.4 state                     [unchanged]
+  ...
+
+detach(iface):
+  0. kernel_version_probe()                  [§5.24 Q3: NEW step 0]
+       — same as attach
+  1. resolve ifindex via if_nametoindex      [unchanged]
+  2..6. same as §5.22 detach symmetry        [unchanged]
+```
+
+**Rationale**: §5.22 detach() symmetry already early-loads the
+skeleton + captures self_tag — detach() ALREADY consumes the BPF
+features the probe gates. Skipping the probe in detach makes the
+detach side fail with the same cryptic libbpf error attach was
+protected against. Option A (attach only) rejected for asymmetry.
+Option O (once-per-process via static) rejected as essentially
+never the hot path (loader is short-lived).
+
+#### Q4 decision — `T_VERIFIER_REJECT` mechanism = **Option (c) Hybrid (active fixture + `SKIP_RETURN_CODE 77` fallback)**
+
+**Choice**: build `tests/fixtures/mac_filter_bad.bpf.c` with deliberate
+verifier violation (unbounded loop without `#pragma unroll` — verifier-universal reject for 5.15+). Test:
+- **SKIP probe first**: standalone `bpftool prog load` on the bad
+  fixture. If exits 0 → verifier accepted on this kernel → SKIP (exit
+  77). If non-zero → expected, proceed.
+- **Active branch**: invoke `xdpmacfilter attach` with `XDPMF_BPF_OBJECT_PATH`
+  env-var override pointing at the bad fixture; assert exit **2**
+  (`LoadFailed`) + recognizable stderr substring.
+
+**Fixture-path override** = env var `XDPMF_BPF_OBJECT_PATH` (Option (i),
+NOT CLI flag). Loader: if env var set + non-empty, use that path
+instead of compiled-in default. ~3 lines impl, symmetric in
+`attach()`/`detach()`. Testing-only mechanism; undocumented in `--help`
+per §7 Robust OOS.
+
+**Rationale**: Option (a) pure-active rejected because a future kernel
+verifier silently accepting our violation produces a confusing false
+fail. Option (b) pure-passive rejected because the test ASSERTS NOTHING
+about the loader's verifier-reject error path — name "T_VERIFIER_REJECT"
+becomes dishonest. Option (c) actively tests the path on the common
+case AND degrades gracefully — best of both.
+
+**Fallback violation pattern**: if unbounded loop unexpectedly verifies
+clean on some kernel, tester swaps to OOB-deref backup pattern
+(verifier-universal for all 5.15+); manual fixture update, not
+runtime auto-switch (preserves test reproducibility).
+
+#### Impl surface summary
+
+**`src/loader/loader.hpp`** — exactly ONE new line (`KernelUnsupported = 7,`
+between `Permission = 6,` and `PathRefused = 8,`). Reviewer's
+`loader.hpp` invariant check MUST accept a single-line `git diff`
+confined to the enum body.
+
+**`src/loader/loader.cpp`** (anon-namespace additions):
+- Floor constants: `constexpr int kKernelFloorMajor = 5;` + `constexpr int kKernelFloorMinor = 15;`.
+- `parse_major_minor(const char* release, int* out_major, int* out_minor) noexcept -> bool` — parses leading `<major>.<minor>` of utsname.release. Accepts `5.15.0`, `5.15.0-100-generic`, `6.1.0-rc4+`, `5.15` (no patch level), etc. Rejects: null, non-digit first char, missing `.`, no digits after `.`, integer overflow.
+- `kernel_version_probe()` — `void`, throws `LoaderError::KernelUnsupported`:
+  1. `uname(&u)` — on EAGAIN/EFAULT → throw with `strerror(errno)`.
+  2. `parse_major_minor(u.release, &maj, &min)` — on false → throw with `unable to parse kernel release '<raw>'`.
+  3. `std::pair{maj,min} < std::pair{kKernelFloorMajor, kKernelFloorMinor}` → throw with `kernel <maj>.<min> too old, need ≥ 5.15`.
+- **Invocation**: `kernel_version_probe();` as FIRST statement of `attach()` AND `detach()`, BEFORE `if_nametoindex`.
+- **Env-var fixture-path override** (Q4): `const char* env_path = std::getenv("XDPMF_BPF_OBJECT_PATH"); const char* obj_path = (env_path && *env_path) ? env_path : nullptr;` near skeleton open. If non-null, pass to libbpf open call. Default behaviour byte-identical to pre-§5.24. Symmetric in attach()/detach().
+- **Headers**: `#include <sys/utsname.h>`, `#include <cstdlib>`, `#include <utility>`.
+
+**`tests/fixtures/mac_filter_bad.bpf.c`** (NEW): unbounded-loop violation. Must clang-compile cleanly; verifier rejects only at `bpf()`-syscall load time. Wired via existing `add_bpf_object` pattern.
+
+**`tests/T_VERIFIER_REJECT.sh`** (NEW): per §6.20.
+
+**`tests/CMakeLists.txt`**: 1 new `add_bpf_object(mac_filter_bad …)` + 1 new `add_test` entry per §6.20 ctest properties.
+
+**`README.md`**: NO change (already says `kernel ≥ 5.15` — Q2 aligns to existing).
+
+#### Stderr discipline contract (load-bearing for §6.20)
+
+The probe's stderr message MUST contain ALL of: `kernel`, `too old`,
+running `<maj>.<min>`, floor `5.15` (or `≥ 5.15`), program name
+`xdpmacfilter`. Recommended exact format: `xdpmacfilter: kernel
+<maj>.<min> too old, need ≥ 5.15`. Impl picks exact wording; reviewer
+asserts substring presence.
+
+#### Threat-model boundary
+
+The probe is **not** a security mechanism — it's operator-UX
+(replacing cryptic libbpf errors). An attacker with root can do
+anything; an attacker without root cannot manipulate `uname()`.
+Audit-clarity improvement, not defence layer.
+
+#### Performance
+
+One additional `uname(2)` syscall per `attach()`/`detach()`
+(~microseconds). Below noise floor.
+
+#### Constraint relaxation justification
+
+`loader.hpp` byte-identical invariant relaxes by exactly one line
+(`KernelUnsupported = 7,`). No new functions, no new types, no new
+top-level symbols, no ABI break. Same precedent as §5.22 Q3's
+`PathRefused = 8`. After this addition the enum is contiguous-from-2
+(`{2,3,4,5,6,7,8}`); exit-code table fully populated through 8.
+
+Evidence: `mint/hybrid-review.md` line 130 (testing M7);
+`mint/task-brief.md` MVP-2 Robust items 1+2; §5.22 Q3 / §5.23
+precedent for one-enumerator additions to `LoaderError`.
+
 ## 6. TestStrategy
 
 Test fixture (per `test/bpf-xdp.md` pack — exact mechanism is tester's
@@ -2667,7 +2865,7 @@ XDP — as the unsupported target.
   - `sudo -n test ! -e "/sys/fs/bpf/xdpmacfilter/lo" || fail`
 - **Cleanup**: `sudo -n ip link set lo xdpgeneric off 2>/dev/null || true` (belt-and-suspenders); `rm -f "${stderr_file}"`.
 - **Ctest properties**: `TIMEOUT 30`, **no** `RESOURCE_LOCK xdp_fixture`, `SKIP_RETURN_CODE 77`.
-- **Flakiness consideration**: `lo` is universally available; native XDP universally unsupported on `lo`. Stable on any Linux host meeting the project's libbpf ≥ 1.1 / kernel ≥ 5.7 floor. If a future kernel adds native XDP to `lo` (extremely unlikely), this test would need a different unsupported-target iface (tap/dummy).
+- **Flakiness consideration**: `lo` is universally available; native XDP universally unsupported on `lo`. Stable on any Linux host meeting the project's libbpf ≥ 1.1 / kernel ≥ 5.15 floor (per §5.24 Q2). If a future kernel adds native XDP to `lo` (extremely unlikely), this test would need a different unsupported-target iface (tap/dummy).
 - **Negation control NOT required** — §6.7 covers suite-level.
 - **Note on Q2 Option K rationale**: this test asserts ONLY exit 3 + stderr substring; does NOT assert any specific exit-code value beyond 3 (would NOT need rewriting if architect later opts for Option N exit 9).
 
@@ -2719,6 +2917,34 @@ with a clear stderr message.
 - **Ctest properties**: `TIMEOUT 10`, **no** `RESOURCE_LOCK`, **no** `SKIP_RETURN_CODE 77` — does not need root. Pure CLI-parser test, parallels §6.10–§6.12 pattern.
 - **Negation control**: an `attach --mode native` invocation does NOT exit 1 with the same stderr — covered implicitly by §6.17 (attach --mode native on lo exits 3, not 1).
 - **Test variant** (optional, tester's choice): also test `detach --mode generic` — proves rule is flag-presence-driven, not mode-value-driven.
+
+### 6.20 T_VERIFIER_REJECT — verifier-reject path produces clean LoadFailed (per §5.24 Q4 Option (c), MVP-2 Robust)
+
+Closes the Q4 Option (c) hybrid choice: assert the loader exits **2**
+(`LoadFailed`) with a recognizable stderr when handed a verifier-rejected
+BPF program. Degrades gracefully (`SKIP_RETURN_CODE 77`) if the verifier
+on the running kernel happens to accept the bad fixture.
+
+- **Setup**: standard veth fixture (`setup_veth`, `${IFACE_A}`/`${IFACE_B}`). NO attach in setup. `RESOURCE_LOCK xdp_fixture`. Requires `require_passwordless_sudo`. Path to bad fixture: `${BUILD_DIR}/tests/fixtures/mac_filter_bad.bpf.o` (built via existing `add_bpf_object` pattern).
+- **SKIP probe** (BEFORE active branch): `sudo -n bpftool prog load "${BUILD_DIR}/tests/fixtures/mac_filter_bad.bpf.o" /sys/fs/bpf/xdpmf_verifier_probe type xdp 2>/dev/null`. If exits 0 → verifier accepted on this kernel → cleanup probe pin → exit **77** (SKIP). If non-zero → expected; proceed.
+- **Trigger** (active branch): `set +e; XDPMF_BPF_OBJECT_PATH="${BUILD_DIR}/tests/fixtures/mac_filter_bad.bpf.o" sudo -n -E "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" 2> "${stderr_file}"; rc=$?; set -e`. (`-E` preserves env var across privilege boundary.)
+- **Outcome** (ALL must hold on active branch):
+  - `rc == 2` — `LoadFailed`.
+  - Stderr non-empty.
+  - Stderr contains AT LEAST ONE of: `verifier` OR `BPF_PROG_LOAD` OR `Invalid argument` (impl-shape flexibility).
+  - No XDP attached: `[[ -z "$(xdp_prog_id ${IFACE_A})" ]]`.
+  - No orphan pin dir: `sudo -n test ! -e "/sys/fs/bpf/xdpmacfilter/${IFACE_A}"`.
+- **Mechanism**:
+  - SKIP exit: `[[ $skip_rc -eq 0 ]] && { sudo -n rm -f /sys/fs/bpf/xdpmf_verifier_probe; exit 77; }`.
+  - rc: `[[ "${rc}" == 2 ]] || fail`.
+  - Stderr non-empty: `[[ -s "${stderr_file}" ]] || fail`.
+  - Stderr substring: `grep -q -E -- 'verifier|BPF_PROG_LOAD|Invalid argument' "${stderr_file}" || fail`.
+- **Cleanup**: `sudo -n ip link set "${IFACE_A}" xdpgeneric off 2>/dev/null || true`; `sudo -n rm -rf "/sys/fs/bpf/xdpmacfilter/${IFACE_A}" 2>/dev/null || true`; `sudo -n rm -f /sys/fs/bpf/xdpmf_verifier_probe 2>/dev/null || true`; `cleanup_veth`; `rm -f "${stderr_file}"`.
+- **Ctest properties**: `TIMEOUT 30`, `RESOURCE_LOCK xdp_fixture`, `SKIP_RETURN_CODE 77`.
+- **Flakiness consideration**: SKIP branch absorbs the only known flake source (future kernel verifier accepting unbounded loop). If that happens, tester swaps `mac_filter_bad.bpf.c` to OOB-deref backup pattern (verifier-universal for 5.15+).
+- **Negation control NOT required** — §6.7 covers suite-level.
+- **Sanity coupling**: this test depends on §5.24 probe NOT firing (modern kernel). If probe false-positive rejects modern kernel, this test exits 7 instead of 2 — §5.24 Q1 impl bug surfacing, not §6.20 design flaw.
+- **Fixture coupling**: `tests/fixtures/mac_filter_bad.bpf.c` MUST be built via `add_bpf_object` in `tests/CMakeLists.txt`. `add_bpf_object` only invokes `clang -target bpf` (compile-time); verifier fires at `bpf()`-syscall load time (what we test).
 
 ## 7. Out of scope
 
@@ -2820,9 +3046,19 @@ might be tempted to add:
   loader binary's compiled-in `--version` string is independent and
   unchanged. Future MVP-2 may add a CMake-derived version constant and
   sync it.
-- **No T_VERIFIER_REJECT + kernel-version probe +
-  `LoaderError::KernelUnsupported`** — testing MED finding per brief
-  OOS section; explicitly MVP-2 (Robust slice).
+- ~~**No T_VERIFIER_REJECT + kernel-version probe +
+  `LoaderError::KernelUnsupported`**~~ **— SHIPPED in §5.24 (MVP-2
+  Robust, 2026-05-23)**. Kernel-version probe is uname-based (Q1
+  Option U); fires at the head of both `attach()` and `detach()`
+  (Q3 Option B); floor is 5.15 (Q2 — README floor unchanged,
+  design.md 5.7-references corrected at lines 765 and 2670).
+  `LoaderError::KernelUnsupported = 7` is the exit-7 enumerator
+  (single-line `loader.hpp` addition, same precedent as MVP-2 Sec's
+  `PathRefused = 8`). T_VERIFIER_REJECT (§6.20) is hybrid (Q4 Option
+  (c) — active fixture `tests/fixtures/mac_filter_bad.bpf.c` with
+  unbounded-loop verifier violation + `SKIP_RETURN_CODE 77` fallback
+  if the running kernel happens to accept the bad fixture).
+  Test coverage: §6.20 T_VERIFIER_REJECT.
 - ~~**No PERCPU stats migration** — performance HIGH finding per brief
   OOS section; design §5.3 + §5.5 explicit MVP-2 (Perf slice).~~
   **— SHIPPED in §5.23 (MVP-2 Perf, 2026-05-23)**. `stats` map type
@@ -2969,3 +3205,46 @@ might be tempted to add:
   bpftool packaging varies by distro; the `--json` PERCPU schema
   is stable per libbpf API. Adding a `bpftool --version` probe is
   OOS.
+
+### MVP-2 Robust additions to OOS (per §5.24)
+
+- **No `--no-version-probe` / `--skip-kernel-check` escape hatch** —
+  the kernel-version probe is unconditional. Operators on
+  backported-feature kernels (5.14 or earlier with relevant features
+  backported) who hit `KernelUnsupported` (exit 7) can locally patch
+  `kKernelFloorMajor`/`kKernelFloorMinor` in `loader.cpp` and
+  rebuild. If upstream demand emerges, a future pass adds the flag.
+- **No `libbpf_probe_bpf_*` feature probing (Q1 Option F rejected)**
+  — Q1 picks Option U (uname-string parse) for the simplicity /
+  cost-benefit profile. Feature-probe-style detection (one syscall
+  per probed feature, fragile across libbpf versions) is OOS.
+- **No `BPF_PROG_LOAD` trivial-probe (Q1 Option C rejected)** —
+  most accurate of the four Q1 options but requires CAP_BPF
+  mid-probe + careful choice of trivial program. Complexity not
+  justified by feature-accuracy gain over Option U.
+- **No `--version` kernel-range reporting** — `--version` stays
+  single-line per MVP-1.
+- **No probe at `--help`/`--version` subcommands** — those don't
+  touch the kernel; probe stays gated to `attach`/`detach`.
+- **No backporting / "kernel X has feature Y backported" detection**
+  — single floor only. Option U doesn't detect backports; Option F
+  would but is rejected.
+- **No probe-result caching across processes** — probe is
+  microseconds; per-invocation re-probe is fine.
+- **No `XDPMF_BPF_OBJECT_PATH` documentation in `--help`** — env var
+  is testing-only infrastructure (per Q4 Option (i)). Production
+  operators do not set it; intentionally undocumented in public CLI
+  surface.
+- **No `--bpf-object-path` CLI flag (Q4 Option (ii) rejected)** —
+  env-var override (Option (i)) is picked. CLI flag would pollute
+  user-visible surface with testing-only mechanism.
+- **No fallback fixture-pattern auto-selection in T_VERIFIER_REJECT**
+  — ships with ONE bad-fixture pattern (unbounded loop). If a future
+  kernel accepts it, tester swaps to OOB-deref backup manually; no
+  runtime auto-detect-and-switch (preserves test reproducibility).
+- **No `T_KERNEL_VERSION_PROBE_UNIT` micro-test for the probe
+  itself** — probe correctness on modern kernels is exercised
+  implicitly by every test calling `attach`/`detach` (20 tests). A
+  separate unit-test for `parse_major_minor` would add maintenance
+  burden for low signal value. MVP-3+ candidate if exotic parse
+  edge cases emerge.
