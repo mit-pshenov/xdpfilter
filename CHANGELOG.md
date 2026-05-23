@@ -88,3 +88,24 @@ MVP-1 — initial vertical slice.
 - ctest suite: `T_BUILD`, `T_LOAD_ATTACH`, `T_PASS_ALLOWED`,
   `T_DROP_DENY`, `T_DROP_MALFORMED`, `T_IDEMPOTENT_RELOAD`,
   `T_NEGATION_CONTROL`.
+
+---
+
+## Build pace
+
+Wall-clock per `/mint` phase boundary (commit-to-commit, from `git log`).
+Includes agent work, peer dialog, AND human-gate decision time —
+the slow phases are usually the ones where the human spent the most
+time reading and asking clarifying questions, not where the agents
+got stuck.
+
+| Pass | Scope | Phase 1 (architect) | Phase 2–3 (impl + tester) | Phase 4 (reviewer) | Total active | Rework |
+|---|---|---|---|---|---|---|
+| MVP-1 (greenfield) | 10 src files, 7 ctest entries | — | 18m | 9m | — | round 1 ✓ + post-pass §4.3/§5.16 amendment (3m) |
+| MVP-1.1A (additive refactor) | 3 items: sanitizer mode, README, FileList drift | — | 8m | 7m | — | round 1 ✓ |
+| MVP-1.1B (source-change refactor) | 4 items: §5.4 4-state machine, identity verification, all-modes probe, alien-refusal test | 12m | 11m | 6m | 30m | round 1 ✓ |
+| MVP-1.1C (polish batch) | 12 items × 4 sections + D4 detach idempotency | 60m | 18m | 10m | 88m | round 1 ✓ |
+
+Phase 1 ≈ architect time + human-gate read/approve.
+Phase 2–3 ≈ impl + tester running in parallel, plus the build-green / tests-ready handoff.
+Phase 4 ≈ reviewer 4-point triangulation + own test re-run.
