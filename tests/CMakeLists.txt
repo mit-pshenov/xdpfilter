@@ -13,6 +13,14 @@ set(TEST_ENV
     "TEST_DIR=${TEST_DIR}"
 )
 
+# Foreign-XDP fixture for T_ATTACH_ALIEN_REFUSAL (design §6.9, MVP-1.1B).
+# add_bpf_object() respects the sanitizer-isolation invariant
+# (cmake/BpfBuild.cmake) — XDPMF_SANITIZERS does NOT propagate into the
+# BPF compile. Tester loads the resulting ${CMAKE_BINARY_DIR}/xdp_pass.bpf.o
+# via `ip link set ... xdpgeneric`; no skeleton header is generated (no C++
+# code opens this object).
+add_bpf_object(xdp_pass ${CMAKE_SOURCE_DIR}/tests/fixtures/xdp_pass.bpf.c)
+
 # T_BUILD performs an isolated clean rebuild in /tmp and greps for warnings;
 # it does NOT need the veth fixture and does NOT take the resource lock.
 add_test(
@@ -33,6 +41,7 @@ foreach(T IN ITEMS
     T_DROP_MALFORMED
     T_IDEMPOTENT_RELOAD
     T_NEGATION_CONTROL
+    T_ATTACH_ALIEN_REFUSAL
 )
     add_test(
         NAME ${T}

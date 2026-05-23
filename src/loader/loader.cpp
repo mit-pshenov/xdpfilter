@@ -1,18 +1,21 @@
 /*
  * loader.cpp — XDP attach/detach control plane built on libbpf.
  *
- * Attach sequence (design §5.4 hybrid idempotent reload):
+ * Attach sequence (design §5.4 4-state probe, MVP-1.1B hardened per
+ * §5.19 identity verification + §5.20 all-modes query):
  *   1. Resolve <iface> → ifindex.
- *   2. Query existing XDP prog id on iface.
- *      - If none: fresh attach.
- *      - If present and bpffs dir /sys/fs/bpf/xdpmacfilter/<iface>/ exists:
- *        "ours" — detach, unpin, remove dir, then fresh attach.
- *      - If present and bpffs dir absent: "alien" — refuse with error 4.
- *   3. Create per-iface bpffs dir (and parent if missing).
- *   4. Open skeleton with pin_root_path = per-iface dir; load auto-pins
- *      maps tagged LIBBPF_PIN_BY_NAME.
- *   5. Populate allow-list map from cfg.allow.
- *   6. Attach XDP in SKB (generic) mode (Decision §5.6).
+ *   2. Probe the iface's XDP slot across ALL modes (HW > NATIVE > SKB)
+ *      via bpf_xdp_query(), and — if a program is attached — verify its
+ *      compile-time identity (bpf_prog_info.name == "mac_filter_prog")
+ *      to classify it as ours-vs-alien.
+ *   3. 4-state disposition:
+ *      (a) no prog, no pin_dir            → fresh attach
+ *      (b) prog ours (SKB + name match)   → detach + clean + fresh attach
+ *      (c) prog alien (any other shape)   → throw AttachRefusedAlien (4)
+ *      (d) no prog, pin_dir present       → cleanup orphan + fresh attach
+ *   4. Create per-iface bpffs dir, open+load skeleton with
+ *      pin_root_path = <dir> (LIBBPF_PIN_BY_NAME maps auto-pin), populate
+ *      allow-list, attach XDP in SKB mode (Decision §5.6).
  *
  * Rollback on any throw: XdpAttachment unwinds, BpffsDir removes the
  * pinned dir, BpfSkeleton tears down libbpf state. On success all three
@@ -26,9 +29,12 @@
 #include <filesystem>
 #include <format>
 #include <string>
+#include <string_view>
 #include <system_error>
+#include <utility>
 
-#include <linux/if_link.h>  // XDP_FLAGS_SKB_MODE
+#include <unistd.h>          // close()
+#include <linux/if_link.h>   // XDP_FLAGS_SKB_MODE
 #include <net/if.h>
 #include <sys/stat.h>
 
@@ -43,6 +49,69 @@ namespace xdpmf {
 namespace {
 
 constexpr std::uint32_t kXdpFlags = XDP_FLAGS_SKB_MODE;
+
+/* §5.19 identity gate: the BPF program's SEC()-exported function name as
+ * kernel-reported via bpf_prog_info.name. MUST match
+ * src/bpf/mac_filter.bpf.c's `int mac_filter_prog(...)` symbol; renaming
+ * that symbol without updating this constant silently breaks "ours"
+ * classification. */
+constexpr std::string_view kOwnedProgName{"mac_filter_prog"};
+
+/* §5.4 + §5.20: per-iface XDP slot classification. Stays anon-namespace
+ * — no consumer outside loader.cpp (loader.hpp §4.3 unchanged). */
+enum class XdpMode : std::uint8_t { None, Skb, Native, Hw };
+
+[[nodiscard]] constexpr std::string_view to_string(XdpMode m) noexcept
+{
+    switch (m) {
+        case XdpMode::None:   return "NONE";
+        case XdpMode::Skb:    return "SKB";
+        case XdpMode::Native: return "NATIVE";
+        case XdpMode::Hw:     return "HW";
+    }
+    return "?";
+}
+
+/* Single-syscall probe result (§5.19/§5.20). is_ours is the conjunction
+ * of (mode == SKB) AND name == kOwnedProgName — both necessary. */
+struct XdpProbe {
+    std::uint32_t prog_id  = 0;
+    XdpMode       mode     = XdpMode::None;
+    bool          is_ours  = false;
+    std::string   name;
+};
+
+/* Deterministic fd close for the prog fd opened by bpf_prog_get_fd_by_id.
+ * Single-callsite helper kept out of raii.hpp per §5.19. */
+class UniqueFd {
+public:
+    UniqueFd() noexcept = default;
+    explicit UniqueFd(int fd) noexcept : fd_(fd) {}
+    UniqueFd(const UniqueFd&)            = delete;
+    UniqueFd& operator=(const UniqueFd&) = delete;
+    UniqueFd(UniqueFd&& other) noexcept : fd_(other.fd_) { other.fd_ = -1; }
+    UniqueFd& operator=(UniqueFd&& other) noexcept {
+        if (this != &other) {
+            reset();
+            fd_ = other.fd_;
+            other.fd_ = -1;
+        }
+        return *this;
+    }
+    ~UniqueFd() noexcept { reset(); }
+
+    void reset() noexcept {
+        if (fd_ >= 0) {
+            (void)::close(fd_);
+            fd_ = -1;
+        }
+    }
+    [[nodiscard]] int  get()   const noexcept { return fd_; }
+    [[nodiscard]] bool valid() const noexcept { return fd_ >= 0; }
+
+private:
+    int fd_ = -1;
+};
 
 /* Single category instance — see loader.hpp. */
 class LoaderCategory final : public std::error_category {
@@ -78,8 +147,6 @@ public:
     throw std::system_error(make_error_code(code), std::move(what));
 }
 
-/* libbpf default log handler is noisy on stderr; we keep it (operators
- * benefit from verifier output). */
 std::string bpffs_dir_for(const std::string& iface)
 {
     return std::string{XDPMF_BPFFS_ROOT} + "/" + iface;
@@ -94,17 +161,81 @@ void bpffs_remove_iface(const std::string& iface) noexcept
     std::filesystem::remove_all(bpffs_dir_for(iface), ec);
 }
 
-/* Query the prog id currently attached to ifindex in SKB mode.
- * Returns 0 if nothing is attached. Throws system_error on real error. */
-[[nodiscard]] std::uint32_t query_attached_prog_id(int ifindex)
+/* §5.19 identity verification: fetch bpf_prog_info for prog_id, populate
+ * `name`, return true iff the kernel-reported program name matches
+ * kOwnedProgName. Fails closed: any errno on fd-get or info-get returns
+ * false (the caller treats the prog as alien). `name` is filled with
+ * whatever the kernel reported (possibly empty on failure) so the
+ * §5.4-(c) stderr message can name the foreign program — even if its
+ * name is the empty string. */
+[[nodiscard]] bool fetch_prog_identity(std::uint32_t prog_id, std::string& name) noexcept
 {
-    std::uint32_t prog_id = 0;
-    const int rc = bpf_xdp_query_id(ifindex, static_cast<int>(kXdpFlags), &prog_id);
+    name.clear();
+
+    const int raw_fd = bpf_prog_get_fd_by_id(prog_id);
+    if (raw_fd < 0) {
+        // TOCTOU racing the kernel (prog detached between probe and fd-get),
+        // or EPERM — fail closed: caller treats as alien.
+        return false;
+    }
+    UniqueFd fd{raw_fd};
+
+    // libbpf 1.1 ships `bpf_obj_get_info_by_fd` (the generic form);
+    // `bpf_prog_get_info_by_fd` is a libbpf 1.2+ wrapper around the same
+    // BPF_OBJ_GET_INFO_BY_FD command. Use the generic form for portability.
+    struct bpf_prog_info info{};
+    std::uint32_t info_len = sizeof(info);
+    if (bpf_obj_get_info_by_fd(fd.get(), &info, &info_len) != 0) {
+        return false;
+    }
+
+    // kernel-populated char[16], NUL-padded; compare bytes up to the first
+    // NUL (not the full 16) per §5.19.
+    const std::size_t n = ::strnlen(info.name, BPF_OBJ_NAME_LEN);
+    name.assign(info.name, n);
+    return std::string_view{name} == kOwnedProgName;
+}
+
+/* §5.4 + §5.19 + §5.20: single-syscall XDP probe across all modes, with
+ * identity verification when a program is found. Return-by-value (POD-ish
+ * — sizeof ~32B + small-string name). NEVER throws on the success path;
+ * any kernel/libbpf failure during identity check downgrades the result
+ * to `is_ours = false` (fail-closed). The only throw path is when
+ * bpf_xdp_query() itself errors out — that's a real kernel failure, not
+ * a "no program" signal, and must surface to the caller. */
+[[nodiscard]] XdpProbe probe_attached_xdp(int ifindex)
+{
+    XdpProbe out;
+
+    bpf_xdp_query_opts opts{};
+    opts.sz = sizeof(opts);
+
+    const int rc = bpf_xdp_query(ifindex, 0, &opts);
     if (rc < 0) {
         throw_loader(classify(rc, LoaderError::AttachFailed),
-                     std::format("bpf_xdp_query_id: {}", std::strerror(-rc)));
+                     std::format("bpf_xdp_query: {}", std::strerror(-rc)));
     }
-    return prog_id;
+
+    // Mode priority HW > NATIVE > SKB per §5.20.
+    if (opts.hw_prog_id != 0) {
+        out.prog_id = opts.hw_prog_id;
+        out.mode    = XdpMode::Hw;
+    } else if (opts.drv_prog_id != 0) {
+        out.prog_id = opts.drv_prog_id;
+        out.mode    = XdpMode::Native;
+    } else if (opts.skb_prog_id != 0) {
+        out.prog_id = opts.skb_prog_id;
+        out.mode    = XdpMode::Skb;
+    } else {
+        return out;  // (a)/(d): nothing attached.
+    }
+
+    // §5.19: a program in non-SKB mode cannot be ours (we only attach in
+    // SKB per §5.6). Skip the identity probe — but still populate `name`
+    // for the alien-refusal stderr message.
+    const bool name_match = fetch_prog_identity(out.prog_id, out.name);
+    out.is_ours = name_match && (out.mode == XdpMode::Skb);
+    return out;
 }
 
 /* Resolve interface name → ifindex, or throw AttachFailed (no separate
@@ -146,27 +277,40 @@ std::uint32_t attach(const AttachConfig& cfg)
 {
     const int ifindex = resolve_ifindex(cfg.iface, LoaderError::AttachFailed);
 
-    // §5.4 ownership probe.
-    const std::uint32_t existing = query_attached_prog_id(ifindex);
+    // §5.4 4-state probe.
+    const XdpProbe probe = probe_attached_xdp(ifindex);
     const std::string pin_dir = bpffs_dir_for(cfg.iface);
     const bool pin_dir_exists = std::filesystem::exists(pin_dir);
 
-    if (existing != 0) {
-        if (!pin_dir_exists) {
-            throw_loader(LoaderError::AttachRefusedAlien,
-                         std::format("XDP prog id {} already attached to {} "
-                                     "(not ours — refusing to clobber)",
-                                     existing, cfg.iface));
+    if (probe.prog_id != 0) {
+        if (probe.is_ours && pin_dir_exists) {
+            // State (b): our prior instance — clean detach then proceed.
+            const int rc = bpf_xdp_detach(ifindex, static_cast<int>(kXdpFlags), nullptr);
+            if (rc < 0) {
+                throw_loader(classify(rc, LoaderError::AttachFailed),
+                             std::format("bpf_xdp_detach (idempotent cleanup): {}",
+                                         std::strerror(-rc)));
+            }
+            bpffs_remove_iface(cfg.iface);
+        } else {
+            // State (c): alien program — refuse to clobber. Stderr message
+            // MUST include the foreign prog_id (load-bearing assertion
+            // target for T_ATTACH_ALIEN_REFUSAL, §6.9).
+            throw_loader(
+                LoaderError::AttachRefusedAlien,
+                std::format("XDP prog id {} (mode {}, name '{}') already attached to {} "
+                            "(not ours — refusing to clobber)",
+                            probe.prog_id, to_string(probe.mode),
+                            probe.name, cfg.iface));
         }
-        // "Ours" — clean detach then proceed.
-        const int rc = bpf_xdp_detach(ifindex, static_cast<int>(kXdpFlags), nullptr);
-        if (rc < 0) {
-            throw_loader(classify(rc, LoaderError::AttachFailed),
-                         std::format("bpf_xdp_detach (idempotent cleanup): {}",
-                                     std::strerror(-rc)));
-        }
+    } else if (pin_dir_exists) {
+        // State (d): no XDP attached, but a stale pin dir survives from a
+        // crash/SIGKILL between ensure_bpffs_dir and bpf_xdp_attach on a
+        // previous run. Clean the orphan and fall through to fresh attach
+        // (no new exit code per §4.1 MVP-1.1B note).
         bpffs_remove_iface(cfg.iface);
     }
+    // State (a): nothing attached, no pin dir — straight to fresh attach.
 
     // Fresh bpffs layout. armed BpffsDir will rm -rf on any rollback path.
     ensure_bpffs_dir(pin_dir);
@@ -227,39 +371,56 @@ std::uint32_t attach(const AttachConfig& cfg)
     }
     XdpAttachment xdp_guard{ifindex, kXdpFlags};
 
-    // Query the just-assigned prog id for stdout reporting.
-    const std::uint32_t new_prog_id = query_attached_prog_id(ifindex);
+    // Query the just-assigned prog id for stdout reporting. After our own
+    // attach the slot is definitively populated in SKB mode by ourselves.
+    const XdpProbe after = probe_attached_xdp(ifindex);
 
     // Commit: kernel keeps the XDP slot (Decision §5.9); maps stay pinned.
     xdp_guard.release();
     dir_guard.release();
-    return new_prog_id;
+    return after.prog_id;
 }
 
 std::uint32_t detach(const std::string& iface)
 {
     const int ifindex = resolve_ifindex(iface, LoaderError::DetachFailed);
 
-    const std::uint32_t prog_id = query_attached_prog_id(ifindex);
-    if (prog_id == 0) {
+    const XdpProbe probe = probe_attached_xdp(ifindex);
+    const std::string pin_dir = bpffs_dir_for(iface);
+    const bool pin_dir_exists = std::filesystem::exists(pin_dir);
+
+    if (probe.prog_id == 0) {
+        if (pin_dir_exists) {
+            // State (d): orphan pin dir from a crash mid-attach. Recoverable
+            // no-op cleanup per §5.4 — exit 0, NOT DetachFailed.
+            bpffs_remove_iface(iface);
+            return 0;
+        }
+        // State (a) inside detach(): user asked to detach something that
+        // isn't there. That IS an error.
         throw_loader(LoaderError::DetachFailed,
                      std::format("nothing attached to {}", iface));
     }
 
-    const std::string pin_dir = bpffs_dir_for(iface);
-    if (!std::filesystem::exists(pin_dir)) {
+    if (!probe.is_ours || !pin_dir_exists) {
+        // State (c): refuse to detach an alien program. Pre-MVP-1.1B this
+        // was triggered by `!pin_dir_exists` alone; now identity gate adds
+        // the name-mismatch case.
         throw_loader(LoaderError::DetachFailed,
-                     std::format("no bpffs dir at {} — not ours, refusing detach",
-                                 pin_dir));
+                     std::format("XDP prog id {} (mode {}, name '{}') on {} is not ours — "
+                                 "refusing to detach",
+                                 probe.prog_id, to_string(probe.mode),
+                                 probe.name, iface));
     }
 
+    // State (b): our prior instance.
     const int rc = bpf_xdp_detach(ifindex, static_cast<int>(kXdpFlags), nullptr);
     if (rc < 0) {
         throw_loader(classify(rc, LoaderError::DetachFailed),
                      std::format("bpf_xdp_detach: {}", std::strerror(-rc)));
     }
     bpffs_remove_iface(iface);
-    return prog_id;
+    return probe.prog_id;
 }
 
 }  // namespace xdpmf

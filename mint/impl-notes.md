@@ -59,6 +59,17 @@ target so diagnostics inside generated/third-party headers are suppressed
 by default (the same treatment libbpf headers in `/usr/include/bpf/`
 already get).
 
+## MVP-1.1B internal choice — `bpf_obj_get_info_by_fd` (not `bpf_prog_get_info_by_fd`)
+
+Design §5.19 names `bpf_prog_get_info_by_fd(fd, &info, &len)` for
+identity verification. libbpf 1.1.2 (this host's pkg-config version)
+ships only the generic `bpf_obj_get_info_by_fd(int bpf_fd, void *info,
+__u32 *info_len)` — `bpf_prog_get_info_by_fd` is a libbpf 1.2+ thin
+wrapper around the same `BPF_OBJ_GET_INFO_BY_FD` syscall command. Both
+fill `struct bpf_prog_info` identically. Used the generic form to stay
+within libbpf 1.1 API; behaviour is byte-equivalent to the design's
+chosen name. Documented inline at the call site in `loader.cpp`.
+
 ## Smoke-check results
 
 - `cmake --build build` → exit 0, zero warnings.
