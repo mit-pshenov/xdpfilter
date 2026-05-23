@@ -47,6 +47,14 @@ add_link_options(-stdlib=libc++)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBBPF REQUIRED IMPORTED_TARGET libbpf)
 
+# XDPMF_SANITIZERS (design §5.18): test-only ASAN+UBSAN build mode for the
+# C++ loader. Default OFF — when OFF, the build is byte-identical to the
+# pre-amendment build (no flag injection, no extra link deps). When ON, the
+# flags are applied via target_compile_options/target_link_options scoped
+# to the xdpmacfilter binary ONLY (see below) — they MUST NOT propagate to
+# the BPF object (clang -target bpf has no userspace sanitizer runtime).
+option(XDPMF_SANITIZERS "Build C++ loader with ASAN+UBSAN (test-only)" OFF)
+
 include(${CMAKE_SOURCE_DIR}/cmake/BpfBuild.cmake)
 
 add_bpf_object(mac_filter ${CMAKE_SOURCE_DIR}/src/bpf/mac_filter.bpf.c)
@@ -69,6 +77,20 @@ target_include_directories(xdpmacfilter SYSTEM PRIVATE
 )
 target_link_libraries(xdpmacfilter PRIVATE PkgConfig::LIBBPF)
 add_dependencies(xdpmacfilter mac_filter_skel)
+
+# Sanitizer injection (design §5.18): apply ASAN+UBSAN flags to the C++
+# loader target ONLY, on both compile and link. target_*_options is scoped
+# (unlike add_compile_options), so the flag never reaches the BPF object
+# nor any other target. -fno-omit-frame-pointer keeps ASAN traces readable.
+if(XDPMF_SANITIZERS)
+    target_compile_options(xdpmacfilter PRIVATE
+        -fsanitize=address,undefined
+        -fno-omit-frame-pointer
+    )
+    target_link_options(xdpmacfilter PRIVATE
+        -fsanitize=address,undefined
+    )
+endif()
 
 enable_testing()
 if(EXISTS ${CMAKE_SOURCE_DIR}/tests/CMakeLists.txt)

@@ -12,6 +12,16 @@ set(_XDPMF_BPF_ARCH_DEFINE "-D__TARGET_ARCH_x86")
 # add_bpf_object(<name> <source.bpf.c>)
 #   Produces ${CMAKE_BINARY_DIR}/<name>.bpf.o via `clang -target bpf`.
 #   Re-runs when the source or any shared header changes.
+#
+# Sanitizer-isolation guard (design §5.18): this helper invokes clang
+# directly via add_custom_command with a hand-rolled flag list. It does
+# NOT consume CMAKE_C_FLAGS, target_compile_options, or any inherited
+# project-wide flags — so XDPMF_SANITIZERS (-fsanitize=address,undefined)
+# CANNOT propagate into the BPF compile, by construction. Do NOT extend
+# this function to splice in ${CMAKE_C_FLAGS} or generator-expression
+# inherited flags without re-checking the sanitizer-isolation invariant
+# (clang -target bpf has no userspace ASAN runtime; a leaked -fsanitize=
+# flag would either fail compile or produce an unloadable BPF object).
 function(add_bpf_object name source)
     set(obj ${CMAKE_BINARY_DIR}/${name}.bpf.o)
 

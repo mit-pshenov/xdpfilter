@@ -57,3 +57,21 @@ set_tests_properties(T_DROP_MALFORMED PROPERTIES SKIP_RETURN_CODE 77)
 # zero (meaning MAC_BAD was let through, i.e. XDP is broken), ctest
 # reports T_NEGATION_CONTROL as FAILED — surfacing the regression.
 set_tests_properties(T_NEGATION_CONTROL PROPERTIES WILL_FAIL TRUE)
+
+# Per design §6.8 (MVP-1.1A): sanitizer-build smoke. Configures a fresh
+# /tmp build dir with -DXDPMF_SANITIZERS=ON, builds it, runs one
+# end-to-end attach+inject+stats+detach via the asan-instrumented binary
+# against the veth fixture, and greps captured stderr for sanitizer
+# reports.  Takes the same xdp_fixture RESOURCE_LOCK as §6.3-§6.6 because
+# it touches veth_a/veth_b.  TIMEOUT 180 because the embedded cmake
+# configure + sanitizer build dominates the runtime.
+add_test(
+    NAME T_SANITIZER_BUILD
+    COMMAND bash ${TEST_DIR}/T_SANITIZER_BUILD.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_SANITIZER_BUILD PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 180
+)

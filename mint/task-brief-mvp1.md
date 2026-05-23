@@ -12,7 +12,7 @@ This is MVP-1 in a series — first "reincarnation" of the pktgate concept, inte
 - **Platform**: Linux x86_64, kernel ≥ 5.15 (for BPF features needed).
 - **Build**: CMake, out-of-source build in `build/`.
 - **Configuration**: command-line arguments only — no config file, no JSON, no hot reload in this slice.
-- **Dependencies**: libbpf 1.1+, libelf, bpftool, clang-19 (all installed on host).
+- **Dependencies**: libbpf 1.1+, libelf, bpftool, clang-19, libc++-19-dev (all installed on host).
 
 ## Acceptance criteria
 
