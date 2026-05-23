@@ -3030,23 +3030,45 @@ might be tempted to add:
 
 ### MVP-1.1C additions to OOS (per §5.21)
 
-- **No netns isolation for the test fixture (C3 Path A)** — per §5.21
-  C3 decision, Path B (PID-suffixed names) was chosen as the
-  janitorial-pass-appropriate option. Path A (per-test `ip netns add
-  xdpmf-test-$$` with veth + loader + traffic gen inside the namespace,
-  teardown nukes the netns) is recorded as MVP-2 hardening: ~50 LOC of
-  fixture infra, cleaner host isolation, deferred.
-- **No CMake-generation of `tests/lib/common.sh:PIN_ROOT`** — per
-  §5.21 B3 decision, a 1-line `# MUST match XDPMF_BPFFS_ROOT in …`
-  comment makes the coupling explicit for MVP-1.1C. CMake-driven
-  generation of the shell constant from the C header
-  (`include/common/mac_filter.h`) is MVP-2 hardening.
-- **No version-string sync between `CHANGELOG.md` and the loader
-  binary's `--version` output** — per §5.21 B4 decision, the changelog
-  versions (`0.1.0`/`0.1.1`/`0.1.2`/`0.1.3`) are documentary only; the
-  loader binary's compiled-in `--version` string is independent and
-  unchanged. Future MVP-2 may add a CMake-derived version constant and
-  sync it.
+- ~~**No netns isolation for the test fixture (C3 Path A)**~~
+  **— SHIPPED in §5.25 (MVP-2 Polish-2, 2026-05-23)** via Q1 = N3
+  (setup_veth-level wrap). `tests/lib/common.sh` exports
+  `NETNS="xdpmf_ns_$$"` + `NSEXEC="sudo -n ip netns exec ${NETNS}"`;
+  `setup_veth` creates the netns and runs the veth pair inside it;
+  `cleanup_veth` deletes the netns (atomic veth + XDP teardown).
+  Test bodies edit only the loader-invocation callsites
+  (`sudo -n "${LOADER_BIN}"` → `${NSEXEC} "${LOADER_BIN}"`); pin
+  paths under `/sys/fs/bpf/xdpmacfilter/${IFACE_A}` remain
+  host-global (bpffs is not netns-isolated; PID-suffix continues to
+  be the pin-path uniqueness guarantee). T_BPFFS_ROOT_SYMLINK +
+  T_MODE_NATIVE_UNSUPPORTED opt out by not calling setup_veth.
+- ~~**No CMake-generation of `tests/lib/common.sh:PIN_ROOT`**~~
+  **— SHIPPED in §5.25 (MVP-2 Polish-2, 2026-05-23)** via Q2 = C1
+  (sed extraction in CMake). `CMakeLists.txt` `execute_process`
+  extracts `XDPMF_BPFFS_ROOT` from `src/common/mac_filter.h` at
+  configure time (FATAL_ERROR fail-fast on empty); `configure_file`
+  emits `${CMAKE_BINARY_DIR}/tests/pins.sh`; `tests/CMakeLists.txt`
+  `TEST_ENV` passes `PINS_SH=<path>`; `tests/lib/common.sh:33-35`
+  sources `${PINS_SH}` with `:?` integrity guards. Silent
+  header-rename drift now produces a hard configure-time failure.
+- ~~**No version-string sync between `CHANGELOG.md` and the loader
+  binary's `--version` output**~~ **— SHIPPED in §5.25 (MVP-2
+  Polish-2, 2026-05-23)** via Q3 = V1 (`project(VERSION)`
+  source-of-truth). `CMakeLists.txt:13 VERSION 0.1.0` bumped to
+  `VERSION 0.2.3`; new `include/version.h.in` template +
+  `configure_file` emits `${CMAKE_BINARY_DIR}/include/version.h`
+  carrying `#define XDPMF_VERSION_STRING "@PROJECT_VERSION@"`;
+  `src/loader/cli.cpp` includes the generated header, drops the
+  hardcoded `kVersion` constant. Loader's `--version` output now
+  reads `xdpmacfilter 0.2.3`. CHANGELOG entry `## [0.2.3]` documents
+  the bump.
+- ~~**No `inject_runt.py:37` inline-comment fix** (MVP-1.1C reviewer
+  OUT-OF-TRIANGULATION advisory)~~ **— SHIPPED in §5.25 (MVP-2
+  Polish-2, 2026-05-23)** via P4. The `:37` inline comment rewritten
+  from `complete 6-byte dst MAC + partial src MAC` →
+  `full 6-byte dst MAC + full 6-byte src MAC + 1 ethertype byte` —
+  agrees with the corrected lines 18-19 docstring (MVP-1.1C B1).
+  Byte literals at lines 41-43 untouched (brief explicit OOS).
 - ~~**No T_VERIFIER_REJECT + kernel-version probe +
   `LoaderError::KernelUnsupported`**~~ **— SHIPPED in §5.24 (MVP-2
   Robust, 2026-05-23)**. Kernel-version probe is uname-based (Q1
@@ -3249,3 +3271,127 @@ might be tempted to add:
   separate unit-test for `parse_major_minor` would add maintenance
   burden for low signal value. MVP-3+ candidate if exotic parse
   edge cases emerge.
+
+### 5.25 MVP-2 Polish-2: netns isolation + CMake-gen `PIN_ROOT` + version-string sync + `inject_runt.py:37` comment fix (fourth and final MVP-2 pass, 2026-05-23) — amendment block
+
+Append-only amendment closing the four remaining janitorial items
+deferred to MVP-2 Polish-2 throughout MVP-1.1C and MVP-2 Sec/Perf/Robust.
+**This is the final MVP-2 slice** — after Polish-2 ships, the MVP-2
+sequence is fully closed and the project enters MVP-3 territory.
+
+Scope is intentionally narrow: 4 items, all non-behavioural. No new
+exit codes, no public C++ API changes, no CLI surface changes, no
+on-the-wire / on-disk format changes. Items 1-3 are infrastructure
+hardening (test isolation, build-pipeline robustness, version-sync
+discipline); Item 4 is a one-line comment fix.
+
+**Scope summary** — file:line targets per brief:
+
+| ID | Where | One-line change |
+|---|---|---|
+| P1 | `tests/lib/common.sh` (`setup_veth`/`cleanup_veth` + new `NETNS`/`NSEXEC` constants + helper wraps) + test-body loader-invocation sweep across `tests/T_*.sh` | Q1 = **N3 (setup_veth-level wrap)**. setup_veth owns a per-PID netns `xdpmf_ns_$$`; veth pair lives inside it; loader/inject helpers run via `ip netns exec` wrapper. Pin paths remain host-global (bpffs is not netns-isolated). Two existing tests (T_BPFFS_ROOT_SYMLINK, T_MODE_NATIVE_UNSUPPORTED) opt out by not calling setup_veth. |
+| P2 | `CMakeLists.txt` (configure-time extraction + `configure_file`) + new `tests/lib/pins.sh.in` template + `tests/CMakeLists.txt` (`PINS_SH` env wiring) + `tests/lib/common.sh:33-34` (replace hardcoded mirror with sourced value + integrity guards) | Q2 = **C1 (sed extraction in CMake)**. CMake `execute_process` extracts `XDPMF_BPFFS_ROOT` value from `src/common/mac_filter.h`, fails fast if empty; `configure_file` emits `${CMAKE_BINARY_DIR}/tests/pins.sh` with `PIN_ROOT="<extracted>"`; ctest `TEST_ENV` passes `PINS_SH=<path>`; common.sh sources it. |
+| P3 | `CMakeLists.txt:13` (VERSION bump) + new `include/version.h.in` template + `CMakeLists.txt` (`configure_file` + include dir) + `src/loader/cli.cpp:6-21,103` (header include + drop hardcoded `kVersion` + use generated macro) + `CHANGELOG.md` (new `## [0.2.3]` section) | Q3 = **V1 (project(VERSION) source-of-truth)**. Bump `VERSION 0.1.0` → `VERSION 0.2.3`; generate `${CMAKE_BINARY_DIR}/include/version.h` from `@PROJECT_VERSION@`; cli.cpp `#include "version.h"`, drop hardcoded `kVersion`. CHANGELOG entry documents Polish-2. |
+| P4 | `tests/inject/inject_runt.py:37` (single inline comment line) | Pure rewrite of one line to agree with the corrected lines 18-19 docstring (MVP-1.1C B1). No question — brief is explicit. |
+
+#### Q1 decision — netns isolation mechanism = **Option N3 (setup_veth-level wrap)**
+
+**Choice**: `tests/lib/common.sh setup_veth` creates a per-PID network
+namespace `NETNS="xdpmf_ns_$$"`, creates the veth pair INSIDE it, and
+runs loader + injectors + iface queries via `ip netns exec ${NETNS} …`.
+`cleanup_veth` deletes the netns (atomic teardown of veth + XDP) plus
+the bpffs pin dir. Test bodies retain `${IFACE_A}`/`${IFACE_B}` and
+`${PIN_DIR}` references unchanged; the only mechanical edit at test-body
+level is `sudo -n "${LOADER_BIN}"` → `${NSEXEC} "${LOADER_BIN}"`
+(`NSEXEC` exported by common.sh).
+
+**Rationale**: N1 (per-test netns named after test) needs `${TEST_NAME}`
+threading which breaks helper-signature stability — PID-only netns
+achieves equivalent isolation under existing `RESOURCE_LOCK xdp_fixture`
+serialization. N2 (one netns per ctest invocation) needs CMake fixture
+hooks that don't compose cleanly with per-test setup_veth. N4 (decline)
+leaves sysctl-per-iface mutations polluting the host's sysctl table —
+PID-suffix closed the name-collision risk but NOT the sysctl-isolation
+gap. N3 closes it cleanly.
+
+**Helper-wrap topology** (centralized in `tests/lib/common.sh`):
+- `NETNS="xdpmf_ns_$$"`, `NSEXEC="sudo -n ip netns exec ${NETNS}"`
+- `setup_veth`: defensive netns-del + pin-dir rm → `ip netns add` → collision preflight (now scoped inside netns) → `${NSEXEC} ip link add veth pair` → sysctl/ifup steps all prefixed `${NSEXEC}` → final 0.5s quiesce
+- `cleanup_veth`: `ip netns del` (atomic veth+XDP teardown) + `rm -rf "${PIN_DIR}"` (bpffs host-global, explicit removal preserved)
+- Helpers re-pointed: `inject_eth`/`inject_runt` (`python3` → `${NSEXEC} python3`); `xdp_prog_id` (`ip -j link show` → `${NSEXEC} ip -j link show`); `read_stats`/`wait_for_stats_sum`/`prog_count` UNCHANGED (bpffs host-global, pin paths are same regardless of netns)
+- Test-body sweep: every `sudo -n "${LOADER_BIN}"` callsite that follows `setup_veth` → `${NSEXEC} "${LOADER_BIN}"` (NSEXEC includes `sudo -n`)
+
+**Opt-out tests** (do NOT call setup_veth):
+- **T_BPFFS_ROOT_SYMLINK (§6.15)** — bpffs root manipulation, host-global by definition
+- **T_MODE_NATIVE_UNSUPPORTED (§6.17)** — uses `lo` (exists in every netns); host-namespace simpler
+- **CLI-parser-only tests (§6.10-§6.12, §6.19)** — no veth, no setup_veth
+- **T_DETACH_NOTHING (§6.13)** — uses `lo`, no setup_veth, stays host-namespace
+- **T_BUILD (§6.1) / T_SANITIZER_BUILD (§6.8)** — pure build-pipeline
+
+**Regression invariant**: 20/20 ctest pass (or legitimately SKIP-77) post-refactor. Any test failing due specifically to netns wrap (loader can't find iface, inject socket bound wrong ns, etc.) is a wrap bug not a test bug.
+
+**Pin-path host-globalness invariant**: loader inside netns still pins to `/sys/fs/bpf/xdpmacfilter/${IFACE_A}/{allowlist,stats}` because `/sys/fs/bpf` is host-global mount (not netns-isolated in 5.15+; would require `unshare(CLONE_NEWNS)` + private mount, exceeds Polish-2 scope). PID-suffix in `IFACE_A` is the cross-PID pin-path uniqueness guarantee.
+
+#### Q2 decision — CMake-gen `PIN_ROOT` mechanism = **Option C1 (sed extraction in CMake)**
+
+**Choice**: configure-time `execute_process(COMMAND sed -nE …)` extracts the quoted value of `XDPMF_BPFFS_ROOT` from `src/common/mac_filter.h`; FATAL_ERROR fail-fast if empty; `configure_file()` emits shell stub `${CMAKE_BINARY_DIR}/tests/pins.sh`; ctest `TEST_ENV` carries `PINS_SH=…`; `tests/lib/common.sh` sources `${PINS_SH}` and consumes `PIN_ROOT`.
+
+**Rationale**: C2 (`cpp -E`) needs include-path resolution for a single string macro — sed is exactly as reliable, zero new tool dep. C3 (.h.in template) reorganizes source-of-truth, makes `mac_filter.h` itself a generated artifact — exceeds Polish-2 scope. C4 (decline) keeps the MVP-1.1C comment marker but doesn't prevent silent rename drift; C1 closes that at one configure-time step.
+
+**Impl substitution flexibility**: impl MAY swap `sed` for `file(READ)` + `string(REGEX MATCH)` if external sed dep is unwelcome — externally observable result (generated `pins.sh` with extracted value) is identical.
+
+**Integrity coverage**: configure-time FATAL_ERROR (empty `XDPMF_BPFFS_ROOT`) + runtime `:?` guards in common.sh (`PINS_SH` unset OR `PIN_ROOT` unset → test exit). Every veth-fixture test exercises sourcing path indirectly. No dedicated `T_PINS_CODEGEN` ctest entry needed.
+
+#### Q3 decision — Version-string sync mechanism = **Option V1 (project(VERSION) source-of-truth + configure_file → version.h)**
+
+**Choice**: `CMakeLists.txt:13 VERSION 0.1.0` → `VERSION 0.2.3` (semver patch-bump — Polish-2 is maintenance release; no new features, no breaking changes). New `include/version.h.in` template → `${CMAKE_BINARY_DIR}/include/version.h` via `configure_file`. `src/loader/cli.cpp` `#include "version.h"`, drops hardcoded `kVersion`, uses `XDPMF_VERSION_STRING` macro. `CHANGELOG.md` gains `## [0.2.3] — 2026-05-23` entry.
+
+**Rationale**: V2 (CHANGELOG as source-of-truth) inverts the dependency wrong — CHANGELOG should document the build, not gate it (typo → build failure). V3 (decline) leaves operators with two different version numbers (changelog vs `--version`) — MVP-1.1C B4 deferral entry flagged exactly this gap.
+
+**Impl details**:
+- `include/version.h.in`: `#define XDPMF_VERSION_STRING "@PROJECT_VERSION@"`
+- `target_include_directories(xdpmacfilter PRIVATE ${CMAKE_BINARY_DIR}/include)` — non-SYSTEM (want diagnostics on our own template, unlike SYSTEM-suppressed skel.h)
+- cli.cpp: `#include "version.h"`, delete line 21 `kVersion` constant, swap `kVersion` → `XDPMF_VERSION_STRING` at line 103 `version_text()` (impl MAY retain a local `constexpr std::string_view kVersion{XDPMF_VERSION_STRING}` alias for readability — same output either way)
+- CHANGELOG.md: new `## [0.2.3]` block above `## [0.2.2]` summarizing Polish-2; Build-pace table gains a row
+
+#### Q4 decision — T_CLI_HELP_VERSION test interaction = **Option T1 (no test edit)**
+
+**Choice**: `tests/T_CLI_HELP_VERSION.sh` NOT modified. Existing ERE `[0-9]+\.[0-9]+\.[0-9]+` at line 81 matches `xdpmacfilter 0.2.3` without change; T1 is forward-compatible.
+
+**Rationale**: T2 (strict exact-match) couples test maintenance to every version bump — low signal value. If future operational need emerges (distro packaging asserting version monotonicity), T2-style assertion added then, not preemptively.
+
+#### Item 4 — `tests/inject/inject_runt.py:37` inline comment fix
+
+Pure rewrite of one line. Current: `# 13 bytes: complete 6-byte dst MAC + partial src MAC.` Becomes: `# 13 bytes: full 6-byte dst MAC + full 6-byte src MAC + 1 ethertype byte.` Agrees with the lines 18-19 docstring (corrected in MVP-1.1C B1). Byte literals at lines 41-43 untouched (brief explicit OOS). One-line edit. Zero behaviour change.
+
+#### Verifiable invariants for reviewer
+
+- `git diff main -- src/loader/cli.cpp` shows: `#include "version.h"` added; `kVersion` constant deleted; `version_text()` switched to `XDPMF_VERSION_STRING`. NO other functional changes.
+- `git diff main -- src/loader/loader.{hpp,cpp}` shows ZERO functional changes.
+- `git diff main -- src/common/mac_filter.h` shows ZERO changes (header is codegen source-of-truth).
+- `git diff main -- src/bpf/` shows ZERO changes.
+- `git diff main -- CMakeLists.txt` shows: VERSION → 0.2.3; new `execute_process` for `XDPMF_BPFFS_ROOT`; new `configure_file` for `version.h`; new `configure_file` for `pins.sh`; target include-dir extension.
+- `git diff main -- tests/CMakeLists.txt` shows: TEST_ENV gains `PINS_SH=…`.
+- `git diff main -- tests/lib/common.sh` shows: NETNS/NSEXEC constants; PIN_ROOT block sourcing+guards; setup_veth/cleanup_veth rewritten for netns; inject_eth/inject_runt/xdp_prog_id prefixed; read_stats/wait_for_stats_sum/prog_count UNCHANGED.
+- `git diff main -- tests/T_*.sh` shows: loader-invocation sweep `sudo -n "${LOADER_BIN}"` → `${NSEXEC} "${LOADER_BIN}"` in veth-fixture tests; opt-out tests UNCHANGED.
+- `git diff main -- tests/inject/inject_runt.py` shows: ONE comment line text change at `:37`.
+- New committed files: `include/version.h.in`, `tests/lib/pins.sh.in`.
+- Build-time generated files NOT committed: `${CMAKE_BINARY_DIR}/include/version.h`, `${CMAKE_BINARY_DIR}/tests/pins.sh` (covered by existing `build/` gitignore).
+- `xdpmacfilter --version` post-build: `xdpmacfilter 0.2.3` (single line, ends with newline).
+- 20/20 ctest pass on dev host; T_BPFFS_ROOT_SYMLINK + T_MODE_NATIVE_UNSUPPORTED specifically re-verified post-refactor (netns opt-out candidates).
+- `XDPMF_SANITIZERS=ON` build clean.
+
+Evidence: `mint/task-brief.md` MVP-2 Polish-2 brief (Items 1-4 + Q1-Q4); §7 OOS lines 3033-3049 (3 deferred entries — all now SHIPPED via amended §7); `mint/hybrid-review.md` items M3 / M5 / M6 (inject_runt:37 docstring drift, PIN_ROOT silent coupling, version-string drift); `mint/review.md` MVP-1.1C OUT-OF-TRIANGULATION advisory (inject_runt:37 inline comment, deferred to Polish-2).
+
+### MVP-2 Polish-2 additions to OOS (per §5.25)
+
+- **No `T_PINS_CODEGEN` dedicated test** (Q2 sub-decision) — codegen integrity is covered by configure-time fail-fast PLUS runtime `:?` guards in common.sh. Every veth-fixture test exercises sourcing indirectly. Standalone codegen test would be redundant; reconsider if codegen gains conditional/branched extraction logic.
+- **No T2 strict version assertion in T_CLI_HELP_VERSION** (Q4) — existing ERE is forward-compatible across version bumps; T2's exact-match would couple test maintenance to every release.
+- **No netns isolation for tests that don't call `setup_veth`** (Q1 N3 carve-out) — T_BPFFS_ROOT_SYMLINK, T_MODE_NATIVE_UNSUPPORTED, T_CLI_*, T_DETACH_NOTHING, T_BUILD, T_SANITIZER_BUILD all stay host-namespace.
+- **No parallel ctest execution post-netns refactor** — `RESOURCE_LOCK xdp_fixture` continues to serialize veth-fixture tests. Pin paths remain host-global; lifting RESOURCE_LOCK is MVP-3+ work (per-PID bpffs sub-root or global lockfile).
+- **No netns-based bpffs isolation** — `/sys/fs/bpf` is host-global mount; bpffs not netns-isolated in 5.15+ (would require `unshare(CLONE_NEWNS)` + private mount, exceeds Polish-2 scope).
+- **No `--version` build-id / commit-hash reporting** — V1 ships only the `PROJECT_VERSION` triplet. Git-describe / build-id is MVP-3+ release-engineering.
+- **No automatic CHANGELOG entry generation** — `[0.2.3]` entry manually authored. Auto-generation from git log is MVP-3+.
+- **No `inject_runt.py` body / bytes rewrite** — brief explicit OOS for Item 4; only the inline comment at `:37` touched. Byte sequence + `socket.send()` + Python imports all UNCHANGED.
+- **No `cpp -E` / `string(REGEX MATCH)` / `.h.in` codegen alternatives** (Q2 C2/C3 rejected) — sed extraction is chosen; impl MAY swap to `file(READ)` + `string(REGEX MATCH)` for portability, externally-observable result invariant.
+- **No `CHANGELOG.md`-as-source-of-truth (Q3 V2 rejected)** — CHANGELOG documents the build, not gates it. `project(VERSION)` stays canonical CMake source-of-truth.
