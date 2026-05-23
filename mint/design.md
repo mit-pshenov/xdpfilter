@@ -2925,26 +2925,27 @@ Closes the Q4 Option (c) hybrid choice: assert the loader exits **2**
 BPF program. Degrades gracefully (`SKIP_RETURN_CODE 77`) if the verifier
 on the running kernel happens to accept the bad fixture.
 
-- **Setup**: standard veth fixture (`setup_veth`, `${IFACE_A}`/`${IFACE_B}`). NO attach in setup. `RESOURCE_LOCK xdp_fixture`. Requires `require_passwordless_sudo`. Path to bad fixture: `${BUILD_DIR}/tests/fixtures/mac_filter_bad.bpf.o` (built via existing `add_bpf_object` pattern).
-- **SKIP probe** (BEFORE active branch): `sudo -n bpftool prog load "${BUILD_DIR}/tests/fixtures/mac_filter_bad.bpf.o" /sys/fs/bpf/xdpmf_verifier_probe type xdp 2>/dev/null`. If exits 0 → verifier accepted on this kernel → cleanup probe pin → exit **77** (SKIP). If non-zero → expected; proceed.
-- **Trigger** (active branch): `set +e; XDPMF_BPF_OBJECT_PATH="${BUILD_DIR}/tests/fixtures/mac_filter_bad.bpf.o" sudo -n -E "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" 2> "${stderr_file}"; rc=$?; set -e`. (`-E` preserves env var across privilege boundary.)
+- **Setup**: standard veth fixture (`setup_veth`, `${IFACE_A}`/`${IFACE_B}`). NO attach in setup. `RESOURCE_LOCK xdp_fixture`. Requires `require_passwordless_sudo`. Path to bad fixture: `${BUILD_DIR}/mac_filter_bad.bpf.o` (built via existing `add_bpf_object` pattern).
+- **SKIP probe** (BEFORE active branch): `sudo -n bpftool prog load "${BUILD_DIR}/mac_filter_bad.bpf.o" /sys/fs/bpf/xdpmf_verifier_probe type xdp 2>/dev/null`. If exits 0 → verifier accepted on this kernel → cleanup probe pin → exit **77** (SKIP). If non-zero → expected; proceed.
+- **Trigger** (active branch): `set +e; XDPMF_BPF_OBJECT_PATH="${BUILD_DIR}/mac_filter_bad.bpf.o" sudo -n -E "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" 2> "${stderr_file}"; rc=$?; set -e`. (`-E` preserves env var across privilege boundary.)
 - **Outcome** (ALL must hold on active branch):
   - `rc == 2` — `LoadFailed`.
   - Stderr non-empty.
-  - Stderr contains AT LEAST ONE of: `verifier` OR `BPF_PROG_LOAD` OR `Invalid argument` (impl-shape flexibility).
+  - Stderr contains AT LEAST ONE of: `BPF program load failed` OR `BPF object load failed` OR `PROG LOAD LOG` OR `verifier` OR `Invalid argument` (impl-shape flexibility — captures libbpf 1.x wrapping + verifier-direct output paths; post-publication amendment 2026-05-23 EDIT-11, see post-publication note below).
   - No XDP attached: `[[ -z "$(xdp_prog_id ${IFACE_A})" ]]`.
   - No orphan pin dir: `sudo -n test ! -e "/sys/fs/bpf/xdpmacfilter/${IFACE_A}"`.
 - **Mechanism**:
   - SKIP exit: `[[ $skip_rc -eq 0 ]] && { sudo -n rm -f /sys/fs/bpf/xdpmf_verifier_probe; exit 77; }`.
   - rc: `[[ "${rc}" == 2 ]] || fail`.
   - Stderr non-empty: `[[ -s "${stderr_file}" ]] || fail`.
-  - Stderr substring: `grep -q -E -- 'verifier|BPF_PROG_LOAD|Invalid argument' "${stderr_file}" || fail`.
+  - Stderr substring: `grep -q -E -- 'BPF program load failed|BPF object load failed|PROG LOAD LOG|verifier|Invalid argument' "${stderr_file}" || fail`.
 - **Cleanup**: `sudo -n ip link set "${IFACE_A}" xdpgeneric off 2>/dev/null || true`; `sudo -n rm -rf "/sys/fs/bpf/xdpmacfilter/${IFACE_A}" 2>/dev/null || true`; `sudo -n rm -f /sys/fs/bpf/xdpmf_verifier_probe 2>/dev/null || true`; `cleanup_veth`; `rm -f "${stderr_file}"`.
 - **Ctest properties**: `TIMEOUT 30`, `RESOURCE_LOCK xdp_fixture`, `SKIP_RETURN_CODE 77`.
 - **Flakiness consideration**: SKIP branch absorbs the only known flake source (future kernel verifier accepting unbounded loop). If that happens, tester swaps `mac_filter_bad.bpf.c` to OOB-deref backup pattern (verifier-universal for 5.15+).
 - **Negation control NOT required** — §6.7 covers suite-level.
 - **Sanity coupling**: this test depends on §5.24 probe NOT firing (modern kernel). If probe false-positive rejects modern kernel, this test exits 7 instead of 2 — §5.24 Q1 impl bug surfacing, not §6.20 design flaw.
-- **Fixture coupling**: `tests/fixtures/mac_filter_bad.bpf.c` MUST be built via `add_bpf_object` in `tests/CMakeLists.txt`. `add_bpf_object` only invokes `clang -target bpf` (compile-time); verifier fires at `bpf()`-syscall load time (what we test).
+- **Fixture coupling**: `tests/fixtures/mac_filter_bad.bpf.c` MUST be built via `add_bpf_object` in `tests/CMakeLists.txt`. `add_bpf_object` only invokes `clang -target bpf` (compile-time); verifier fires at `bpf()`-syscall load time (what we test). Fixture MUST also declare `allowlist` + `stats` maps with names/types matching the real `mac_filter.bpf.c` shapes — the libbpf skeleton-populate step runs BEFORE BPF_PROG_LOAD and fails earlier (`failed to find skeleton map`) if maps are absent; the verifier-reject path needs to reach BPF_PROG_LOAD to be exercised.
+- **Post-publication amendment 2026-05-23 EDIT-11** (Phase B finding by mint-tester): the original substring list `verifier|BPF_PROG_LOAD|Invalid argument` was a guess against libbpf wording that doesn't match libbpf 1.x reality. Verifier emits register-state dumps (no literal `verifier` word); libbpf wraps with `BPF program load failed` / `PROG LOAD LOG` (space-separated, no underscore in `PROG LOAD`); kernel can return E2BIG (`Argument list too long` — insn-limit hit) instead of EINVAL (`Invalid argument`) for unbounded-loop rejections. List broadened to `BPF program load failed|BPF object load failed|PROG LOAD LOG|verifier|Invalid argument` — captures libbpf 1.x wrapping (standard wrap + verifier-log header), impl's own wrap (resilient to future libbpf wording changes), preserves original tokens for forward-compat. Tight enough to mean "actually a load failure", not "any non-empty stderr".
 
 ## 7. Out of scope
 

@@ -29,6 +29,18 @@ add_bpf_object(xdp_pass ${CMAKE_SOURCE_DIR}/tests/fixtures/xdp_pass.bpf.c)
 # ... xdpgeneric obj …` from the test script.
 add_bpf_object(mac_filter_alt ${CMAKE_SOURCE_DIR}/tests/fixtures/mac_filter_alt.bpf.c)
 
+# Verifier-reject fixture for T_VERIFIER_REJECT (design §6.20, MVP-2 Robust).
+# Deliberate verifier violation: unbounded-shape loop bounded by a
+# runtime value derived from packet data (`ctx->data_end - ctx->data`)
+# with NO `#pragma unroll`. clang -target bpf accepts at compile time;
+# kernel BPF verifier rejects at bpf()-syscall BPF_PROG_LOAD time —
+# exactly the LoadFailed (exit 2) path T_VERIFIER_REJECT exercises in
+# the loader (via XDPMF_BPF_OBJECT_PATH env-var override per §5.24 Q4).
+# Same sanitizer-isolation invariant; output at
+# ${CMAKE_BINARY_DIR}/mac_filter_bad.bpf.o (consumed by both the
+# SKIP-probe `bpftool prog load` and the active-branch loader invocation).
+add_bpf_object(mac_filter_bad ${CMAKE_SOURCE_DIR}/tests/fixtures/mac_filter_bad.bpf.c)
+
 # T_BUILD performs an isolated clean rebuild in /tmp and greps for warnings;
 # it does NOT need the veth fixture and does NOT take the resource lock.
 add_test(
@@ -236,4 +248,34 @@ add_test(
 set_tests_properties(T_MODE_DETACH_REJECTS PROPERTIES
     ENVIRONMENT "${TEST_ENV}"
     TIMEOUT 10
+)
+
+# ─────────────────────────────────────────────────────────────────────────
+# MVP-2 Robust addition (§5.24 / §6.20).
+#
+# T_VERIFIER_REJECT (§6.20): hand the loader a verifier-rejected .bpf.o
+# via XDPMF_BPF_OBJECT_PATH env-var override (per §5.24 Q4 Option (c));
+# assert exit 2 (LoadFailed) + recognizable stderr (verifier|BPF_PROG_LOAD|
+# Invalid argument) + no XDP attached + no orphan pin dir.
+#
+# SKIP probe FIRST: standalone `bpftool prog load` on the bad fixture;
+# if a future kernel verifier silently accepts our deliberate violation,
+# the test exits 77 (ctest SKIP) rather than producing a false red — Q4
+# Option (c) "degrades gracefully" contract. SKIP_RETURN_CODE 77 honours
+# that path.
+#
+# Takes RESOURCE_LOCK xdp_fixture because the test uses ${IFACE_A} (the
+# active branch attempts an attach that will fail at load time, but the
+# veth is touched). TIMEOUT 30: bpftool probe + loader invocation + a
+# few cleanup sudo calls; no traffic injection.
+add_test(
+    NAME T_VERIFIER_REJECT
+    COMMAND bash ${TEST_DIR}/T_VERIFIER_REJECT.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_VERIFIER_REJECT PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 60
+    SKIP_RETURN_CODE 77
 )

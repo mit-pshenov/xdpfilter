@@ -46,6 +46,7 @@ enum class LoaderError : int {
     AttachRefusedAlien = 4,
     DetachFailed       = 5,
     Permission         = 6,
+    KernelUnsupported  = 7,
     PathRefused        = 8,
 };
 

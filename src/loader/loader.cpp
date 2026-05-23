@@ -37,12 +37,15 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>           // §5.24: std::getenv for XDPMF_BPF_OBJECT_PATH
 #include <cstring>
 #include <format>
+#include <fstream>           // §5.24: read override BPF object from path
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #include <dirent.h>
 #include <fcntl.h>           // O_PATH, O_DIRECTORY, O_NOFOLLOW, O_CLOEXEC, openat
@@ -50,6 +53,7 @@
 #include <net/if.h>
 #include <sys/stat.h>        // fstatat, mkdirat, S_IS*
 #include <sys/types.h>
+#include <sys/utsname.h>     // §5.24 Q1: uname() for kernel-version probe
 #include <unistd.h>          // close, faccessat, unlinkat
 
 #include <bpf/bpf.h>
@@ -74,6 +78,20 @@ constexpr std::string_view kOwnedProgName{"mac_filter_prog"};
  * the second identity factor on top of the name check. */
 constexpr std::size_t kBpfTagSize = 8;  // BPF_TAG_SIZE
 using TagArray = std::array<std::uint8_t, kBpfTagSize>;
+
+/* §5.24 Q2: minimum supported kernel version floor. Below this, libbpf
+ * deeper in BPF_PROG_LOAD would surface a cryptic "Invalid argument"; the
+ * probe replaces that with a clear KernelUnsupported (exit 7). LTS reality
+ * (Debian Bookworm, Ubuntu 22.04, AlmaLinux/Rocky 9) — matches README. */
+constexpr int kKernelFloorMajor = 5;
+constexpr int kKernelFloorMinor = 15;
+
+/* §5.24 Q1 Option U: env-var name for the BPF object path override (Q4
+ * fixture-path mechanism for T_VERIFIER_REJECT). Testing-only — not
+ * documented in --help per §7 Robust OOS. When unset or empty, the
+ * compiled-in embedded ELF bytes from the skeleton are used (byte-identical
+ * to pre-§5.24 behaviour). */
+constexpr std::string_view kBpfObjectPathEnv{"XDPMF_BPF_OBJECT_PATH"};
 
 /* §5.4 + §5.20: per-iface XDP slot classification as observed by the §5.20
  * all-modes probe. Distinct from the public-API ::xdpmf::XdpMode (which
@@ -197,6 +215,7 @@ public:
             case LoaderError::AttachRefusedAlien: return "alien XDP program already attached";
             case LoaderError::DetachFailed:       return "detach failed";
             case LoaderError::Permission:         return "permission denied (need CAP_BPF / CAP_NET_ADMIN)";
+            case LoaderError::KernelUnsupported:  return "kernel version too old for xdpmacfilter";
             case LoaderError::PathRefused:        return "bpffs path refused (symlink or non-directory at the bpffs root or per-iface entry)";
         }
         return "unknown loader error";
@@ -218,6 +237,88 @@ public:
 [[noreturn]] void throw_loader(LoaderError code, std::string what)
 {
     throw std::system_error(make_error_code(code), std::move(what));
+}
+
+/* §5.24 Q1: parse the leading "<major>.<minor>" of utsname.release. Accepts
+ * canonical forms like "5.15.0", "5.15.0-100-generic", "6.1.0-rc4+", and
+ * partial "5.15" (no patch). Rejects null, non-digit lead, missing dot,
+ * empty minor field, and integer overflow. Returns true iff *out_major and
+ * *out_minor are filled. Defensive: on any malformed input the caller
+ * treats this as "fail closed" → throw KernelUnsupported. */
+[[nodiscard]] bool parse_major_minor(const char* release,
+                                     int* out_major,
+                                     int* out_minor) noexcept
+{
+    if (release == nullptr || out_major == nullptr || out_minor == nullptr) {
+        return false;
+    }
+    constexpr int kMaxComponent = 1'000'000;  // overflow guard far below INT_MAX
+    auto parse_digits = [](const char*& p, int& value) noexcept -> bool {
+        if (*p < '0' || *p > '9') {
+            return false;  // require at least one digit
+        }
+        int v = 0;
+        while (*p >= '0' && *p <= '9') {
+            v = v * 10 + (*p - '0');
+            if (v > kMaxComponent) {
+                return false;  // overflow guard
+            }
+            ++p;
+        }
+        value = v;
+        return true;
+    };
+
+    const char* p = release;
+    int maj = 0;
+    int min = 0;
+    if (!parse_digits(p, maj)) return false;
+    if (*p != '.')             return false;  // missing dot
+    ++p;
+    if (!parse_digits(p, min)) return false;  // empty minor field
+    *out_major = maj;
+    *out_minor = min;
+    return true;
+}
+
+/* §5.24 Q3 Option B: kernel-version fast-fail at the head of attach() AND
+ * detach(). One uname(2) syscall + a tiny parse — below the noise floor
+ * (~microseconds). Replaces the cryptic libbpf `Invalid argument` from
+ * deep inside bpf_object__load that operators on too-old kernels would
+ * otherwise see (audit-clarity, not a security mechanism).
+ *
+ * Stderr discipline (load-bearing for §6.20 T_VERIFIER_REJECT siblings and
+ * §5.24 stderr contract): on too-old kernel the thrown what() includes the
+ * literals `kernel`, `too old`, the running `<maj>.<min>`, the floor `5.15`,
+ * and the program name `xdpmacfilter`. */
+void kernel_version_probe()
+{
+    struct utsname u{};
+    if (::uname(&u) != 0) {
+        const int e = errno;
+        throw_loader(LoaderError::KernelUnsupported,
+                     std::format("xdpmacfilter: uname() failed: {} "
+                                 "(need kernel ≥ {}.{})",
+                                 std::strerror(e),
+                                 kKernelFloorMajor, kKernelFloorMinor));
+    }
+    int maj = 0;
+    int min = 0;
+    if (!parse_major_minor(u.release, &maj, &min)) {
+        throw_loader(LoaderError::KernelUnsupported,
+                     std::format("xdpmacfilter: unable to parse kernel release '{}' "
+                                 "(need kernel ≥ {}.{})",
+                                 u.release,
+                                 kKernelFloorMajor, kKernelFloorMinor));
+    }
+    // Lexicographic compare via std::pair: maj first, then min on tie.
+    if (std::pair{maj, min} < std::pair{kKernelFloorMajor, kKernelFloorMinor}) {
+        throw_loader(LoaderError::KernelUnsupported,
+                     std::format("xdpmacfilter: kernel {}.{} too old, "
+                                 "need ≥ {}.{}",
+                                 maj, min,
+                                 kKernelFloorMajor, kKernelFloorMinor));
+    }
 }
 
 [[nodiscard]] std::string bpffs_dir_for(const std::string& iface)
@@ -640,13 +741,83 @@ private:
  * computed from LIBBPF_PIN_BY_NAME during open; load() then skips the
  * auto-pin step. Manual pinning happens in attach() after the state
  * machine, once the per-iface dir is known-good. */
+/* §5.24 Q4 fixture-path override: read the BPF object ELF from `path` into
+ * an in-memory buffer, allocate the typed skeleton struct manually (mirrors
+ * mac_filter_bpf__open_opts), substitute s->data/s->data_sz with the file
+ * bytes (instead of the embedded mac_filter_bpf__elf_bytes), then open via
+ * bpf_object__open_skeleton. libbpf's bpf_object__open_mem (under the hood)
+ * completes ELF parsing before returning, so the local buffer's lifetime
+ * only needs to cover this call. Returns an owning BpfSkeleton.
+ *
+ * Testing-only path — undocumented in --help per §7 Robust OOS. */
+[[nodiscard]] BpfSkeleton open_skeleton_from_path(const char* path)
+{
+    std::ifstream ifs(path, std::ios::binary | std::ios::ate);
+    if (!ifs) {
+        throw_loader(LoaderError::LoadFailed,
+                     std::format("XDPMF_BPF_OBJECT_PATH '{}': cannot open for reading",
+                                 path));
+    }
+    const std::streamsize sz = ifs.tellg();
+    if (sz <= 0) {
+        throw_loader(LoaderError::LoadFailed,
+                     std::format("XDPMF_BPF_OBJECT_PATH '{}': empty or unreadable",
+                                 path));
+    }
+    ifs.seekg(0, std::ios::beg);
+    std::vector<char> buf(static_cast<std::size_t>(sz));
+    if (!ifs.read(buf.data(), sz)) {
+        throw_loader(LoaderError::LoadFailed,
+                     std::format("XDPMF_BPF_OBJECT_PATH '{}': short read", path));
+    }
+
+    auto* obj = static_cast<mac_filter_bpf*>(std::calloc(1, sizeof(mac_filter_bpf)));
+    if (obj == nullptr) {
+        throw_loader(LoaderError::LoadFailed,
+                     "calloc(mac_filter_bpf) failed (out of memory?)");
+    }
+    // Adopt ownership immediately so any throw below routes through dtor.
+    BpfSkeleton holder{obj};
+
+    const int crc = mac_filter_bpf__create_skeleton(obj);
+    if (crc != 0) {
+        throw_loader(classify(crc, LoaderError::LoadFailed),
+                     std::format("mac_filter_bpf__create_skeleton: {}",
+                                 std::strerror(-crc)));
+    }
+
+    // Substitute the embedded ELF bytes with the file-loaded buffer. libbpf
+    // copies/parses synchronously inside bpf_object__open_skeleton, so the
+    // local std::vector remains live for the duration of the call.
+    obj->skeleton->data    = buf.data();
+    obj->skeleton->data_sz = static_cast<std::size_t>(sz);
+
+    const int orc = bpf_object__open_skeleton(obj->skeleton, nullptr);
+    if (orc < 0) {
+        throw_loader(classify(orc, LoaderError::LoadFailed),
+                     std::format("bpf_object__open_skeleton('{}'): {}",
+                                 path, std::strerror(-orc)));
+    }
+    return holder;
+}
+
 [[nodiscard]] BpfSkeleton load_skeleton()
 {
-    BpfSkeleton skel{mac_filter_bpf__open()};
-    if (!skel) {
-        const int e = errno;
-        throw_loader(classify(-e, LoaderError::LoadFailed),
-                     std::format("mac_filter_bpf__open: {}", std::strerror(e)));
+    // §5.24 Q4: env-var fixture-path override. Default (env unset or empty)
+    // is byte-identical to pre-§5.24 — embedded ELF via the skeleton.
+    const char* env_path = std::getenv(kBpfObjectPathEnv.data());
+    const char* obj_path = (env_path != nullptr && *env_path != '\0') ? env_path : nullptr;
+
+    BpfSkeleton skel;
+    if (obj_path != nullptr) {
+        skel = open_skeleton_from_path(obj_path);
+    } else {
+        skel = BpfSkeleton{mac_filter_bpf__open()};
+        if (!skel) {
+            const int e = errno;
+            throw_loader(classify(-e, LoaderError::LoadFailed),
+                         std::format("mac_filter_bpf__open: {}", std::strerror(e)));
+        }
     }
     if (bpf_map__set_pin_path(skel->maps.allowlist, nullptr) != 0
         || bpf_map__set_pin_path(skel->maps.stats,    nullptr) != 0) {
@@ -744,6 +915,11 @@ const std::error_category& loader_error_category() noexcept
 
 std::uint32_t attach(const AttachConfig& cfg)
 {
+    // §5.24 Q3 Option B: fast-fail before ANY libbpf API call (in particular
+    // before the §5.22 Q1 early skeleton load). Replaces a cryptic deep
+    // BPF_PROG_LOAD "Invalid argument" with a clean KernelUnsupported.
+    kernel_version_probe();
+
     const int ifindex = resolve_ifindex(cfg.iface, LoaderError::AttachFailed);
 
     // §5.22 Item 2: open bpffs root with O_PATH|O_NOFOLLOW. All subsequent
@@ -861,6 +1037,10 @@ std::uint32_t attach(const AttachConfig& cfg)
 
 std::uint32_t detach(const std::string& iface)
 {
+    // §5.24 Q3 Option B: symmetric with attach() — detach() also early-loads
+    // the skeleton (§5.22 Q1), so kernel-version gating must precede that.
+    kernel_version_probe();
+
     const int ifindex = resolve_ifindex(iface, LoaderError::DetachFailed);
 
     // §5.22 Item 2: BpffsRootFd guards the root for the duration of detach.
