@@ -5,6 +5,25 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-23
+
+MVP-2 Sec — §5.19 tag-check identity gate + O_PATH bpffs root hardening (first MVP-2 pass).
+
+### Added
+- §5.22 tag-check identity gate: `bpf_prog_info.tag` (SHA-1 of post-libbpf-preprocessing bytecode) added to the `is_ours` predicate on top of the MVP-1.1B name-check. Self-tag captured via Q1 Option E (load skeleton first, query own tag, then probe). Closes the attacker-recompile vector (same `SEC()` name + altered bytecode → tag mismatch → refuse).
+- §5.22 O_PATH bpffs root hardening: `BpffsRootFd` RAII opens `/sys/fs/bpf/xdpmacfilter/` with `O_PATH | O_DIRECTORY | O_NOFOLLOW`; all bpffs ops converted to fd-relative `*at()` syscalls (`faccessat`/`mkdirat`/`openat`+`fdopendir`+`unlinkat` walk/`fstatat AT_SYMLINK_NOFOLLOW`). Closes the symlink-vortex vector at both root and per-iface levels.
+- New exit code 8 = `PathRefused`: fires when bpffs root or per-iface entry is a symlink / not-a-directory. Distinct audit signal from exit 4 (alien-prog refusal) and exit 6 (kernel permission).
+- `T_ATTACH_TAG_MISMATCH` — tag-mismatch refusal regression test with defensive tag-distinctness preflight + loader-twice negation control (state-(b) idempotent reload via fresh prog id assertion).
+- `T_BPFFS_ROOT_SYMLINK` — symlink-refusal regression test (root + per-iface variants) with trap-driven destructive-setup cleanup.
+- `tests/fixtures/mac_filter_alt.bpf.c` — alt BPF fixture (same SEC name, minimal body) for the tag-mismatch test.
+
+### Changed
+- `detach()` is now symmetric to `attach()` for the identity gate: also early-loads skeleton, captures self_tag, runs the probe — closes a parallel attacker-recompile vector where an attacker's planted same-named alien could be detached by an operator running `xdpmacfilter detach`.
+- §6.13 T_DETACH_NOTHING ctest property gains `RESOURCE_LOCK xdp_fixture` to prevent races with T_BPFFS_ROOT_SYMLINK's destructive setup.
+
+### Operational notes (NOT a behaviour bug — strictness consequence of tag-check)
+- Cross-loader idempotency is NOT supported: if you manually load `mac_filter.bpf.o` via `bpftool prog load` or `ip link set xdpgeneric obj` outside of `xdpmacfilter`, the loader will refuse to recognize it as ours (exit 4 + `tag mismatch`). Reason: kernel-computed `bpf_prog_info.tag` differs across libbpf rewrite paths (CO-RE relocations, subprog inlining) even for the same `.bpf.o`. Workaround: detach the external load first (`ip link set <iface> xdp off`), then run `xdpmacfilter attach`.
+
 ## [0.1.3] — 2026-05-23
 
 MVP-1.1C — hybrid-review polish batch (third refactor pass).
@@ -105,6 +124,7 @@ got stuck.
 | MVP-1.1A (additive refactor) | 3 items: sanitizer mode, README, FileList drift | — | 8m | 7m | — | round 1 ✓ |
 | MVP-1.1B (source-change refactor) | 4 items: §5.4 4-state machine, identity verification, all-modes probe, alien-refusal test | 12m | 11m | 6m | 30m | round 1 ✓ |
 | MVP-1.1C (polish batch) | 12 items × 4 sections + D4 detach idempotency | 60m | 18m | 10m | 88m | round 1 ✓ |
+| MVP-2 Sec (security pass) | 2 items + 2 tests + 3 architect decisions (Q1/Q2/Q3) + Phase B amendments (detach symmetry, §6.14 reshape, tag-stability finding) + 1-line loader.hpp relaxation | 34m | 34m | 7m | 75m | round 1 ✓ (0 findings) |
 
 Phase 1 ≈ architect time + human-gate read/approve.
 Phase 2–3 ≈ impl + tester running in parallel, plus the build-green / tests-ready handoff.
