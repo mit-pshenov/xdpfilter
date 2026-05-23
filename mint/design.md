@@ -28,29 +28,35 @@ intentionally one vertical slice exercising the toolchain end-to-end.
 | `src/loader/raii.hpp` | RAII wrappers: `BpfSkeleton`, `XdpAttachment`, `BpffsDir` (see §5.17) | C++23 (header-only) | 120 |
 | `src/loader/cli.hpp` | CLI parse declarations (subcommand `attach`/`detach`, flags, MAC parsing) | C++23 | 40 |
 | `src/loader/cli.cpp` | CLI parser implementation: tokenization, MAC validation, usage text | C++23 | 130 |
-| `src/loader/loader.hpp` | Loader API: `attach()`, `detach()`, error enum (allow-list populated inline in `attach()` — see §5.17). Post-§5.21 A1: also owns `AttachConfig`/`DetachConfig` structs (moved from `cli.hpp`). | C++23 | 50 |
-| `src/loader/loader.cpp` | Open skeleton, pin maps under `/sys/fs/bpf/xdpmacfilter/<iface>/`, attach XDP (SKB mode), 4-state detect-and-(detach-ours / refuse-alien / recover-stale-pin) probe per §5.4 (revised MVP-1.1B: identity-verified ownership + all-modes XDP query — see §5.19, §5.20; MVP-1.1C D4: detach state (a) returns exit 0 — see §5.21) | C++23 | 230 |
-| `src/loader/main.cpp` | `main()`: dispatch subcommand, map exceptions/errors to exit codes | C++23 | 60 |
+| `src/loader/loader.hpp` | Loader API: `attach()`, `detach()`, error enum (allow-list populated inline in `attach()` — see §5.17). Post-§5.21 A1: also owns `AttachConfig`/`DetachConfig` structs (moved from `cli.hpp`). Post-§5.22: enum gains `PathRefused = 8` (single enumerator addition — see §5.22 Q3). | C++23 | 50 |
+| `src/loader/loader.cpp` | Open skeleton, pin maps under `/sys/fs/bpf/xdpmacfilter/<iface>/`, attach XDP (SKB mode), 4-state detect-and-(detach-ours / refuse-alien / recover-stale-pin) probe per §5.4 (revised MVP-1.1B: identity-verified ownership + all-modes XDP query — see §5.19, §5.20; MVP-1.1C D4: detach state (a) returns exit 0 — see §5.21; MVP-2 Sec §5.22: tag-check identity gate + O_PATH bpffs root fd hardening + symlink-refused exit 8) | C++23 | 290 |
+| `src/loader/main.cpp` | `main()`: dispatch subcommand, map exceptions/errors to exit codes (post-§5.22: exit 8 row added) | C++23 | 60 |
 | `README.md` | Repo entry-point doc: what / prerequisites / build / run / test / where-docs-live (added MVP-1.1A) | Markdown | 50 |
 | `CHANGELOG.md` | Repo-root version history per Keep-a-Changelog convention; seeded with `0.1.0`/`0.1.1`/`0.1.2`/`0.1.3` sections (added MVP-1.1C per §5.21 B4) | Markdown | 30 |
-| `tests/CMakeLists.txt` | ctest registration (tester populates; MVP-1.1B adds T_ATTACH_ALIEN_REFUSAL entry + `add_bpf_object(xdp_pass …)` wiring per §6.9; MVP-1.1C adds T_CLI_HELP_VERSION/T_CLI_CAPACITY/T_CLI_BAD_MAC/T_DETACH_NOTHING entries per §6.10–§6.13) | CMake | tester |
+| `tests/CMakeLists.txt` | ctest registration (tester populates; MVP-1.1B adds T_ATTACH_ALIEN_REFUSAL entry + `add_bpf_object(xdp_pass …)` wiring per §6.9; MVP-1.1C adds T_CLI_HELP_VERSION/T_CLI_CAPACITY/T_CLI_BAD_MAC/T_DETACH_NOTHING entries per §6.10–§6.13; MVP-2 Sec adds T_ATTACH_TAG_MISMATCH + T_BPFFS_ROOT_SYMLINK entries + `add_bpf_object(mac_filter_alt …)` wiring per §6.14–§6.15) | CMake | tester |
 | `tests/T_SANITIZER_BUILD.sh` | ASAN+UBSAN sanitizer-build smoke: fresh `/tmp` build with `-DXDPMF_SANITIZERS=ON` + one end-to-end attach/inject/stats/detach + stderr grep (per §6.8, added MVP-1.1A) | bash | 60 |
 | `tests/T_ATTACH_ALIEN_REFUSAL.sh` | Alien-XDP refusal end-to-end: pre-attach `xdp_pass.bpf.o` to `${IFACE_A}`, run our `attach`, assert exit 4 + foreign prog still attached + stderr names foreign id (per §6.9, added MVP-1.1B) | bash | 80 |
 | `tests/T_CLI_HELP_VERSION.sh` | CLI surface: `--help` / `--version` exit 0 + content asserts (per §6.10, added MVP-1.1C) | bash | 30 |
 | `tests/T_CLI_CAPACITY.sh` | CLI surface: 65-MAC overflow → exit 1 + `too many --allow entries` in stderr (per §6.11, added MVP-1.1C) | bash | 30 |
 | `tests/T_CLI_BAD_MAC.sh` | CLI surface: 4 malformed-MAC sub-cases → exit 1 + recognizable stderr (per §6.12, added MVP-1.1C) | bash | 30 |
 | `tests/T_DETACH_NOTHING.sh` | `detach --iface lo` on clean iface → exit 0 (per §6.13 + §5.21 D4 idempotency amendment, added MVP-1.1C) | bash | 30 |
+| `tests/T_ATTACH_TAG_MISMATCH.sh` | Tag-check end-to-end: pre-attach `mac_filter_alt.bpf.o` (same SEC name, different bytecode) to `${IFACE_A}` + invoke our `attach`, assert exit 4 + stderr contains hex tag AND `tag mismatch` substring; negation control re-runs with the real `mac_filter.bpf.o` and asserts exit 0 (per §6.14, added MVP-2 Sec) | bash | 80 |
+| `tests/T_BPFFS_ROOT_SYMLINK.sh` | O_PATH bpffs root hardening: pre-symlink `/sys/fs/bpf/xdpmacfilter` (and per-iface sub-variant) to attacker-controlled dir, invoke `attach`, assert exit 8 + `symlink`/`ELOOP` substring; cleanup restores real bpffs root and confirms negation attach succeeds (per §6.15, added MVP-2 Sec) | bash | 100 |
 | `tests/fixtures/xdp_pass.bpf.c` | Minimal foreign-XDP fixture: `SEC("xdp") int xdp_pass_prog(...) { return XDP_PASS; }` (function name MUST differ from `mac_filter_prog` so §5.19 identity-check classifies it as alien) — built via `add_bpf_object(xdp_pass …)` (per §6.9, added MVP-1.1B) | BPF C | 15 |
+| `tests/fixtures/mac_filter_alt.bpf.c` | Tag-mismatch fixture: `SEC("xdp") int mac_filter_prog(...) { return XDP_PASS; }` — function name IDENTICAL to the real prog (`mac_filter_prog`) so name-check passes; body intentionally minimal so bytecode (and therefore `bpf_prog_info.tag`) differs from `src/bpf/mac_filter.bpf.c`'s built `.bpf.o`. Built via `add_bpf_object(mac_filter_alt …)` (per §6.14, added MVP-2 Sec) | BPF C | 15 |
 | `tests/...` | Other test scripts/binaries (tester populates per TestStrategy §6) | tester-chosen | tester |
 
-Total impl LOC est: ~900 (excluding tests; bumped from ~870 by the §5.4
-probe expansion in `loader.cpp` per MVP-1.1B). MVP-1.1C adds no net LOC
-to impl (A1/A2 are relocate-and-comment edits; B2 is one CMake token).
+Total impl LOC est: ~960 (excluding tests; +60 from §5.22 — ~30 for the
+tag-check / probe extension and ~30 for the `BpffsRootFd` RAII + the
+`*at()` syscall conversion of `ensure_bpffs_dir`/`bpffs_remove_iface` per
+§5.22 Q2 Standard scope). `loader.hpp` grows by exactly **one line** —
+the `PathRefused = 8` enumerator — per §5.22 Q3.
 
 The generated BPF skeleton header (`mac_filter.skel.h`) lives in
 `${CMAKE_BINARY_DIR}` — not committed, not listed. Likewise the foreign
-fixture's BPF object (`${CMAKE_BINARY_DIR}/xdp_pass.bpf.o`) is a build
-artifact, not committed.
+fixture's BPF object (`${CMAKE_BINARY_DIR}/xdp_pass.bpf.o`) and the
+tag-mismatch fixture's BPF object (`${CMAKE_BINARY_DIR}/mac_filter_alt.bpf.o`)
+are build artifacts, not committed.
 
 ## 3. DataStructures
 
@@ -119,6 +125,13 @@ directory is a **necessary** ownership signal — but, post MVP-1.1B, no
 longer **sufficient**: identity verification per §5.19 is the second gate.
 See Decision §5.4 for the full 4-state probe.
 
+**Post-§5.22 note**: both the parent `/sys/fs/bpf/xdpmacfilter/` and the
+per-iface `/sys/fs/bpf/xdpmacfilter/<iface>/` directories MUST be real
+directories — not symlinks. The loader refuses to operate (exit 8,
+`PathRefused`, see §4.1 and §5.22) if either entry exists as a symlink.
+Detection mechanism: `O_PATH | O_DIRECTORY | O_NOFOLLOW` open on the
+root + `openat(...O_NOFOLLOW)` on the per-iface entry. See §5.22 Item 2.
+
 ### 3.6 CLI-internal: `struct AttachConfig`
 ```
 std::string  iface
@@ -161,9 +174,11 @@ Exit codes (definitive):
 | 1 | CLI usage error (bad flag, bad MAC, missing required arg) |
 | 2 | BPF object load failed (libbpf error) |
 | 3 | XDP attach failed (kernel error) |
-| 4 | Attach refused: a non-ours XDP program is already attached to iface (see §5.4) |
+| 4 | Attach refused: a non-ours XDP program is already attached to iface (see §5.4 + §5.19; post-§5.22 the identity gate is name+tag, see §5.22 Q1) |
 | 5 | Detach failed: kernel error during `bpf_xdp_detach` (post-§5.21 D4: "nothing attached" and "pinned dir missing" cases no longer map to 5 — they return 0) |
 | 6 | Permission denied (need CAP_BPF / CAP_NET_ADMIN — typically run as root) |
+| 7 | *reserved* — earmarked for `KernelUnsupported` in MVP-2 Robust slice (do NOT consume in MVP-2 Sec) |
+| 8 | Path refused: bpffs root or per-iface entry exists as a symlink (`ELOOP` on `O_PATH|O_DIRECTORY|O_NOFOLLOW` open) — refusing to operate on attacker-controllable path (added §5.22 Q3 — `LoaderError::PathRefused`) |
 
 **MVP-1.1B note**: the 4-state §5.4 probe does NOT introduce any new
 exit codes. The new state (d) — "no XDP attached AND pin_dir present"
@@ -177,6 +192,14 @@ unchanged.
 0**, making detach fully idempotent. The exit-5 row above is narrowed
 to "kernel error during `bpf_xdp_detach`" only; previously it covered
 "nothing attached" and "pinned dir missing" too.
+
+**MVP-2 Sec note** (per §5.22 Q3): row **8 = `PathRefused`** is added.
+This is the **first new exit code since MVP-1**; rationale is audit
+clarity (operators grepping for "the bpffs path was attacker-controlled"
+get a distinct signal from "an alien BPF prog was already attached"
+(code 4) and from "kernel said no" (code 6)). Code 7 stays reserved for
+the MVP-2 Robust slice; MVP-2 Sec deliberately takes the next
+contiguous slot (8) rather than 7. See §5.22 Q3 for full rationale.
 
 Stdout: human-readable status on success ("attached prog id N to <iface>",
 "detached prog id N from <iface>"). Stderr: errors. No JSON, no machine
@@ -222,6 +245,7 @@ enum class LoaderError : int {
     AttachRefusedAlien = 4,
     DetachFailed       = 5,
     Permission         = 6,
+    PathRefused        = 8,   // §5.22 Q3: bpffs root or per-iface entry is a symlink
 };
 
 }  // namespace xdpmf
@@ -242,6 +266,18 @@ live in `loader.hpp` (moved from `cli.hpp` to break the backwards layer
 where control-plane depended on CLI parser). `cli.hpp` now
 `#include`s `loader.hpp` for its `ParsedCommand = std::variant<…>`
 declaration. The struct field layouts are unchanged (binary-compatible).
+
+**MVP-2 Sec note** (per §5.22 Q3): the `LoaderError` enum gains exactly
+**one** new enumerator — `PathRefused = 8`. This is a deliberate,
+controlled relaxation of the brief's "loader.hpp byte-identical"
+invariant: a single enum-value addition is the smallest possible .hpp
+change (no new functions, no new types, no new top-level symbols, no
+ABI break for existing call sites). The `attach()`/`detach()` signatures
+above remain byte-identical. Reviewer's `loader.hpp`-invariant check
+should accept a one-line `git diff` confined to the enum body. All
+other §5.22 work (the `XdpProbe` tag field, the `BpffsRootFd` RAII, the
+`*at()` syscall conversion) lives entirely in `loader.cpp`'s anon
+namespace — zero further .hpp surface.
 
 ### 4.4 Observability (no API, just contract)
 
@@ -322,17 +358,31 @@ was sufficient — the KC-A trust-boundary weakness. The bpffs directory
 remains a **necessary** ownership signal (no pin_dir → cannot be ours,
 see state c) but is no longer **sufficient** on its own.
 
+**MVP-2 Sec extension** (per §5.22 Q1): condition (3) is strengthened —
+identity verification is now `name == "mac_filter_prog"` AND
+`tag == self_tag` (both must hold). The `self_tag` is captured early
+(skeleton load happens before the probe) from
+`bpf_prog_get_info_by_fd(skel->progs.mac_filter_prog->fd).tag` — see
+§5.22 Q1 rationale. State (c) refusal stderr is extended to include the
+hex tag of the alien program (load-bearing for §6.14 assertions).
+Additionally, the existence/creation/removal of `pin_dir` is now
+hardened against symlink substitution attacks via O_PATH/O_NOFOLLOW —
+see §5.22 Q2 + Item 2.
+
 This is safe (won't clobber unrelated XDP, won't be spoofed by planted
-pin_dir alone, won't be blinded by alien programs in non-SKB modes)
-and idempotent (our own prior instance is auto-cleaned;
-crash-mid-attach is auto-recovered).
+pin_dir alone, won't be blinded by alien programs in non-SKB modes,
+won't be defeated by attacker-recompile with same name, won't be
+defeated by symlink at the bpffs root) and idempotent (our own prior
+instance is auto-cleaned; crash-mid-attach is auto-recovered).
 
 **Post-publication amendments**: the 4-state expansion (state d), the
 identity-verification gate (state b condition 3), and the all-modes
 probe (state classification driver) are the MVP-1.1B changes — see
 §5.19 (KC-A identity verification) and §5.20 (KC-B all-modes query)
 for impl mechanisms and rationale. The detach-state-(a) idempotency
-extension is the MVP-1.1C change — see §5.21 D4.
+extension is the MVP-1.1C change — see §5.21 D4. The tag-check
+extension to condition (3) and the O_PATH bpffs root hardening are the
+MVP-2 Sec changes — see §5.22.
 
 ### 5.5 Malformed-frame counter = **separate `STAT_DROP_MALFORMED`** (not merged with `STAT_DROP_DENY`) — because
 Brief acceptance #5 explicitly leaves the choice to architect and notes
@@ -564,7 +614,8 @@ item 2 + KC-A "Recommended fix"):
   the primary KC-A attack (attacker plants pin_dir, attacker plants
   no prog or any prog → loader detaches whatever is in the XDP slot).
   Future MVP-2 hardening could LAYER (iii) on top of (i); MVP-1.1B
-  does (i) only — see §7 OOS list.
+  does (i) only — see §7 OOS list. **Post-§5.22**: (iii) is now also
+  shipped, layered on top of (i)+(name+tag), per §5.22 Item 2.
 
 **Rationale for (i)**: closes the realistic KC-A attack surface at
 minimal impl cost (~30 LOC). An attacker must now actually attach a
@@ -581,7 +632,9 @@ requires capturing the freshly-built skeleton's own tag at load time
 (via the same `bpf_prog_get_info_by_fd` call on `skel->progs.mac_filter_prog`'s
 fd) and comparing. Tag-check is captured as MVP-2 hardening in §7
 OOS — name-check alone closes the realistic threat surface for
-MVP-1.1B without the additional impl complexity.
+MVP-1.1B without the additional impl complexity. **Post-§5.22**:
+tag-check is now also shipped, layered on top of name-check, per
+§5.22 Item 1.
 
 **Impl surface** (scoped to `loader.cpp`, no `loader.hpp` changes):
 
@@ -602,6 +655,11 @@ MVP-1.1B without the additional impl complexity.
   `sizeof(XdpProbe) ≤ 32` — return-by-value is fine, no heap, no exceptions
   on the success path. Impl may rename `XdpMode`/`XdpProbe` if it prefers,
   but the field set is the contract.
+  **Post-§5.22 Q1 extension**: the struct gains a `tag` field
+  (`std::array<__u8, BPF_TAG_SIZE>`, 8 bytes) populated from
+  `bpf_prog_info.tag`. `is_ours` semantics extend to require
+  `(mode == SKB) && (name == "mac_filter_prog") && (tag == self_tag)`.
+  New `sizeof(XdpProbe) ≤ 40`. See §5.22 Item 1 for the contract.
 - **Add** a thin fd RAII wrapper for the prog_fd obtained via
   `bpf_prog_get_fd_by_id` (so the fd is closed deterministically even
   if `bpf_prog_get_info_by_fd` throws). Reuse the existing
@@ -623,7 +681,13 @@ MVP-1.1B without the additional impl complexity.
   to {} (not ours — refusing to clobber)", probe.prog_id,
   to_string(probe.mode), probe.name.data(), cfg.iface)` (or
   equivalent that includes the foreign prog id — that field is the
-  load-bearing assertion target for §6.9).
+  load-bearing assertion target for §6.9). **Post-§5.22**: the
+  message MUST additionally include the probed `tag` rendered as
+  hex AND the literal substring `tag mismatch` when the rejection
+  cause was the tag check (load-bearing for §6.14). When the cause
+  is a name mismatch (the §6.9 case), the message format is
+  unchanged — name-mismatch comes lexically before tag-check in the
+  `is_ours` evaluation order. See §5.22 Item 1.
 - **State-(d) stale-pin-path**: `probe.prog_id == 0 &&
   std::filesystem::exists(pin_dir)` → call existing
   `bpffs_remove_iface(cfg.iface)` then fall through to fresh attach
@@ -636,6 +700,8 @@ MVP-1.1B without the additional impl complexity.
 
 All new helpers live in the anonymous namespace of `loader.cpp`. No
 new symbols cross the `loader.hpp` boundary (§4.3 unchanged).
+**Post-§5.22**: this invariant is relaxed by exactly one enumerator
+(`LoaderError::PathRefused = 8`) — see §5.22 Q3 + §4.3 MVP-2 Sec note.
 
 Evidence: `mint/hybrid-review.md` HIGH KC-A (security M1 + L1 + §5.7
 synthesis); `mint/task-brief.md` MVP-1.1B item 2 (Action).
@@ -852,6 +918,449 @@ changelog.
 Evidence: `mint/hybrid-review.md` synthesizer Top-actionable items
 #10-15 + testing-reviewer LOW table; `mint/task-brief.md` MVP-1.1C
 scope items A1/A2/B1-B4/C1-C4/D1-D4 (lines 27-159).
+
+### 5.22 MVP-2 Sec: tag-check identity gate + O_PATH bpffs root hardening (first MVP-2 pass, 2026-05-23) — amendment block
+
+Append-only amendment closing the two remaining attack vectors on the
+§5.4/§5.19 trust boundary that MVP-1.1B explicitly deferred to MVP-2
+(see §7 OOS lines "No `bpf_prog_info.tag`…" + "No `O_PATH/O_DIRECTORY`
+fd hardening…"). This is the **first MVP-2 pass** and the **first
+security-track work since MVP-1.1B's name-check baseline**. Scope is
+deliberately narrow per brief: 2 items, both layered on top of §5.19
++ §5.20.
+
+**Threat coverage delta**:
+
+| Vector | Pre-§5.22 status | Post-§5.22 status |
+|---|---|---|
+| Attacker-recompile (same `SEC()` name, different bytecode) → impersonates `mac_filter_prog` and passes §5.19 name-check | Bypasses identity gate; loader detaches alien and replaces. KC-A residual. | Closed: `tag` (SHA1-of-bytecode) compared against `self_tag` captured from our freshly-built skeleton — bytecode mismatch → state (c) refusal (exit 4 + stderr `tag mismatch`). See Q1. |
+| Symlink at `/sys/fs/bpf/xdpmacfilter/` (bpffs root) → `std::filesystem::{exists,create_directories,remove_all}` operates on attacker-controlled path | Bypasses path-discipline; loader pins maps and reads counters from attacker's view of bpffs. KC-A symlink-vortex subset. | Closed at the bpffs root: `O_PATH \| O_DIRECTORY \| O_NOFOLLOW` open returns ELOOP → exit 8 (`PathRefused`). See Q2. |
+| Symlink at `/sys/fs/bpf/xdpmacfilter/<iface>/` (per-iface dir) → `bpffs_remove_iface` follows symlink and `remove_all`'s attacker target | Same as above, on the per-iface depth. | Closed: fd-relative `openat(...O_NOFOLLOW)` on the per-iface entry returns ELOOP → exit 8 (`PathRefused`). Per Q2 Standard scope. |
+| TOCTOU window between probe and `bpf_xdp_attach` (kernel API limitation) | Open. Race window ~µs. Out of our control without libbpf changes. | Unchanged — explicitly OOS per §7 addition. |
+| libbpf-level pin path resolution (`pin_root_path` is string-based) | Open. `bpf_obj_pin` resolves the path itself, not fd-relative. | Unchanged — explicitly OOS per §7 addition (Q2 Maximum deferred). |
+
+#### Q1 decision — Self-tag capture timing = **Option E (early-load)**
+
+**Choice**: load the skeleton FIRST (before the §5.4 probe), capture
+`self_tag` from `bpf_prog_get_info_by_fd(skel->progs.mac_filter_prog->fd).tag`,
+THEN run `probe_attached_xdp(ifindex)` and the rest of the §5.4 state
+machine. The probe compares the alien's tag against `self_tag` for
+the `is_ours` predicate.
+
+**Rationale** (Option E vs Option C trade-off):
+
+- Option E reorders `attach()` so `BpfSkeleton skel = open_and_load()`
+  happens before `probe`. The cost is one wasted skeleton load on the
+  state-(c) refusal path — kernel verifier work, ~ms-scale, automatically
+  rolled back by the `BpfSkeleton` destructor when we throw
+  `AttachRefusedAlien`. State (c) is the **rare** path (clean dev host:
+  never; security-incident host: triggered once per attack attempt).
+  Wasted work on a rare path is acceptable.
+- Option C (compile-time extractor → `expected_tag.h` with
+  `constexpr std::array<__u8, 8> kExpectedTag = {…};`) would add:
+  - A new CMake post-build step (custom command + custom target +
+    dependency edge from the loader binary onto a generated header).
+  - A new tiny libbpf-using extractor binary (built but not installed).
+  - A new generated header in `${CMAKE_BINARY_DIR}` (not committed but
+    becomes load-bearing for incremental-build correctness).
+  - Release-build determinism becomes load-bearing — if the build
+    pipeline ever produces a `.bpf.o` whose tag differs between the
+    extractor invocation and the runtime load (e.g. clang upgrade
+    between `cmake --build` invocations on a stale tree), the loader
+    refuses to attach itself.
+  Option C is the cleaner architectural answer when the build pipeline
+  can absorb codegen — but the brief explicitly frames this as the
+  **first MVP-2 pass** with **scope intentionally narrow** (brief §1).
+  Adding a build-pipeline step exceeds that scope; Option E lives
+  entirely inside `loader.cpp` anon namespace.
+- Self-tag captured AT RUNTIME from the same skeleton we're about to
+  attach is also **stronger** than a compile-time constant: there is
+  zero risk of toolchain drift between the extractor and the runtime
+  load. The tag we compare against IS the tag of the program we will
+  attach next.
+
+**Impl flow** (`attach()` reorder, all inside `loader.cpp` anon
+namespace, public API unchanged):
+
+```
+attach(cfg):
+  1. resolve ifindex via if_nametoindex     [unchanged]
+  2. open + load skeleton (BpfSkeleton RAII) [MOVED EARLIER from current ~line 200]
+  3. self_tag = bpf_prog_get_info_by_fd(skel.progs.mac_filter_prog->fd).tag
+                  — copied into std::array<__u8, BPF_TAG_SIZE>
+                  — failure (EPERM/EACCES/anything) → throw Permission/LoadFailed
+                  — tag returned as all-zeros (unlikely; kernel bug) → throw LoadFailed
+                  — load-bearing invariant: self_tag MUST be non-zero on success path
+  4. open BpffsRootFd (see Q2 / Item 2)
+  5. probe = probe_attached_xdp(ifindex, self_tag)
+                  — probe internally compares alien's tag against self_tag
+                  — is_ours = (mode==SKB) && (name=="mac_filter_prog") && (tag==self_tag)
+  6. branch on §5.4 state (a/b/c/d) [unchanged logic; identity check is richer]
+  7. on state (c): throw AttachRefusedAlien — skel destructor unwinds load
+  8. on state (b): bpf_xdp_detach existing + bpffs_remove_iface
+  9. ensure_bpffs_dir (via *at()) + skel.attach() + skel.pin() + populate_allowlist
+```
+
+**Self-tag failure modes** (fail-closed per §5.19 pattern):
+
+- `bpf_prog_get_fd_by_id` returns -EPERM/-EACCES → translate to
+  `LoaderError::Permission` (exit 6). Operator is missing CAP_BPF;
+  this is the same translation §5.19 already does for the alien probe.
+- `bpf_prog_get_info_by_fd` returns -E* → translate to
+  `LoaderError::LoadFailed` (exit 2). We just loaded the skeleton; if
+  the kernel suddenly can't tell us about our own program, this is a
+  load-time failure.
+- Returned `info.tag` is all-zeros (defensive — should never happen on
+  supported kernels) → throw `LoaderError::LoadFailed` with stderr
+  `"kernel returned zero tag for our own program"`. Better to fail
+  loud than silently disable the gate.
+
+#### Q2 decision — O_PATH coverage scope = **Standard**
+
+**Choice**: harden the bpffs **root** with `O_PATH | O_DIRECTORY |
+O_NOFOLLOW`, harden **per-iface dir** existence/creation via
+`*at()`-relative syscalls AND harden **removal** by opening the
+per-iface dir with `O_PATH | O_DIRECTORY | O_NOFOLLOW` + iterating
+entries via `fdopendir`+`readdir` + `unlinkat`. Do NOT push fd-relative
+pinning into libbpf (`pin_root_path` API is path-string-based;
+fd-relative pinning would require libbpf source changes or a
+hand-rolled `bpf_obj_pin` replacement against `O_PATH`-rooted
+constructed paths — too invasive for this pass).
+
+**Rationale** (Minimum vs Standard vs Maximum trade-off):
+
+- Minimum (root-fd-only) covers the bpffs-root-symlink vector but
+  leaves `bpffs_remove_iface` operating on path strings — a per-iface
+  symlink planted between `attach()` and `detach()` would still escape.
+  Two attack vectors (root + per-iface) but only one closed.
+- Standard (root + per-iface fd-relative ops including removal) covers
+  both vectors at the cost of a few additional `*at()` syscalls and
+  one new local helper for the fd-relative removal walk. ~30 LOC.
+  Brief recommendation. Closes the realistic symlink-vortex surface
+  for the bpffs **directory** layer.
+- Maximum would push fd-relative resolution down into libbpf's
+  pinning. CON: libbpf 1.1's `bpf_obj_pin` takes a `const char *path`
+  and resolves it; there is no fd-relative variant in libbpf API.
+  Implementing this requires either replacing `LIBBPF_PIN_BY_NAME`
+  semantics with hand-rolled `bpf_obj_pin` + `unlinkat` against
+  fd-rooted constructed paths (medium-invasive — re-derives the
+  skeleton's pinning behaviour) OR upstreaming a libbpf API addition
+  (out of our control). The brief itself marks Maximum as "likely too
+  invasive for this pass" — recorded as MVP-2+ work in §7.
+
+**`BpffsRootFd` RAII contract** (anon namespace, `loader.cpp` only —
+NOT exported to `raii.hpp` per §5.19's single-callsite rule):
+
+```
+class BpffsRootFd {
+    int fd_;
+public:
+    // Opens XDPMF_BPFFS_ROOT (= "/sys/fs/bpf/xdpmacfilter") with
+    // O_PATH | O_DIRECTORY | O_NOFOLLOW.
+    // If initial open returns ENOENT: mkdir(AT_FDCWD, root, 0755) once,
+    //   then retry open. Second ENOENT → throw LoadFailed (bpffs not mounted).
+    // If open returns ELOOP (root is a symlink): throw PathRefused (exit 8)
+    //   with stderr "bpffs root '<path>' is a symlink — refusing to operate".
+    // If open returns ENOTDIR (root exists but is a regular file):
+    //   throw PathRefused (exit 8) with stderr "bpffs root '<path>' is not
+    //   a directory". (Same code; symlink and not-a-directory are both
+    //   "the attacker placed something non-directory at our root".)
+    // If open returns EACCES/EPERM: throw Permission (exit 6).
+    // On any other errno: throw LoadFailed (exit 2) with the strerror() tail.
+    explicit BpffsRootFd();
+
+    ~BpffsRootFd();  // close(fd_) if fd_ >= 0; ignore close errors.
+
+    BpffsRootFd(const BpffsRootFd&) = delete;
+    BpffsRootFd& operator=(const BpffsRootFd&) = delete;
+    BpffsRootFd(BpffsRootFd&&) noexcept;
+    BpffsRootFd& operator=(BpffsRootFd&&) noexcept;
+
+    int fd() const noexcept { return fd_; }  // for use with *at() syscalls
+};
+```
+
+**Helper conversions** (all callsites currently in `loader.cpp`, all
+move to `*at()` form using `root.fd()` from a single `BpffsRootFd
+root` instance held for the duration of `attach()` / `detach()`):
+
+| Pre-§5.22 callsite | Post-§5.22 form |
+|---|---|
+| `std::filesystem::exists(pin_dir)` in `attach()` line ~284 | `faccessat(root.fd(), cfg.iface.c_str(), F_OK, AT_SYMLINK_NOFOLLOW)` — return value 0 = exists (real dir or NOT-FOLLOWED symlink). To distinguish: follow with `fstatat(root.fd(), iface, &st, AT_SYMLINK_NOFOLLOW)`; if `S_ISLNK(st.st_mode)` → throw `PathRefused` exit 8 with stderr `"per-iface entry '<iface>' is a symlink — refusing"`. If `S_ISDIR(st.st_mode)` → treat as existing (proceed to state classification). Otherwise (regular file etc.) → `PathRefused` likewise. |
+| `std::filesystem::exists(pin_dir)` in `detach()` line ~390 | Same as above. Symlink at the iface path during detach → `PathRefused` exit 8 (we refuse to remove an attacker-controlled path). |
+| `ensure_bpffs_dir(pin_dir)` (creates the per-iface dir) | `mkdirat(root.fd(), cfg.iface.c_str(), 0755)`. On `EEXIST`: confirm it's a real directory via `fstatat(...AT_SYMLINK_NOFOLLOW)`; if symlink or non-dir → `PathRefused` exit 8. The bpffs-root parent dir is handled inside `BpffsRootFd` ctor (mkdir-once retry on ENOENT). The pre-existing `std::filesystem::create_directories(pin_dir.parent_path())` two-level create is replaced by the `BpffsRootFd` ctor + this single `mkdirat`. |
+| `bpffs_remove_iface(iface)` (was `std::filesystem::remove_all(pin_dir)`) | (1) `int iface_fd = openat(root.fd(), iface.c_str(), O_PATH \| O_DIRECTORY \| O_NOFOLLOW \| O_CLOEXEC)`; if `ELOOP` → `PathRefused` exit 8; if `ENOENT` → no-op return (idempotent). Wrap `iface_fd` in scoped fd RAII (same anon-namespace shape as the §5.19 prog-fd RAII). (2) Use `fdopendir(iface_fd_dup)` (note: `fdopendir` consumes its fd — dup first via `fcntl(F_DUPFD_CLOEXEC)` OR open separately with `openat(...O_RDONLY|O_DIRECTORY|O_NOFOLLOW)`) + iterate `readdir` entries, skipping `.` and `..`. (3) `unlinkat(iface_fd, entry->d_name, 0)` for each entry — these are pinned BPF map files, all regular-file-ish. (4) `unlinkat(root.fd(), iface.c_str(), AT_REMOVEDIR)` to remove the now-empty iface dir. |
+| Inline `pin_dir.string().c_str()` paths passed to libbpf (`bpf_map__set_pin_path`) | **Unchanged** — Q2 Maximum is OOS. libbpf still resolves paths string-side. The TOCTOU window between our `mkdirat` and libbpf's `bpf_obj_pin` is unchanged (~µs) and explicitly OOS per §7. |
+
+**Detail on `fdopendir` ownership** (recurring foot-gun): `fdopendir(fd)`
+takes ownership of `fd` — the subsequent `closedir(dirp)` closes the
+underlying fd. Impl pattern: open the iface dir twice OR open once with
+`O_RDONLY|O_DIRECTORY|O_NOFOLLOW` (for `fdopendir`) and use `root.fd()`
++ iface name for the final `unlinkat(...AT_REMOVEDIR)`. Either is
+acceptable; impl picks based on which is cleaner with the local RAII.
+The constraint is: no fd leak, no double-close. Confirm with ASAN-LSAN
+in `T_SANITIZER_BUILD` (§6.8).
+
+**Why O_PATH not O_RDONLY for the root**: `O_PATH` is the
+"placeholder" open — does not pull a full inode reference, lighter
+weight, sufficient for `*at()` syscalls and `faccessat`/`fstatat`. We
+never `read()` from the root fd. `O_RDONLY` would work but is
+heavier. Linux-specific; bpffs is Linux-only so no portability cost.
+
+**Why O_NOFOLLOW not lstat-and-then-open**: lstat-and-then-open is
+TOCTOU-racy (attacker swaps the symlink between lstat and open).
+`O_NOFOLLOW` is atomic in the kernel: it returns `ELOOP` if the
+**final** path component is a symlink, without resolving it. This is
+the kernel-supported way to refuse symlink dereference.
+
+**Why O_DIRECTORY**: defensive — kernel verifies the target is a
+directory and returns `ENOTDIR` if not. Combined with `O_NOFOLLOW`,
+this means the open ONLY succeeds on a real directory (not symlink,
+not regular file, not pipe). Cheap belt-and-suspenders.
+
+#### Q3 decision — Symlink-refused exit code = **New code 8 (`PathRefused`)**
+
+**Choice**: add a new exit code 8 = `LoaderError::PathRefused`, with
+the dedicated semantic "the bpffs root or per-iface entry exists as a
+non-directory (symlink or other), and we refused to operate on it".
+
+**Rationale** (Reuse-4 vs Reuse-6 vs New-8 trade-off):
+
+- Reusing 4 (`AttachRefusedAlien`) extends the "alien" semantic from
+  "alien BPF prog already attached" to "alien path layout we don't
+  trust". These are **two distinct attack vectors** and operators
+  monitoring exit codes will lose the ability to distinguish them by
+  exit-code grep alone. The whole point of distinct exit codes —
+  argued at length in §5.20 ("the detection layer is the entire point
+  of code 4's existence") — is undermined.
+- Reusing 6 (`Permission`) misrepresents the failure: the kernel did
+  not deny us anything; we deliberately refused to follow an
+  attacker-controllable path. "Permission" reads as a config / capability
+  problem, not a security refusal. Misleading.
+- New code 8 is distinct, observable, audit-friendly. Operators can
+  build dashboards: "exit 4 spike = attempted prog clobber; exit 8
+  spike = attempted path substitution; exit 6 spike = privilege
+  regression". The cost is +1 row in §4.1 table AND +1 enumerator in
+  `LoaderError` (which lives in `loader.hpp`).
+
+**Constraint relaxation justification** (the brief says "no .hpp
+changes" — Q3 option C is offered with cost "new §4.1 row"; team-lead
+spawn message explicitly anticipates updating §4.1 if Q3 = new code):
+
+The "loader.hpp byte-identical" invariant is relaxed for §5.22 by
+**exactly one line** — the `PathRefused = 8,` enumerator inside the
+existing `LoaderError` enum body. No new functions, no new types, no
+new top-level symbols, no ABI break for existing call sites (the enum
+is an integer type; adding a value does not change layout or
+calling convention). This is the smallest possible .hpp diff that
+preserves the audit-clarity property. Reviewer's `loader.hpp`-invariant
+check should accept a single-line `git diff` confined to the enum
+body; any other diff to `loader.hpp` IS a constraint violation. The
+relaxation is documented in §4.3 ("MVP-2 Sec note") for downstream
+discoverability.
+
+**Why 8 not 7**: code 7 is **reserved** for `LoaderError::KernelUnsupported`
+per the MVP-2 Robust slice (per §7 OOS line in MVP-1.1C addendum and
+the brief's OOS list). MVP-2 Sec deliberately takes the **next
+contiguous slot after the reservation** (8) to avoid stealing 7 from
+the future Robust slice. If MVP-2 Robust ships before this code is
+released, the table is `0/1/2/3/4/5/6/7/8`; if it ships after, the
+table is `0/1/2/3/4/5/6/[7=reserved]/8` until Robust fills 7. The
+table in §4.1 is now updated accordingly.
+
+#### Item 1 — Tag-check identity gate (extends §5.19 mechanism (i))
+
+**Where** (per brief): `loader.cpp` — `probe_attached_xdp()` helper,
+`is_ours` predicate, `attach()` state-(c) stderr message.
+
+**XdpProbe struct extension** (the §5.19 contract grows by one
+field):
+
+```
+struct XdpProbe {
+    std::uint32_t prog_id;                           // 0 = none
+    XdpMode       mode;                              // {NONE, SKB, NATIVE, HW}
+    bool          is_ours;                           // (mode==SKB) && name==... && tag==...
+    std::array<char, BPF_OBJ_NAME_LEN> name;         // 16 bytes, kernel-truncated NUL-padded
+    std::array<std::uint8_t, 8 /*BPF_TAG_SIZE*/> tag;  // populated when prog_id != 0; zeroed otherwise
+};
+// sizeof(XdpProbe) ≤ 40 bytes — POD, return-by-value, no heap.
+// BPF_TAG_SIZE is libbpf-defined and equal to 8 on all supported kernels.
+```
+
+**`is_ours` predicate** (post-§5.22, all three conditions necessary):
+
+```
+bool is_ours = (mode == XdpMode::SKB)
+            && (strncmp(name.data(), "mac_filter_prog", BPF_OBJ_NAME_LEN) == 0)
+            && (tag == self_tag);
+```
+
+Evaluation order: mode first (cheapest; non-SKB is the common alien
+case), then name (compile-time literal compare), then tag (byte-array
+equality). Short-circuit on first failure. The probed `tag` field is
+populated whenever `prog_id != 0`; if the tag fetch failed (probe
+fell into the fail-closed branch), `is_ours` is already `false` from
+that branch's return — no need to also fail tag-equality.
+
+**Probe self_tag parameter**: `probe_attached_xdp` gains a second
+parameter — `const std::array<std::uint8_t, 8>& self_tag` — passed in
+from the caller (`attach()`). The probe uses this only for the
+final `is_ours` AND; everything else (querying the kernel for the
+alien's mode/name/tag) is unchanged from §5.19. Architect-permitted
+helper-signature change since `probe_attached_xdp` is anon-namespace.
+
+**State-(c) stderr message** (post-§5.22, MUST include all of: prog_id,
+mode, name, **hex tag**, iface, and a substring identifying the
+rejection cause):
+
+Two sub-cases by rejection cause:
+
+- **Name mismatch** (the §6.9 case — covered by `T_ATTACH_ALIEN_REFUSAL`):
+  message format unchanged from §5.19 to preserve §6.9 assertion
+  surface — name-mismatch comes first in the `is_ours` evaluation
+  order, so this stderr shape is the one the §6.9 fixture triggers.
+  Recommended (architect-suggested):
+  ```
+  XDP prog id <ID> (mode <MODE>, name '<NAME>') already attached to
+  <IFACE> (not ours — refusing to clobber)
+  ```
+- **Tag mismatch** (the §6.14 case — name passes but tag fails — covered
+  by `T_ATTACH_TAG_MISMATCH`): message MUST include the hex tag AND
+  the literal substring `tag mismatch`. Recommended
+  (architect-suggested):
+  ```
+  XDP prog id <ID> (mode <MODE>, name '<NAME>', tag <HEX16>) already
+  attached to <IFACE> (not ours — tag mismatch)
+  ```
+  where `<HEX16>` is the 16-character lowercase hex rendering of the
+  8 tag bytes (e.g. `5a3f1c0e9b2d4807`). Impl picks the exact
+  `std::format` spelling — `std::format("{:02x}", b)` per byte
+  concatenated, or `std::format("{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}", t[0],…,t[7])`,
+  or ranges-style `std::format` join — all acceptable. Contract:
+  `grep -i -E '[0-9a-f]{16}'` on stderr MUST yield a match within
+  the message line, AND `grep -F -- 'tag mismatch'` MUST match.
+
+The brief permits impl flexibility on exact format spelling; the
+**load-bearing contract** for tester is the two substrings above.
+
+**Mode-mismatch sub-case** (mode != SKB; can happen with any name):
+existing §5.19 message format applies (no tag rendered because we
+don't trust a non-SKB attached program's identity claim anyway —
+mode-mismatch is the primary refusal cause). Optional tag rendering
+in stderr for operator diagnostic value is **permitted but not
+required**.
+
+**Self-tag failure on the load path** (already covered in Q1 above —
+not a probe concern, but reiterated here so impl has one source of
+truth): if `self_tag` capture fails in `attach()` step 3, the
+state-(c) branch is never reached because the function throws before
+the probe is even called. `self_tag` is therefore always non-zero
+when passed to `probe_attached_xdp`.
+
+#### Item 2 — O_PATH bpffs root fd hardening (extends §5.19 mechanism (iii))
+
+**Where** (per brief): `loader.cpp` — `ensure_bpffs_dir`,
+`bpffs_remove_iface`, the inline `std::filesystem::exists(pin_dir)`
+checks in `attach()` (line ~284) and `detach()` (line ~390).
+
+**Action**: as enumerated in Q2 table above. Summary:
+
+1. Construct `BpffsRootFd root` at the **start** of `attach()` (after
+   `if_nametoindex`, before the skeleton load; OR after the skeleton
+   load but before the probe — order is impl's choice as long as
+   `root` exists before any `*at()` callsite). The destructor
+   guarantees fd closure on any exception.
+2. Replace `std::filesystem::exists(pin_dir)` in both `attach()` and
+   `detach()` with `faccessat(root.fd(), iface, F_OK, AT_SYMLINK_NOFOLLOW)`
+   + `fstatat(...AT_SYMLINK_NOFOLLOW)` for symlink/dir-type
+   discrimination. Symlink → `PathRefused` (exit 8).
+3. Replace `std::filesystem::create_directories(pin_dir)` (which under
+   §5.21 already lives inline in `ensure_bpffs_dir`) with
+   `mkdirat(root.fd(), iface, 0755)`. On `EEXIST` confirm dir-ness via
+   `fstatat`. The parent (`/sys/fs/bpf/xdpmacfilter/`) is handled by
+   the `BpffsRootFd` ctor.
+4. Replace `std::filesystem::remove_all(pin_dir)` (inside
+   `bpffs_remove_iface`) with the `openat`+`fdopendir`+`unlinkat`
+   walk described in Q2 table. Symlink at the per-iface entry →
+   `PathRefused` (exit 8).
+5. The "bpffs root itself is a symlink" case is handled by the
+   `BpffsRootFd` ctor: initial open with `O_NOFOLLOW` returns
+   `ELOOP` → throw `PathRefused` (exit 8) with the root-specific
+   stderr message. Do NOT auto-`unlink+mkdir` the root — destructive,
+   out of scope (would itself be a vulnerability vector).
+6. TOCTOU window between our probe and `bpf_xdp_attach` is
+   **unchanged** (explicit OOS — see §7 addition). Same applies to
+   the libbpf-level `pin_root_path` resolution (Q2 Maximum, OOS).
+
+**Idempotency-on-removal**: `bpffs_remove_iface` returns silently on
+`ENOENT` at the `openat` step — the per-iface dir simply doesn't
+exist, which is the desired post-state of removal. This preserves
+§5.4 state-(d) and §5.21 D4 idempotency semantics.
+
+**Symlink-refusal stderr discipline** (load-bearing for §6.15 tester
+asserts):
+
+- Root-level symlink: `"bpffs root '/sys/fs/bpf/xdpmacfilter' is a
+  symlink (or not a directory) — refusing to operate"` — MUST contain
+  literal substring `symlink` AND the literal root path token.
+- Per-iface symlink: `"bpffs entry for iface '<iface>' is a symlink
+  — refusing to operate"` — MUST contain literal substring `symlink`
+  AND the iface name token.
+- Both cases MAY ALSO include the kernel errno (`ELOOP` literal
+  string) in addition to the human word `symlink` — impl flexibility
+  — but the human-word token MUST be present (per Q3 audit-clarity
+  rationale).
+
+#### Impl surface summary (post-§5.22)
+
+| Surface | File | Public? | Pre-§5.22 | Post-§5.22 |
+|---|---|---|---|---|
+| `LoaderError` enum body | `loader.hpp` | YES (single-line addition) | 5 enumerators | 6 enumerators (`PathRefused = 8` added) |
+| `attach()` / `detach()` signatures | `loader.hpp` | YES | unchanged | unchanged (byte-identical) |
+| Other `loader.hpp` content | `loader.hpp` | YES | — | byte-identical to MVP-1.1C |
+| `XdpProbe` struct | `loader.cpp` anon ns | NO | 4 fields | 5 fields (+`tag`) |
+| `BpffsRootFd` RAII | `loader.cpp` anon ns | NO | — | new (single-callsite) |
+| Scoped fd RAII for iface_fd | `loader.cpp` anon ns | NO | (pattern exists from §5.19 prog-fd) | reuse same pattern |
+| `probe_attached_xdp` helper | `loader.cpp` anon ns | NO | `(ifindex)` | `(ifindex, const self_tag&)` |
+| `ensure_bpffs_dir` helper | `loader.cpp` anon ns | NO | path-based | fd-relative (`mkdirat` + `fstatat`) |
+| `bpffs_remove_iface` helper | `loader.cpp` anon ns | NO | `remove_all` | `openat` + `fdopendir` + `unlinkat` walk |
+| `attach()` reorder | `loader.cpp` | YES (signature unchanged) | probe → load | load → tag-capture → probe |
+| `raii.hpp` | `raii.hpp` | YES | unchanged | unchanged (BpffsRootFd is single-callsite, lives in loader.cpp) |
+| `cli.hpp`, `cli.cpp`, `main.cpp` | various | YES | unchanged | unchanged (no new CLI surface) |
+| `src/bpf/mac_filter.bpf.c` | — | — | unchanged | unchanged (no .bpf.c changes) |
+| `src/common/mac_filter.h` | — | — | unchanged | unchanged |
+
+**Verifiable invariants for reviewer** (4-point triangulation focus
+for round 1):
+
+- `git diff main -- src/loader/loader.hpp` shows exactly one line
+  added: `    PathRefused        = 8,` (with surrounding comma/indent
+  matching the existing enum style).
+- `git diff main -- src/loader/loader.cpp` shows the tag-check +
+  O_PATH additions; no unrelated refactoring.
+- `git diff main -- src/loader/raii.hpp` shows no changes.
+- `git diff main -- src/bpf/` shows no changes.
+- `git diff main -- src/common/` shows no changes.
+- `git diff main -- src/loader/cli.{hpp,cpp}` shows no changes.
+- `git diff main -- src/loader/main.cpp` shows no changes (the new
+  exit code 8 reaches the shell via `std::system_error::code().value()`
+  through the existing `LoaderError` mapping path; main.cpp does not
+  need an explicit `case` for the new enumerator if the mapping is
+  enum-value-driven).
+
+**Decisions summary** (one-liner per Q for cross-reference):
+
+- **Q1 = Option E (early-load)** — single source of truth, no build-pipeline change, wasted state-(c) load is rare.
+- **Q2 = Standard** — closes both root and per-iface symlink vectors; libbpf-level pinning (Maximum) stays OOS.
+- **Q3 = New code 8 (`PathRefused`)** — distinct audit signal beats surface flatness; one-enumerator .hpp relaxation justified.
+
+Evidence: `mint/task-brief.md` MVP-2 Sec brief (items 1-2 + Q1/Q2/Q3
++ tests T_ATTACH_TAG_MISMATCH + T_BPFFS_ROOT_SYMLINK);
+`mint/hybrid-review.md` HIGH KC-A residual subset (attacker-recompile
++ symlink-vortex); §5.19 mechanism (i) extension; §5.19 mechanism
+(iii) layering; §7 OOS lines 1378-1385 (now resolved — see updated
+§7 below).
 
 ## 6. TestStrategy
 
@@ -1305,9 +1814,15 @@ implicitly by the all-modes probe of §5.20).
   - Post-state: `[[ -z "$(xdp_prog_id lo 2>/dev/null)" ]] || fail=1`
     AND `[[ ! -e /sys/fs/bpf/xdpmacfilter/lo ]] || fail=1`.
   - Aggregator pattern: `fail=0` + final `exit "$fail"`.
-- **Ctest properties**: `TIMEOUT 10`. No `RESOURCE_LOCK` (lo is
-  shared but we make NO state changes; concurrent veth-fixture tests
-  are unaffected). **`SKIP_RETURN_CODE 77`** required (for
+- **Ctest properties**: `TIMEOUT 10`. **Post-§5.22 amendment**:
+  add `RESOURCE_LOCK xdp_fixture` to this entry so it serializes
+  against the new `T_BPFFS_ROOT_SYMLINK` (§6.15) — that test
+  destructively corrupts `/sys/fs/bpf/xdpmacfilter` for its duration,
+  and a concurrent T_DETACH_NOTHING would either trip the new
+  `PathRefused` exit 8 (failure) or observe a wrong post-state.
+  Pre-§5.22 this entry took no RESOURCE_LOCK; the addition is a
+  one-line ctest-property amendment, test logic unchanged.
+  **`SKIP_RETURN_CODE 77`** required (for
   `require_passwordless_sudo` skip path).
 - **Why**: the detach-on-clean-iface idempotent path was extended in
   MVP-1.1C (§5.21 D4 amendment to §5.4) but never asserted by ctest.
@@ -1315,6 +1830,327 @@ implicitly by the all-modes probe of §5.20).
   invocations on a clean iface succeed without error. Pairs with
   §6.6's "detach on dirty iface" (T_IDEMPOTENT_RELOAD) for full
   coverage of `detach()`'s state machine.
+
+### 6.14 T_ATTACH_TAG_MISMATCH — same-name-different-bytecode alien refused (per §5.22 Item 1, MVP-2 Sec)
+Closes the attacker-recompile vector: a BPF prog whose compile-time
+`SEC()` function name is `mac_filter_prog` (so §5.19 name-check passes)
+but whose bytecode differs from our build (so `bpf_prog_info.tag` differs
+from our captured `self_tag`) MUST be classified as alien and refused
+with exit 4 + a stderr message that identifies the rejection cause as
+tag mismatch. Symmetric to §6.9 (which exercises name-mismatch); together
+they prove both gates of the §5.22 Q1 identity predicate.
+
+- **Tag-mismatch fixture** (vendored in-tree, new MVP-2 Sec):
+  `tests/fixtures/mac_filter_alt.bpf.c` — ~15 LOC. The skeleton shape
+  (architect-specified; tester writes the file verbatim):
+
+  ```c
+  #include "vmlinux.h"
+  #include <bpf/bpf_helpers.h>
+
+  char LICENSE[] SEC("license") = "GPL";
+
+  SEC("xdp")
+  int mac_filter_prog(struct xdp_md *ctx) {
+      /* Intentionally minimal body so the bytecode (and therefore
+         bpf_prog_info.tag, which is SHA1 over the bytecode) differs
+         from src/bpf/mac_filter.bpf.c's built .bpf.o. Function name
+         is IDENTICAL on purpose — that's what makes this a tag-check
+         test (name check passes; tag check must fail). */
+      (void)ctx;
+      return XDP_PASS;
+  }
+  ```
+
+  Load-bearing constraints (tester MUST preserve):
+  - Function name `mac_filter_prog` — IDENTICAL to the real prog
+    (`src/bpf/mac_filter.bpf.c`). This makes the §5.19 name-check pass.
+  - Body MUST NOT be a verbatim copy of `mac_filter.bpf.c`'s logic
+    (no allowlist lookup, no stats bumps). Any body that compiles to
+    different bytecode works; `return XDP_PASS;` is the minimum.
+  - `SEC("license") = "GPL"` is mandatory (kernel rejects non-GPL XDP
+    progs that touch GPL-only helpers; XDP_PASS itself doesn't need
+    it but the kernel still requires a license string).
+  - `SEC("xdp")` is mandatory; same SEC as the real prog so the
+    foreign-attach step uses the same `ip link set ... xdpgeneric obj
+    ... sec xdp` invocation pattern as §6.9.
+
+  Build wiring: `tests/CMakeLists.txt` adds one line invoking the
+  existing helper `add_bpf_object(mac_filter_alt
+  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/mac_filter_alt.bpf.c)` (same
+  pattern as `xdp_pass` per §6.9). Output:
+  `${CMAKE_BINARY_DIR}/mac_filter_alt.bpf.o`. The §5.18
+  sanitizer-isolation invariant applies — BPF object never receives
+  `-fsanitize=`. No skeleton generation needed (loaded via `ip link`
+  or `bpftool` from the test script).
+
+  Tag-distinctness check (defensive, tester executes once at script
+  start): `bpftool prog show -j` after a one-shot
+  `bpftool prog load ${BUILD_DIR}/mac_filter_alt.bpf.o ...` returns a
+  `tag` field. Compare with the tag of the real `mac_filter.bpf.o`
+  similarly. If equal, the fixture is mis-built (compiler stripped
+  the difference) and tester aborts early with an explicit error
+  message — do NOT proceed to assert tag-mismatch refusal on a fixture
+  that doesn't actually differ. Architect notes: this check is
+  paranoia; clang's instruction selection on `return XDP_PASS;` vs the
+  real allowlist-lookup body always produces distinct bytecode in
+  practice, but the script SHOULD include the defensive check so a
+  silent fixture regression surfaces loudly.
+
+- **Setup**: standard veth fixture (`setup_veth` from
+  `tests/lib/common.sh`, same as §6.3–§6.9) — `veth_a` is the filter
+  side. Take `RESOURCE_LOCK xdp_fixture` (same lock as §6.3–§6.6, §6.8,
+  §6.9). `require_passwordless_sudo` (root needed for `ip link set xdp`
+  and for `bpf_xdp_query`).
+
+- **Trigger** (sequential — mirrors §6.9 with the tag-mismatch fixture):
+  1. `setup_veth` (creates `veth_a`/`veth_b`, both UP, quiesced).
+  2. Pre-attach the tag-mismatch fixture to `veth_a` in generic (SKB)
+     mode (same mode as our loader's attach mode, so the mode-axis
+     check passes and only the tag-axis check is what fails):
+     `sudo -n ip link set "${IFACE_A}" xdpgeneric obj
+     "${BUILD_DIR}/mac_filter_alt.bpf.o" sec xdp`.
+     Equivalent `bpftool` alternative as in §6.9 is acceptable.
+  3. Capture the foreign prog id and the foreign tag for assertion:
+     `foreign_id=$(xdp_prog_id ${IFACE_A})` AND `foreign_tag=$(bpftool
+     -j prog show id "${foreign_id}" | jq -r '.tag')` (or equivalent
+     `bpftool prog show id <id>` text parse — tester picks parser).
+     Both MUST be non-empty.
+  4. Run our loader with the standard attach invocation:
+     `set +e; sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}"
+     --allow "${MAC_GOOD}" 2> "${stderr_file}"; rc=$?; set -e`.
+
+- **Outcome — primary scenario** (ALL must hold):
+  - **rc == 4** — exit code matches `LoaderError::AttachRefusedAlien`
+    per §4.1 (NOT exit 8 — exit 8 is for path-symlink refusals; the
+    program is alien, the path is fine). If rc == 0 the §5.22 tag-check
+    didn't land (loader accepted a bytecode-different alien as ours —
+    the attacker-recompile vector is open). If rc != 4 and != 0, some
+    other classification went wrong.
+  - **stderr contains the foreign tag in 16-char lowercase hex form**:
+    `grep -qE -- "${foreign_tag}" "${stderr_file}"` (the tag value
+    rendered as e.g. `5a3f1c0e9b2d4807` per §5.22 Item 1). If
+    `foreign_tag` from `bpftool -j` is uppercase, normalize via
+    `tr 'A-F' 'a-f'` before greping; impl is required to render
+    lowercase per the §5.22 stderr discipline.
+  - **stderr contains literal substring `tag mismatch`** (per §5.22
+    Item 1 contract): `grep -q -F -- 'tag mismatch' "${stderr_file}"`.
+  - **stderr contains the foreign prog id** as substring (legacy
+    §6.9 contract, still holds): `grep -q -F -- "${foreign_id}"
+    "${stderr_file}"`.
+  - **Foreign program STILL attached, byte-identical id**:
+    `[[ "$(xdp_prog_id ${IFACE_A})" == "${foreign_id}" ]]`. Safety
+    floor — loader MUST NOT have clobbered the alien.
+  - **No orphan pin dir** on `${IFACE_A}`: `[[ ! -e "${PIN_DIR}" ]]`.
+    The refusal happens before `ensure_bpffs_dir`, OR RAII rollback
+    unwinds cleanly.
+
+- **Outcome — negation control scenario** (triangulation: proves the
+  identity gate ACCEPTS our own program identity, not just rejects
+  arbitrary aliens):
+
+  In the same script (or a paired sibling script — tester's choice;
+  shared script is simpler), repeat the trigger sequence above but with
+  the REAL `mac_filter.bpf.o` (built from `src/bpf/mac_filter.bpf.c`)
+  as the pre-attached fixture instead of `mac_filter_alt.bpf.o`. The
+  pre-attached real prog has bytecode identical to what our loader is
+  about to load — therefore identical tag — therefore §5.4 state (b)
+  ("ours"), idempotent reload, exit 0.
+
+  Assertions (control scenario):
+  - **rc == 0** — exit code matches successful idempotent reload.
+  - **stderr does NOT contain `tag mismatch`**: `! grep -q -F --
+    'tag mismatch' "${stderr_file}"`.
+  - **stderr does NOT contain `error:`**: `! grep -q -F -- 'error:'
+    "${stderr_file}"`.
+  - **`xdp_prog_id ${IFACE_A}` post-attach is NON-EMPTY** (our prog
+    is attached): `[[ -n "$(xdp_prog_id ${IFACE_A})" ]]`.
+  - **`${PIN_DIR}` exists and contains `allowlist` and `stats`**:
+    `[[ -e "${PIN_DIR}/allowlist" && -e "${PIN_DIR}/stats" ]]`.
+
+  This control proves the test isn't a no-op: the same loader, same
+  invocation, same pre-attached prog name, ONLY the tag differs, and
+  the rejection flips. Without this control, an impl bug that always
+  rejected SKB-mode alien (regardless of tag) would still pass the
+  primary scenario.
+
+- **Assertion mechanism** (concrete): same `fail=0` aggregator pattern
+  as §6.9. Single script, run primary scenario then cleanup, then run
+  negation-control scenario then cleanup. Each sub-scenario contributes
+  to the same `fail` accumulator; final `exit "$fail"`.
+
+- **Cleanup** (trap on EXIT, idempotent, runs between sub-scenarios
+  AND on script exit):
+  - Detach our prog if attached: `sudo -n "${LOADER_BIN}" detach
+    --iface "${IFACE_A}" 2>/dev/null || true`.
+  - Detach foreign prog: `sudo -n ip link set "${IFACE_A}" xdpgeneric
+    off 2>/dev/null || true`.
+  - `cleanup_veth` (existing helper) — wipes veth + any pin dir.
+  - Remove stderr capture file: `rm -f "${stderr_file}"`.
+
+- **Ctest properties**:
+  - `TIMEOUT 60` — same floor as §6.9 (two scenarios, two foreign
+    attaches, two loader runs, two cleanups; still well under 60s on
+    a dev host).
+  - `RESOURCE_LOCK xdp_fixture` — serializes against §6.3–§6.6, §6.8,
+    §6.9.
+  - `SKIP_RETURN_CODE 77` — `require_passwordless_sudo` skip path.
+  - **No** `WILL_FAIL` — positive-outcome test; success means both
+    scenarios passed.
+
+- **Pre-existing tests NOT modified** — additive only. §6.13 takes a
+  new RESOURCE_LOCK (see its amendment above) but that is for §6.15;
+  §6.14 itself does not require pre-existing test changes.
+
+- **Negation control built-in** — the in-script "real prog reload"
+  scenario IS the triangulation; no separate `T_NEGATION_CONTROL`-style
+  WILL_FAIL entry needed for this test.
+
+### 6.15 T_BPFFS_ROOT_SYMLINK — symlink at bpffs root and per-iface dir refused (per §5.22 Item 2, MVP-2 Sec)
+Closes the symlink-vortex vector: a symlink placed at
+`/sys/fs/bpf/xdpmacfilter/` (the bpffs root) OR at
+`/sys/fs/bpf/xdpmacfilter/<iface>/` (the per-iface dir) MUST cause the
+loader to refuse with exit 8 (`PathRefused`) + a stderr message
+identifying the path-symlink rejection cause. Negation control: after
+cleanup restores the real bpffs root, a fresh attach must succeed
+(proving the refusal is symlink-specific, not a permanent break).
+
+**DESTRUCTIVE setup**: this test deliberately corrupts the system's
+real bpffs path `/sys/fs/bpf/xdpmacfilter/` for the duration of the
+test. Cleanup MUST run in `trap EXIT` to restore the path even on
+script error. `RESOURCE_LOCK` MUST exclude all other tests that touch
+the bpffs path.
+
+- **Setup**:
+  - `require_passwordless_sudo` (corruption requires root: `mkdir`
+    under `/sys/fs/bpf/`, `ln -sfn` in same).
+  - Pre-check: if `/sys/fs/bpf/xdpmacfilter/` exists as a real
+    directory and is non-empty, abort early (exit 1, NOT 77) with
+    explicit error: "real bpffs path is in use; refusing to corrupt".
+    If it exists but is empty, snapshot it (record so cleanup
+    re-creates) then `sudo -n rmdir /sys/fs/bpf/xdpmacfilter` before
+    placing the symlink. If it does not exist, no snapshot needed.
+  - Create attacker-controlled target: `sudo -n mkdir -p
+    /tmp/xdpmf-fake-bpffs` (the symlink will point here so the
+    attacker's view of "bpffs" is a tmpfs-or-disk dir we control).
+  - Install `trap` to run cleanup on EXIT, INT, TERM, HUP — see
+    Cleanup section.
+
+- **Trigger — primary scenario (root-level symlink)**:
+  1. `sudo -n ln -sfn /tmp/xdpmf-fake-bpffs /sys/fs/bpf/xdpmacfilter`
+     — the bpffs root is now a symlink pointing at our controlled
+     dir. `lstat /sys/fs/bpf/xdpmacfilter` MUST return `S_IFLNK` (sanity
+     check before invoking the loader).
+  2. Run our loader: `set +e; sudo -n "${LOADER_BIN}" attach --iface
+     "${IFACE_A}" --allow "${MAC_GOOD}" 2> "${stderr_file}"; rc=$?;
+     set -e`. (Uses a veth iface for the `--iface` arg — `setup_veth`
+     must run BEFORE the symlink installation so the veth itself is
+     real.)
+
+- **Outcome — primary scenario** (ALL must hold):
+  - **rc == 8** — exit code matches `LoaderError::PathRefused` per
+    §4.1 / §5.22 Q3. (rc == 0 means the loader followed the symlink
+    and pinned maps in the attacker dir — the symlink-vortex is open.
+    rc == 4 means the impl reused `AttachRefusedAlien` for path
+    refusals — semantic regression, Q3 decision not honored. rc == 6
+    means impl picked `Permission` semantic — likewise wrong.)
+  - **stderr contains literal substring `symlink`** (per §5.22 Item 2
+    discipline): `grep -q -F -- 'symlink' "${stderr_file}"`. The
+    word MAY appear inside a longer phrase ("…is a symlink…" or
+    "…symlink — refusing to operate…").
+  - **stderr contains the bpffs root path token** (operator-pinpoint
+    for the corrupted entry): `grep -q -F --
+    '/sys/fs/bpf/xdpmacfilter' "${stderr_file}"`.
+  - **Loader did NOT write into the attacker's fake dir**:
+    `[[ -z "$(ls -A /tmp/xdpmf-fake-bpffs 2>/dev/null)" ]]` — the fake
+    dir MUST be empty post-attempt. If non-empty, the loader followed
+    the symlink before refusing — partial-write data leak.
+  - **No XDP attached on `${IFACE_A}`**: `[[ -z "$(xdp_prog_id
+    ${IFACE_A} 2>/dev/null)" ]]` — refusal happened before
+    `bpf_xdp_attach`.
+
+- **Trigger — sub-variant (per-iface symlink)** (Q2 Standard scope —
+  required because we picked Standard, not Minimum):
+  1. Remove the root-level symlink and restore the real root: `sudo -n
+     rm /sys/fs/bpf/xdpmacfilter && sudo -n mkdir
+     /sys/fs/bpf/xdpmacfilter`.
+  2. Place the per-iface symlink: `sudo -n mkdir -p
+     /tmp/xdpmf-fake-iface && sudo -n ln -sfn /tmp/xdpmf-fake-iface
+     /sys/fs/bpf/xdpmacfilter/${IFACE_A}`. `lstat` confirm
+     `S_IFLNK`.
+  3. Run our loader: `set +e; sudo -n "${LOADER_BIN}" attach --iface
+     "${IFACE_A}" --allow "${MAC_GOOD}" 2> "${stderr_file}"; rc=$?;
+     set -e`.
+
+- **Outcome — per-iface sub-variant** (ALL must hold):
+  - **rc == 8** — same as primary.
+  - **stderr contains `symlink`**: same predicate as primary.
+  - **stderr contains the iface name token**: `grep -q -F --
+    "${IFACE_A}" "${stderr_file}"` (per §5.22 Item 2 message
+    discipline — the per-iface message includes the iface name).
+  - **Fake iface dir was NOT written into**: `[[ -z "$(ls -A
+    /tmp/xdpmf-fake-iface 2>/dev/null)" ]]`.
+  - **No XDP attached on `${IFACE_A}`**: same as primary.
+
+- **Trigger — negation control (real bpffs root)**:
+  1. Cleanup tears down all symlinks AND `mkdir
+     /sys/fs/bpf/xdpmacfilter` (the real path is back).
+  2. Run our loader: `set +e; sudo -n "${LOADER_BIN}" attach --iface
+     "${IFACE_A}" --allow "${MAC_GOOD}" 2> "${stderr_file}"; rc=$?;
+     set -e`. Then immediate detach: `sudo -n "${LOADER_BIN}" detach
+     --iface "${IFACE_A}"`.
+  3. Outcome: **rc == 0** for attach; **rc == 0** for detach; pin
+     paths existed during the attach window; no errors. Proves the
+     refusal in the primary/sub-variant scenarios is symlink-specific,
+     not a permanent break of the loader.
+
+- **Assertion mechanism** (concrete): same `fail=0` aggregator pattern
+  as §6.9 / §6.14. Three scenarios in one script (primary, per-iface
+  sub-variant, negation control); each scenario contributes assertions
+  to the same `fail` accumulator; final `exit "$fail"`.
+
+- **Cleanup** (trap on EXIT/INT/TERM/HUP — idempotent, runs in this
+  exact order):
+  1. `sudo -n "${LOADER_BIN}" detach --iface "${IFACE_A}" 2>/dev/null
+     || true` (in case negation-control attach succeeded but script
+     died before its detach).
+  2. `sudo -n rm -f /sys/fs/bpf/xdpmacfilter/${IFACE_A}` (per-iface
+     symlink — may not exist; `-f` swallows ENOENT).
+  3. `sudo -n rm -f /sys/fs/bpf/xdpmacfilter` (root symlink — may
+     not exist).
+  4. If the snapshot from Setup indicated the real root pre-existed:
+     `sudo -n mkdir -p /sys/fs/bpf/xdpmacfilter` to restore. If the
+     real root did NOT pre-exist (was created by step 1 of the
+     sub-variant trigger), leave it removed — restores host state.
+     If snapshot indicated content, the test bails in Setup (already
+     handled).
+  5. `sudo -n rm -rf /tmp/xdpmf-fake-bpffs /tmp/xdpmf-fake-iface`.
+  6. `cleanup_veth` (existing helper) — wipes veth fixture.
+  7. `rm -f "${stderr_file}"`.
+
+  **Idempotency contract**: cleanup MUST be safe to run multiple times
+  (e.g. if `trap EXIT` fires AND the script's normal-exit cleanup
+  also runs). All `rm -f` / `|| true` patterns above ensure this.
+
+- **Ctest properties**:
+  - `TIMEOUT 60` — three scenarios; same floor as §6.9 / §6.14.
+  - **`RESOURCE_LOCK xdp_fixture`** — serializes against §6.3–§6.6,
+    §6.8, §6.9, §6.14 (all veth-fixture tests). AND serializes against
+    §6.13 per the §5.22 amendment to §6.13 (T_DETACH_NOTHING now also
+    takes `xdp_fixture` — see §6.13 ctest-properties block above). The
+    shared lock name ensures NO other test that touches the bpffs path
+    can run concurrently with the destructive setup window.
+  - `SKIP_RETURN_CODE 77` — `require_passwordless_sudo` skip path.
+  - **No** `WILL_FAIL`.
+
+- **Pre-existing tests NOT modified** — additive only. The one
+  exception is §6.13's ctest-property amendment (one-line addition of
+  `RESOURCE_LOCK xdp_fixture`) which is required by this test's
+  destructive setup; that amendment is documented inline in §6.13 above
+  and does not change §6.13's test logic.
+
+- **Negation control built-in** — the in-script "real bpffs root"
+  scenario IS the triangulation; no separate `WILL_FAIL` entry needed.
 
 ### Cross-cutting note for §6.3-§6.6, §6.8, §6.9 (per §5.21 C1+C2+C3+C4)
 
@@ -1332,16 +2168,16 @@ are byte-identical to the pre-MVP-1.1C versions.
   carrier-up, etc.) are NOT post-inject synchronization and stay
   as-is.
 - **C2 (sudo -n + preflight skip-77)**: tests requiring root (§6.2,
-  §6.3, §6.4, §6.5, §6.6, §6.8, §6.9, §6.13) call
-  `require_passwordless_sudo` near the top after sourcing
-  `common.sh`; SKIP 77 on missing passwordless sudo is the expected
-  behaviour, NOT a test failure. All `sudo …` invocations are
-  `sudo -n …` (no password prompt — fail-fast instead of hang).
+  §6.3, §6.4, §6.5, §6.6, §6.8, §6.9, §6.13, **§6.14, §6.15** — last
+  two added MVP-2 Sec) call `require_passwordless_sudo` near the top
+  after sourcing `common.sh`; SKIP 77 on missing passwordless sudo is
+  the expected behaviour, NOT a test failure. All `sudo …` invocations
+  are `sudo -n …` (no password prompt — fail-fast instead of hang).
   CMake `set_tests_properties(... PROPERTIES SKIP_RETURN_CODE 77)`
   must be set on every root-requiring entry.
 - **C3 (uniquified iface names)**: every literal `veth_a`/`veth_b` in
-  §6.3-§6.9 reads as `${IFACE_A}`/`${IFACE_B}` (PID-suffixed
-  `xdpmf_a_$$`/`xdpmf_b_$$`); bpffs pin paths follow
+  §6.3-§6.9 (and §6.14, §6.15) reads as `${IFACE_A}`/`${IFACE_B}`
+  (PID-suffixed `xdpmf_a_$$`/`xdpmf_b_$$`); bpffs pin paths follow
   (`/sys/fs/bpf/xdpmacfilter/${IFACE_A}/…`). `setup_veth` preflights
   that neither name collides with an existing host interface and
   errors out (exit 1) if collision detected.
@@ -1363,6 +2199,13 @@ fixture name. Tester decides whether to share veth between tests
 (faster, requires explicit stats reset) or re-create per test (slower,
 simpler — recommended for MVP-1).
 
+**Post-§5.22 isolation note**: §6.15 (T_BPFFS_ROOT_SYMLINK) destructively
+corrupts the bpffs root path. It takes `RESOURCE_LOCK xdp_fixture` AND
+§6.13 (T_DETACH_NOTHING) is amended to also take `xdp_fixture` — this
+ensures the destructive setup window does not overlap with any other
+bpffs-touching test. All other tests with veth fixtures already take
+`xdp_fixture` per the existing convention.
+
 ## 7. Out of scope
 
 The brief's out-of-scope list applies verbatim. Additionally, the
@@ -1375,14 +2218,22 @@ might be tempted to add:
   hardcoded per §5.6. The MVP-1.1B all-modes probe (§5.20) closes the
   detection-layer gap without exposing a CLI surface; the CLI flag
   itself remains MVP-2.
-- **No `bpf_prog_info.tag` (SHA1-of-bytecode) identity check** in §5.19
-  — tag-check is the strongest defense and is MVP-2 hardening; MVP-1.1B
-  ships name-check only. Adding tag-check requires capturing the
-  freshly-built skeleton's own tag at load time and comparing — extra
-  complexity not warranted for the current threat model.
-- **No `O_PATH/O_DIRECTORY` fd hardening** on `pin_dir` (the §5.19
-  option (iii)) — defers to MVP-2 as a layered addition; MVP-1.1B ships
-  the name-check identity gate only.
+- ~~**No `bpf_prog_info.tag` (SHA1-of-bytecode) identity check** in §5.19~~
+  **— SHIPPED in §5.22 (MVP-2 Sec, 2026-05-23)**. Tag-check is now
+  layered on top of name-check per §5.22 Q1 = Option E (early-load):
+  skeleton loads first, `self_tag` is captured from our own program's
+  `bpf_prog_info.tag`, probe compares the alien's tag against it.
+  Stderr on tag-mismatch refusal includes the hex tag + literal
+  `tag mismatch` substring. Test coverage: §6.14 T_ATTACH_TAG_MISMATCH.
+- ~~**No `O_PATH/O_DIRECTORY` fd hardening** on `pin_dir` (the §5.19~~
+  ~~option (iii))~~ **— SHIPPED in §5.22 (MVP-2 Sec, 2026-05-23) at Q2
+  = Standard scope**. `BpffsRootFd` RAII opens the bpffs root with
+  `O_PATH | O_DIRECTORY | O_NOFOLLOW`; all bpffs operations use
+  fd-relative `*at()` syscalls (`mkdirat`, `faccessat`, `fstatat`,
+  `openat`, `unlinkat`). Symlink at the root → exit 8 (`PathRefused`);
+  symlink at a per-iface entry → likewise. Test coverage: §6.15
+  T_BPFFS_ROOT_SYMLINK (primary + per-iface sub-variant + negation
+  control).
 - **No `--mode`-specific detach in MVP-1.1B** — detach always uses
   `XDP_FLAGS_SKB_MODE` per §5.6; we only detach what we ourselves
   attached, and we only attach in SKB. Alien progs in non-SKB modes
@@ -1391,10 +2242,18 @@ might be tempted to add:
   (stale-pin recovery) maps to exit 0 (successful attach after orphan
   cleanup) in `attach()`, and to exit 0 (successful no-op cleanup) in
   `detach()`. The MVP-1 exit-code table (§4.1) is unchanged.
+  **Post-§5.22 note**: this fence applies to the §5.4 4-state expansion
+  specifically; MVP-2 Sec adds exactly one new exit code (8 =
+  `PathRefused`) for the orthogonal path-symlink-refusal case per
+  §5.22 Q3. That addition is documented in §4.1.
 - **No restructure of `loader.hpp`** in MVP-1.1B — all §5.19/§5.20
   changes are confined to `loader.cpp` anon-namespace helpers. Public
   API (§4.3) is unchanged. (Architecture M1 backwards layering —
   `loader.hpp → cli.hpp` — is addressed in MVP-1.1C per §5.21 A1.)
+  **Post-§5.22 note**: this fence relaxes by exactly one enumerator
+  (`LoaderError::PathRefused = 8`) per §5.22 Q3 — the smallest
+  possible .hpp diff. All other §5.22 work lives in `loader.cpp` anon
+  namespace.
 - **No changes to the 8 pre-existing tests** — they remain
   byte-identical; only the new `T_ATTACH_ALIEN_REFUSAL` is added.
 - **No changes to other `src/**` files** — only `src/loader/loader.cpp`
@@ -1444,10 +2303,67 @@ might be tempted to add:
   sync it.
 - **No T_VERIFIER_REJECT + kernel-version probe +
   `LoaderError::KernelUnsupported`** — testing MED finding per brief
-  OOS section; explicitly MVP-2.
+  OOS section; explicitly MVP-2 (Robust slice).
 - **No PERCPU stats migration** — performance HIGH finding per brief
-  OOS section; design §5.3 + §5.5 explicit MVP-2.
+  OOS section; design §5.3 + §5.5 explicit MVP-2 (Perf slice).
 - **No removal of `mint/test-run.log` from the gitignore list** — brief
   flags this as a stale finding (already gitignored AND untracked, no
   work needed). Not a change; documented here so reviewer does not flag
   the non-edit as a miss.
+
+### MVP-2 Sec additions to OOS (per §5.22)
+
+- **No libbpf-level fd-relative pinning (Q2 Maximum)** — `bpf_obj_pin`
+  in libbpf 1.1 is path-string-based; fd-relative pinning would
+  require either re-implementing the pin step manually against
+  `O_PATH`-rooted constructed paths OR upstreaming a libbpf API
+  addition. Both exceed the §5.22 "first MVP-2 pass, narrow scope"
+  framing. Recorded as MVP-2+ hardening; if upstream libbpf gains
+  fd-relative `bpf_obj_pin` we revisit. The residual surface this
+  leaves open is the µs-scale window between our `mkdirat(root.fd(),
+  iface, …)` and libbpf's subsequent path-based `bpf_obj_pin` — a
+  symlink-substitution attack in that window would succeed, but the
+  attacker needs root-on-bpffs and µs-precision timing, AND the
+  resulting pinned maps would be in the attacker's dir (operator
+  notices via `bpftool map show`); the attack value is low.
+- **No TOCTOU closure between our probe and `bpf_xdp_attach`** —
+  requires single-syscall atomic attach-only-if-empty semantics not
+  available in libbpf 1.1 (and arguably not in the kernel XDP attach
+  API itself). A future kernel feature (e.g. `XDP_FLAGS_REPLACE` with
+  expected-prog-id atomicity) could close this; out of our control.
+  The residual window is ~µs; an attacker would have to win an
+  inter-syscall race.
+- **No `LoaderError::PathRefused` use beyond symlink/non-directory
+  refusal at the bpffs root or per-iface entry** — exit 8 is reserved
+  for the §5.22 Item 2 path-discipline cases. Other path-shaped errors
+  (e.g. permission-denied on bpffs mount, ENOSPC on pin) continue to
+  use `Permission` (6) / `LoadFailed` (2) per existing classification.
+  This fences impl from broadening exit 8's semantic during
+  implementation.
+- **No `expected_tag.h` compile-time tag header (Q1 Option C)** —
+  Option E (early-load runtime tag capture) was chosen per §5.22 Q1.
+  Option C is recorded as MVP-3+ work if a future build-pipeline
+  redesign makes codegen cheaper; the runtime cost of Option E
+  (one skeleton load on the rare state-(c) refusal path) is not
+  pressuring us toward Option C in MVP-2.
+- **No `--no-tag-check` / `--tag-check-mode` escape hatch** — the
+  tag-check is unconditional. An operator who wants to attach a
+  custom-built variant of the program must update their build
+  pipeline so the variant's tag matches what the loader expects; the
+  loader does not expose an opt-out. (If a future MVP-2+ adds
+  multi-variant support, the design becomes "variant registry of
+  acceptable tags", not a bypass flag.)
+- **No `T_PROBE_ELOOP_UNIT` micro-test** — the `BpffsRootFd` ctor's
+  ELOOP branch is exercised end-to-end by §6.15 T_BPFFS_ROOT_SYMLINK;
+  a separate unit-test entry point would duplicate coverage at the
+  cost of a new test surface. If §6.15 turns out to be flaky on some
+  hosts (kernel symlink semantics regression — extremely unlikely),
+  a unit-level entry is reconsidered.
+- **No bpffs mount preflight** — the loader assumes
+  `/sys/fs/bpf` is mounted as `bpf` filesystem (the standard
+  distro/systemd setup). If `/sys/fs/bpf` is not mounted, `mkdirat`
+  for the root will fail with whatever errno the kernel returns
+  (ENOTDIR/ENOSYS/etc.) → `LoadFailed` (exit 2). Adding an explicit
+  `statfs(/sys/fs/bpf, ...) == BPF_FS_MAGIC` preflight is MVP-2+
+  Robust-slice work; the current behaviour (fail with kernel errno
+  surfaced via stderr) is the floor.
