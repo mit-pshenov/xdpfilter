@@ -21,6 +21,14 @@ set(TEST_ENV
 # code opens this object).
 add_bpf_object(xdp_pass ${CMAKE_SOURCE_DIR}/tests/fixtures/xdp_pass.bpf.c)
 
+# Tag-mismatch fixture for T_ATTACH_TAG_MISMATCH (design §6.14, MVP-2 Sec).
+# Same SEC function name `mac_filter_prog` as the real prog (so the §5.19
+# name-check passes) but minimal body (`return XDP_PASS;`) so the
+# bytecode — and therefore bpf_prog_info.tag (SHA1 over bytecode) —
+# differs. Same sanitizer-isolation invariant; loaded via `ip link set
+# ... xdpgeneric obj …` from the test script.
+add_bpf_object(mac_filter_alt ${CMAKE_SOURCE_DIR}/tests/fixtures/mac_filter_alt.bpf.c)
+
 # T_BUILD performs an isolated clean rebuild in /tmp and greps for warnings;
 # it does NOT need the veth fixture and does NOT take the resource lock.
 add_test(
@@ -113,6 +121,11 @@ foreach(T IN ITEMS
 endforeach()
 
 # T_DETACH_NOTHING needs passwordless sudo (calls bpf_xdp_query under root).
+# Per §5.22 amendment to §6.13: this entry takes RESOURCE_LOCK xdp_fixture
+# so it cannot race the destructive setup window of T_BPFFS_ROOT_SYMLINK
+# (§6.15) — that test transiently rmdir's /sys/fs/bpf/xdpmacfilter and a
+# concurrent T_DETACH_NOTHING would either trip the new PathRefused exit 8
+# (failure) or observe a wrong post-state. Test logic itself unchanged.
 add_test(
     NAME T_DETACH_NOTHING
     COMMAND bash ${TEST_DIR}/T_DETACH_NOTHING.sh
@@ -120,6 +133,46 @@ add_test(
 )
 set_tests_properties(T_DETACH_NOTHING PROPERTIES
     ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK xdp_fixture
     TIMEOUT 10
+    SKIP_RETURN_CODE 77
+)
+
+# ─────────────────────────────────────────────────────────────────────────
+# MVP-2 Sec additions (§5.22 / §6.14 + §6.15).
+#
+# T_ATTACH_TAG_MISMATCH (§6.14): same-name-different-bytecode alien
+# rejected with exit 4 + 'tag mismatch' + 16-char hex tag in stderr;
+# negation control re-runs with real mac_filter.bpf.o (rc==0, ours
+# reload).  Same RESOURCE_LOCK as the rest of the veth-fixture tests.
+#
+# T_BPFFS_ROOT_SYMLINK (§6.15): symlink at bpffs root and per-iface dir
+# refused with exit 8 + 'symlink' + path-token stderr discipline;
+# negation control with real bpffs root proves refusal is
+# symlink-specific.  DESTRUCTIVE to /sys/fs/bpf/xdpmacfilter for the
+# test's duration; trap-driven cleanup mandatory; RESOURCE_LOCK
+# xdp_fixture serializes against ALL other tests that touch the bpffs
+# path (the §6.13 amendment above extends this lock to T_DETACH_NOTHING).
+add_test(
+    NAME T_ATTACH_TAG_MISMATCH
+    COMMAND bash ${TEST_DIR}/T_ATTACH_TAG_MISMATCH.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_ATTACH_TAG_MISMATCH PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 60
+    SKIP_RETURN_CODE 77
+)
+
+add_test(
+    NAME T_BPFFS_ROOT_SYMLINK
+    COMMAND bash ${TEST_DIR}/T_BPFFS_ROOT_SYMLINK.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_BPFFS_ROOT_SYMLINK PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 60
     SKIP_RETURN_CODE 77
 )

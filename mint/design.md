@@ -1001,6 +1001,50 @@ attach(cfg):
   9. ensure_bpffs_dir (via *at()) + skel.attach() + skel.pin() + populate_allowlist
 ```
 
+**detach() symmetry** (post-publication clarification, 2026-05-23, Phase B
+peer dialog — original spec showed attach() only and was attach-centric;
+detach() is symmetric for the identity gate):
+
+```
+detach(iface):
+  1. resolve ifindex via if_nametoindex          [unchanged]
+  2. open + load skeleton (BpfSkeleton RAII)     [SAME early-load as attach]
+  3. self_tag = bpf_prog_get_info_by_fd(...).tag [SAME capture as attach]
+  4. open BpffsRootFd                            [SAME hardening as attach]
+  5. probe = probe_attached_xdp(ifindex, self_tag) [SAME identity gate]
+  6. branch on §5.4 state in detach context:
+       state (a) — nothing attached, no pin_dir → exit 0 no-op (per §5.21 D4)
+       state (b) — ours (name+tag match)       → bpf_xdp_detach + bpffs_remove_iface
+       state (c) — alien (name OR tag mismatch) → throw DetachFailed (exit 5)
+                   — tag-mismatch is a new rejection cause within state-(c);
+                     exit code is unchanged from §5.4 baseline
+       state (d) — orphan pin_dir, no prog       → bpffs_remove_iface, exit 0 (§5.21 D4)
+  7. skel destructor unwinds load on any exit path
+```
+
+Rationale for full symmetry: §5.19 baseline already extends the probe to
+detach() (`probe.is_ours` is consumed in both code paths). Once `is_ours`
+includes the tag-check predicate (per §5.22 Q1), detach() MUST have
+access to the same `self_tag` to compute the predicate consistently —
+otherwise the tag comparison either degenerates to "always reject" or
+"always accept", both incoherent. Early-load + self-tag capture is
+therefore not optional for detach; it is the only logically consistent
+extension of Q1 Option E to the detach code path.
+
+Closes a parallel attack vector: without tag-check on detach, an attacker
+who plants a `mac_filter_prog`-named alien (passing name-check) could
+trick `xdpmacfilter detach --iface X` into removing their evidence
+(state-(b) path executes `bpf_xdp_detach`, taking down the alien). With
+tag-check, the same scenario hits state-(c) (`DetachFailed` exit 5) and
+the alien remains attached for forensic inspection. Cost: one extra
+skeleton load per detach call (~ms verifier work) — same as attach.
+
+Detach skel-load failure mode table is identical to attach's
+(`Permission` on EPERM/EACCES; `LoadFailed` on anything else;
+`LoadFailed` on all-zeros tag). Exit-code surface is unchanged from
+§5.4 baseline (the new exit 8 PathRefused is bpffs-root specific and
+fires from BpffsRootFd ctor, not from the detach state machine).
+
 **Self-tag failure modes** (fail-closed per §5.19 pattern):
 
 - `bpf_prog_get_fd_by_id` returns -EPERM/-EACCES → translate to
@@ -1014,6 +1058,37 @@ attach(cfg):
   supported kernels) → throw `LoaderError::LoadFailed` with stderr
   `"kernel returned zero tag for our own program"`. Better to fail
   loud than silently disable the gate.
+
+**Tag stability across loaders** (post-publication observation,
+2026-05-23, tester's Phase B finding during §6.14 negation-control
+implementation): the kernel-computed `bpf_prog_info.tag` for the SAME
+`.bpf.o` source object differs between iproute2's
+`ip link set xdpgeneric obj` load and our loader's libbpf-skeleton
+load. Hypothesis: kernel's `bpf_prog_calc_tag()` normalizes out
+map-fd-bearing `LD_MAP_FD` instructions (stable across loaders) but
+libbpf-side preprocessing (CO-RE relocations, subprog inlining,
+license string handling) happens BEFORE `BPF_PROG_LOAD` and is NOT
+normalized — different libbpf versions or rewrite paths produce
+distinct post-preprocessing bytecode that the kernel hashes as
+distinct programs. Counter-confirmed by §6.6 T_IDEMPOTENT_RELOAD
+passing — tag IS stable when both loads route through the same libbpf
+in the same process.
+
+**Implication for the §5.22 threat model**: the tag-check gate is
+stricter than the brief implied. Closed vectors are still those listed
+above (attacker-recompile, single-instruction patch, our own
+idempotent re-invocation). The ADDITIONAL stricter behaviour is: if
+an operator manually loads our `mac_filter.bpf.o` outside of
+`xdpmacfilter` (e.g. `bpftool prog load`, `ip link set xdpgeneric
+obj`, custom userspace), our loader will refuse to recognize it as
+ours and exit 4 + `tag mismatch`. Operator must detach the manual load
+first (`ip link set <iface> xdp off`), then re-invoke our loader. This
+strictness is consistent with §5.22 Q1's stated intent ("byte-identical
+copy of our compiled program") — the qualifier turns out to mean
+"byte-identical post-libbpf-preprocessing-in-our-process". No design
+change required for the threat-model behaviour; documented for
+operational guidance (README/man page candidate, OOS for this pass)
+and as a new OOS fence in §7 MVP-2 Sec additions.
 
 #### Q2 decision — O_PATH coverage scope = **Standard**
 
@@ -1945,32 +2020,70 @@ they prove both gates of the §5.22 Q1 identity predicate.
     The refusal happens before `ensure_bpffs_dir`, OR RAII rollback
     unwinds cleanly.
 
-- **Outcome — negation control scenario** (triangulation: proves the
-  identity gate ACCEPTS our own program identity, not just rejects
-  arbitrary aliens):
+- **Outcome — negation control scenario** (reshaped Phase B 2026-05-23;
+  triangulation: proves the identity gate ACCEPTS our own program
+  identity via the full state-(b) path, not just rejects arbitrary
+  aliens):
 
-  In the same script (or a paired sibling script — tester's choice;
-  shared script is simpler), repeat the trigger sequence above but with
-  the REAL `mac_filter.bpf.o` (built from `src/bpf/mac_filter.bpf.c`)
-  as the pre-attached fixture instead of `mac_filter_alt.bpf.o`. The
-  pre-attached real prog has bytecode identical to what our loader is
-  about to load — therefore identical tag — therefore §5.4 state (b)
-  ("ours"), idempotent reload, exit 0.
+  **Why reshaped from the originally-specified "pre-attach REAL .bpf.o
+  via ip link" pattern**: tester's Phase B run surfaced two independent
+  problems that made the original spec unreachable in practice. (1)
+  §5.4 state (b) requires THREE conditions simultaneously — prog
+  attached in SKB mode, **pin_dir present**, identity verifies.
+  Pre-attaching via `ip link set xdpgeneric obj` does NOT create our
+  bpffs pin_dir (libbpf-managed pins are created by our loader's
+  `bpf_obj_pin` calls only). (2) Empirically the kernel-computed
+  `bpf_prog_info.tag` for the SAME `.bpf.o` differs between iproute2's
+  `ip link xdpgeneric` load and our loader's libbpf-skeleton load —
+  libbpf-side preprocessing (CO-RE relocations, subprog inlining)
+  happens BEFORE BPF_PROG_LOAD and is not normalized by the kernel's
+  `bpf_prog_calc_tag()`. Either problem alone kills the original spec.
+  The "loader-twice idempotent-reload" pattern below avoids both by
+  routing both loads through OUR libbpf in OUR process.
 
-  Assertions (control scenario):
-  - **rc == 0** — exit code matches successful idempotent reload.
-  - **stderr does NOT contain `tag mismatch`**: `! grep -q -F --
-    'tag mismatch' "${stderr_file}"`.
-  - **stderr does NOT contain `error:`**: `! grep -q -F -- 'error:'
-    "${stderr_file}"`.
-  - **`xdp_prog_id ${IFACE_A}` post-attach is NON-EMPTY** (our prog
-    is attached): `[[ -n "$(xdp_prog_id ${IFACE_A})" ]]`.
-  - **`${PIN_DIR}` exists and contains `allowlist` and `stats`**:
-    `[[ -e "${PIN_DIR}/allowlist" && -e "${PIN_DIR}/stats" ]]`.
+  Sequence (continued in the same script after primary scenario's
+  trap-cleanup has restored a clean iface):
 
-  This control proves the test isn't a no-op: the same loader, same
-  invocation, same pre-attached prog name, ONLY the tag differs, and
-  the rejection flips. Without this control, an impl bug that always
+  1. Verify cleanup left the iface clean: `[[ -z "$(xdp_prog_id
+     ${IFACE_A})" ]]` AND `[[ ! -e "${PIN_DIR}" ]]`. (If not clean,
+     primary-scenario cleanup is broken — fail loud with explicit error,
+     do NOT proceed; that's a separate bug not a negation-control
+     failure.)
+  2. **First loader invocation** (state (a) fresh attach):
+     `set +e; sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}"
+     --allow "${MAC_GOOD}" 2> "${stderr1_file}"; rc1=$?; set -e`.
+     Assert `[[ $rc1 -eq 0 ]]` AND `[[ -n "$(xdp_prog_id
+     ${IFACE_A})" ]]` AND `[[ -e "${PIN_DIR}/allowlist" ]]` AND
+     `[[ -e "${PIN_DIR}/stats" ]]`.
+  3. Capture the prog id our loader just attached:
+     `our_id_1=$(xdp_prog_id ${IFACE_A})`.
+  4. **Second loader invocation** — the load-bearing negation-control
+     assertion (state (b) idempotent reload):
+     `set +e; sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}"
+     --allow "${MAC_GOOD}" 2> "${stderr2_file}"; rc2=$?; set -e`.
+     Assert (ALL hold):
+     - `[[ $rc2 -eq 0 ]]` — state (b) idempotent reload succeeded;
+       identity gate accepted our previously-attached prog as ours
+       (name match AND tag match AND pin_dir present).
+     - `! grep -q -F -- 'tag mismatch' "${stderr2_file}"` — gate did
+       NOT trigger tag-mismatch refusal.
+     - `! grep -q -F -- 'error:' "${stderr2_file}"` — no error-prefixed
+       stderr lines.
+     - `our_id_2=$(xdp_prog_id ${IFACE_A})` is non-empty AND
+       `[[ "$our_id_2" != "$our_id_1" ]]` — state (b) detaches the old
+       and attaches a fresh skeleton load → new prog id; if the ids
+       were equal, the loader skipped the re-attach and we wouldn't
+       have exercised the gate (silent test-machinery failure detector).
+  5. **Detach** (symmetric proof per §5.22 Q1 detach() symmetry —
+     detach() identity gate also accepts our own program):
+     `set +e; sudo -n "${LOADER_BIN}" detach --iface "${IFACE_A}" 2>
+     "${stderr_d_file}"; rc_d=$?; set -e`.
+     Assert `[[ $rc_d -eq 0 ]]` AND `[[ -z "$(xdp_prog_id
+     ${IFACE_A})" ]]` AND `[[ ! -e "${PIN_DIR}" ]]`.
+
+  This loader-twice control proves the test isn't a no-op: identity
+  gate ACCEPTS our own program identity through both attach (state b)
+  AND detach paths. Without this control, an impl bug that always
   rejected SKB-mode alien (regardless of tag) would still pass the
   primary scenario.
 
@@ -2367,3 +2480,14 @@ might be tempted to add:
   `statfs(/sys/fs/bpf, ...) == BPF_FS_MAGIC` preflight is MVP-2+
   Robust-slice work; the current behaviour (fail with kernel errno
   surfaced via stderr) is the floor.
+- **No support for cross-loader idempotency** — operator-managed
+  external loads of our `.bpf.o` (via `ip link set xdpgeneric obj`,
+  `bpftool prog load`, custom userspace, etc.) are NOT recognized by
+  our loader as state-(b) "ours" because the resulting
+  `bpf_prog_info.tag` differs from our loader's own libbpf-skeleton
+  load (see §5.22 Q1 "Tag stability across loaders" sub-section).
+  Operators must use `xdpmacfilter attach` exclusively for our program,
+  or manually detach external loads (`ip link set <iface> xdp off`)
+  before invoking our loader. A future MVP-3+ pass could expose an
+  `--accept-tag <hex>` registry CLI flag for advanced multi-loader
+  scenarios; OOS for MVP-2 Sec.

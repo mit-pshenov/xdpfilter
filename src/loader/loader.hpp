@@ -37,6 +37,7 @@ enum class LoaderError : int {
     AttachRefusedAlien = 4,
     DetachFailed       = 5,
     Permission         = 6,
+    PathRefused        = 8,
 };
 
 /* Singleton category whose error_code values are LoaderError integers.
