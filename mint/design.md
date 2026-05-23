@@ -2940,7 +2940,7 @@ on the running kernel happens to accept the bad fixture.
   - Stderr non-empty: `[[ -s "${stderr_file}" ]] || fail`.
   - Stderr substring: `grep -q -E -- 'BPF program load failed|BPF object load failed|PROG LOAD LOG|verifier|Invalid argument' "${stderr_file}" || fail`.
 - **Cleanup**: `sudo -n ip link set "${IFACE_A}" xdpgeneric off 2>/dev/null || true`; `sudo -n rm -rf "/sys/fs/bpf/xdpmacfilter/${IFACE_A}" 2>/dev/null || true`; `sudo -n rm -f /sys/fs/bpf/xdpmf_verifier_probe 2>/dev/null || true`; `cleanup_veth`; `rm -f "${stderr_file}"`.
-- **Ctest properties**: `TIMEOUT 30`, `RESOURCE_LOCK xdp_fixture`, `SKIP_RETURN_CODE 77`.
+- **Ctest properties**: `TIMEOUT 60`, `RESOURCE_LOCK xdp_fixture`, `SKIP_RETURN_CODE 77`. (Post-publication amendment 2026-05-23 EDIT-12: original spec wording was `TIMEOUT 30`; tester's Phase B empirical run showed actual wall ~24s with the libbpf-stderr head/tail trim optimization — 60s kept as safe margin matching other veth-fixture tests' floor, since libbpf-stderr volume can spike under load. CMake inline comment in `tests/CMakeLists.txt` also updated to reflect the 60s value.)
 - **Flakiness consideration**: SKIP branch absorbs the only known flake source (future kernel verifier accepting unbounded loop). If that happens, tester swaps `mac_filter_bad.bpf.c` to OOB-deref backup pattern (verifier-universal for 5.15+).
 - **Negation control NOT required** — §6.7 covers suite-level.
 - **Sanity coupling**: this test depends on §5.24 probe NOT firing (modern kernel). If probe false-positive rejects modern kernel, this test exits 7 instead of 2 — §5.24 Q1 impl bug surfacing, not §6.20 design flaw.

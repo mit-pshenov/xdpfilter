@@ -266,8 +266,9 @@ set_tests_properties(T_MODE_DETACH_REJECTS PROPERTIES
 #
 # Takes RESOURCE_LOCK xdp_fixture because the test uses ${IFACE_A} (the
 # active branch attempts an attach that will fail at load time, but the
-# veth is touched). TIMEOUT 30: bpftool probe + loader invocation + a
-# few cleanup sudo calls; no traffic injection.
+# veth is touched). TIMEOUT 60: bpftool probe + loader invocation + a
+# few cleanup sudo calls; no traffic injection. Spec §6.20 originally
+# said 30; bumped to 60 per EDIT-12 (libbpf-stderr volume safety margin).
 add_test(
     NAME T_VERIFIER_REJECT
     COMMAND bash ${TEST_DIR}/T_VERIFIER_REJECT.sh
