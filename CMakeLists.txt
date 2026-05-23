@@ -10,8 +10,19 @@ endif()
 
 project(xdpmacfilter
     LANGUAGES C CXX
-    VERSION   0.1.0
+    VERSION   0.2.3
     DESCRIPTION "MVP-1 L2 MAC allow-list XDP filter"
+)
+
+# §5.25 P3: version-string sync — generate include/version.h from the
+# project(VERSION ...) tuple above so the loader's --version output and
+# the CMake project version are guaranteed to agree. The template lives
+# in include/version.h.in (committed); the rendered version.h lives in
+# ${CMAKE_BINARY_DIR}/include/ (NOT committed).
+configure_file(
+    ${CMAKE_SOURCE_DIR}/include/version.h.in
+    ${CMAKE_BINARY_DIR}/include/version.h
+    @ONLY
 )
 
 set(CMAKE_C_STANDARD            17)
@@ -47,6 +58,28 @@ add_link_options(-stdlib=libc++)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBBPF REQUIRED IMPORTED_TARGET libbpf>=1.1)
 
+# §5.25 P2: extract XDPMF_BPFFS_ROOT from src/common/mac_filter.h so the
+# test fixture (tests/lib/common.sh) inherits the SAME pin root the loader
+# compiles in — no silent drift if the macro value is ever changed. The
+# extracted value MUST be exactly "/sys/fs/bpf/xdpmacfilter" today; future
+# renames here flow automatically into tests/pins.sh.
+execute_process(
+    COMMAND sed -nE "s@^[ \\t]*#define[ \\t]+XDPMF_BPFFS_ROOT[ \\t]+\"([^\"]+)\".*@\\1@p"
+            ${CMAKE_SOURCE_DIR}/src/common/mac_filter.h
+    OUTPUT_VARIABLE XDPMF_BPFFS_ROOT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+if(NOT XDPMF_BPFFS_ROOT)
+    message(FATAL_ERROR
+        "§5.25 P2: failed to extract XDPMF_BPFFS_ROOT from "
+        "src/common/mac_filter.h — macro renamed or removed?")
+endif()
+configure_file(
+    ${CMAKE_SOURCE_DIR}/tests/lib/pins.sh.in
+    ${CMAKE_BINARY_DIR}/tests/pins.sh
+    @ONLY
+)
+
 # XDPMF_SANITIZERS (design §5.18): test-only ASAN+UBSAN build mode for the
 # C++ loader. Default OFF — when OFF, the build is byte-identical to the
 # pre-amendment build (no flag injection, no extra link deps). When ON, the
@@ -67,6 +100,7 @@ add_executable(xdpmacfilter
 )
 target_include_directories(xdpmacfilter PRIVATE
     ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_BINARY_DIR}/include
 )
 # bpftool-generated skel.h uses C-style casts and other C-isms that fail
 # our zero-warning C++23 build. Treat the build dir as a SYSTEM include so

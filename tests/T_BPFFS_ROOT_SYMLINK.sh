@@ -45,7 +45,7 @@ cleanup_symlink() {
     set +e
     # 1) Detach if any negation-control attach succeeded but script died
     #    before reaching its detach.
-    sudo -n "${LOADER_BIN}" detach --iface "${IFACE_A}" 2>/dev/null
+    ${NSEXEC} "${LOADER_BIN}" detach --iface "${IFACE_A}" 2>/dev/null
 
     # 2) Remove per-iface symlink (may or may not exist; -f swallows ENOENT).
     sudo -n rm -f "${BPFFS_ROOT}/${IFACE_A}" 2>/dev/null
@@ -141,7 +141,7 @@ echo "   readlink -> $(sudo -n readlink "${BPFFS_ROOT}")"
 : > "${stderr_file}"
 echo "=== invoke our loader (expect exit 8 — PathRefused)"
 set +e
-sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" 2> "${stderr_file}"
+${NSEXEC} "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" 2> "${stderr_file}"
 rc=$?
 set -e
 echo "loader rc=${rc}"
@@ -214,7 +214,7 @@ echo "   readlink -> $(sudo -n readlink "${BPFFS_ROOT}/${IFACE_A}")"
 : > "${stderr_file}"
 echo "=== invoke our loader (expect exit 8 — PathRefused, per-iface)"
 set +e
-sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" 2> "${stderr_file}"
+${NSEXEC} "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" 2> "${stderr_file}"
 rc_sub=$?
 set -e
 echo "loader rc=${rc_sub}"
@@ -282,7 +282,7 @@ fi
 : > "${stderr_file}"
 echo "=== invoke our loader (expect exit 0 — attach succeeds)"
 set +e
-sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" 2> "${stderr_file}"
+${NSEXEC} "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" 2> "${stderr_file}"
 rc_neg_attach=$?
 set -e
 echo "loader attach rc=${rc_neg_attach}"
@@ -312,7 +312,7 @@ fi
 : > "${stderr_file}"
 echo "=== invoke our loader (detach, expect exit 0)"
 set +e
-sudo -n "${LOADER_BIN}" detach --iface "${IFACE_A}" 2> "${stderr_file}"
+${NSEXEC} "${LOADER_BIN}" detach --iface "${IFACE_A}" 2> "${stderr_file}"
 rc_neg_detach=$?
 set -e
 echo "loader detach rc=${rc_neg_detach}"

@@ -3315,22 +3315,58 @@ PID-suffix closed the name-collision risk but NOT the sysctl-isolation
 gap. N3 closes it cleanly.
 
 **Helper-wrap topology** (centralized in `tests/lib/common.sh`):
-- `NETNS="xdpmf_ns_$$"`, `NSEXEC="sudo -n ip netns exec ${NETNS}"`
+- `NETNS="xdpmf_ns_$$"`, `NSEXEC="sudo -n nsenter --net=/var/run/netns/${NETNS}"` (per EDIT-15 — uses `nsenter --net=<path>`, NOT `ip netns exec`, to enter the netns WITHOUT unsharing the mount namespace; see "Mount-ns preservation" rationale at end of §5.25 Q1. `ip netns add` creates the `/var/run/netns/<name>` bind-mount that `nsenter` follows. `nsenter` is util-linux, universally present on Linux ≥ 2.6.x — no new dep vs iproute2's `ip netns exec`.)
 - `setup_veth`: defensive netns-del + pin-dir rm → `ip netns add` → collision preflight (now scoped inside netns) → `${NSEXEC} ip link add veth pair` → sysctl/ifup steps all prefixed `${NSEXEC}` → final 0.5s quiesce
 - `cleanup_veth`: `ip netns del` (atomic veth+XDP teardown) + `rm -rf "${PIN_DIR}"` (bpffs host-global, explicit removal preserved)
 - Helpers re-pointed: `inject_eth`/`inject_runt` (`python3` → `${NSEXEC} python3`); `xdp_prog_id` (`ip -j link show` → `${NSEXEC} ip -j link show`); `read_stats`/`wait_for_stats_sum`/`prog_count` UNCHANGED (bpffs host-global, pin paths are same regardless of netns)
 - Test-body sweep: every `sudo -n "${LOADER_BIN}"` callsite that follows `setup_veth` → `${NSEXEC} "${LOADER_BIN}"` (NSEXEC includes `sudo -n`)
+- **Env-var-carrying loader invocations** (EDIT-14, 2026-05-23): tests that pass env vars to the loader (e.g. `XDPMF_BPF_OBJECT_PATH` per §5.24 Q4 testing override) MUST use the explicit `env`-after-NSEXEC form: `${NSEXEC} env XDPMF_BPF_OBJECT_PATH="${BAD_OBJ}" "${LOADER_BIN}" attach --iface "${IFACE_A}" ...`. **Rationale**: NSEXEC's outer `sudo -n` strips env (no `-E` — would conflict with `ip netns exec` child-launch semantic); `ip netns exec` passes env through cleanly to its child; explicit `env` AFTER the netns boundary sets the var directly in the loader child process. The pre-§5.25 idiom `VAR=... sudo -n -E "${LOADER_BIN}" ...` does NOT translate. Currently only T_VERIFIER_REJECT (§6.20) uses this idiom; future env-carrying tests follow the same pattern. Discovered by mint-tester during Phase B prep.
 
-**Opt-out tests** (do NOT call setup_veth):
-- **T_BPFFS_ROOT_SYMLINK (§6.15)** — bpffs root manipulation, host-global by definition
-- **T_MODE_NATIVE_UNSUPPORTED (§6.17)** — uses `lo` (exists in every netns); host-namespace simpler
-- **CLI-parser-only tests (§6.10-§6.12, §6.19)** — no veth, no setup_veth
-- **T_DETACH_NOTHING (§6.13)** — uses `lo`, no setup_veth, stays host-namespace
-- **T_BUILD (§6.1) / T_SANITIZER_BUILD (§6.8)** — pure build-pipeline
+**Mechanical opt-out rule**: a test enters the netns iff it calls
+`setup_veth`. There is no other axis. Tester verifies via
+`grep -l 'setup_veth' tests/T_*.sh` — every file in that list gets
+the NSEXEC sweep at its `sudo -n "${LOADER_BIN}"` callsites; every
+file NOT in that list stays in host namespace and keeps `sudo -n`
+loader invocations.
+
+**Tests that ENTER the netns (call setup_veth → NSEXEC-sweep required)** — empirical roster grep-verified 2026-05-23 (EDIT-13):
+
+- T_LOAD_ATTACH (§6.2), T_PASS_ALLOWED (§6.3), T_DROP_DENY (§6.4), T_DROP_MALFORMED (§6.5), T_IDEMPOTENT_RELOAD (§6.6), T_NEGATION_CONTROL (§6.7) — the MVP-1 veth-fixture set.
+- T_ATTACH_ALIEN_REFUSAL (§6.9) — MVP-1.1B; calls setup_veth.
+- T_SANITIZER_BUILD (§6.8) — MVP-1.1A; calls setup_veth at line 78 (end-to-end attach/inject/stats/detach via sanitized binary).
+- T_ATTACH_TAG_MISMATCH (§6.14) — MVP-2 Sec; calls setup_veth.
+- T_BPFFS_ROOT_SYMLINK (§6.15) — MVP-2 Sec; calls setup_veth at line 124 (loader needs `${IFACE_A}` for `--iface` resolution). Destructive bpffs manipulations on `/sys/fs/bpf/xdpmacfilter/` remain host-global (bpffs is not netns-isolated in 5.15+), but the test's loader invocations + iface resolution still benefit from the netns wrap (sysctl isolation, clean iface namespace).
+- T_MODE_GENERIC_DEFAULT (§6.16), T_PERCPU_STATS_SUM (§6.18) — MVP-2 Perf; both call setup_veth.
+- T_VERIFIER_REJECT (§6.20) — MVP-2 Robust; calls setup_veth.
+
+Total: 13 tests in the NSEXEC-sweep set.
+
+**Tests that STAY host-namespace (do NOT call setup_veth)** — empirical roster grep-verified 2026-05-23 (EDIT-13):
+
+- T_BUILD (§6.1) — pure build cleanliness; no veth, no loader-vs-iface.
+- T_CLI_HELP_VERSION (§6.10), T_CLI_CAPACITY (§6.11), T_CLI_BAD_MAC (§6.12), T_MODE_DETACH_REJECTS (§6.19) — pure CLI-parser tests; loader exits before any kernel call.
+- T_DETACH_NOTHING (§6.13) — uses `lo` directly (every netns has its own `lo`; wrapping would break the test's intent). Stays host-namespace; loader invocation remains `sudo -n "${LOADER_BIN}"`. `RESOURCE_LOCK xdp_fixture` continues to serialize against destructive bpffs tests.
+- T_MODE_NATIVE_UNSUPPORTED (§6.17) — uses `lo`; native-XDP-on-lo is universally unsupported in both host-ns and netns; the host-vs-netns axis is not what this test exercises.
+
+Total: 7 tests in the opt-out set. (13 + 7 = 20, matches the regression invariant.)
+
+**Brief framing correction (EDIT-13, 2026-05-23)**: the task brief described T_BPFFS_ROOT_SYMLINK + T_MODE_NATIVE_UNSUPPORTED as "the two tests that don't use the standard veth fixture". This is descriptively incorrect — T_BPFFS_ROOT_SYMLINK DOES call setup_veth at line 124 (needs `${IFACE_A}` for `--iface` resolution); T_SANITIZER_BUILD ALSO calls setup_veth at line 78 (end-to-end scenario under sanitizer). The brief's framing was a guess; the grep-verified roster above is authoritative. Bpffs is not netns-isolated, so the bpffs-symlink manipulations work identically inside or outside a netns — the netns just gives clean iface + sysctl scope. Discovered by mint-tester during Phase B prep.
 
 **Regression invariant**: 20/20 ctest pass (or legitimately SKIP-77) post-refactor. Any test failing due specifically to netns wrap (loader can't find iface, inject socket bound wrong ns, etc.) is a wrap bug not a test bug.
 
-**Pin-path host-globalness invariant**: loader inside netns still pins to `/sys/fs/bpf/xdpmacfilter/${IFACE_A}/{allowlist,stats}` because `/sys/fs/bpf` is host-global mount (not netns-isolated in 5.15+; would require `unshare(CLONE_NEWNS)` + private mount, exceeds Polish-2 scope). PID-suffix in `IFACE_A` is the cross-PID pin-path uniqueness guarantee.
+**Mount-ns preservation** (EDIT-15, 2026-05-23, post-Phase-B finding by mint-tester): the kernel's bpffs is global (not netns-isolated); programs/maps pinned under `/sys/fs/bpf/xdpmacfilter/<iface>/` are visible from any netns **IF** the host's `/sys/fs/bpf` bpffs mount is visible in the caller's mount namespace. Crucially, `ip netns exec` is NOT just a network-ns enter — iproute2's implementation (`lib/namespace.c → netns_switch()`) ALSO unshares the mount namespace and remounts `/sys` as a fresh per-netns sysfs (so `/sys/class/net/<iface>` reflects netns-local state — iproute2's internal design intent). The remount detaches the host's `/sys/fs/bpf` bpffs mount — inside the child, `/sys/fs/bpf` appears empty, the loader's `mkdirat(root.fd(), iface, 0755)` fails with `ENOENT`, attach aborts with `LoadFailed` (exit 2). The original §5.25 spec used `ip netns exec` for NSEXEC and consequently violated the host-global-bpffs assumption; mint-tester's empirical Phase B run flagged 11/20 tests failing this way.
+
+**Resolution**: use `nsenter --net=/var/run/netns/<name>` instead of `ip netns exec <name>`. `nsenter --net=<path>` enters ONLY the network namespace, leaving the caller's mount namespace untouched. Host's `/sys/fs/bpf` remains visible to the child; loader operations succeed. All Q1 N3 invariants hold under nsenter: veth in netns (network-ns op), sysctl writes hit `/proc/sys/net/*` netns-local copy (nsenter --net rebinds per-netns `/proc/sys/net` analogously per util-linux `nsenter(1)` + kernel semantics), AF_PACKET binds to netns-local ifaces, `if_nametoindex` resolves netns-local.
+
+**Diagnostic recipe** (run as root to verify the distinction):
+```
+$ sudo ip netns add diag_ns
+$ sudo ip netns exec diag_ns ls /sys/fs/bpf       # ← empty (mount-ns unshared)
+$ sudo nsenter --net=/var/run/netns/diag_ns ls /sys/fs/bpf   # ← host bpffs visible
+$ sudo ip netns del diag_ns
+```
+
+**Pin-path host-globalness invariant (revised, EDIT-15)**: loader inside the netns creates pins at `/sys/fs/bpf/xdpmacfilter/${IFACE_A}/{allowlist,stats}`, AND those pins are visible to host-namespace processes (read_stats.py, cleanup_veth's `rm -rf "${PIN_DIR}"`) because the host's bpffs mount remains in the caller's mount namespace under `nsenter --net`. PID-suffix in `IFACE_A` is the cross-PID pin-path uniqueness guarantee; per-iface pin dir cleaned by `sudo -n rm -rf "${PIN_DIR}"` in cleanup_veth (executed from host namespace — bpffs path is the same address either way). MVP-3+ alternative would be `unshare(CLONE_NEWNS)` + private per-test bpffs mount — exceeds Polish-2 scope.
 
 #### Q2 decision — CMake-gen `PIN_ROOT` mechanism = **Option C1 (sed extraction in CMake)**
 

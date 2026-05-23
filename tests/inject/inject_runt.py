@@ -34,7 +34,7 @@ def main() -> int:
     sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL))
     try:
         sock.bind((iface, 0))
-        # 13 bytes: complete 6-byte dst MAC + partial src MAC.
+        # 13 bytes: full 6-byte dst MAC + full 6-byte src MAC + 1 ethertype byte.
         # Designed so that even if the kernel zero-pads to 14 bytes, the
         # resulting src MAC is 02:00:00:00:00:00 (neither MAC_GOOD nor
         # MAC_BAD), so a STAT_DROP_DENY caused by padding is unambiguous.

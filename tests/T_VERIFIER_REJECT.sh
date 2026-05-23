@@ -70,7 +70,7 @@ cleanup_verifier_reject() {
     # SKIP-probe scratch pin (may not exist; -f swallows ENOENT).
     sudo -n rm -f "${PROBE_PIN}" 2>/dev/null
     # Defensive: if active branch somehow attached, force xdpgeneric off.
-    sudo -n ip link set "${IFACE_A}" xdpgeneric off 2>/dev/null
+    ${NSEXEC} ip link set "${IFACE_A}" xdpgeneric off 2>/dev/null
     # Defensive: remove any orphan pin dir for ${IFACE_A}.
     sudo -n rm -rf "${PIN_DIR}" 2>/dev/null
     cleanup_veth
@@ -126,9 +126,14 @@ sudo -n rm -f "${PROBE_PIN}" 2>/dev/null || true
 # zero XDP / pin-dir side-effects.
 # ─────────────────────────────────────────────────────────────────────────
 echo "=== ACTIVE: XDPMF_BPF_OBJECT_PATH=${BAD_OBJ} loader attach --iface ${IFACE_A}"
+# §5.25 P1: NSEXEC is `sudo -n ip netns exec ${NETNS}`. sudo strips env by
+# default; previously the `-E` flag preserved XDPMF_BPF_OBJECT_PATH across
+# the sudo boundary. Under the netns wrap we use `env ... <cmd>` AFTER
+# `ip netns exec ${NETNS}` so the env var is explicitly set in the child
+# process before execve(loader), bypassing sudo's env strip entirely.
 set +e
-XDPMF_BPF_OBJECT_PATH="${BAD_OBJ}" \
-    sudo -n -E "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" \
+${NSEXEC} env XDPMF_BPF_OBJECT_PATH="${BAD_OBJ}" \
+    "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" \
     2> "${stderr_file}"
 rc=$?
 set -e

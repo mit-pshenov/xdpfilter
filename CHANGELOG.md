@@ -5,6 +5,23 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-05-23
+
+MVP-2 Polish-2 — netns isolation + CMake-gen `PIN_ROOT` + version-string sync + `inject_runt:37` comment fix (fourth and final MVP-2 pass).
+
+### Added
+- Per-PID netns isolation for veth-fixture tests (design §5.25 P1, Q1 = N3). `tests/lib/common.sh setup_veth` creates `xdpmf_ns_$$`, builds the veth pair inside it, and runs loader/injectors through `${NSEXEC}` (= `sudo -n ip netns exec ${NETNS}`). Closes the sysctl-pollution gap left by PID-suffix-only iface naming.
+- Configure-time `XDPMF_BPFFS_ROOT` extraction in `CMakeLists.txt` (design §5.25 P2, Q2 = C1) → generated `${CMAKE_BINARY_DIR}/tests/pins.sh` (template: `tests/lib/pins.sh.in`). `tests/lib/common.sh` sources it (with `:?` integrity guards) instead of mirroring the literal — silent drift between header and test fixture is now impossible.
+- Configure-time `version.h` generation from `project(VERSION ...)` (design §5.25 P3, Q3 = V1) → `${CMAKE_BINARY_DIR}/include/version.h` (template: `include/version.h.in`). `src/loader/cli.cpp` consumes the generated `XDPMF_VERSION_STRING` macro; the hardcoded `kVersion` constant is removed.
+
+### Changed
+- CMake `project(VERSION ...)` bumped from `0.1.0` → `0.2.3` (semver patch — Polish-2 is maintenance; no new features, no breaking changes).
+- `xdpmacfilter --version` output now reflects `project(VERSION)` (was hardcoded `0.1.0`; is now `0.2.3` and tracks the CMake version automatically going forward).
+- `tests/lib/common.sh` `PIN_ROOT` is sourced from generated `pins.sh` (was hardcoded mirror of the header macro).
+
+### Fixed
+- `tests/inject/inject_runt.py:37` inline comment (design §5.25 P4): now matches the lines 18-19 docstring corrected in MVP-1.1C B1 — 13 bytes = full 6-byte dst MAC + full 6-byte src MAC + 1 ethertype byte. Byte literals at lines 41-43 untouched (explicit OOS).
+
 ## [0.2.2] — 2026-05-23
 
 MVP-2 Robust — kernel-version probe + `T_VERIFIER_REJECT` (third MVP-2 pass).

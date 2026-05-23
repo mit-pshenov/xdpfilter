@@ -57,7 +57,7 @@ echo "loader=${LOADER_BIN}"
 cleanup_test() {
     set +e
     # Detach via loader (best-effort — may fail if we corrupted state).
-    sudo -n "${LOADER_BIN}" detach --iface "${IFACE_A}" >/dev/null 2>&1
+    ${NSEXEC} "${LOADER_BIN}" detach --iface "${IFACE_A}" >/dev/null 2>&1
     # Aggressive bpffs cleanup — strip any per-iface dir AND any
     # accidentally-rooted map pins (defensive vs Phase B "stale-pin
     # tripping T_ATTACH_TAG_MISMATCH" report).
@@ -72,7 +72,7 @@ trap cleanup_test EXIT
 setup_veth
 
 echo "=== attach (default mode = generic) on ${IFACE_A}"
-sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
+${NSEXEC} "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
 sleep 0.3
 
 # Sanity floor: the stats pin must exist (else attach silently failed).

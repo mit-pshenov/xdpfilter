@@ -42,7 +42,7 @@ cleanup_alien() {
     # Detach the foreign XDP before veth deletion (defensive; cleanup_veth
     # also kills the iface, which implicitly detaches XDP, but be explicit
     # so a future cleanup_veth refactor can't silently change behaviour).
-    sudo -n ip link set "${IFACE_A}" xdpgeneric off 2>/dev/null
+    ${NSEXEC} ip link set "${IFACE_A}" xdpgeneric off 2>/dev/null
     cleanup_veth
     rm -f "${stderr_file}"
     set -e
@@ -60,7 +60,7 @@ trap cleanup_alien EXIT
 setup_veth
 
 echo "=== pre-attach foreign XDP (xdp_pass_prog) on ${IFACE_A} via xdpgeneric"
-sudo -n ip link set "${IFACE_A}" xdpgeneric obj "${FOREIGN_OBJ}" sec xdp
+${NSEXEC} ip link set "${IFACE_A}" xdpgeneric obj "${FOREIGN_OBJ}" sec xdp
 # Let the attach settle (verifier+JIT, netlink ack).
 sleep 0.2
 
@@ -68,14 +68,14 @@ foreign_id=$(xdp_prog_id "${IFACE_A}")
 if [[ -z "${foreign_id}" || "${foreign_id}" == "0" ]]; then
     echo "FAIL: foreign-attach step left no XDP prog id on ${IFACE_A}" >&2
     echo "      (the fixture failed before our loader was invoked — not our bug)" >&2
-    ip -j link show "${IFACE_A}" >&2
+    ${NSEXEC} ip -j link show "${IFACE_A}" >&2
     exit 1
 fi
 echo "foreign prog id = ${foreign_id}"
 
 echo "=== invoke our loader (expect exit 4 — AttachRefusedAlien)"
 set +e
-sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" 2> "${stderr_file}"
+${NSEXEC} "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" 2> "${stderr_file}"
 rc=$?
 set -e
 echo "loader rc=${rc}"

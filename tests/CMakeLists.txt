@@ -7,10 +7,15 @@
 # double-init.
 
 set(TEST_DIR  ${CMAKE_CURRENT_SOURCE_DIR})
+# §5.25 P2: PINS_SH is the path to the CMake-generated tests/pins.sh
+# (configure_file output from tests/lib/pins.sh.in). common.sh sources
+# it to pick up PIN_ROOT (extracted from src/common/mac_filter.h's
+# XDPMF_BPFFS_ROOT). Runtime `:?` guard in common.sh exits if unset.
 set(TEST_ENV
     "BUILD_DIR=${CMAKE_BINARY_DIR}"
     "SOURCE_DIR=${CMAKE_SOURCE_DIR}"
     "TEST_DIR=${TEST_DIR}"
+    "PINS_SH=${CMAKE_BINARY_DIR}/tests/pins.sh"
 )
 
 # Foreign-XDP fixture for T_ATTACH_ALIEN_REFUSAL (design §6.9, MVP-1.1B).

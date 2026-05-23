@@ -22,15 +22,15 @@ trap cleanup_veth EXIT
 setup_veth
 
 echo "=== attach #1"
-sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
+${NSEXEC} "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
 sleep 0.2
 
 echo "=== attach #2 (must replace ours, not refuse)"
-sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
+${NSEXEC} "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
 sleep 0.2
 
 echo "=== detach"
-sudo -n "${LOADER_BIN}" detach --iface "${IFACE_A}"
+${NSEXEC} "${LOADER_BIN}" detach --iface "${IFACE_A}"
 sleep 0.2
 
 fail=0

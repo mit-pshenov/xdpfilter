@@ -18,7 +18,7 @@ echo "loader=${LOADER_BIN}"
 trap cleanup_veth EXIT
 setup_veth
 
-sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
+${NSEXEC} "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
 
 # Allow the attach to settle (verifier+JIT, link netlink ack).
 sleep 0.3
@@ -34,7 +34,7 @@ sudo -n test -e "${PIN_DIR}/stats" \
 prog_id=$(xdp_prog_id "${IFACE_A}")
 [[ -n "${prog_id}" ]] \
     || { echo "FAIL: no XDP prog id reported by ip -j on ${IFACE_A}" >&2
-         ip -j link show "${IFACE_A}" >&2
+         ${NSEXEC} ip -j link show "${IFACE_A}" >&2
          exit 1; }
 
 echo "PASS: T_LOAD_ATTACH (prog_id=${prog_id})"

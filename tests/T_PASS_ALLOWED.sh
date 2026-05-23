@@ -13,7 +13,7 @@ LOADER_BIN=$(find_loader)
 trap cleanup_veth EXIT
 setup_veth
 
-sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
+${NSEXEC} "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
 sleep 0.3
 
 # Inject exactly one well-formed frame with the allowed src MAC.

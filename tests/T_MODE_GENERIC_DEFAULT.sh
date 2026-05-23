@@ -28,7 +28,7 @@ echo "loader=${LOADER_BIN}"
 
 cleanup_test() {
     set +e
-    sudo -n "${LOADER_BIN}" detach --iface "${IFACE_A}" >/dev/null 2>&1
+    ${NSEXEC} "${LOADER_BIN}" detach --iface "${IFACE_A}" >/dev/null 2>&1
     cleanup_veth
     set -e
 }
@@ -37,7 +37,7 @@ trap cleanup_test EXIT
 setup_veth
 
 echo "=== attach without --mode (expect default = generic/SKB)"
-sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
+${NSEXEC} "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
 
 # Let the attach settle (verifier+JIT, netlink ack).
 sleep 0.3
@@ -60,7 +60,7 @@ fail=0
 # value the string form names), since iproute2's JSON output diverges
 # from its text output.  All three forms denote XDP_ATTACHED_SKB, which
 # is what §5.23 Q1 + §5.6 default = Generic must produce.
-mode=$(ip -j link show "${IFACE_A}" 2>/dev/null \
+mode=$(${NSEXEC} ip -j link show "${IFACE_A}" 2>/dev/null \
     | jq -r '.[0].xdp.attached[]?.mode // .[0].xdp.mode // empty' \
     | head -n1)
 echo "probed mode='${mode}'"
@@ -70,23 +70,23 @@ case "${mode}" in
         ;;
     "")
         echo "FAIL: ip -j link show ${IFACE_A} reported no XDP mode" >&2
-        ip -j link show "${IFACE_A}" >&2 || true
+        ${NSEXEC} ip -j link show "${IFACE_A}" >&2 || true
         fail=1
         ;;
     1|native|xdpdrv)
         echo "FAIL: mode='${mode}' is NATIVE/DRV — regression: default should be SKB/generic" >&2
-        ip -j link show "${IFACE_A}" >&2 || true
+        ${NSEXEC} ip -j link show "${IFACE_A}" >&2 || true
         fail=1
         ;;
     3|offload|xdpoffload)
         echo "FAIL: mode='${mode}' is HW/offload — regression: default should be SKB/generic" >&2
-        ip -j link show "${IFACE_A}" >&2 || true
+        ${NSEXEC} ip -j link show "${IFACE_A}" >&2 || true
         fail=1
         ;;
     *)
         echo "FAIL: expected generic|xdpgeneric|2, got '${mode}'" >&2
         echo "      regression: default mode is no longer SKB-class" >&2
-        ip -j link show "${IFACE_A}" >&2 || true
+        ${NSEXEC} ip -j link show "${IFACE_A}" >&2 || true
         fail=1
         ;;
 esac

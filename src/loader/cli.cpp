@@ -4,6 +4,7 @@
  * be readable, and we want zero non-standard dependencies. C++23.
  */
 #include "cli.hpp"
+#include "version.h"
 
 #include <algorithm>
 #include <array>
@@ -18,7 +19,6 @@ namespace xdpmf {
 namespace {
 
 constexpr std::string_view kProgName = "xdpmacfilter";
-constexpr std::string_view kVersion  = "0.1.0";
 
 /* Hex nibble → 0..15 or -1 on invalid. */
 [[nodiscard]] constexpr int hex_nibble(char c) noexcept
@@ -100,7 +100,7 @@ std::string usage_text()
 
 std::string version_text()
 {
-    return std::format("{} {}\n", kProgName, kVersion);
+    return std::format("{} {}\n", kProgName, XDPMF_VERSION_STRING);
 }
 
 namespace {

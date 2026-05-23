@@ -56,10 +56,14 @@ REAL_PIN_TAG="/sys/fs/bpf/xdpmf_real_tagprobe_$$"
 cleanup_tagmismatch() {
     set +e
     # Detach our prog if any negation-control left it attached.
-    sudo -n "${LOADER_BIN}" detach --iface "${IFACE_A}" 2>/dev/null
-    # Detach any foreign xdpgeneric still attached.
-    sudo -n ip link set "${IFACE_A}" xdpgeneric off 2>/dev/null
+    # §5.25 P1: loader runs inside ${NETNS}; cleanup_veth deletes the
+    # whole netns so the detach attempt is racing the teardown — but
+    # we still try it for tests that died mid-run before cleanup_veth.
+    ${NSEXEC} "${LOADER_BIN}" detach --iface "${IFACE_A}" 2>/dev/null
+    # Detach any foreign xdpgeneric still attached (iface in netns).
+    ${NSEXEC} ip link set "${IFACE_A}" xdpgeneric off 2>/dev/null
     # Remove preflight scratch pins (may not exist; -f swallows ENOENT).
+    # Bpffs is host-global; no NSEXEC needed.
     sudo -n rm -f "${ALT_PIN_TAG}" "${REAL_PIN_TAG}" 2>/dev/null
     cleanup_veth
     rm -f "${stderr_file}"
@@ -115,14 +119,14 @@ setup_veth
 fail=0
 
 echo "=== PRIMARY: pre-attach mac_filter_alt.bpf.o on ${IFACE_A} via xdpgeneric"
-sudo -n ip link set "${IFACE_A}" xdpgeneric obj "${ALT_OBJ}" sec xdp
+${NSEXEC} ip link set "${IFACE_A}" xdpgeneric obj "${ALT_OBJ}" sec xdp
 sleep 0.2
 
 foreign_id=$(xdp_prog_id "${IFACE_A}")
 if [[ -z "${foreign_id}" || "${foreign_id}" == "0" ]]; then
     echo "FAIL: foreign-attach step left no XDP prog id on ${IFACE_A}" >&2
     echo "      (the fixture failed before our loader was invoked — not our bug)" >&2
-    ip -j link show "${IFACE_A}" >&2
+    ${NSEXEC} ip -j link show "${IFACE_A}" >&2
     exit 1
 fi
 foreign_tag_raw=$(sudo -n bpftool -j prog show id "${foreign_id}" | jq -r '.tag')
@@ -136,7 +140,7 @@ fi
 
 echo "=== invoke our loader (expect exit 4 — AttachRefusedAlien, tag mismatch)"
 set +e
-sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" 2> "${stderr_file}"
+${NSEXEC} "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" 2> "${stderr_file}"
 rc=$?
 set -e
 echo "loader rc=${rc}"
@@ -226,7 +230,7 @@ echo "=== NEGATION CONTROL (loader-twice idempotent-reload pattern)"
 # Step 1: verify primary-scenario cleanup left the iface clean. If not
 # clean, primary cleanup is broken — fail loud with explicit error, do
 # NOT proceed (that's a separate bug, not a negation-control failure).
-sudo -n ip link set "${IFACE_A}" xdpgeneric off 2>/dev/null || true
+${NSEXEC} ip link set "${IFACE_A}" xdpgeneric off 2>/dev/null || true
 sleep 0.2
 sudo -n rm -rf "${PIN_DIR}" 2>/dev/null || true
 
@@ -251,7 +255,7 @@ trap 'cleanup_tagmismatch; rm -f "${stderr1_file}" "${stderr2_file}" "${stderr_d
 
 echo "=== first loader attach (expect rc=0 — state (a) fresh attach)"
 set +e
-sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" 2> "${stderr1_file}"
+${NSEXEC} "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" 2> "${stderr1_file}"
 rc1=$?
 set -e
 echo "loader rc1=${rc1}"
@@ -285,7 +289,7 @@ echo "our_id_1 = ${our_id_1}"
 # present (from step 2), identity verifies (same name, same tag).
 echo "=== second loader attach (expect rc=0 — state (b) idempotent reload — LOAD-BEARING)"
 set +e
-sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" 2> "${stderr2_file}"
+${NSEXEC} "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" 2> "${stderr2_file}"
 rc2=$?
 set -e
 echo "loader rc2=${rc2}"
@@ -337,7 +341,7 @@ echo "our_id_2 = ${our_id_2}  (different from our_id_1 = ${our_id_1} as expected
 # this exercises the detach() identity gate's acceptance path.
 echo "=== loader detach (expect rc=0 — clean teardown, validates detach() identity gate)"
 set +e
-sudo -n "${LOADER_BIN}" detach --iface "${IFACE_A}" 2> "${stderr_d_file}"
+${NSEXEC} "${LOADER_BIN}" detach --iface "${IFACE_A}" 2> "${stderr_d_file}"
 rc_d=$?
 set -e
 echo "loader detach rc_d=${rc_d}"
