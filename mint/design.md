@@ -28,18 +28,24 @@ intentionally one vertical slice exercising the toolchain end-to-end.
 | `src/loader/raii.hpp` | RAII wrappers: `BpfSkeleton`, `XdpAttachment`, `BpffsDir` (see §5.17) | C++23 (header-only) | 120 |
 | `src/loader/cli.hpp` | CLI parse declarations (subcommand `attach`/`detach`, flags, MAC parsing) | C++23 | 40 |
 | `src/loader/cli.cpp` | CLI parser implementation: tokenization, MAC validation, usage text | C++23 | 130 |
-| `src/loader/loader.hpp` | Loader API: `attach()`, `detach()`, error enum (allow-list populated inline in `attach()` — see §5.17) | C++23 | 50 |
-| `src/loader/loader.cpp` | Open skeleton, pin maps under `/sys/fs/bpf/xdpmacfilter/<iface>/`, attach XDP (SKB mode), 4-state detect-and-(detach-ours / refuse-alien / recover-stale-pin) probe per §5.4 (revised MVP-1.1B: identity-verified ownership + all-modes XDP query — see §5.19, §5.20) | C++23 | 230 |
+| `src/loader/loader.hpp` | Loader API: `attach()`, `detach()`, error enum (allow-list populated inline in `attach()` — see §5.17). Post-§5.21 A1: also owns `AttachConfig`/`DetachConfig` structs (moved from `cli.hpp`). | C++23 | 50 |
+| `src/loader/loader.cpp` | Open skeleton, pin maps under `/sys/fs/bpf/xdpmacfilter/<iface>/`, attach XDP (SKB mode), 4-state detect-and-(detach-ours / refuse-alien / recover-stale-pin) probe per §5.4 (revised MVP-1.1B: identity-verified ownership + all-modes XDP query — see §5.19, §5.20; MVP-1.1C D4: detach state (a) returns exit 0 — see §5.21) | C++23 | 230 |
 | `src/loader/main.cpp` | `main()`: dispatch subcommand, map exceptions/errors to exit codes | C++23 | 60 |
 | `README.md` | Repo entry-point doc: what / prerequisites / build / run / test / where-docs-live (added MVP-1.1A) | Markdown | 50 |
-| `tests/CMakeLists.txt` | ctest registration (tester populates; MVP-1.1B adds T_ATTACH_ALIEN_REFUSAL entry + `add_bpf_object(xdp_pass …)` wiring per §6.9) | CMake | tester |
+| `CHANGELOG.md` | Repo-root version history per Keep-a-Changelog convention; seeded with `0.1.0`/`0.1.1`/`0.1.2`/`0.1.3` sections (added MVP-1.1C per §5.21 B4) | Markdown | 30 |
+| `tests/CMakeLists.txt` | ctest registration (tester populates; MVP-1.1B adds T_ATTACH_ALIEN_REFUSAL entry + `add_bpf_object(xdp_pass …)` wiring per §6.9; MVP-1.1C adds T_CLI_HELP_VERSION/T_CLI_CAPACITY/T_CLI_BAD_MAC/T_DETACH_NOTHING entries per §6.10–§6.13) | CMake | tester |
 | `tests/T_SANITIZER_BUILD.sh` | ASAN+UBSAN sanitizer-build smoke: fresh `/tmp` build with `-DXDPMF_SANITIZERS=ON` + one end-to-end attach/inject/stats/detach + stderr grep (per §6.8, added MVP-1.1A) | bash | 60 |
-| `tests/T_ATTACH_ALIEN_REFUSAL.sh` | Alien-XDP refusal end-to-end: pre-attach `xdp_pass.bpf.o` to `veth_a`, run our `attach`, assert exit 4 + foreign prog still attached + stderr names foreign id (per §6.9, added MVP-1.1B) | bash | 80 |
+| `tests/T_ATTACH_ALIEN_REFUSAL.sh` | Alien-XDP refusal end-to-end: pre-attach `xdp_pass.bpf.o` to `${IFACE_A}`, run our `attach`, assert exit 4 + foreign prog still attached + stderr names foreign id (per §6.9, added MVP-1.1B) | bash | 80 |
+| `tests/T_CLI_HELP_VERSION.sh` | CLI surface: `--help` / `--version` exit 0 + content asserts (per §6.10, added MVP-1.1C) | bash | 30 |
+| `tests/T_CLI_CAPACITY.sh` | CLI surface: 65-MAC overflow → exit 1 + `too many --allow entries` in stderr (per §6.11, added MVP-1.1C) | bash | 30 |
+| `tests/T_CLI_BAD_MAC.sh` | CLI surface: 4 malformed-MAC sub-cases → exit 1 + recognizable stderr (per §6.12, added MVP-1.1C) | bash | 30 |
+| `tests/T_DETACH_NOTHING.sh` | `detach --iface lo` on clean iface → exit 0 (per §6.13 + §5.21 D4 idempotency amendment, added MVP-1.1C) | bash | 30 |
 | `tests/fixtures/xdp_pass.bpf.c` | Minimal foreign-XDP fixture: `SEC("xdp") int xdp_pass_prog(...) { return XDP_PASS; }` (function name MUST differ from `mac_filter_prog` so §5.19 identity-check classifies it as alien) — built via `add_bpf_object(xdp_pass …)` (per §6.9, added MVP-1.1B) | BPF C | 15 |
 | `tests/...` | Other test scripts/binaries (tester populates per TestStrategy §6) | tester-chosen | tester |
 
 Total impl LOC est: ~900 (excluding tests; bumped from ~870 by the §5.4
-probe expansion in `loader.cpp` per MVP-1.1B).
+probe expansion in `loader.cpp` per MVP-1.1B). MVP-1.1C adds no net LOC
+to impl (A1/A2 are relocate-and-comment edits; B2 is one CMake token).
 
 The generated BPF skeleton header (`mac_filter.skel.h`) lives in
 `${CMAKE_BINARY_DIR}` — not committed, not listed. Likewise the foreign
@@ -121,6 +127,11 @@ std::vector<xdpmf_mac> allow      // size ≤ 64, deduplicated by parser
 Not on any external boundary, but the contract between `cli.cpp` →
 `loader.cpp`.
 
+**Post-§5.21 A1 note**: this struct now lives in `loader.hpp` (moved
+from `cli.hpp`); it remains the same `iface`/`allow` field layout. The
+contract direction is unchanged (cli.cpp produces it, loader.cpp
+consumes it); only the declaring header file moved.
+
 ## 4. Interfaces
 
 ### 4.1 CLI
@@ -151,7 +162,7 @@ Exit codes (definitive):
 | 2 | BPF object load failed (libbpf error) |
 | 3 | XDP attach failed (kernel error) |
 | 4 | Attach refused: a non-ours XDP program is already attached to iface (see §5.4) |
-| 5 | Detach failed: nothing attached, or pinned dir missing, or kernel error |
+| 5 | Detach failed: kernel error during `bpf_xdp_detach` (post-§5.21 D4: "nothing attached" and "pinned dir missing" cases no longer map to 5 — they return 0) |
 | 6 | Permission denied (need CAP_BPF / CAP_NET_ADMIN — typically run as root) |
 
 **MVP-1.1B note**: the 4-state §5.4 probe does NOT introduce any new
@@ -160,6 +171,12 @@ exit codes. The new state (d) — "no XDP attached AND pin_dir present"
 a new code. Symmetrically `detach()` in state (d) returns exit 0
 (recoverable no-op cleanup), not exit 5. The exit-code table above is
 unchanged.
+
+**MVP-1.1C note** (per §5.21 D4 amendment): `detach()` in state (a)
+(no prog AND no pin_dir — "truly nothing attached") also returns **exit
+0**, making detach fully idempotent. The exit-5 row above is narrowed
+to "kernel error during `bpf_xdp_detach`" only; previously it covered
+"nothing attached" and "pinned dir missing" too.
 
 Stdout: human-readable status on success ("attached prog id N to <iface>",
 "detached prog id N from <iface>"). Stderr: errors. No JSON, no machine
@@ -189,12 +206,14 @@ rename without a matching §5.19 update.
 namespace xdpmf {
 
 struct AttachConfig { std::string iface; std::vector<xdpmf_mac> allow; };
+struct DetachConfig { std::string iface; };
 
 // Returns prog_id on success. Throws std::system_error with codes from
 // the LoaderError enum on failure (translated to exit code by main()).
 std::uint32_t attach(const AttachConfig& cfg);
 
 // Returns prog_id of the detached program on success.
+// Post-§5.21 D4: returns 0 on "nothing to detach" (state a) — exit 0, no throw.
 std::uint32_t detach(const std::string& iface);
 
 enum class LoaderError : int {
@@ -217,6 +236,12 @@ pins MUST be cleaned up (RAII rollback).
 anonymous-namespace POD type and a thin fd-RAII wrapper INSIDE
 `loader.cpp`. No new public symbols cross the `loader.hpp` boundary —
 the `attach()`/`detach()` signatures above are unchanged.
+
+**MVP-1.1C note** (per §5.21 A1): `AttachConfig`/`DetachConfig` now
+live in `loader.hpp` (moved from `cli.hpp` to break the backwards layer
+where control-plane depended on CLI parser). `cli.hpp` now
+`#include`s `loader.hpp` for its `ParsedCommand = std::variant<…>`
+declaration. The struct field layouts are unchanged (binary-compatible).
 
 ### 4.4 Observability (no API, just contract)
 
@@ -281,6 +306,12 @@ State (a) inside `detach()` (truly nothing — no prog, no dir) remains
 an error (`DetachFailed`, exit 5) — the user asked to detach something
 that isn't there.
 
+**MVP-1.1C override** (per §5.21 D4): the immediately-preceding sentence
+is amended — state (a) inside `detach()` now also returns **exit 0**
+(stdout: `"no XDP attached to <iface> (no-op)"`). Detach is fully
+idempotent in MVP-1.1C onward. See §5.21 D4 entry for full rationale and
+blast-radius analysis.
+
 "Ours" classification (state b) requires THREE conditions, all
 necessary: (1) prog attached AND in SKB mode (see §5.20), (2) pin_dir
 present, (3) identity verification passes per §5.19. Pre MVP-1.1B
@@ -300,7 +331,8 @@ crash-mid-attach is auto-recovered).
 identity-verification gate (state b condition 3), and the all-modes
 probe (state classification driver) are the MVP-1.1B changes — see
 §5.19 (KC-A identity verification) and §5.20 (KC-B all-modes query)
-for impl mechanisms and rationale.
+for impl mechanisms and rationale. The detach-state-(a) idempotency
+extension is the MVP-1.1C change — see §5.21 D4.
 
 ### 5.5 Malformed-frame counter = **separate `STAT_DROP_MALFORMED`** (not merged with `STAT_DROP_DENY`) — because
 Brief acceptance #5 explicitly leaves the choice to architect and notes
@@ -690,6 +722,137 @@ without exposing a CLI surface; the CLI flag remains MVP-2 work.
 Evidence: `mint/hybrid-review.md` MEDIUM-SYNTH KC-B (security M2);
 `mint/task-brief.md` MVP-1.1B item 1 (Action).
 
+### 5.21 MVP-1.1C polish batch (third refactor pass, 2026-05-23) — amendment block
+
+Append-only amendment summarizing the 12 polish items from
+`mint/task-brief.md` (MVP-1.1C) and `mint/hybrid-review.md` Top-actionable
+items #10-15 + testing-reviewer LOW table. No new architectural
+contracts; no data-structure on-the-wire changes; no public-API
+signature changes. The single intentional behaviour change is the
+detach-idempotency extension (item D4 implication, see "Decisions for
+MVP-1.1C" below).
+
+**Scope summary** — file:line targets per brief:
+
+| ID | Where | One-line change |
+|---|---|---|
+| A1 | `src/loader/cli.hpp:18-25` (struct defs) + `src/loader/loader.hpp:17` (`#include "cli.hpp"`) | Move `AttachConfig`/`DetachConfig` from `cli.hpp` to `loader.hpp` (just above `LoaderError`); drop `loader.hpp`'s `#include "cli.hpp"`; add `#include "loader.hpp"` to `cli.hpp`; keep `ParsedCommand = std::variant<AttachConfig, DetachConfig, …>` compiling. Inverts the backwards layering called out in hybrid-review.md arch M1. |
+| A2 | `src/loader/raii.hpp:118-124` | Rewrite the comment block above `class BpffsDir`: drop the false "call create() or arm()" wording (no `create()` method exists); describe the real API — creation happens via `std::filesystem::create_directories()` in `loader.cpp`, this RAII owns removal lifecycle (`arm()` / `release()`). Comment-only, zero behaviour change. |
+| B1 | `tests/inject/inject_runt.py:14-19` | Rewrite the docstring paragraph: `:99` → `:00` (matches the actual `bytes([…])` literal at lines 37-43); "first 6 bytes plus partial 7th" → "13 bytes — full 6-byte dst MAC + full 6-byte src MAC + 1 ethertype byte". |
+| B2 | `CMakeLists.txt:48` | Change `pkg_check_modules(LIBBPF REQUIRED IMPORTED_TARGET libbpf)` → `pkg_check_modules(LIBBPF REQUIRED IMPORTED_TARGET libbpf>=1.1)`. Enforces the floor already asserted in §3 / §5.20 (`bpf_xdp_query`, `bpf_xdp_attach` are post-1.0 APIs). |
+| B3 | `tests/lib/common.sh:25` | Add 1-line comment immediately above `PIN_ROOT=/sys/fs/bpf/xdpmacfilter`: `# MUST match XDPMF_BPFFS_ROOT in include/common/mac_filter.h`. Documents the silent coupling. CMake-generation deferred to MVP-2 (see §7 addition). |
+| B4 | new `CHANGELOG.md` at repo root | Create per Keep-a-Changelog convention (`## [Unreleased]` + `## [0.1.0]` / `## [0.1.1]` / `## [0.1.2]` / `## [0.1.3]` sections, one bullet per non-trivial change derived from git log + `task-brief-mvp1*.md`). Terse, ~20-40 lines total. No version numbers in code yet — purely documentary. |
+| C1 | `tests/lib/common.sh` (add helper) + post-inject `sleep` callsites in `tests/T_*.sh` | Add `wait_for_stats_sum <iface> <expected_sum> [timeout_ms=2000] [poll_ms=20]` helper polling `read_stats.py` until `STAT_PASS+STAT_DROP_DENY+STAT_DROP_MALFORMED == expected_sum` or timeout. Returns 0 on match, 1 on timeout. Sweep replaces post-inject `sleep 0.3`/`sleep 0.5` in §6.3-§6.6, §6.8, §6.9. Fixture-setup sleeps stay as-is. Tester documents per-test which sleeps were replaced in `mint/impl-notes.md` if non-obvious. |
+| C2 | every `sudo` call in `tests/T_*.sh` and `tests/lib/common.sh` | Add `require_passwordless_sudo()` to `common.sh` — runs `sudo -n true 2>/dev/null`, on failure prints clear message to stderr + exits **77** (ctest skip convention). Each `T_*.sh` requiring root calls it near the top after sourcing common.sh. Replace all `sudo …` → `sudo -n …` throughout `tests/`. CMake `set_tests_properties(... PROPERTIES SKIP_RETURN_CODE 77)` must be set on every root-requiring test entry — tester verifies and adds where missing. |
+| C3 | `tests/lib/common.sh:20-21` (`IFACE_A`/`IFACE_B`) + fixture create/destroy paths + every `veth_a`/`veth_b` literal in `tests/T_*.sh` | **Path B chosen (see Decisions for MVP-1.1C below)** — uniquify with PID suffix: `IFACE_A=xdpmf_a_$$`, `IFACE_B=xdpmf_b_$$`. Add preflight in `setup_veth`: error out (exit 1, NOT 77) if either name already exists on host (`ip link show "${IFACE_A}" >/dev/null 2>&1` → fail). All §6.x assertions that hard-code `veth_a`/`veth_b` migrate to `${IFACE_A}`/`${IFACE_B}` — including bpffs pin paths (now `/sys/fs/bpf/xdpmacfilter/${IFACE_A}/…`). Note: existing `xdp_prog_id` / `PIN_DIR` helpers in `common.sh` that reference iface names continue to take iface as an arg or read `IFACE_A` — no helper signature change. |
+| C4 | `tests/lib/common.sh` (`prog_count` helper if present, else wherever `bpftool prog show \| wc -l` is invoked) + §6.6 baseline/final check | Replace global `bpftool prog show \| wc -l` baseline/final delta with **per-iface XDP-presence check** using the existing `xdp_prog_id <iface>` helper at `tests/lib/common.sh:115-121` (wraps `bpf_xdp_query_id` equivalent via `bpftool net show dev <iface>` or `ip -j link show <iface>`). Assertion semantics shift from "global prog count delta == 0" to "after attach: `xdp_prog_id` non-empty on `${IFACE_A}`; after detach: `xdp_prog_id` empty on `${IFACE_A}`". §6.6 outcome text updated by this amendment (see "Cross-cutting note" at end of §6.13). |
+| D1 | new `tests/T_CLI_HELP_VERSION.sh` (≤30 LOC) | See §6.10. |
+| D2 | new `tests/T_CLI_CAPACITY.sh` (≤30 LOC) | See §6.11. |
+| D3 | new `tests/T_CLI_BAD_MAC.sh` (≤30 LOC) | See §6.12. |
+| D4 | new `tests/T_DETACH_NOTHING.sh` (≤30 LOC) | See §6.13. Also implies a small behaviour change in `loader.cpp` — see "Decisions for MVP-1.1C" → D4. |
+
+All 4 new D-items register in `tests/CMakeLists.txt`. D1-D3 do NOT need
+root or veth fixtures (pure CLI-parser tests). D4 calls
+`bpf_xdp_query_id` so needs `require_passwordless_sudo` (per brief Note).
+
+**Decisions for MVP-1.1C**:
+
+- **C3 path = Path B (uniquify with PID suffix), NOT Path A (netns)** —
+  *because* this is the third refactor pass on an already-passing test
+  suite (MVP-1, MVP-1.1A, MVP-1.1B all green). Path A (netns isolation)
+  is architecturally cleaner but adds ~50 LOC of fixture infra and
+  re-touches all 8+1 existing test setup/teardown paths; blast radius
+  is large for a janitorial pass. Path B closes the actual reported
+  risk (name collision with a developer/CI-host interface) at ~10 LOC,
+  and the preflight gives a loud failure if a `xdpmf_a_$$` collision
+  somehow happens (vanishingly unlikely — `$$` is process-unique and
+  the `xdpmf_` prefix is project-distinct). Path A is recorded as MVP-2
+  work in the §7 addendum.
+
+- **B4 changelog format = Keep-a-Changelog convention** — *because*
+  it is the format the brief suggests as default, it is widely
+  recognized (GitHub renders it natively, contributors can read it
+  without onboarding), it requires no tooling, and the section
+  structure (`## [Unreleased]` / `## [0.1.x] — YYYY-MM-DD` /
+  `### Added` / `### Changed` / `### Fixed`) maps cleanly to our
+  existing /mint phase boundaries. Initial seed:
+  - `## [Unreleased]` (empty — placeholder for future polish);
+  - `## [0.1.3] — 2026-05-23` (MVP-1.1C polish batch);
+  - `## [0.1.2] — <commit date of MVP-1.1B closeout>` (§5.4
+    trust-boundary hardening, identity gate, all-modes probe,
+    T_ATTACH_ALIEN_REFUSAL);
+  - `## [0.1.1] — <commit date of MVP-1.1A closeout>` (sanitizer build
+    option, T_SANITIZER_BUILD, README, namespace cleanups);
+  - `## [0.1.0] — <commit date of MVP-1 closeout>` (initial vertical
+    slice — XDP filter + loader + 7 ctest entries).
+
+  Impl reads exact dates from `git log --format='%cs' <commit>`; when
+  multiple commits exist per phase, use the merge/closeout commit
+  (the `mint phase 4: review passed …` commit). No version numbers are
+  added to the loader binary in this pass — the `--version` string is
+  whatever it already is. Future MVP-2 may add a CMake-derived version
+  constant and sync it to the changelog.
+
+- **D4 implies `detach()` becomes fully idempotent — state (a) in
+  `detach()` now returns exit 0, not exit 5** — *because* brief D4
+  specifies: "invoke `xdpmacfilter detach --iface lo` on an interface
+  that has no XDP program attached and no bpffs dir … should be the
+  no-op recoverable cleanup path (exit 0)". The pre-MVP-1.1C §5.4
+  (lines 278-282) treats state (a) inside `detach()` as `DetachFailed`
+  (exit 5). The brief overrides this. Amendment: drop the
+  `throw_loader(LoaderError::DetachFailed, ...)` at
+  `src/loader/loader.cpp:401` and return 0 instead (semantically:
+  "nothing to detach, nothing to clean — success"). Stdout message:
+  `"no XDP attached to {} (no-op)"`. The §5.4 table row (a) prose
+  has been LOGICALLY amended (the inline §5.4 paragraph already cites
+  this §5.21 entry as the override); the §4.1 exit-5 row description
+  is also narrowed to "kernel error during `bpf_xdp_detach`".
+
+  **Blast-radius check**: grep across `tests/` for any existing
+  assertion that detach-on-clean-iface returns exit 5 — only result is
+  `tests/T_IDEMPOTENT_RELOAD.sh:7` (a comment mention of §5.4), no
+  exit-5 assertion. No existing test breaks. Safe to land.
+
+- **C1-C4 absorption: no new §6.x entries; absorbed as edits to
+  existing §6.x mechanisms** — *because* these are pure
+  verification-infrastructure changes (helper additions, mechanism
+  swaps) that do not change the OUTCOME semantics of any existing
+  test. C1 changes the *mechanism* (sleep → poll) for
+  §6.3/§6.4/§6.5/§6.6/§6.8/§6.9; the outcome assertions
+  (`stats[…] == N`) are byte-identical. C2 adds a skip-77 preflight
+  which is a precondition, not an outcome. C3 renames
+  `veth_a`/`veth_b` → `${IFACE_A}`/`${IFACE_B}` throughout; outcomes
+  are name-substituted. C4 swaps `bpftool prog show | wc -l` →
+  `xdp_prog_id`-based per-iface check ONLY in §6.6; the §6.6 outcome
+  text "`final_count == baseline_count` AND … `/sys/fs/bpf/xdpmacfilter/veth_a/`
+  does not exist AND `ip -j link show veth_a` shows no XDP attached"
+  is now read as "**post-detach `xdp_prog_id ${IFACE_A}` returns
+  empty** AND `/sys/fs/bpf/xdpmacfilter/${IFACE_A}/` does not exist
+  AND `ip -j link show ${IFACE_A}` shows no XDP attached" — the
+  `final_count == baseline_count` clause is **dropped** (host-global
+  prog-count delta is racy on a multi-tenant CI/dev host per
+  hybrid-review.md testing M6; per-iface presence is the correct
+  signal). The single "Cross-cutting note" at the tail of §6.13 records
+  these mechanism shifts authoritatively so tester does not need to
+  cross-reference §5.21 while writing each per-test mechanism block.
+
+  Adding new §6.10-§6.13 entries ONLY for D1-D4 keeps the §6 list
+  grow-rate low and avoids fragmenting the infrastructure-change story
+  across four separate §6.x entries that would each have essentially
+  identical "Setup: same as before; Outcome: same; Mechanism: now uses
+  helper X" bodies.
+
+**Items NOT in scope per brief (already-OOS list extended in §7
+addendum)**: C3 Path A (netns isolation), `--mode` CLI flag,
+T_VERIFIER_REJECT + kernel-version probe, tag-check identity hardening,
+O_PATH fd hardening for pin_dir, PERCPU stats migration, CMake-driven
+generation of `PIN_ROOT` from the C header, version-string sync to
+changelog.
+
+Evidence: `mint/hybrid-review.md` synthesizer Top-actionable items
+#10-15 + testing-reviewer LOW table; `mint/task-brief.md` MVP-1.1C
+scope items A1/A2/B1-B4/C1-C4/D1-D4 (lines 27-159).
+
 ## 6. TestStrategy
 
 Test fixture (per `test/bpf-xdp.md` pack — exact mechanism is tester's
@@ -705,6 +868,12 @@ choice but **direction semantics below are mandatory**):
   tester's choice (separate netns is recommended to avoid kernel
   local-delivery shortcuts), but the injection→observation direction
   above is fixed.
+
+**Post-§5.21 C3 note**: `veth_a`/`veth_b` literals throughout §6 are
+read as `${IFACE_A}`/`${IFACE_B}` (PID-suffixed `xdpmf_a_$$`/`xdpmf_b_$$`)
+in actual test invocations. Bpffs pin paths follow:
+`/sys/fs/bpf/xdpmacfilter/${IFACE_A}/…`. The fixed names retained in
+§6 prose are for narrative consistency only.
 
 MAC constants for tests:
 - `MAC_GOOD = 02:00:00:00:00:01` (locally-administered, unicast)
@@ -788,6 +957,13 @@ impl source to write these.
   to a standalone first-class test — see §6.9 `T_ATTACH_ALIEN_REFUSAL`,
   with vendored foreign-XDP fixture and stronger assertion set. The
   "OPTIONAL" framing here is superseded by §6.9.
+- **MVP-1.1C amendment** (per §5.21 C4): steps 1 and 5 (the
+  `baseline_count`/`final_count` global prog-count) are **dropped** —
+  the `final_count == baseline_count` clause in Outcome is **removed**.
+  Surviving outcome: "post-step-4 `xdp_prog_id ${IFACE_A}` returns empty
+  AND `/sys/fs/bpf/xdpmacfilter/${IFACE_A}/` does not exist AND
+  `ip -j link show ${IFACE_A}` shows no XDP attached". See the
+  "Cross-cutting note" at the tail of §6.13.
 
 ### 6.7 T_NEGATION_CONTROL — proves test suite isn't a no-op (acceptance #7)
 - **Construction**: a copy of T_DROP_DENY with the assertion inverted —
@@ -995,6 +1171,188 @@ implicitly by the all-modes probe of §5.20).
   symmetry (assert exit 4 AND assert foreign-not-clobbered) is
   internal sanity, not a substitute for §6.7.
 
+### 6.10 T_CLI_HELP_VERSION — help/version exit cleanly (per §5.21 D1, MVP-1.1C)
+- **Setup**: none. Pure binary-invocation test; no veth, no root, no
+  kernel call. Does NOT need `require_passwordless_sudo`.
+- **Trigger** (two sub-cases, both must pass):
+  1. `${LOADER_BIN} --help` → capture stdout, capture exit code.
+  2. `${LOADER_BIN} --version` → capture stdout, capture exit code.
+- **Outcome**:
+  - Sub-case 1: exit 0; stdout non-empty; stdout contains literal
+    substring `Usage:`; stdout contains literal substring `attach`;
+    stdout contains literal substring `detach`.
+  - Sub-case 2: exit 0; stdout is a single non-empty line (allowing
+    optional trailing newline); contains literal substring
+    `xdpmacfilter`; matches ERE `[0-9]+\.[0-9]+\.[0-9]+` (semver-shaped
+    version token anywhere in the line).
+- **Assertion mechanism** (concrete):
+  - Exit per sub-case: `set +e; "${LOADER_BIN}" --help >"$stdout_file"
+    2>&1; rc=$?; set -e; [[ $rc -eq 0 ]] || fail=1`.
+  - Stdout content (sub-case 1): `grep -q -F -- 'Usage:' "$stdout_file"
+    && grep -q -F -- 'attach' "$stdout_file" && grep -q -F -- 'detach'
+    "$stdout_file"`.
+  - Stdout content (sub-case 2): `grep -q -F -- 'xdpmacfilter'
+    "$stdout_file" && grep -qE '[0-9]+\.[0-9]+\.[0-9]+' "$stdout_file"`.
+  - Sub-case 2 line count: `[[ "$(wc -l < "$stdout_file")" -le 1 ]]`
+    (tolerates 0 newlines if impl uses `fputs` without `\n`; the
+    assertion is "single line", not "exactly one `\n`").
+  - Aggregator pattern: `fail=0` accumulator over both sub-cases,
+    final `exit "$fail"`.
+- **Ctest properties**: `TIMEOUT 10` (binary launch + parse only).
+  No `RESOURCE_LOCK` (no shared kernel/fixture state). No
+  `SKIP_RETURN_CODE` (no sudo needed).
+- **Why**: locks the contract that `--help`/`--version` exit cleanly
+  without touching the kernel. Trivially exercised by users in the
+  wild, untested by any pre-MVP-1.1C ctest.
+
+### 6.11 T_CLI_CAPACITY — allow-list overflow rejected (per §5.21 D2, MVP-1.1C)
+- **Setup**: none (no veth, no root, no kernel call — error happens in
+  the CLI parser before any libbpf call). Does NOT need
+  `require_passwordless_sudo`.
+- **Trigger**: invoke `${LOADER_BIN} attach --iface lo --allow <list>`
+  where `<list>` contains **65 distinct MACs** (one more than
+  `XDPMF_ALLOWLIST_MAX = 64` per §3.3). Helper to generate the list
+  (bash, in-test): `list=$(for i in $(seq 0 64); do printf
+  '02:00:00:00:%02x:%02x,' $(( i / 256 )) $(( i % 256 )); done | sed
+  's/,$//')`. Either single-flag comma-separated or repeated-flag form
+  is acceptable per §4.1.
+- **Outcome**:
+  - Exit code = **1** (per §4.1: "CLI usage error" — the
+    `XDPMF_ALLOWLIST_MAX` check at `cli.cpp:121-123` throws `CliError`,
+    which `main.cpp:58-62` maps to `kExitUsageErr` = 1).
+  - Stderr contains the literal substring `too many --allow entries`
+    (the format-string in `cli.cpp:122-123`; the `(max 64)` tail is
+    impl-shape and is NOT asserted).
+  - No kernel side-effect: `xdp_prog_id lo` returns empty AFTER the
+    invocation (sanity floor — proves we never reached the attach
+    path). Pre-check optional but recommended.
+- **Assertion mechanism**:
+  - Exit: `set +e; "${LOADER_BIN}" attach --iface lo --allow "$list"
+    2> "$stderr_file"; rc=$?; set -e; [[ $rc -eq 1 ]] || fail=1`.
+  - Stderr substring: `grep -q -F -- 'too many --allow entries'
+    "$stderr_file" || fail=1`.
+  - No-side-effect: `[[ -z "$(xdp_prog_id lo 2>/dev/null)" ]] ||
+    fail=1`.
+- **Ctest properties**: `TIMEOUT 10`. No `RESOURCE_LOCK`. No
+  `SKIP_RETURN_CODE`.
+- **Why**: the capacity-limit branch in `cli.cpp:121-123` is untested
+  by any pre-MVP-1.1C ctest. Regression in the bounds check would
+  silently let oversized allow-lists through (the BPF verifier might
+  still catch the map-overflow at runtime but the contract is "parser
+  rejects" — that is the stronger guarantee we lock here).
+
+### 6.12 T_CLI_BAD_MAC — malformed MAC rejected (per §5.21 D3, MVP-1.1C)
+- **Setup**: none (parser-only failure, no kernel call). Does NOT need
+  `require_passwordless_sudo`.
+- **Trigger** (four sub-cases, all four must fail with exit 1):
+  1. `${LOADER_BIN} attach --iface lo --allow not-a-mac` (totally
+     malformed).
+  2. `${LOADER_BIN} attach --iface lo --allow gg:gg:gg:gg:gg:gg` (right
+     shape, non-hex octets).
+  3. `${LOADER_BIN} attach --iface lo --allow 01:02:03:04:05` (too few
+     octets — 5 instead of 6).
+  4. `${LOADER_BIN} attach --iface lo --allow 01:02:03:04:05:06:07` (too
+     many octets — 7 instead of 6).
+- **Outcome** (per sub-case):
+  - Exit code = **1** (CLI usage error per §4.1; tokenizer error path
+    throws `CliError` → `kExitUsageErr`).
+  - Stderr contains a recognizable malformed-MAC token: the substring
+    `mac` (case-insensitive grep `-i`) appearing anywhere in stderr —
+    the exact wording is impl-shape (could be "invalid MAC", "malformed
+    MAC address", "bad MAC token"); assertion stays loose on wording
+    but firm on the token.
+- **Assertion mechanism** (per sub-case, in a loop over the 4 bad-MAC
+  strings):
+  - Exit: `set +e; "${LOADER_BIN}" attach --iface lo --allow "$bad" 2>
+    "$stderr_file"; rc=$?; set -e; [[ $rc -eq 1 ]] || fail=1`.
+  - Stderr: `grep -qi -- 'mac' "$stderr_file" || fail=1`.
+  - Aggregator pattern mirrors §6.9: `fail=0` accumulator over the 4
+    sub-cases, final `exit "$fail"`.
+- **Ctest properties**: `TIMEOUT 10`. No `RESOURCE_LOCK`. No
+  `SKIP_RETURN_CODE`.
+- **Why**: the tokenizer error path in `cli.cpp` is uncovered by any
+  pre-MVP-1.1C ctest. Four sub-cases sweep the realistic malformed-MAC
+  variety (non-hex chars, short, long, totally non-MAC) and lock the
+  contract that all four produce CLI error + recognizable stderr.
+
+### 6.13 T_DETACH_NOTHING — detach is idempotent on clean iface (per §5.21 D4 + §5.4 amendment, MVP-1.1C)
+- **Setup**:
+  - `require_passwordless_sudo` (per brief Note — the call reaches
+    `bpf_xdp_query_id`/`bpf_xdp_query` which needs root or CAP_BPF;
+    missing privilege → SKIP 77, not fail).
+  - Assert preconditions: `xdp_prog_id lo` returns empty AND `[[ ! -e
+    /sys/fs/bpf/xdpmacfilter/lo ]]`. (If `lo` has somehow accumulated
+    XDP/pin state from a previous run, abort early with explicit error
+    — fixture is dirty, do not blame the loader.) Test uses `lo` per
+    brief, NOT a veth fixture (no fixture setup/teardown cost).
+- **Trigger**: `sudo -n "${LOADER_BIN}" detach --iface lo` → capture
+  stdout, stderr, exit code.
+- **Outcome**:
+  - Exit code = **0** (per §5.21 D4 detach-idempotency amendment to
+    §5.4: state (a) in `detach()` — no prog AND no pin_dir — returns
+    0).
+  - Stderr does NOT contain the literal substring `error:`
+    (case-sensitive — matches the `error: ` prefix the loader/main
+    use for thrown errors at `main.cpp:59`). Empty stderr is fine;
+    informational lines without an `error:` prefix are fine.
+  - No new kernel side-effect: `xdp_prog_id lo` still returns empty
+    post-call; `/sys/fs/bpf/xdpmacfilter/lo` still does not exist.
+- **Assertion mechanism**:
+  - Exit: `set +e; sudo -n "${LOADER_BIN}" detach --iface lo 2>
+    "$stderr_file" > "$stdout_file"; rc=$?; set -e; [[ $rc -eq 0 ]]
+    || fail=1`.
+  - Stderr: `! grep -q -F -- 'error:' "$stderr_file" || fail=1`.
+  - Post-state: `[[ -z "$(xdp_prog_id lo 2>/dev/null)" ]] || fail=1`
+    AND `[[ ! -e /sys/fs/bpf/xdpmacfilter/lo ]] || fail=1`.
+  - Aggregator pattern: `fail=0` + final `exit "$fail"`.
+- **Ctest properties**: `TIMEOUT 10`. No `RESOURCE_LOCK` (lo is
+  shared but we make NO state changes; concurrent veth-fixture tests
+  are unaffected). **`SKIP_RETURN_CODE 77`** required (for
+  `require_passwordless_sudo` skip path).
+- **Why**: the detach-on-clean-iface idempotent path was extended in
+  MVP-1.1C (§5.21 D4 amendment to §5.4) but never asserted by ctest.
+  Locks the contract that detach is fully idempotent — repeated
+  invocations on a clean iface succeed without error. Pairs with
+  §6.6's "detach on dirty iface" (T_IDEMPOTENT_RELOAD) for full
+  coverage of `detach()`'s state machine.
+
+### Cross-cutting note for §6.3-§6.6, §6.8, §6.9 (per §5.21 C1+C2+C3+C4)
+
+These are infrastructure-level mechanism shifts that apply uniformly to
+the pre-existing test entries listed; the per-test Outcome assertions
+(`stats[…] == N`, exit-code values, foreign-id substring match, etc.)
+are byte-identical to the pre-MVP-1.1C versions.
+
+- **C1 (sleep → poll)**: post-inject `sleep 0.3` (and `sleep 0.5` etc.)
+  callsites in §6.3 / §6.4 / §6.5 / §6.8 / §6.9 are replaced by
+  `wait_for_stats_sum "${IFACE_A}" <expected_sum>` (helper defined in
+  `tests/lib/common.sh` per §5.21 C1). `expected_sum` is the count of
+  injected frames that should land in any of the three counter slots
+  (typically 1 per test). Fixture-setup sleeps (waiting for veth
+  carrier-up, etc.) are NOT post-inject synchronization and stay
+  as-is.
+- **C2 (sudo -n + preflight skip-77)**: tests requiring root (§6.2,
+  §6.3, §6.4, §6.5, §6.6, §6.8, §6.9, §6.13) call
+  `require_passwordless_sudo` near the top after sourcing
+  `common.sh`; SKIP 77 on missing passwordless sudo is the expected
+  behaviour, NOT a test failure. All `sudo …` invocations are
+  `sudo -n …` (no password prompt — fail-fast instead of hang).
+  CMake `set_tests_properties(... PROPERTIES SKIP_RETURN_CODE 77)`
+  must be set on every root-requiring entry.
+- **C3 (uniquified iface names)**: every literal `veth_a`/`veth_b` in
+  §6.3-§6.9 reads as `${IFACE_A}`/`${IFACE_B}` (PID-suffixed
+  `xdpmf_a_$$`/`xdpmf_b_$$`); bpffs pin paths follow
+  (`/sys/fs/bpf/xdpmacfilter/${IFACE_A}/…`). `setup_veth` preflights
+  that neither name collides with an existing host interface and
+  errors out (exit 1) if collision detected.
+- **C4 (per-iface XDP-presence check)**: the `final_count ==
+  baseline_count` clause in §6.6 Outcome is **dropped**; surviving
+  §6.6 outcome is "post-detach `xdp_prog_id ${IFACE_A}` returns empty
+  AND `/sys/fs/bpf/xdpmacfilter/${IFACE_A}/` does not exist AND
+  `ip -j link show ${IFACE_A}` shows no XDP attached". The
+  `baseline_count` / `final_count` capture steps (1 and 5 in the §6.6
+  Trigger sequence) are also removed.
+
 ### Test ordering and isolation
 
 Tests 6.3, 6.4, 6.5 each require a fresh attach (stats start at zero).
@@ -1036,7 +1394,7 @@ might be tempted to add:
 - **No restructure of `loader.hpp`** in MVP-1.1B — all §5.19/§5.20
   changes are confined to `loader.cpp` anon-namespace helpers. Public
   API (§4.3) is unchanged. (Architecture M1 backwards layering —
-  `loader.hpp → cli.hpp` — remains MVP-2 work per hybrid-review.md.)
+  `loader.hpp → cli.hpp` — is addressed in MVP-1.1C per §5.21 A1.)
 - **No changes to the 8 pre-existing tests** — they remain
   byte-identical; only the new `T_ATTACH_ALIEN_REFUSAL` is added.
 - **No changes to other `src/**` files** — only `src/loader/loader.cpp`
@@ -1064,3 +1422,32 @@ might be tempted to add:
 - **No CI configuration files** (GitHub Actions, etc.) — local ctest
   only for MVP-1.
 - **No man page, no shell completion** — `--help` text only.
+
+### MVP-1.1C additions to OOS (per §5.21)
+
+- **No netns isolation for the test fixture (C3 Path A)** — per §5.21
+  C3 decision, Path B (PID-suffixed names) was chosen as the
+  janitorial-pass-appropriate option. Path A (per-test `ip netns add
+  xdpmf-test-$$` with veth + loader + traffic gen inside the namespace,
+  teardown nukes the netns) is recorded as MVP-2 hardening: ~50 LOC of
+  fixture infra, cleaner host isolation, deferred.
+- **No CMake-generation of `tests/lib/common.sh:PIN_ROOT`** — per
+  §5.21 B3 decision, a 1-line `# MUST match XDPMF_BPFFS_ROOT in …`
+  comment makes the coupling explicit for MVP-1.1C. CMake-driven
+  generation of the shell constant from the C header
+  (`include/common/mac_filter.h`) is MVP-2 hardening.
+- **No version-string sync between `CHANGELOG.md` and the loader
+  binary's `--version` output** — per §5.21 B4 decision, the changelog
+  versions (`0.1.0`/`0.1.1`/`0.1.2`/`0.1.3`) are documentary only; the
+  loader binary's compiled-in `--version` string is independent and
+  unchanged. Future MVP-2 may add a CMake-derived version constant and
+  sync it.
+- **No T_VERIFIER_REJECT + kernel-version probe +
+  `LoaderError::KernelUnsupported`** — testing MED finding per brief
+  OOS section; explicitly MVP-2.
+- **No PERCPU stats migration** — performance HIGH finding per brief
+  OOS section; design §5.3 + §5.5 explicit MVP-2.
+- **No removal of `mint/test-run.log` from the gitignore list** — brief
+  flags this as a stale finding (already gitignored AND untracked, no
+  work needed). Not a change; documented here so reviewer does not flag
+  the non-edit as a miss.
