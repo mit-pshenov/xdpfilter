@@ -1,195 +1,151 @@
-# Task brief — MVP-1.1C: hybrid-review polish batch (refactor mode)
+# Task brief — MVP-2 Sec: §5.19 tag-check + O_PATH bpffs root hardening (refactor mode)
 
 ## Goal
 
-Knock down the long tail of LOW/MEDIUM polish items from `mint/hybrid-review.md` that survived the first two refactor passes (MVP-1.1A landed quick wins #1-3, MVP-1.1B landed trust-boundary items #4-6+9). Everything in this brief is from synthesizer's "Top actionable list" items #10-15 plus four sub-items from the testing-reviewer LOW table — no design re-thinks, no architectural changes, no new design contracts.
+Close two remaining attack vectors on the §5.4 / §5.19 trust boundary, both deferred to MVP-2 in design.md §7:
 
-This is the **third refactor pass** on the MVP-1 codebase. Scope is wide (12 items) but per-item depth is shallow: most are ≤10 LOC. The point of bundling is to clean the whole polish backlog in one /mint cycle.
+1. **Tag-check identity gate** layered ON TOP of the existing name-check (§5.19 option iii referenced; full spec deferred to MVP-2 per §7 line 1378-1382). Closes the **attacker-recompile** vector: a CAP_BPF attacker who recompiles `src/bpf/mac_filter.bpf.c` with the same `SEC()` name but altered behaviour produces a program whose `bpf_prog_info.name == "mac_filter_prog"` (passes name-check) but whose `bpf_prog_info.tag` (SHA1-of-bytecode) differs from our own freshly-built skeleton's tag.
+
+2. **O_PATH/O_DIRECTORY/O_NOFOLLOW fd hardening** on the bpffs root path (per §5.19 option (iii) + §7 line 1383-1385). Closes the **symlink-vortex** subset of KC-A: an attacker who plants a symlink at `/sys/fs/bpf/xdpmacfilter/` itself or at the per-iface subdir tricks `std::filesystem::{exists,create_directories,remove_all}` into operating on attacker-controlled paths.
+
+This is the **first MVP-2 pass** — first time we touch security beyond MVP-1.1B's name-check baseline. Scope is intentionally narrow: 2 items, both extending §5.19. No CLI surface changes, no .bpf.c changes, no .hpp changes (per §5.19 "All new helpers live in the anonymous namespace of `loader.cpp`. No new symbols cross the `loader.hpp` boundary").
 
 ## Context: prior work
 
 - **MVP-1 brief**: `mint/task-brief-mvp1.md`
 - **MVP-1.1A brief**: `mint/task-brief-mvp1.1a.md`
-- **MVP-1.1B brief**: `mint/task-brief-mvp1.1b.md`
-- **Existing design**: `mint/design.md` — already amended through §5.20 + §6.9; **this pass appends §5.21 + new §6.x as needed**
-- **MVP-1.1B review**: `mint/review.md` (round-1 pass, overwritten each cycle)
-- **Hybrid review source**: `mint/hybrid-review.md` — the synthesized report. All scope items reference its line numbers / Top-actionable-list IDs.
+- **MVP-1.1B brief**: `mint/task-brief-mvp1.1b.md` — the §5.4 4-state machine + §5.19 name-check baseline
+- **MVP-1.1C brief**: `mint/task-brief-mvp1.1c.md` — the polish batch
+- **Existing design**: `mint/design.md` — already amended through §5.21 + §6.13. §5.19 is the authoritative spec on identity verification; §7 lines 1378-1385 explicitly defer tag-check and O_PATH to MVP-2 (us).
+- **Hybrid review source**: `mint/hybrid-review.md` — sec M1 "Recommended fix" enumerates the three identity mechanisms (name / map-identity / O_PATH); §5.19 ships (i) name-check; this brief ships (iii) O_PATH **plus** the tag-check enhancement architect described in §5.19's "strongest defense" paragraph (lines 576-584).
 
-## Workflow rules (refactor mode — same as MVP-1.1A/B)
+## Workflow rules (refactor mode — same as MVP-1.1A/B/C)
 
-- **Architect**: read existing `design.md` + `hybrid-review.md` + this brief. EDIT design.md in place. Append a single new amendment block (e.g. `§5.21 — MVP-1.1C polish batch (2026-05-23)`) summarising the 12 changes with file:line targets. Append new `§6.x` TestStrategy items for each new ctest (4 of them). For each ctest, specify intent + expected exit code + 1-line assertion list. NO design rewrites; NO new architectural contracts; this is a janitorial pass.
-- **Impl**: EDIT existing files in place. The only NEW file in this pass is `CHANGELOG.md` at repo root (item D5 below). Cross-cutting renames or extractions OK where required (item B1 moves a struct between headers).
-- **Tester**: ADD 4 new ctest scripts (`tests/T_CLI_HELP_VERSION.sh`, `tests/T_CLI_CAPACITY.sh`, `tests/T_CLI_BAD_MAC.sh`, `tests/T_DETACH_NOTHING.sh`) + register all 4 in `tests/CMakeLists.txt`. Also EDIT `tests/lib/common.sh` to add the `wait_for_stats_sum` helper (item C1) AND to make the sudo + veth + prog_count infrastructure changes (items C2/C3/C4). Existing tests stay green; tester may need to adjust their use of `wait_for_stats_sum` (replacing `sleep 0.3`) and `sudo` → `sudo -n` calls — those edits are in scope.
-- **Reviewer**: 4-point triangulation focused on the 12 items + new tests. Existing-and-unchanged code regions are out of scope.
+- **Architect**: read existing `design.md` (especially §5.19 in full + §7 deferral entries) + `hybrid-review.md` sec M1 + this brief. EDIT design.md in place. Append a new amendment block `§5.22 MVP-2 Sec: tag-check + O_PATH hardening` after §5.21. The amendment MUST address the open mechanism questions below (architect chooses, justifies, documents). Append new `§6.x` TestStrategy items for the new tests. NO design rewrites; this extends §5.19, doesn't replace it.
+- **Impl**: EDIT `src/loader/loader.cpp` in place — the probe helper, the attach() entry path, and the bpffs-touching helpers (`ensure_bpffs_dir`, `bpffs_remove_iface`, and the inline `std::filesystem::exists(pin_dir)` callsite in `attach()`/`detach()`). All new helpers stay in the anon namespace per §5.19. `loader.hpp` MUST NOT change (no new public symbols). May need a new local RAII wrapper for the bpffs root fd in `loader.cpp` anon namespace.
+- **Tester**: ADD new ctest scripts for the new TestStrategy entries (~2 new tests; architect specifies the exact list in §6.x). Tester may need to extend `tests/fixtures/` with a second variant of the alien-XDP fixture that has the same SEC name but altered bytecode (for tag-mismatch test). Existing 13 ctest entries stay green (or legitimately SKIP).
+- **Reviewer**: 4-point triangulation focused on §5.22 + new tests + the §5.19 extension correctness. Existing-and-unchanged code is out of scope, with one exception: verify the loader.hpp invariant ("no new public symbols") actually held.
 
-## Scope (exactly 12 items in 4 sections — anything else is OOS)
+## Open mechanism questions (architect decides; document in §5.22)
 
-### Section A — Architecture polish (2 items)
+These are the substantive design decisions this pass requires. Architect picks one path per question, documents rationale.
 
-#### A1. Move `AttachConfig`/`DetachConfig` from `cli.hpp` to `loader.hpp` (hybrid-review #13, arch M1)
+### Q1: Self-tag capture timing — early vs. lazy?
 
-**Where**: `src/loader/cli.hpp:18-25` (struct defs); `src/loader/loader.hpp:17` (`#include "cli.hpp"  // AttachConfig` — verified line 17).
+The tag-check requires the loader to know "our own" tag at the moment of identity verification (which currently happens inside the probe at the start of `attach()`, before any skeleton load). Two options:
 
-**Why**: `loader.hpp` currently pulls in `cli.hpp` solely to use `AttachConfig`/`DetachConfig` — backwards layering (control-plane should not depend on CLI parser). Both structs are pure data; `cli.hpp` keeps `Subcommand`/`HelpRequest`/`VersionRequest`/`ParsedCommand` and includes `loader.hpp` if it still needs the configs in its `variant`.
+- **Option E (early)**: load the skeleton FIRST (before the probe), capture self-tag via `bpf_prog_get_info_by_fd(skel->progs.mac_filter_prog.prog->fd)`, THEN do the probe. Pro: one skeleton load, one tag, used everywhere. Con: skeleton is loaded even in state-(c) (alien refusal) where we immediately throw → wasted work + brief kernel-resource churn.
+- **Option C (compile-time)**: post-build step extracts the tag from `mac_filter.bpf.o` via a tiny libbpf-using extractor, generates `expected_tag.h` with `constexpr std::array<__u8, 8> kExpectedTag = {0x..., ...};`; loader compares probe's tag against this static constant. Pro: no extra runtime work; tag-check is pure constant-time. Con: build pipeline gains a new step + a new generated header; release-build determinism becomes load-bearing.
 
-**Action**: relocate the two struct definitions to `loader.hpp` (just above the `LoaderError` enum), delete the `#include "cli.hpp"` from `loader.hpp`, add `#include "loader.hpp"` to `cli.hpp`, update `using ParsedCommand = std::variant<AttachConfig, DetachConfig, …>;` to compile with the new layering. Verify `loader.cpp` and `cli.cpp` still compile without further changes.
+Architect picks; both are reasonable; (C) is the cleaner architectural answer if the build pipeline can absorb the codegen step. (E) is simpler at runtime cost.
 
-#### A2. Fix `raii.hpp:120-124` doc-vs-code drift (hybrid-review arch M2)
+### Q2: O_PATH fd hardening scope — surface area?
 
-**Where**: `src/loader/raii.hpp:118-124` (the comment block above `class BpffsDir`).
+Three concentric circles of coverage; architect chooses how far to push:
 
-**Why**: comment claims "call create() or arm() depending on whether you want it created or just tracked-for-removal" but `BpffsDir` exposes only `arm()` and `release()` — there is NO `create()` method. Misleading future readers.
+- **Minimum**: open `/sys/fs/bpf/xdpmacfilter/` with `O_PATH | O_DIRECTORY | O_NOFOLLOW` early; use this fd for the existence check (`faccessat(root_fd, iface, F_OK, AT_SYMLINK_NOFOLLOW)`), per-iface dir creation (`mkdirat(root_fd, iface, 0755)`), and existence check before pin operations. **Does NOT** harden `std::filesystem::remove_all(pin_dir)` (the recursive-removal path) — leave that as-is.
+- **Standard**: minimum + harden removal via `openat(root_fd, iface, O_PATH|O_DIRECTORY|O_NOFOLLOW)` + iterate `entries` via `getdents64` (or `std::filesystem::directory_iterator` on an fd-relative path) + `unlinkat` each + `unlinkat(root_fd, iface, AT_REMOVEDIR)`. Closes the per-iface-symlink subset too.
+- **Maximum**: standard + also pass the fd-relative path to libbpf for map pinning so that libbpf's `bpf_obj_pin` happens relative to our O_PATH fd. CON: libbpf's `pin_root_path` API is path-string-based; this would require either a libbpf version that supports fd-relative pinning OR re-implementing the pin step manually via `bpf_obj_pin` against `O_PATH`-rooted constructed paths. Likely too invasive for this pass.
 
-**Action**: rewrite the comment to accurately describe the actual API: directory creation happens via `std::filesystem::create_directories()` in `loader.cpp`; the class owns the removal lifecycle via `arm()` (mark for removal on destruction) and `release()` (cancel removal after a successful operation). 1 comment-block edit, no behavior change.
+Architect picks; **Standard** is the recommended target — covers both attack vectors (root-level symlink + per-iface symlink) without dragging libbpf into scope. **Minimum** is the floor; **Maximum** is OOS for this pass.
 
-### Section B — Documentation polish (4 items)
+### Q3: New exit code for symlink-refused?
 
-#### B1. Fix `inject_runt.py` docstring (hybrid-review #10, doc M3)
+If the bpffs root or per-iface entry exists but is a symlink, the loader refuses to operate. Current exit codes (§4.1):
 
-**Where**: `tests/inject/inject_runt.py:14-19` (docstring).
+- 4 = `AttachRefusedAlien` (semantically "refusing to clobber someone else's setup")
+- 6 = `Permission` (kernel/filesystem permission denial)
+- 7 = reserved (was going to be `KernelUnsupported` per MVP-2 Robust slice; that's a different pass)
 
-**Why**: docstring claims the script "would produce a src MAC of `02:00:00:00:00:99`" and "only the first 6 bytes plus a partial 7th survive". Both verified wrong:
-- inline comment + `bytes([…])` literal (lines 37-43) explicitly produce `02:00:00:00:00:00` not `:99`
-- the actual send is 13 bytes (6 dst MAC + 6 src MAC + 1 ethertype) — not "6 + partial 7th"
+Options:
+- **Reuse 4 (`AttachRefusedAlien`)**: spec'd "alien" extended to mean "anything not in our exact ownership shape", including suspect paths.
+- **Reuse 6 (`Permission`)**: symlink refusal is a filesystem-policy decision; fits the permission semantic.
+- **New code (`PathRefused`, exit 8)**: distinct, observable, audit-friendly. Costs a new design §4.1 row.
 
-**Action**: rewrite the relevant docstring paragraph to match reality. The `:99` claim becomes `:00`; the "first 6 bytes plus partial 7th" sentence becomes the accurate "13 bytes — full 6-byte dst MAC + full 6-byte src MAC + 1 ethertype byte". ~5-line docstring edit.
+Architect picks; reusing existing codes keeps the surface flat. If picking new code, justify the audit value.
 
-#### B2. Add `>=1.1` version qualifier to `pkg_check_modules(LIBBPF …)` (hybrid-review #14, doc M5)
+## Scope (exactly 2 items + tests — anything else is OOS)
 
-**Where**: `CMakeLists.txt:48` (`pkg_check_modules(LIBBPF REQUIRED IMPORTED_TARGET libbpf)`).
+### Item 1 — Tag-check identity gate (extends §5.19 mechanism (i))
 
-**Why**: MVP-1 uses `bpf_xdp_query_id()`, `bpf_xdp_attach()` etc. — these are post-1.0 libbpf APIs; building against an older libbpf would silently fail at link or behave wrongly. The required floor (1.1) is asserted in `design.md` §3 but unenforced by build config.
-
-**Action**: change line 48 to `pkg_check_modules(LIBBPF REQUIRED IMPORTED_TARGET libbpf>=1.1)`. 1-token edit. Verify CMake configure still succeeds on the dev host.
-
-#### B3. Annotate `tests/lib/common.sh:25 PIN_ROOT` as mirror-of `XDPMF_BPFFS_ROOT` (hybrid-review #15, arch L3 + doc M6)
-
-**Where**: `tests/lib/common.sh:25` (`PIN_ROOT=/sys/fs/bpf/xdpmacfilter`).
-
-**Why**: this string is the hard-coded test mirror of `XDPMF_BPFFS_ROOT` macro from `include/common/mac_filter.h`. Future renames of the macro will silently break the tests unless someone notices both copies. A one-line `# MUST match XDPMF_BPFFS_ROOT in include/common/mac_filter.h` comment makes the coupling explicit.
-
-**Action**: add the comment above line 25. CMake-generation is a possible MVP-2 hardening but explicitly out of scope here.
-
-#### B4. Add minimal `CHANGELOG.md` at repo root (hybrid-review doc L3)
-
-**Where**: new file `CHANGELOG.md`.
-
-**Why**: README exists (added MVP-1.1A) but there is no version history; a contributor opening the repo at 0.1.0 cannot quickly answer "what changed in 1.1A vs 1.1B?". Even a sparse changelog gives them an entry point into git history.
-
-**Action**: create `CHANGELOG.md` following the Keep-a-Changelog convention (Unreleased → 0.1.x sections). Populate with entries for `0.1.0` (MVP-1), `0.1.1` (MVP-1.1A), `0.1.2` (MVP-1.1B), `0.1.3` (this batch). Each section: one bullet per non-trivial change, derived from git log + the four `mint/task-brief-mvp1*.md` files. Keep terse — ~20-40 lines total. No version numbers in code yet; the changelog is purely documentary.
-
-### Section C — Test infrastructure (4 items)
-
-#### C1. Replace fixed `sleep 0.3` with `wait_for_stats_sum` poll helper (hybrid-review #12, testing M3)
-
-**Where**: `tests/lib/common.sh` (add helper); all existing tests that currently `sleep 0.3` (or similar fixed sleeps) after an inject and before reading stats.
-
-**Why**: fixed sleeps are flaky on loaded CI (under-sleep → race, over-sleep → wasted runtime). A bounded poll that exits as soon as the expected stats delta is observed is both faster on the happy path and more reliable under load.
-
-**Action**: add to `tests/lib/common.sh`:
-```bash
-# wait_for_stats_sum <iface> <expected_sum> [timeout_ms=2000] [poll_ms=20]
-# Polls read_stats.py until the (PASS+DROP_DENY+DROP_MALFORMED) sum equals
-# expected_sum, or timeout. Returns 0 on match, 1 on timeout.
-wait_for_stats_sum() { ... }
-```
-Then sweep all callers of `sleep 0.3` (or `sleep 0.5` etc.) in `tests/T_*.sh` that follow a packet inject and replace with `wait_for_stats_sum <iface> <expected>`. Sleeps that are NOT post-inject synchronization (e.g. fixture setup waits) stay as-is. Tester documents per-test which sleeps were replaced in `mint/impl-notes.md` if non-obvious.
-
-#### C2. Switch `sudo` → `sudo -n` + preflight (hybrid-review #11, testing M8)
-
-**Where**: every `sudo` call in `tests/T_*.sh` and `tests/lib/common.sh` fixture setup; also a new top-of-test preflight check.
-
-**Why**: stale sudo timestamp on dev host or CI without passwordless sudo causes `sudo` to hang on stdin → ctest waits the full 60s timeout → confusing failure. `sudo -n` errors out immediately if no cached credential / no NOPASSWD rule.
+**Where**: `src/loader/loader.cpp` — the `probe_attached_xdp()` helper + the `is_ours` predicate + the `attach()` state-(b) branch.
 
 **Action**:
-1. Add to `tests/lib/common.sh` a `require_passwordless_sudo()` helper that runs `sudo -n true 2>/dev/null` and on failure prints a clear message + exits with **77** (ctest "skip" convention) so the test SKIPs cleanly rather than failing.
-2. Each `tests/T_*.sh` that needs root calls `require_passwordless_sudo` near the top (after sourcing common.sh).
-3. Replace all `sudo …` invocations with `sudo -n …` throughout `tests/`.
+1. Extend the existing `XdpProbe` struct (§5.19 spec, lines 594-604 of design.md) to add a `std::array<__u8, BPF_TAG_SIZE> tag;` field populated from `bpf_prog_info.tag`. `BPF_TAG_SIZE` is libbpf-defined and currently 8.
+2. The `is_ours` predicate becomes: `(mode == SKB) && (name == "mac_filter_prog") && (tag == self_tag)`. The `self_tag` comes from Q1 architect decision (option E or C).
+3. State-(c) refusal message MUST now include the probed tag in hex (load-bearing for the new T_ATTACH_TAG_MISMATCH test): `std::format("XDP prog id {} (name '{}', tag {:02x}{:02x}...{:02x}) on {} — refusing to clobber (tag mismatch)", ...)`. Use `std::format` ranges-style join for the 8-byte array; impl picks format spelling.
+4. Failure of the tag query (e.g. kernel returned `bpf_prog_info.tag` as zeros, or `bpf_prog_get_info_by_fd` returned EPERM) → fail closed (`is_ours = false`), as already specified for the name-check at §5.19 lines 611-616.
 
-#### C3. Replace host-scope `veth_a`/`veth_b` with netns isolation OR uniquified names (hybrid-review testing M4)
+### Item 2 — O_PATH bpffs root fd hardening (extends §5.19 mechanism (iii))
 
-**Where**: `tests/lib/common.sh:20-21` (`IFACE_A=veth_a`, `IFACE_B=veth_b`); fixture create/destroy paths.
+**Where**: `src/loader/loader.cpp` — `ensure_bpffs_dir`, `bpffs_remove_iface`, the inline `std::filesystem::exists(pin_dir)` checks in `attach()` (line 284) and `detach()` (line 390).
 
-**Why**: hard-coded `veth_a`/`veth_b` collide with any real interface a developer or CI host happens to have named the same. Particularly nasty: test cleanup deletes the colliding real interface.
+**Action** (Standard scope per Q2):
+1. Add a local RAII wrapper `BpffsRootFd` in `loader.cpp` anon namespace (NOT in `raii.hpp` — single-callsite per §5.19 RAII pattern) that opens `XDPMF_BPFFS_ROOT` with `O_PATH | O_DIRECTORY | O_NOFOLLOW`, retrying once via `mkdirat(AT_FDCWD, XDPMF_BPFFS_ROOT, 0755) + open` if the initial open returns `ENOENT`. Close fd on destruction. Sole owner.
+2. Replace path-based bpffs operations with fd-relative `*at()` syscalls relative to the root fd:
+   - `std::filesystem::exists(pin_dir)` → `faccessat(root_fd, iface, F_OK, AT_SYMLINK_NOFOLLOW)`. Symlink → behaves as "not exists" AND records a soft warning to stderr (or: refuses outright with the Q3-chosen exit code; architect decides).
+   - `ensure_bpffs_dir(pin_dir)` → `mkdirat(root_fd, iface, 0755)`. Already-exists (`EEXIST`) is OK only if `fstatat(root_fd, iface, &st, AT_SYMLINK_NOFOLLOW)` confirms it's a directory (not symlink).
+   - `bpffs_remove_iface(iface)` → open per-iface dir via `openat(root_fd, iface, O_PATH|O_DIRECTORY|O_NOFOLLOW)`, iterate entries, `unlinkat(iface_fd, entry, 0)` each, then `unlinkat(root_fd, iface, AT_REMOVEDIR)`. Wrap iface_fd in scoped fd RAII.
+3. The "bpffs root itself is a symlink" case: initial `open(XDPMF_BPFFS_ROOT, O_PATH|O_DIRECTORY|O_NOFOLLOW)` returns ELOOP → fail attach with the Q3-chosen exit code, clear stderr message. Do NOT silently `unlink+mkdir` the root — that's destructive and outside this scope.
+4. Existing TOCTOU race window between probe and attach is unchanged (out of scope; would require single-syscall atomic operations not available in libbpf 1.1).
 
-**Action**: architect chooses one of two paths and documents the choice in §5.21:
-- **Path A (preferred — cleaner)**: spin a dedicated network namespace per test (`ip netns add xdpmf-test-$$`), run veth pair + loader + traffic gen inside it; teardown nukes the netns. Adds ~50 LOC of fixture infra but isolates host completely.
-- **Path B (cheaper — pragmatic)**: keep host-scope but uniquify names with PID suffix (`IFACE_A=xdpmf_a_$$`, `IFACE_B=xdpmf_b_$$`). Add a `pre-flight` that errors out if either name already exists on the host. ~10 LOC.
+### Tests (tester writes; architect specifies §6.x in design)
 
-Either path is acceptable. Architect picks based on perceived ROI vs. risk of breaking the (already MVP-1.1B-passed) test suite.
+#### Test 1 — T_ATTACH_TAG_MISMATCH (closes attacker-recompile vector)
 
-#### C4. Fix `prog_count` host-global → per-iface (hybrid-review testing M6)
+**Fixture**: a second `.bpf.c` source `tests/fixtures/mac_filter_alt.bpf.c` with the SAME `SEC(...)` function name `mac_filter_prog` but a different (no-op `return XDP_PASS` minimum) body. Compile to `.bpf.o` via existing `add_bpf_object` CMake function. The bytecode is intentionally different from `src/bpf/mac_filter.bpf.c` → tag differs.
 
-**Where**: `tests/lib/common.sh` (the `prog_count` helper if it exists, otherwise wherever the baseline/final comparison is done — grep for `bpftool prog`).
+**Scenario**: attach the fixture via raw `bpftool prog load + bpftool net attach xdp` (same fixture-attach style as `T_ATTACH_ALIEN_REFUSAL`), then invoke `xdpmacfilter attach --iface ${IFACE_A} …`. Assert exit code = `AttachRefusedAlien` (or Q3-chosen code) + stderr contains both the probed tag (in hex) AND the substring `tag mismatch`.
 
-**Why**: current logic does `bpftool prog show | wc -l` baseline → run test → diff against final. On a host with concurrent BPF activity (other tests, monitoring agents, container runtimes) the delta is racy and incorrect. The correct check is "is OUR program attached to THIS iface?" which is per-iface.
+Negation control: same scenario but using the real `mac_filter.bpf.o` (built from `src/bpf/mac_filter.bpf.c`) as the pre-attached fixture — must hit state-(b) (idempotent reload, exit 0). This proves the tag-check accepts our own program identity AND rejects look-alikes — the actual triangulation.
 
-**Action**: replace the global count with `bpf_xdp_query_id`-equivalent per-iface check using `bpftool net show dev <iface>` or `ip link show <iface> | grep xdp`. Test asserts "after attach: xdp program present on <iface>; after detach: no xdp program on <iface>", not "global prog count delta == 0".
+#### Test 2 — T_BPFFS_ROOT_SYMLINK (closes symlink-vortex vector)
 
-### Section D — New CLI tests (4 items)
+**Pre-setup**: as root, `mkdir /tmp/xdpmf-fake-bpffs && ln -sfn /tmp/xdpmf-fake-bpffs /sys/fs/bpf/xdpmacfilter` (if `/sys/fs/bpf/xdpmacfilter` exists from a prior run, `rm -rf` it first; this test deliberately corrupts the bpffs root for the duration of the test).
 
-Each is a thin shell script (≤30 LOC) registered in `tests/CMakeLists.txt`. None requires root or veth fixtures; they exercise the loader binary's CLI parsing paths only.
+**Cleanup**: `unlink /sys/fs/bpf/xdpmacfilter; rm -rf /tmp/xdpmf-fake-bpffs`. MUST run in `trap EXIT` because the corruption affects all subsequent tests; `tests/CMakeLists.txt` registers this test with `RESOURCE_LOCK` so it doesn't race the others.
 
-#### D1. `tests/T_CLI_HELP_VERSION.sh` (hybrid-review testing LOW)
+**Scenario**: invoke `xdpmacfilter attach --iface ${IFACE_A} --allow MAC_GOOD`. Assert exit code = Q3-chosen exit (4 / 6 / 8 — architect's pick) + stderr contains a recognizable substring (`ELOOP` / `symlink` / `not a directory` — architect spec's exact word).
 
-**Intent**: `xdpmacfilter --help` exits 0 and prints non-empty usage to stdout containing `Usage:` and the subcommand names. `xdpmacfilter --version` exits 0 and prints a single line containing `xdpmacfilter` and a version string (semver-shaped, regex `[0-9]+\.[0-9]+\.[0-9]+`). Both checked.
+Negation control: after cleanup restores the real bpffs root, a fresh attach succeeds. This proves the refusal is symlink-specific, not a permanent break.
 
-**Why**: trivially covered by users in the wild, never asserted by any ctest. Locks the contract that help/version exit cleanly without touching the kernel.
-
-#### D2. `tests/T_CLI_CAPACITY.sh` (hybrid-review testing LOW)
-
-**Intent**: invoke `xdpmacfilter attach --iface lo --allow <N+1 MACs>` where `N = XDPMF_ALLOWLIST_MAX` (64 per design §3). Assert exit code = `CliError` mapped value (look up the actual exit code from `cli.cpp:121-123` "too many --allow entries" path — likely exit **1** for CLI-level error per design §4.1) AND stderr contains the substring `too many --allow entries`.
-
-**Why**: the capacity-limit branch in `cli.cpp` is untested; regression in the bounds check would silently let oversized allow-lists through.
-
-**Helper**: generate `N+1` synthetic MACs in the test via `printf '02:00:00:00:%02x:%02x ' …` loop. No fixture needed since the failure happens before any kernel call.
-
-#### D3. `tests/T_CLI_BAD_MAC.sh` (hybrid-review testing LOW)
-
-**Intent**: invoke `xdpmacfilter attach --iface lo --allow not-a-mac` (and a couple of malformed variants: `gg:gg:gg:gg:gg:gg`, `01:02:03:04:05` short, `01:02:03:04:05:06:07` long). For each, assert exit code = CLI-error (per `cli.cpp` tokenizer) AND stderr mentions malformed-mac in a recognizable way.
-
-**Why**: tokenizer error path uncovered.
-
-#### D4. `tests/T_DETACH_NOTHING.sh` (hybrid-review testing LOW)
-
-**Intent**: invoke `xdpmacfilter detach --iface lo` on an interface that has no XDP program attached and no bpffs dir. Per design §5.4, this should be the no-op recoverable cleanup path (exit 0) introduced in MVP-1.1B item §5.4 4-state machine. Assert exit 0; assert no `error:` in stderr.
-
-**Why**: the "detach nothing" path was added in MVP-1.1B but never asserted by ctest. Locks the contract that detach is idempotent on a clean iface.
-
-**Note for tester**: this test DOES touch the kernel (calls `bpf_xdp_query_id`) so `require_passwordless_sudo` applies. Use `lo` to avoid any veth fixture cost.
+Test 2 sub-variant: per-iface symlink. If the architect chooses Q2 Standard (recommended), add a 1-scenario sub-test in the same script: `mkdir /tmp/xdpmf-fake-iface && ln -sfn /tmp/xdpmf-fake-iface /sys/fs/bpf/xdpmacfilter/${IFACE_A}` then attach — must also refuse via Q3-chosen exit. Same cleanup pattern.
 
 ## Out of scope (explicit)
 
-These are NOT to be touched in this pass — they belong to MVP-2 (separate brief, separate /mint cycle):
-
-- `mac_filter.bpf.c` PERCPU stats migration (perf HIGH, design §5.3 explicit MVP-2)
-- `--mode {generic,native,offload}` CLI flag (perf MED, design §5.6 explicit MVP-2)
-- T_VERIFIER_REJECT + kernel-version probe + `LoaderError::KernelUnsupported` (testing MED, MVP-2)
-- Tag-check security follow-up on top of name-check (sec MED, MVP-2 per §5.19 + §7)
-- O_PATH fd hardening for bpffs root (sec MED, MVP-2 per §7)
-- Removing `mint/test-run.log` from the gitignore list (verified already gitignored AND untracked — no work needed, doc L1 is a stale finding)
+- **PERCPU stats migration** — MVP-2 Perf slice
+- **`--mode {generic,native,offload}` CLI flag** — MVP-2 Perf slice
+- **Kernel-version probe + `LoaderError::KernelUnsupported`** — MVP-2 Robust slice (this pass MUST NOT take exit code 7)
+- **`T_VERIFIER_REJECT`** — MVP-2 Robust slice
+- **Netns isolation for tests (C3 Path A)** — MVP-2 Polish-2 slice
+- **CMake-generation of `PIN_ROOT`** — MVP-2 Polish-2 slice
+- **Version-string sync between CHANGELOG.md and `--version`** — MVP-2 Polish-2 slice
+- **`inject_runt.py:37` inline comment fix** — MVP-2 Polish-2 slice (advisory from MVP-1.1C review)
+- **libbpf-level `pin_root_path` fd-relative pinning (Q2 Maximum)** — too invasive; deferred
+- **TOCTOU window between probe and attach** — requires libbpf changes outside our control; deferred
+- **`loader.hpp` public API changes** — strict invariant: zero changes to `loader.hpp` symbols in this pass
 
 ## Definition of done
 
-- All 12 items addressed per their per-item action specs
-- `mint/design.md` has a new `§5.21` amendment block + 4 new `§6.x` TestStrategy items
-- Build is clean under both default flags and `XDPMF_SANITIZERS=ON` (no regression on the MVP-1.1A sanitizer test)
-- All 9 existing ctest entries still pass (or legitimately SKIP per `T_DROP_MALFORMED` §6.5 + new `require_passwordless_sudo` SKIPs)
-- All 4 new ctest entries pass on the dev host
-- `mint/review.md` round-1 verdict = `pass` (no rework needed)
+- §5.22 amendment block in `mint/design.md` documenting Q1/Q2/Q3 decisions with rationale
+- Up to 2 new §6.x TestStrategy entries for T_ATTACH_TAG_MISMATCH + T_BPFFS_ROOT_SYMLINK
+- `loader.cpp` extended with tag-check + O_PATH hardening per Q1/Q2 decisions
+- `loader.hpp` byte-identical to its current state (verifiable via `git diff`)
+- 2 new ctest entries pass on dev host; 13 existing entries still pass (or legitimately SKIP per §6.5)
+- `XDPMF_SANITIZERS=ON` build clean (no ASAN/UBSAN regressions from new fd-handling code)
+- `mint/review.md` round-1 verdict = `pass`
 - One git commit per phase boundary per workflow B
 
 ## Dependencies
 
-No new system dependencies. `bpftool` is already required by existing tests (used in `T_LOAD_ATTACH`). No new Python modules. No new C++ libraries.
+No new system dependencies. libbpf 1.1+ is already required (B2 in MVP-1.1C). `BPF_TAG_SIZE` and `bpf_prog_info.tag` are stable libbpf API. `mkdirat`/`openat`/`faccessat`/`unlinkat` are POSIX-2008 + Linux. No new C++ libraries.
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 
 ```yaml
 packs:
-  architect:  []                                       # janitorial pass, no new abstractions
+  architect:  []                                       # security-focused but at abstract level
   impl:       [lang/cpp.md, lang/cmake.md]             # no .bpf.c edits this pass
   tester:     [test/bpf-xdp.md]
   reviewer:   []                                       # generic framework + LSP
 ```
-
