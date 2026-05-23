@@ -5,6 +5,28 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-05-23
+
+MVP-2 Perf — PERCPU stats migration + `--mode {generic,native,offload}` CLI flag (second MVP-2 pass).
+
+### Added
+- `--mode {generic,native,offload}` CLI flag on the `attach` subcommand (default `generic` — preserves MVP-1 SKB baseline). Maps to `XDP_FLAGS_SKB_MODE` / `XDP_FLAGS_DRV_MODE` / `XDP_FLAGS_HW_MODE`. `detach` does NOT accept `--mode` (mode is auto-detected from the §5.20 all-modes probe; explicit rejection with exit 1 + `attach-only` stderr).
+- `enum class XdpMode` in `loader.hpp` (public API addition; second relaxation of the MVP-2 Sec "byte-identical" invariant — intentional, the cleanest CLI-to-loader carrier).
+- `T_MODE_GENERIC_DEFAULT` — default-mode attach + mode-probe assertion (accepts string `generic`/`xdpgeneric` AND numeric `2` for kernel/iproute2 variance).
+- `T_MODE_NATIVE_UNSUPPORTED` — `attach --mode native --iface lo` → exit 3 + `native` stderr (kernel rejects native XDP on loopback).
+- `T_PERCPU_STATS_SUM` — fixture-level PERCPU sum-correctness test. Seeds `STAT_PASS` with broadcast value V=42 via `bpftool map update`, asserts `read_stats.py` returns `nr_cpus * V` (discriminator: a CPU-0-only read would return V, not the sum).
+- `T_MODE_DETACH_REJECTS` — `detach --mode <X>` → exit 1 + `attach-only` stderr. Two sub-cases (`native` + `generic`) prove the rule is flag-presence-driven, not flag-value-driven.
+
+### Changed
+- `stats` BPF map type: `BPF_MAP_TYPE_ARRAY` → `BPF_MAP_TYPE_PERCPU_ARRAY`. Closes counter-loss-under-load + cache-line-bouncing flagged by hybrid-review.md perf HIGH. First `.bpf.c` edit since MVP-1.
+- `read_stats.py` sums across CPUs (bpftool `--json` PERCPU schema: `entry["values"]` plural array). Output format unchanged for callers.
+- `is_ours` identity-gate predicate mode-axis: relaxed from `(mode == SKB)` to `(mode != None)` — accepts our prog in any of SKB / NATIVE / HW. Required for multi-mode attach correctness.
+- `detach()` now passes the §5.20-probed mode through to `bpf_xdp_detach` instead of hardcoded `XDP_FLAGS_SKB_MODE` — closes the symmetric mode-handling gap.
+- `--help` text now documents `--mode` (attach-only).
+
+### Fixed
+- Pre-existing typo in design.md §3.4 callout (`Decision §5.5` → `Decision §5.3`) — opportunistic cleanup during MVP-2 Perf §5.3 supersede edit.
+
 ## [0.2.0] — 2026-05-23
 
 MVP-2 Sec — §5.19 tag-check identity gate + O_PATH bpffs root hardening (first MVP-2 pass).
@@ -125,6 +147,7 @@ got stuck.
 | MVP-1.1B (source-change refactor) | 4 items: §5.4 4-state machine, identity verification, all-modes probe, alien-refusal test | 12m | 11m | 6m | 30m | round 1 ✓ |
 | MVP-1.1C (polish batch) | 12 items × 4 sections + D4 detach idempotency | 60m | 18m | 10m | 88m | round 1 ✓ |
 | MVP-2 Sec (security pass) | 2 items + 2 tests + 3 architect decisions (Q1/Q2/Q3) + Phase B amendments (detach symmetry, §6.14 reshape, tag-stability finding) + 1-line loader.hpp relaxation | 34m | 34m | 7m | 75m | round 1 ✓ (0 findings) |
+| MVP-2 Perf (performance pass) | 3 items + 4 tests + 3 architect decisions (Q1/Q2/Q3) + Phase B test fixups (3 empirical issues: bpftool broadcast-only, jq numeric mode, stale-pin cleanup) + 2 OUT-OF-TRIANGULATION spec-wording fixes inline-merged + public-API relaxation (XdpMode enum + AttachConfig.mode field) | 14m | 24m | 10m | 48m | round 1 ✓ (0 findings) |
 
 Phase 1 ≈ architect time + human-gate read/approve.
 Phase 2–3 ≈ impl + tester running in parallel, plus the build-green / tests-ready handoff.
