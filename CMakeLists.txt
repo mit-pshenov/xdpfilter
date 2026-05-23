@@ -45,7 +45,7 @@ add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-stdlib=libc++>)
 add_link_options(-stdlib=libc++)
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(LIBBPF REQUIRED IMPORTED_TARGET libbpf)
+pkg_check_modules(LIBBPF REQUIRED IMPORTED_TARGET libbpf>=1.1)
 
 # XDPMF_SANITIZERS (design §5.18): test-only ASAN+UBSAN build mode for the
 # C++ loader. Default OFF — when OFF, the build is byte-identical to the

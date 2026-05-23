@@ -25,6 +25,7 @@
 
 #include <cerrno>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <format>
@@ -390,16 +391,24 @@ std::uint32_t detach(const std::string& iface)
     const bool pin_dir_exists = std::filesystem::exists(pin_dir);
 
     if (probe.prog_id == 0) {
+        // Symmetric idempotency per MVP-1.1C §5.21 D4: detach is a no-op
+        // when there's nothing to detach. Both (a) "truly nothing" and
+        // (d) "orphan pin dir only" return 0 from this layer. main.cpp
+        // gates its "detached prog id N" stdout on prog_id != 0, so the
+        // caller-facing message comes from here for both branches.
         if (pin_dir_exists) {
-            // State (d): orphan pin dir from a crash mid-attach. Recoverable
-            // no-op cleanup per §5.4 — exit 0, NOT DetachFailed.
+            // (d) — orphan pin dir from a crash mid-attach. Clean it up.
             bpffs_remove_iface(iface);
+            std::puts(std::format("removed orphan pin dir for {} (no XDP was attached)",
+                                  iface).c_str());
             return 0;
         }
-        // State (a) inside detach(): user asked to detach something that
-        // isn't there. That IS an error.
-        throw_loader(LoaderError::DetachFailed,
-                     std::format("nothing attached to {}", iface));
+        // (a) — nothing attached and no pin dir. Loudly confirm the no-op
+        // so an operator scripting against `xdpmacfilter detach` can tell
+        // the difference between "we cleaned something" and "nothing was
+        // there to clean".
+        std::puts(std::format("no XDP attached to {} (no-op)", iface).c_str());
+        return 0;
     }
 
     if (!probe.is_ours || !pin_dir_exists) {

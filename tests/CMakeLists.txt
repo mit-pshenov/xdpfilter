@@ -33,7 +33,10 @@ set_tests_properties(T_BUILD PROPERTIES
     TIMEOUT 300
 )
 
-# All other tests use the same veth_a/veth_b fixture → must be serialized.
+# All other tests use the same veth (${IFACE_A}/${IFACE_B}, PID-suffixed
+# per §5.21 C3) fixture → must be serialized via RESOURCE_LOCK.
+# Per §5.21 C2: every root-using test gets SKIP_RETURN_CODE 77 so
+# require_passwordless_sudo can SKIP cleanly when sudo would prompt.
 foreach(T IN ITEMS
     T_LOAD_ATTACH
     T_PASS_ALLOWED
@@ -52,13 +55,14 @@ foreach(T IN ITEMS
         ENVIRONMENT "${TEST_ENV}"
         RESOURCE_LOCK xdp_fixture
         TIMEOUT 60
+        SKIP_RETURN_CODE 77
     )
 endforeach()
 
-# Per design §6.5: this test may legitimately not be assertable on kernels
-# that pad short Ethernet frames before XDP sees them.  Exit code 77 →
-# ctest reports the test as Skipped (with the reason printed to stdout).
-set_tests_properties(T_DROP_MALFORMED PROPERTIES SKIP_RETURN_CODE 77)
+# Per design §6.5: this test may also exit 77 on kernels that pad short
+# Ethernet frames before XDP sees them.  Same SKIP_RETURN_CODE 77
+# already set above by the foreach loop (both the pad-skip and the
+# require_passwordless_sudo skip use the same convention).
 
 # Per design §6.7: negation control deliberately asserts a value that is
 # wrong-by-spec.  The script exits NON-ZERO on the (expected) failure;
@@ -83,4 +87,39 @@ set_tests_properties(T_SANITIZER_BUILD PROPERTIES
     ENVIRONMENT "${TEST_ENV}"
     RESOURCE_LOCK xdp_fixture
     TIMEOUT 180
+    SKIP_RETURN_CODE 77
+)
+
+# ─────────────────────────────────────────────────────────────────────────
+# MVP-1.1C additions (§5.21 D1-D4 / §6.10-§6.13).
+# D1/D2/D3 are pure CLI-parser tests — no root, no veth, no RESOURCE_LOCK.
+# D4 needs CAP_BPF for bpf_xdp_query — uses `lo` instead of veth, so no
+# RESOURCE_LOCK either (lo is shared but we make no state changes).
+# All four use TIMEOUT 10 (binary launch + parse + exit only).
+foreach(T IN ITEMS
+    T_CLI_HELP_VERSION
+    T_CLI_CAPACITY
+    T_CLI_BAD_MAC
+)
+    add_test(
+        NAME ${T}
+        COMMAND bash ${TEST_DIR}/${T}.sh
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    set_tests_properties(${T} PROPERTIES
+        ENVIRONMENT "${TEST_ENV}"
+        TIMEOUT 10
+    )
+endforeach()
+
+# T_DETACH_NOTHING needs passwordless sudo (calls bpf_xdp_query under root).
+add_test(
+    NAME T_DETACH_NOTHING
+    COMMAND bash ${TEST_DIR}/T_DETACH_NOTHING.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_DETACH_NOTHING PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    TIMEOUT 10
+    SKIP_RETURN_CODE 77
 )

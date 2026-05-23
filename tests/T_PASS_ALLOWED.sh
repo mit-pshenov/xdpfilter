@@ -6,21 +6,24 @@
 # Outcome : stats[PASS]==1 AND stats[DROP_DENY]==0 AND stats[DROP_MAL]==0.
 set -euo pipefail
 source "${TEST_DIR}/lib/common.sh"
+require_passwordless_sudo
 
 LOADER_BIN=$(find_loader)
 
 trap cleanup_veth EXIT
 setup_veth
 
-sudo "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
+sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
 sleep 0.3
 
 # Inject exactly one well-formed frame with the allowed src MAC.
 inject_eth "${IFACE_B}" "${MAC_GOOD}" "${MAC_DST}"
 
-# Wait for the BPF program to finish (single sender + single packet ⇒
-# very short window, but be generous).
-sleep 0.3
+# Per §5.21 C1: replace post-inject sleep with deterministic poll until
+# the BPF program has accounted for our single frame in any stats slot.
+# Timeout means failure (no frame was ever counted) — let the assertion
+# below name the specific slot that didn't move.
+wait_for_stats_sum "${IFACE_A}" 1 || true
 
 read -r pass deny mal < <(read_stats)
 echo "stats: PASS=${pass} DROP_DENY=${deny} DROP_MALFORMED=${mal}"

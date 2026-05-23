@@ -8,21 +8,13 @@
 
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <variant>
-#include <vector>
 
 #include "common/mac_filter.h"
+#include "loader.hpp"  // AttachConfig / DetachConfig (moved here in MVP-1.1C §5.21 A1)
 
 namespace xdpmf {
-
-struct AttachConfig {
-    std::string             iface;
-    std::vector<xdpmf_mac>   allow;   // size ≤ XDPMF_ALLOWLIST_MAX, deduplicated
-};
-
-struct DetachConfig {
-    std::string iface;
-};
 
 struct HelpRequest    {};
 struct VersionRequest {};

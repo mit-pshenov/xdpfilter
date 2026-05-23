@@ -13,10 +13,23 @@
 #include <cstdint>
 #include <string>
 #include <system_error>
+#include <vector>
 
-#include "cli.hpp"  // AttachConfig
+#include "common/mac_filter.h"  // struct xdpmf_mac
 
 namespace xdpmf {
+
+/* Inputs to attach() / detach(). Owned by loader.hpp so the control plane
+ * does not depend on the CLI parser (cli.hpp includes us, not vice versa).
+ * Layout is binary-compatible with the pre-MVP-1.1C placement in cli.hpp. */
+struct AttachConfig {
+    std::string             iface;
+    std::vector<xdpmf_mac>  allow;   // size ≤ XDPMF_ALLOWLIST_MAX, deduplicated
+};
+
+struct DetachConfig {
+    std::string iface;
+};
 
 enum class LoaderError : int {
     LoadFailed         = 2,

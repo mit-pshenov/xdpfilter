@@ -29,10 +29,16 @@ int run_attach(const xdpmf::AttachConfig& cfg)
 
 int run_detach(const xdpmf::DetachConfig& cfg)
 {
+    // detach() returns 0 for the idempotent no-op paths (§5.21 D4) and
+    // prints its own stdout message in those cases. Only emit the "real
+    // detach" success line when a non-zero prog id was actually removed
+    // — otherwise we'd double-print over loader.cpp's message.
     const auto prog_id = xdpmf::detach(cfg.iface);
-    const std::string line = std::format("detached prog id {} from {}\n",
-                                         prog_id, cfg.iface);
-    std::fputs(line.c_str(), stdout);
+    if (prog_id != 0) {
+        const std::string line = std::format("detached prog id {} from {}\n",
+                                             prog_id, cfg.iface);
+        std::fputs(line.c_str(), stdout);
+    }
     return kExitOk;
 }
 

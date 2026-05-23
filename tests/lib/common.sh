@@ -4,12 +4,16 @@
 # Provides:
 #   IFACE_A / IFACE_B / MAC_GOOD / MAC_BAD / MAC_DST   (design §6 constants)
 #   PIN_ROOT / PIN_DIR
+#   require_passwordless_sudo → exits 77 (ctest SKIP) if `sudo -n true` fails
 #   find_loader               → echoes path of xdpmacfilter binary
-#   setup_veth                → fresh veth_a/veth_b pair, both UP
+#   setup_veth                → fresh ${IFACE_A}/${IFACE_B} pair, both UP
 #   cleanup_veth              → wipe veth + pin dir (idempotent, suitable for trap)
 #   read_stats <pin>          → echoes "<pass> <drop_deny> <drop_malformed>"
+#   wait_for_stats_sum <iface> <expected_sum> [timeout_ms=2000] [poll_ms=20]
+#                             → polls stats pin until sum == expected_sum or timeout
 #   inject_eth <iface> <src> <dst>            → scapy-based Ethernet frame
 #   inject_runt <iface>                       → sub-14-byte raw frame
+#   xdp_prog_id <iface>       → echoes attached XDP prog id, empty if none
 #
 # Env consumed (set by ctest):
 #   BUILD_DIR / SOURCE_DIR / TEST_DIR
@@ -17,13 +21,31 @@
 set -euo pipefail
 
 # ── Constants per design §6 TestStrategy ──────────────────────────────────
-IFACE_A=veth_a
-IFACE_B=veth_b
+# Per §5.21 C3 (MVP-1.1C): iface names are PID-suffixed to avoid collision
+# with any pre-existing host interface (`xdpmf_` project prefix + `$$`).
+# setup_veth() preflights for collisions and errors out if either name is
+# already in use on the host.
+IFACE_A=xdpmf_a_$$
+IFACE_B=xdpmf_b_$$
 MAC_GOOD="02:00:00:00:00:01"
 MAC_BAD="02:00:00:00:00:02"
 MAC_DST="ff:ff:ff:ff:ff:ff"
+# MUST match XDPMF_BPFFS_ROOT in src/common/mac_filter.h
 PIN_ROOT=/sys/fs/bpf/xdpmacfilter
 PIN_DIR=${PIN_ROOT}/${IFACE_A}
+
+# ── Passwordless-sudo precondition (per §5.21 C2) ─────────────────────────
+# Tests that require root call this near the top after sourcing common.sh.
+# On failure (sudo would prompt or be denied), exit 77 — ctest's
+# SKIP_RETURN_CODE convention; the test is reported as Skipped, not Failed.
+require_passwordless_sudo() {
+    if ! sudo -n true 2>/dev/null; then
+        echo "SKIP: passwordless sudo not available (sudo -n true failed)" >&2
+        echo "      this test needs CAP_BPF/CAP_NET_ADMIN; run ctest as root" >&2
+        echo "      or configure NOPASSWD sudo for the test user." >&2
+        exit 77
+    fi
+}
 
 # ── Locate the loader binary in BUILD_DIR ─────────────────────────────────
 find_loader() {
@@ -48,11 +70,25 @@ find_loader() {
 
 # ── Fixture lifecycle ─────────────────────────────────────────────────────
 setup_veth() {
-    # Idempotent: wipe any prior state first.
-    sudo ip link del "${IFACE_A}" 2>/dev/null || true
-    sudo rm -rf "${PIN_DIR}"     2>/dev/null || true
+    # Per §5.21 C3 preflight: the PID-suffixed names are vanishingly unlikely
+    # to collide on a sane host, but if they DO collide we error out loudly
+    # rather than silently `ip link del`-ing whoever owns the name.  This is
+    # an honest fixture failure (exit 1), NOT a skip (77).
+    if ip link show "${IFACE_A}" >/dev/null 2>&1; then
+        echo "ERROR: ${IFACE_A} already exists on host — fixture name collision" >&2
+        echo "       refusing to clobber; delete it manually if it is stale." >&2
+        exit 1
+    fi
+    if ip link show "${IFACE_B}" >/dev/null 2>&1; then
+        echo "ERROR: ${IFACE_B} already exists on host — fixture name collision" >&2
+        echo "       refusing to clobber; delete it manually if it is stale." >&2
+        exit 1
+    fi
+    # Defensive clear of any prior pin dir for this iface name (PID-suffix
+    # uniqueness makes this nearly impossible, but cheap insurance).
+    sudo -n rm -rf "${PIN_DIR}"     2>/dev/null || true
 
-    sudo ip link add "${IFACE_A}" type veth peer name "${IFACE_B}"
+    sudo -n ip link add "${IFACE_A}" type veth peer name "${IFACE_B}"
 
     # Suppress kernel-emitted background traffic on the veth pair so
     # that exact-equality stat assertions are not polluted.  Diagnosis
@@ -62,31 +98,33 @@ setup_veth() {
     #      link-local address is generated → no DAD, no MLD, no RS),
     #   2) set addrgen mode = none,
     #   3) turn ARP off (raw L2 frames don't need it).
-    sudo sysctl -w "net.ipv6.conf.${IFACE_A}.disable_ipv6=1" >/dev/null 2>&1 || true
-    sudo sysctl -w "net.ipv6.conf.${IFACE_B}.disable_ipv6=1" >/dev/null 2>&1 || true
-    sudo ip link set "${IFACE_A}" addrgenmode none 2>/dev/null || true
-    sudo ip link set "${IFACE_B}" addrgenmode none 2>/dev/null || true
-    sudo ip link set "${IFACE_A}" arp off          2>/dev/null || true
-    sudo ip link set "${IFACE_B}" arp off          2>/dev/null || true
+    sudo -n sysctl -w "net.ipv6.conf.${IFACE_A}.disable_ipv6=1" >/dev/null 2>&1 || true
+    sudo -n sysctl -w "net.ipv6.conf.${IFACE_B}.disable_ipv6=1" >/dev/null 2>&1 || true
+    sudo -n ip link set "${IFACE_A}" addrgenmode none 2>/dev/null || true
+    sudo -n ip link set "${IFACE_B}" addrgenmode none 2>/dev/null || true
+    sudo -n ip link set "${IFACE_A}" arp off          2>/dev/null || true
+    sudo -n ip link set "${IFACE_B}" arp off          2>/dev/null || true
 
-    sudo ip link set "${IFACE_A}" up
-    sudo ip link set "${IFACE_B}" up
+    sudo -n ip link set "${IFACE_A}" up
+    sudo -n ip link set "${IFACE_B}" up
 
     # Per pack idiom: rp_filter can drop frames before XDP runs.
-    sudo sysctl -w "net.ipv4.conf.${IFACE_A}.rp_filter=0" >/dev/null 2>&1 || true
-    sudo sysctl -w "net.ipv4.conf.${IFACE_B}.rp_filter=0" >/dev/null 2>&1 || true
-    sudo sysctl -w "net.ipv4.conf.all.rp_filter=0"        >/dev/null 2>&1 || true
+    sudo -n sysctl -w "net.ipv4.conf.${IFACE_A}.rp_filter=0" >/dev/null 2>&1 || true
+    sudo -n sysctl -w "net.ipv4.conf.${IFACE_B}.rp_filter=0" >/dev/null 2>&1 || true
+    sudo -n sysctl -w "net.ipv4.conf.all.rp_filter=0"        >/dev/null 2>&1 || true
 
     # Let any residual chatter quiesce BEFORE XDP attaches; anything
     # that fires now is invisible to the BPF program (not attached yet).
+    # Per §5.21 C1 this is a fixture-setup sleep (carrier-up + quiesce),
+    # NOT a post-inject synchronization — it stays as-is.
     sleep 0.5
 }
 
 cleanup_veth() {
     set +e
     # Deleting one veth end removes the peer too, and implicitly detaches XDP.
-    sudo ip link del "${IFACE_A}" 2>/dev/null
-    sudo rm -rf "${PIN_DIR}"     2>/dev/null
+    sudo -n ip link del "${IFACE_A}" 2>/dev/null
+    sudo -n rm -rf "${PIN_DIR}"     2>/dev/null
     set -e
 }
 
@@ -94,20 +132,47 @@ cleanup_veth() {
 # Echoes 3 space-separated u64 counters: pass drop_deny drop_malformed
 read_stats() {
     local pin="${1:-${PIN_DIR}/stats}"
-    sudo python3 "${TEST_DIR}/lib/read_stats.py" "${pin}"
+    sudo -n python3 "${TEST_DIR}/lib/read_stats.py" "${pin}"
+}
+
+# ── Stats-sum poll helper (per §5.21 C1, MVP-1.1C) ───────────────────────
+# Polls the pinned stats map until the SUM of all 3 counters equals
+# expected_sum or until timeout.  Replaces post-inject `sleep 0.3` /
+# `sleep 0.5` callsites — tighter loop, deterministic on fast hosts,
+# fail-fast on slow hosts.
+#
+# Usage: wait_for_stats_sum <iface> <expected_sum> [timeout_ms=2000] [poll_ms=20]
+# Returns: 0 on match, 1 on timeout.
+wait_for_stats_sum() {
+    local iface="$1" expected="$2"
+    local timeout_ms="${3:-2000}" poll_ms="${4:-20}"
+    local pin="${PIN_ROOT}/${iface}/stats"
+    local waited_ms=0
+    local p d m sum
+    while (( waited_ms < timeout_ms )); do
+        if read -r p d m < <(sudo -n python3 "${TEST_DIR}/lib/read_stats.py" "${pin}" 2>/dev/null); then
+            sum=$(( p + d + m ))
+            if (( sum == expected )); then
+                return 0
+            fi
+        fi
+        sleep "$(awk -v ms="${poll_ms}" 'BEGIN{printf "%.3f", ms/1000.0}')"
+        waited_ms=$(( waited_ms + poll_ms ))
+    done
+    return 1
 }
 
 # ── Frame injection (scapy / raw AF_PACKET) ──────────────────────────────
 # inject_eth <iface> <src_mac> <dst_mac>
 inject_eth() {
     local iface="$1" src="$2" dst="$3"
-    sudo python3 "${TEST_DIR}/inject/inject_eth.py" "${iface}" "${src}" "${dst}"
+    sudo -n python3 "${TEST_DIR}/inject/inject_eth.py" "${iface}" "${src}" "${dst}"
 }
 
 # inject_runt <iface> — sub-14-byte frame for malformed-frame test.
 inject_runt() {
     local iface="$1"
-    sudo python3 "${TEST_DIR}/inject/inject_runt.py" "${iface}"
+    sudo -n python3 "${TEST_DIR}/inject/inject_runt.py" "${iface}"
 }
 
 # ── XDP-on-iface query ────────────────────────────────────────────────────
@@ -120,7 +185,10 @@ xdp_prog_id() {
     ' | head -n1
 }
 
-# ── BPF prog count snapshot (for idempotency assertion) ──────────────────
+# ── BPF prog count snapshot (kept for legacy use) ────────────────────────
+# Per §5.21 C4, the §6.6 baseline/final clause is dropped — this helper
+# is no longer the §6.6 ownership signal (per-iface xdp_prog_id is).
+# Retained for any out-of-tree or diagnostic use.
 prog_count() {
-    sudo bpftool prog show --json 2>/dev/null | jq 'length'
+    sudo -n bpftool prog show --json 2>/dev/null | jq 'length'
 }

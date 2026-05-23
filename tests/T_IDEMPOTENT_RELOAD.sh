@@ -1,63 +1,53 @@
 #!/bin/bash
 # T_IDEMPOTENT_RELOAD — design §6.6: no leaked kernel objects (acceptance #6).
 #
-# Trigger :
-#   1. baseline = count of bpftool prog show entries
-#   2. attach (exit 0)
-#   3. attach again — must succeed (detect-and-detach "ours", §5.4)
-#   4. detach (exit 0)
-#   5. final = count of bpftool prog show entries
-# Outcome : final == baseline AND ${PIN_DIR} does NOT exist
-#           AND no XDP attached to veth_a.
+# Trigger (post-§5.21 C4 — baseline/final prog-count steps DROPPED, per-iface
+# XDP-presence check substituted):
+#   1. attach (exit 0)
+#   2. attach again — must succeed (detect-and-detach "ours", §5.4)
+#   3. detach (exit 0)
+# Outcome : post-detach `xdp_prog_id ${IFACE_A}` returns empty
+#           AND ${PIN_DIR} does NOT exist
+#           AND `ip -j link show ${IFACE_A}` shows no XDP attached.
 #
 # (Sub-variant §6.6 — alien-program refusal — is OPTIONAL per design and
-# is NOT exercised here.)
+# is NOT exercised here; promoted to standalone T_ATTACH_ALIEN_REFUSAL.)
 set -euo pipefail
 source "${TEST_DIR}/lib/common.sh"
+require_passwordless_sudo
 
 LOADER_BIN=$(find_loader)
 
 trap cleanup_veth EXIT
 setup_veth
 
-baseline=$(prog_count)
-echo "baseline prog count = ${baseline}"
-
 echo "=== attach #1"
-sudo "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
+sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
 sleep 0.2
-mid=$(prog_count)
-echo "after attach #1: prog count = ${mid}"
 
 echo "=== attach #2 (must replace ours, not refuse)"
-sudo "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
+sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
 sleep 0.2
 
 echo "=== detach"
-sudo "${LOADER_BIN}" detach --iface "${IFACE_A}"
+sudo -n "${LOADER_BIN}" detach --iface "${IFACE_A}"
 sleep 0.2
 
 fail=0
 
-# Pin dir must be gone.
-if [[ -e "${PIN_DIR}" ]]; then
+# Pin dir must be gone — gate via sudo so /sys/fs/bpf mode 1700 doesn't
+# cause a false-negative absence assertion.
+if sudo -n test -e "${PIN_DIR}"; then
     echo "FAIL: ${PIN_DIR} still exists after detach" >&2
-    sudo ls -la "${PIN_DIR}" >&2 || true
+    sudo -n ls -la "${PIN_DIR}" >&2 || true
     fail=1
 fi
 
-# No XDP on veth_a.
+# No XDP on ${IFACE_A} — per-iface presence check (§5.21 C4 replaces the
+# global `bpftool prog show | wc -l` delta).
 left=$(xdp_prog_id "${IFACE_A}")
 if [[ -n "${left}" ]]; then
     echo "FAIL: XDP still attached to ${IFACE_A} (prog_id=${left})" >&2
-    fail=1
-fi
-
-# Prog count must be back to baseline.
-final=$(prog_count)
-echo "final prog count = ${final}"
-if [[ "${baseline}" != "${final}" ]]; then
-    echo "FAIL: prog count leaked (baseline=${baseline} final=${final})" >&2
     fail=1
 fi
 

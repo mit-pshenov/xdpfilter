@@ -27,6 +27,7 @@
 # (§6.7). This pass is purely additive.
 set -euo pipefail
 source "${TEST_DIR}/lib/common.sh"
+require_passwordless_sudo
 
 : "${SOURCE_DIR:?SOURCE_DIR must be set by ctest}"
 
@@ -79,7 +80,7 @@ setup_veth
 # ── Step 4: attach via sanitized binary, capture stderr ──────────────────
 echo "=== T_SANITIZER_BUILD: attach (sanitized) iface=${IFACE_A} allow=${MAC_GOOD}"
 set +e
-sudo "${SANITIZED_LOADER}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" \
+sudo -n "${SANITIZED_LOADER}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" \
     2>>"${STDERR_FILE}"
 attach_rc=$?
 set -e
@@ -87,7 +88,8 @@ sleep 0.3
 
 # ── Step 5: inject one well-formed allowed frame ────────────────────────
 inject_eth "${IFACE_B}" "${MAC_GOOD}" "${MAC_DST}"
-sleep 0.3
+# Per §5.21 C1: replace post-inject sleep with stats-sum poll.
+wait_for_stats_sum "${IFACE_A}" 1 || true
 
 # ── Step 6: read stats ──────────────────────────────────────────────────
 read -r pass deny mal < <(read_stats)
@@ -96,7 +98,7 @@ echo "stats: PASS=${pass} DROP_DENY=${deny} DROP_MALFORMED=${mal}"
 # ── Step 7: detach via sanitized binary, capture stderr ─────────────────
 echo "=== T_SANITIZER_BUILD: detach (sanitized)"
 set +e
-sudo "${SANITIZED_LOADER}" detach --iface "${IFACE_A}" 2>>"${STDERR_FILE}"
+sudo -n "${SANITIZED_LOADER}" detach --iface "${IFACE_A}" 2>>"${STDERR_FILE}"
 detach_rc=$?
 set -e
 

@@ -70,6 +70,32 @@ fill `struct bpf_prog_info` identically. Used the generic form to stay
 within libbpf 1.1 API; behaviour is byte-equivalent to the design's
 chosen name. Documented inline at the call site in `loader.cpp`.
 
+## MVP-1.1C internal choice — main.cpp stdout gating for idempotent detach
+
+Design §5.21 D4 / §4.3 specifies that `detach()` returns 0 in the
+no-op idempotent cases (state (a) and, since MVP-1.1B, state (d)) and
+prints a state-specific stdout message ("no XDP attached to {}
+(no-op)" for state (a); "removed orphan pin dir for {} (no XDP was
+attached)" for state (d)). The pre-MVP-1.1C `main.cpp` `run_detach()`
+unconditionally printed `"detached prog id {} from {}"` regardless of
+the returned id, which would have produced a confusing double-print
+once `detach()` started emitting its own no-op messages.
+
+Resolution: `detach()` now prints the state-(a)/(d) message directly
+from `loader.cpp`, and `main.cpp` `run_detach()` only prints the
+"detached prog id N from {}" line when `prog_id != 0`. Effect:
+- state (a): one stdout line "no XDP attached to {} (no-op)" (new).
+- state (d): one stdout line "removed orphan pin dir for {} (no XDP
+  was attached)" (was: silent prog-id-0 line; now matches §5.19 spec).
+- state (b): unchanged "detached prog id N from {}".
+
+The state-(d) line was already specified in design §5.19 but had been
+emitted only as the wrong "detached prog id 0 from {}" pre-MVP-1.1C —
+the D4 amendment naturally surfaced this alignment, so it was fixed
+in the same commit (one-line gate in main.cpp). Pure stdout cosmetics,
+no exit-code or behaviour change beyond what §5.21 D4 already
+mandates. No existing test asserts on the old wrong line.
+
 ## Smoke-check results
 
 - `cmake --build build` → exit 0, zero warnings.

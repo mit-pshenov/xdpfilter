@@ -6,17 +6,19 @@
 # Outcome : stats[DROP_DENY]==1 AND stats[PASS]==0 AND stats[DROP_MAL]==0.
 set -euo pipefail
 source "${TEST_DIR}/lib/common.sh"
+require_passwordless_sudo
 
 LOADER_BIN=$(find_loader)
 
 trap cleanup_veth EXIT
 setup_veth
 
-sudo "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
+sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
 sleep 0.3
 
 inject_eth "${IFACE_B}" "${MAC_BAD}" "${MAC_DST}"
-sleep 0.3
+# Per §5.21 C1: replace post-inject sleep with stats-sum poll.
+wait_for_stats_sum "${IFACE_A}" 1 || true
 
 read -r pass deny mal < <(read_stats)
 echo "stats: PASS=${pass} DROP_DENY=${deny} DROP_MALFORMED=${mal}"

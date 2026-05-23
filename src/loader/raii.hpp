@@ -117,10 +117,17 @@ private:
 /* ---------- Bpffs per-iface directory (ownership marker) ---------- */
 
 /*
- * Owns the lifetime of /sys/fs/bpf/xdpmacfilter/<iface>/. Construct with
- * the desired path; the directory is NOT created automatically — call
- * create() or arm() depending on whether you want it created or just
- * tracked-for-removal. release() prevents removal on destruction.
+ * Tracks the lifetime of /sys/fs/bpf/xdpmacfilter/<iface>/ for cleanup
+ * purposes. This class does NOT create the directory — creation happens
+ * in loader.cpp via std::filesystem::create_directories() before the
+ * BpffsDir is armed. The owner workflow is:
+ *   1) construct BpffsDir with the target path,
+ *   2) std::filesystem::create_directories(path) in loader.cpp,
+ *   3) arm() to enable removal-on-destruction (rollback path),
+ *   4) on success: release() so the dir survives loader exit
+ *      (kernel keeps the pinned maps live).
+ * If arm() was called but release() was not (e.g. throw during attach),
+ * the destructor removes the dir tree.
  */
 class BpffsDir {
 public:

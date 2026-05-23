@@ -15,13 +15,14 @@
 # surfacing the regression.
 set -euo pipefail
 source "${TEST_DIR}/lib/common.sh"
+require_passwordless_sudo
 
 LOADER_BIN=$(find_loader)
 
 trap cleanup_veth EXIT
 setup_veth
 
-sudo "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
+sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
 sleep 0.3
 
 # Inject a DISALLOWED MAC — spec says this MUST be dropped.

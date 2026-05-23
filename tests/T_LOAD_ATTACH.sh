@@ -10,6 +10,7 @@
 # tests below mean anything.
 set -euo pipefail
 source "${TEST_DIR}/lib/common.sh"
+require_passwordless_sudo
 
 LOADER_BIN=$(find_loader)
 echo "loader=${LOADER_BIN}"
@@ -17,14 +18,17 @@ echo "loader=${LOADER_BIN}"
 trap cleanup_veth EXIT
 setup_veth
 
-sudo "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
+sudo -n "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"
 
 # Allow the attach to settle (verifier+JIT, link netlink ack).
 sleep 0.3
 
-[[ -e "${PIN_DIR}/allowlist" ]] \
+# /sys/fs/bpf may be mode 1700 (root-only traversal) on some hosts —
+# gate the existence check via `sudo -n test` so it works regardless of
+# bpffs perms.
+sudo -n test -e "${PIN_DIR}/allowlist" \
     || { echo "FAIL: ${PIN_DIR}/allowlist pin missing" >&2; exit 1; }
-[[ -e "${PIN_DIR}/stats" ]] \
+sudo -n test -e "${PIN_DIR}/stats" \
     || { echo "FAIL: ${PIN_DIR}/stats pin missing"     >&2; exit 1; }
 
 prog_id=$(xdp_prog_id "${IFACE_A}")

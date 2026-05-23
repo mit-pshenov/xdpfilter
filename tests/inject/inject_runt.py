@@ -13,9 +13,11 @@ XDP will see a 14-byte frame and the malformed counter will NOT bump
 allow-list).  The calling test detects that situation and reports SKIP.
 
 We deliberately use byte values that, after zero-padding, would produce
-a src MAC of 02:00:00:00:00:99 (NOT MAC_BAD, NOT MAC_GOOD) so the test
+a src MAC of 02:00:00:00:00:00 (NOT MAC_BAD, NOT MAC_GOOD) so the test
 can unambiguously distinguish "malformed dropped" vs "kernel padded →
-denied".  Only the first 6 bytes (dst MAC) plus a partial 7th survive.
+denied".  The wire payload is 13 bytes — full 6-byte dst MAC + full
+6-byte src MAC + 1 ethertype byte — one byte short of a valid Ethernet
+header.
 """
 import socket
 import sys
