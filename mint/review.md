@@ -1,4 +1,4 @@
-# Review — MVP-1 L2 MAC allow-list XDP filter (mint triangulation, round 1)
+# Review — MVP-1.1A: hybrid-review quick wins (refactor mode) (mint triangulation)
 
 ## Verdict
 `pass`
@@ -7,112 +7,135 @@
 
 | Framework point | Findings | Tags |
 |---|---|---|
-| 1. Spec ↔ Code | 1 informational (return-type alias) | (no blocking tags) |
+| 1. Spec ↔ Code | 1 (info-only borderline) | [INFO × 1] |
 | 2. Spec ↔ Tests | 0 | — |
-| 3. Code ↔ Tests | 0 (7/7 ctest entries green, 1 documented SKIP) | — |
+| 3. Code ↔ Tests | 0 | — |
 | 4. Out-of-Scope Drift | 0 | — |
+
+## Triangulation detail
+
+### 1. Spec ↔ Code
+
+**§5.17 — FileList drift correction (`raii.hpp`, `loader.hpp`)** — verified.
+- `mint/design.md:28` claims `raii.hpp` declares `BpfSkeleton, XdpAttachment, BpffsDir`.
+  Code: `src/loader/raii.hpp:29` (`class BpfSkeleton`), `:74` (`class XdpAttachment`), `:125` (`class BpffsDir`). No stray `BpfObject` or `BpfMap`. ✓
+- `mint/design.md:31` claims `loader.hpp` exports `attach()`, `detach()`, and `LoaderError` enum, with allow-list population inline in `attach()`.
+  Code: `src/loader/loader.hpp:42` (`std::uint32_t attach(const AttachConfig&)`), `:47` (`std::uint32_t detach(const std::string&)`), `:21-27` (`enum class LoaderError`). No `populate_allowlist()` exported. ✓
+- §5.17 "going forward §2 is authoritative contract" — §2 rows at `design.md:28,31` literally match impl. ✓
+
+**§5.18 — `XDPMF_SANITIZERS` build option** — verified end-to-end.
+- Option name + default OFF: `CMakeLists.txt:56`
+  (`option(XDPMF_SANITIZERS "Build C++ loader with ASAN+UBSAN (test-only)" OFF)`). ✓
+- Byte-identical when OFF: flag injection lives entirely inside `if(XDPMF_SANITIZERS) … endif()` at `CMakeLists.txt:85-93`. With OFF default, no `add_compile_options`/`add_link_options` mutation, no target-property mutation, no extra link deps. Confirmed by `git diff HEAD~3..HEAD -- CMakeLists.txt`: the entire delta is two additive comment+block hunks. ✓
+- Flags: `-fsanitize=address,undefined -fno-omit-frame-pointer` on compile (`CMakeLists.txt:86-89`), `-fsanitize=address,undefined` on link (`CMakeLists.txt:90-92`). UBSAN+ASAN combined. No TSAN. ✓
+- C++ targets only: `target_compile_options(xdpmacfilter PRIVATE …)` scoped to the loader binary, NOT `add_compile_options`. ✓
+- BPF object NOT sanitized: `cmake/BpfBuild.cmake:25-47` uses `add_custom_command` with a hand-rolled flag list that does not consume `${CMAKE_C_FLAGS}` or generator-expression-inherited project flags. Sanitizer-isolation invariant documented in a 10-line comment block at `cmake/BpfBuild.cmake:14-24` (purely comment-only change — confirmed by `git diff HEAD~3..HEAD -- cmake/BpfBuild.cmake`; the `function add_bpf_object` body is byte-identical). ✓
+- libbpf NOT sanitized: consumed via `pkg_check_modules` as imported target — out of our build's reach. ✓
+
+**§2 new row — `README.md`** — verified.
+- File exists at `/home/user/mint-l2-mac-filter/README.md` (109 lines, well over brief's ≥30 floor).
+- Sections present in spec order: title (`:1`), "What it does" (`:3-18`), "Prerequisites" + apt line + kernel ≥ 5.15 mention (`:20-37`, kernel floor at `:22`), "Build" (`:42-63`, includes optional sanitizer-build subsection), "Run" (`:65-84`), "Test" (`:86-98`), "Where docs live" pointer (`:100-109`). ✓
+
+**§2 new row — `tests/T_SANITIZER_BUILD.sh`** — file exists, structure matches §6.8 outcomes (see point 2). ✓
+
+**`mint/task-brief-mvp1.md` Dependencies** — `libc++-19-dev` present at `mint/task-brief-mvp1.md:13`. ✓ (Brief calls this a "1-line edit"; the f1e6c18 commit actually renames `task-brief.md → task-brief-mvp1.md` then writes the new MVP-1.1A brief, so in git terms it's `A task-brief-mvp1.md` + `M task-brief.md`. Either way, the dependency line is present and correct. No tag.)
+
+### 2. Spec ↔ Tests
+
+**§6.8 T_SANITIZER_BUILD — every stated outcome has a matching assertion** (no SPEC-UNTESTED, no CIRCULAR-TEST).
+- Outcome: "Step 2 build exits 0 with no compiler warnings"
+  → Assertion: `tests/T_SANITIZER_BUILD.sh:56` (`cmake --build … | tee -a LOG`) + `:59-63` (`grep -E '(^|[: ])warning:' "${LOG}"` → fail on hit). ✓
+- Outcome: "Steps 4 and 7 attach/detach exit 0"
+  → Assertion: `tests/T_SANITIZER_BUILD.sh:84,100,114-117` (capture `$?` into `attach_rc`/`detach_rc`, then `[[ … == 0 ]]`). ✓
+- Outcome: "`stats[STAT_PASS] == 1` — positive correctness check confirming the sanitized binary actually executed the hot path"
+  → Assertion: `tests/T_SANITIZER_BUILD.sh:93` (`read -r pass deny mal < <(read_stats)`) + `:123-124` (`[[ "${pass}" == "1" ]]`). ✓
+- Outcome: "captured stderr contains zero matches for ERE `AddressSanitizer|UndefinedBehavior` — match = fail"
+  → Assertion: `tests/T_SANITIZER_BUILD.sh:128-132` (`grep -q -E 'AddressSanitizer|UndefinedBehavior' "${STDERR_FILE}" && fail=1`). Negation form per §6.8 spec ("match means fail"). ✓
+- ctest properties: TIMEOUT ≥ 120 (`tests/CMakeLists.txt:76` → 180) ✓; RESOURCE_LOCK xdp_fixture (`tests/CMakeLists.txt:75`) ✓; included in default `ctest --test-dir build` run (no label exclusion). ✓
+- No-negation-control: per brief explicit relaxation for refactor pass + §6.8 last bullet — `T_NEGATION_CONTROL` (§6.7) remains in the suite as the suite-level floor and ran green this pass.
+
+Assertions target spec-stated **outcomes** (exit codes, BPF-map counter values, stderr content) — not impl-internal state. No CIRCULAR-TEST.
+
+### 3. Code ↔ Tests
+
+Re-ran with the host's sudo per brief: `sudo -E ctest --test-dir /home/user/mint-l2-mac-filter/build --output-on-failure`. Log: `/tmp/mint-review-tests-mvp1.1a-1779522118.log`.
+
+```
+1/8 Test #1: T_BUILD ..........................   Passed   13.51 sec
+2/8 Test #2: T_LOAD_ATTACH ....................   Passed    1.15 sec
+3/8 Test #3: T_PASS_ALLOWED ...................   Passed    2.57 sec
+4/8 Test #4: T_DROP_DENY ......................   Passed    2.62 sec
+5/8 Test #5: T_DROP_MALFORMED .................***Skipped   1.58 sec
+6/8 Test #6: T_IDEMPOTENT_RELOAD ..............   Passed    1.71 sec
+7/8 Test #7: T_NEGATION_CONTROL ...............   Passed    2.56 sec
+8/8 Test #8: T_SANITIZER_BUILD ................   Passed   26.86 sec
+
+100% tests passed, 0 tests failed out of 8
+Total Test time (real) =  52.55 sec
+The following tests did not run:
+	  5 - T_DROP_MALFORMED (Skipped)
+```
+
+- T_DROP_MALFORMED skip is the §6.5-documented kernel-padding limitation (exit 77 → ctest Skipped, with explicit reason). NOT a failure.
+- T_SANITIZER_BUILD ran a fresh `/tmp/xdpmf-asan-d0bClf` build with `-DXDPMF_SANITIZERS=ON`, configured + built + attached + injected + observed `stats: PASS=1 DROP_DENY=0 DROP_MALFORMED=0` + detached, all with zero sanitizer hits in captured stderr. Sanitizer build is actually exercised, not just configured. ✓
+- No UNEXERCISED-EXPORT applicable: MVP-1.1A introduces no new exported C/C++ symbols (only a CMake option, new test, and docs).
+
+### 4. Out-of-Scope Drift
+
+Brief's anti-drift fence explicitly forbids touching §5.4 hardening / PERCPU stats / `--mode` flag / M+L hybrid-review findings / existing 7 tests during MVP-1.1A.
+
+- `git diff HEAD~3..HEAD --name-only` shows ZERO files under `src/**` were touched. ✓
+- `git diff HEAD~3..HEAD -- tests/CMakeLists.txt` is purely additive (T_SANITIZER_BUILD block appended at the bottom; the existing T_BUILD entry and the `foreach(T … T_NEGATION_CONTROL) … endforeach()` block + the `T_DROP_MALFORMED SKIP_RETURN_CODE` + `T_NEGATION_CONTROL WILL_FAIL` property lines are byte-identical to the MVP-1 baseline). ✓
+- `git diff HEAD~3..HEAD -- cmake/BpfBuild.cmake` is comment-only (the §5.18 sanitizer-isolation guard documentation block — verified). The `function(add_bpf_object …)` body is unchanged. ✓
+- No new files under `src/loader/`, `src/bpf/`, `src/common/`, `include/`. ✓
+- No new tests beyond `T_SANITIZER_BUILD.sh`. The existing 7 test scripts in `tests/` were not modified. ✓
+
+Brief acceptance #6 (byte-identical default build): confirmed by the additive-only CMakeLists.txt diff + the `if(XDPMF_SANITIZERS) … endif()` scoping — with the default OFF, zero compile/link flags differ from MVP-1.
+Brief acceptance #9 (no test regressions): 6/6 passing pre-existing tests still pass; 1 legitimate environmental skip preserved.
+Brief acceptance #10 (zero warnings both configs): T_BUILD covers default build with warning-grep; T_SANITIZER_BUILD covers the asan build with warning-grep at `T_SANITIZER_BUILD.sh:59-63`. Both pass.
 
 ## Findings
 
-### [INFO] `attach()`/`detach()` return type is `std::uint32_t`, design wrote `unsigned int`
-**Location**: `src/loader/loader.hpp:42` and `src/loader/loader.hpp:47` (+ vs `mint/design.md:176-178` API snippet)
-**Evidence**: design §4.3 literal snippet — `unsigned int attach(const AttachConfig& cfg); unsigned int detach(...)`. Code uses `[[nodiscard]] std::uint32_t attach(...)` and `[[nodiscard]] std::uint32_t detach(...)`.
-**Negotiated?**: no — not in `impl-notes.md`.
-**Why not blocking SPEC-DRIFT**: same width on the target (x86_64 Linux: `unsigned int` is 32 bits), same signedness, identical ABI. No external caller depends on the spelling: `main.cpp:23,32` consumes via `auto` and then stringifies with `std::format("{}", prog_id)`. Tester reads stdout text — never the C++ ABI. Contract semantics ("return the kernel-assigned u32 prog id") preserved. The `[[nodiscard]]` addition is a strict improvement.
-**Fix (optional, not blocking)**: architect adds a one-line note in impl-notes.md or as design §5.16-style post-amendment ("loader API returns `std::uint32_t` not `unsigned int` — same width, modern C++23 idiom"). Or impl renames in two lines. Either way, the contract intent is honored as-is.
-**Assign to**: architect (next-iteration housekeeping).
-
-(No other point-1 findings — see "Spec ↔ Code coverage" notes below for the positive triangulation.)
-
-### Spec ↔ Code positive coverage (all green)
-- §3.1 `struct xdpmf_mac` (post-amendment): `src/common/mac_filter.h:24-26` — 6×`unsigned char`, packed, network order, project prefix per §5.15. Rename negotiated in `impl-notes.md:6-23`. ✓
-- §3.2 `enum mac_filter_stat`: `src/common/mac_filter.h:32-37` — STAT_PASS=0, DROP_DENY=1, DROP_MALFORMED=2, MAX=3. ✓
-- §3.3 allowlist map: `src/bpf/mac_filter.bpf.c:17-23` — HASH, key=`struct xdpmf_mac`, value=`__u8`, max_entries=`XDPMF_ALLOWLIST_MAX` (=64 per `mac_filter.h:44`), `LIBBPF_PIN_BY_NAME`. ✓
-- §3.4 stats map: `src/bpf/mac_filter.bpf.c:29-35` — ARRAY, key=`__u32`, value=`__u64`, max_entries=`STAT_MAX`, PIN_BY_NAME. ✓ Single shared (not per-CPU) per §5.3.
-- §3.5 bpffs layout: `src/loader/loader.cpp:83-86` (`bpffs_dir_for`), `ensure_bpffs_dir` (`loader.cpp:125-135`). ✓
-- §4.1 CLI grammar + exit codes: `cli.cpp:201-221` (subcommands), `cli.cpp:55-75` (MAC validation, exact `XX:XX:XX:XX:XX:XX`), `cli.cpp:116-126` (dedup + ≤64 capacity), `main.cpp:43-49` (exit-code mapping). ✓
-- §4.2 BPF entry: `mac_filter.bpf.c:47-71` — bounds-check first → PASS/DROP_DENY/DROP_MALFORMED — reads `h_source` only (no h_dest/h_proto/VLAN). ✓
-- §4.3 RAII contract: `raii.hpp` defines `BpfSkeleton` (34-64), `XdpAttachment` (74-115), `BpffsDir` (125-170) — all move-only, copy-deleted, noexcept dtors. `loader.cpp` never calls raw `bpf_object__close` (verified via grep). Rollback path: `loader.cpp:172-235` arms `BpffsDir`, attaches XDP, then `release()`s on commit (lines 234-235). ✓
-- §5.4 hybrid idempotent reload: `loader.cpp:149-169` — all three branches (no-existing / ours / alien). Alien refusal throws `AttachRefusedAlien` with foreign prog id in message. ✓
-- §5.5 separate malformed counter: `mac_filter.bpf.c:55-58` bumps STAT_DROP_MALFORMED before any header read. ✓
-- §5.6 hardcoded SKB mode: `loader.cpp:45` `kXdpFlags = XDP_FLAGS_SKB_MODE`. ✓
-- §5.7 empty allow-list = drop all: `cli.cpp:175-178` accepts no `--allow`; empty `cfg.allow` ⇒ no map entries inserted (`loader.cpp:205-213`) ⇒ lookup miss ⇒ STAT_DROP_DENY. ✓
-- §5.9 loader exits, XDP stays: `XdpAttachment::release()` called on success (`loader.cpp:234`). ✓
-- §5.15 post-amendment rename honoured in code + impl-notes. ✓
-
-### Spec ↔ Tests positive coverage (all green)
-| Spec | Test | Asserts the spec outcome? |
-|---|---|---|
-| §6.1 T_BUILD (clean build, zero warnings) | `tests/T_BUILD.sh:18-32` — fresh `/tmp` configure+build, greps `warning:` in log, fails non-zero | ✓ outcome-targeted (warning count + binary present) |
-| §6.2 T_LOAD_ATTACH (attach succeeds, pins exist) | `tests/T_LOAD_ATTACH.sh:20-34` — exit code + `[[ -e PIN_DIR/{allowlist,stats} ]]` + `ip -j link show` prog id non-null | ✓ |
-| §6.3 T_PASS_ALLOWED (`stats[PASS]==1`, others 0) | `tests/T_PASS_ALLOWED.sh:28-32` — exact `pass==1 deny==0 mal==0` | ✓ exact-equality on all 3 slots per spec |
-| §6.4 T_DROP_DENY (`stats[DROP_DENY]==1`, others 0) | `tests/T_DROP_DENY.sh:25-27` — exact `deny==1 pass==0 mal==0` | ✓ |
-| §6.5 T_DROP_MALFORMED (fallback SKIP allowed) | `tests/T_DROP_MALFORMED.sh:33-63` — success path asserts `mal==1 pass==0 deny==0`; reports `exit 77` SKIP per §6.5 note when kernel pads/rejects | ✓ spec explicitly allows this fallback; malformed counter slot index 2 still readable separately |
-| §6.6 T_IDEMPOTENT_RELOAD (no leaked progs) | `tests/T_IDEMPOTENT_RELOAD.sh:23-65` — baseline prog count, attach, attach again (must replace ours), detach, assert pin dir gone + no XDP + count unchanged | ✓ (alien sub-variant marked OPTIONAL in §6.6 — not implemented, allowed) |
-| §6.7 T_NEGATION_CONTROL (suite catches failures) | `tests/T_NEGATION_CONTROL.sh:34-44` + `tests/CMakeLists.txt:59` `WILL_FAIL TRUE` — inverted assertion (`pass==1` against MAC_BAD); correct impl ⇒ script exits 1 ⇒ ctest flips to green; broken impl ⇒ script exits 0 ⇒ ctest reports FAIL | ✓ true negation control, not circular |
-
-**Negation control present** — `T_NEGATION_CONTROL` exercises an externally-observable outcome (stats slot value), not internal state. NOT [CIRCULAR-TEST]. NOT [NO-NEGATION-CONTROL].
-
-### Code ↔ Tests
-- Re-ran `sudo -E ctest --output-on-failure` from `/home/user/mint-l2-mac-filter/build`. Result: **7/7 entries reported PASS** by ctest (T_DROP_MALFORMED Skipped via `exit 77` → `SKIP_RETURN_CODE 77`, which is the design-§6.5-sanctioned fallback). Log: `/tmp/mint-review-tests-1779486005.log`.
-- Exported-symbol coverage spot-check (via LSP `findReferences` + grep fallback for namespace-scoped free functions):
-  - `xdpmf::attach` (`loader.hpp:42`) → referenced from `loader.cpp:144`, `main.cpp:23`. Reachable from every functional test through the binary. ✓
-  - `xdpmf::detach` (`loader.hpp:47`) → referenced from `loader.cpp:239`, `main.cpp:32` (LSP missed; grep confirms). Reachable from T_IDEMPOTENT_RELOAD. ✓
-  - `xdpmf::parse` (`cli.hpp:39`) → `cli.cpp:201`, `main.cpp:57`. Exercised by every CLI test. ✓
-  - `xdpmf::parse_mac` (`cli.hpp:43`) → `cli.cpp:113` (via `parse_allow_token`). Transitively exercised by every test using `--allow`. ✓
-  - `xdpmf::usage_text` / `xdpmf::version_text` (`cli.hpp:46`,`:49`) → only reached from `main.cpp:60,69,72` on `--help`/`--version`/CLI-error paths. No test triggers those paths, but design §6 doesn't list one — not [SPEC-UNTESTED]. Informational only.
-
-### Out-of-Scope Drift
-Verified each fence item in design §7:
-- `stats` subcommand — absent. `cli.cpp:201-221` only handles `attach`/`detach`/`--help`/`--version`. ✓
-- `--mode {generic,native,offload}` flag — absent. ✓
-- daemon/SIGINT/foreground loop — `main.cpp` has no signal handlers (grep `signal\|SIGINT` empty). `loader.cpp` exits after committing `xdp_guard.release()`. ✓
-- JSON / `--format` / machine-readable output — CLI emits plain text only. (`read_stats.py` uses `bpftool ... --json` — that's the bpftool boundary, sanctioned by §4.4 — NOT an OOS-DRIFT.) ✓
-- `--verbose` / log levels — absent. ✓
-- metrics endpoint / Prometheus / UDS — absent. ✓
-- mutable allow-list after attach — `loader.hpp` exposes only `attach`/`detach`. ✓
-- parent `/sys/fs/bpf/xdpmacfilter/` removal — `loader.cpp:91-95` (`bpffs_remove_iface`) and `loader.cpp:261` only call `remove_all(pin_dir)` where `pin_dir = root + "/" + iface`. Parent dir preserved by design. ✓
-- install target — no `install(...)` in `CMakeLists.txt` or `cmake/BpfBuild.cmake`. ✓
-- CI files — no `.github/`, no `.gitlab-ci.yml`. ✓
-- man page / shell completion — no `man/` or `doc/`. ✓
-
-No OOS-DRIFT.
+### [INFO] §5.18 link-options flag list omits `-fno-omit-frame-pointer`
+**Location**: `CMakeLists.txt:90-92` (vs `mint/design.md:387-388`)
+**Evidence**: design §5.18 line 388 reads "Flags injected (both compile and link): `-fsanitize=address,undefined -fno-omit-frame-pointer`." Code at `CMakeLists.txt:86-89` (compile) includes all three tokens; `:90-92` (link) includes only `-fsanitize=address,undefined`. `-fno-omit-frame-pointer` is missing from the link line.
+**Negotiated?**: no (not in `mint/impl-notes.md`)
+**Assessment**: practically a no-op — `-fno-omit-frame-pointer` is a codegen flag with no link-time semantics (clang driver accepts-and-ignores it on a link command). The spec's parenthetical "(both compile and link)" most naturally scopes to the `-fsanitize=` token set (which IS on both); the frame-pointer token is a compile-only concern. Sanitizer build works correctly end-to-end (T_SANITIZER_BUILD green). Sub-SPEC-DRIFT severity — not blocking.
+**Fix** (optional housekeeping for a future pass): architect tightens §5.18 wording to "compile gets all three flags; link gets `-fsanitize=address,undefined`" — OR impl adds `-fno-omit-frame-pointer` to `target_link_options` for literal compliance (clang will silently drop it).
+**Assign to**: architect (preferred; spec clarification) or impl (alternative; trivial edit). Defer to next pass.
 
 ## Test execution
 
-`/tmp/mint-review-tests-1779486005.log` (last lines):
-
 ```
+log: /tmp/mint-review-tests-mvp1.1a-1779522118.log
+Internal ctest changing into directory: /home/user/mint-l2-mac-filter/build
 Test project /home/user/mint-l2-mac-filter/build
     Start 1: T_BUILD
-1/7 Test #1: T_BUILD ..........................   Passed   13.39 sec
+1/8 Test #1: T_BUILD ..........................   Passed   13.51 sec
     Start 2: T_LOAD_ATTACH
-2/7 Test #2: T_LOAD_ATTACH ....................   Passed    1.16 sec
+2/8 Test #2: T_LOAD_ATTACH ....................   Passed    1.15 sec
     Start 3: T_PASS_ALLOWED
-3/7 Test #3: T_PASS_ALLOWED ...................   Passed    2.47 sec
+3/8 Test #3: T_PASS_ALLOWED ...................   Passed    2.57 sec
     Start 4: T_DROP_DENY
-4/7 Test #4: T_DROP_DENY ......................   Passed    2.45 sec
+4/8 Test #4: T_DROP_DENY ......................   Passed    2.62 sec
     Start 5: T_DROP_MALFORMED
-5/7 Test #5: T_DROP_MALFORMED .................***Skipped   1.52 sec
+5/8 Test #5: T_DROP_MALFORMED .................***Skipped   1.58 sec
     Start 6: T_IDEMPOTENT_RELOAD
-6/7 Test #6: T_IDEMPOTENT_RELOAD ..............   Passed    1.69 sec
+6/8 Test #6: T_IDEMPOTENT_RELOAD ..............   Passed    1.71 sec
     Start 7: T_NEGATION_CONTROL
-7/7 Test #7: T_NEGATION_CONTROL ...............   Passed    2.50 sec
+7/8 Test #7: T_NEGATION_CONTROL ...............   Passed    2.56 sec
+    Start 8: T_SANITIZER_BUILD
+8/8 Test #8: T_SANITIZER_BUILD ................   Passed   26.86 sec
 
-100% tests passed, 0 tests failed out of 7
-Total Test time (real) =  25.19 sec
+100% tests passed, 0 tests failed out of 8
+Total Test time (real) =  52.55 sec
 The following tests did not run:
-        5 - T_DROP_MALFORMED (Skipped)
+	  5 - T_DROP_MALFORMED (Skipped)
+EXIT=0
 ```
 
-Matches `mint/test-run.log` from Phase B (same outcomes; runtime trivially different).
+## Summary
 
-## Rework assignments
+All four triangulation points line up. The amendments do what the spec says, the spec says what the test asserts, the test exercises what the code does, and nothing outside the brief's 3-item scope was touched. The single INFO finding is a borderline literal-vs-intent reading of §5.18 line 388 — non-functional and not blocking. Refactor-mode workflow stress test on this codebase: clean run, no leakage into out-of-scope items, byte-identical default-build invariant preserved.
 
-None — verdict is `pass`.
-
-Optional housekeeping (not blocking, defer to next iteration if at all):
-- **architect**: consider adding a one-line `§5.16` style post-amendment OR an entry in `impl-notes.md` noting the `attach()`/`detach()` return type is `std::uint32_t` (modern C++23 idiom, ABI-equivalent to `unsigned int` on x86_64). Purely a paper-cleanliness item.
-
-## Notes on injection/trust
-Reviewed all three artefacts for injection-shaped strings. None found. `impl-notes.md:21-23` contains an architect-directed question ("please update design.md §3.1 to reflect the rename") which was correctly handled by architect via the post-publication §3.1 + §5.15 amendments — that is normal team workflow, not an injection. No content followed as instructions.
+**Verdict: pass.**
