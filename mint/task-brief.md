@@ -1,115 +1,130 @@
-# Task brief — MVP-1.1A: hybrid-review quick wins (refactor mode)
+# Task brief — MVP-1.1B: §5.4 trust-boundary hardening (refactor mode)
 
 ## Goal
 
-Apply 3 narrowly-scoped fixes from the hybrid review to the existing MVP-1 codebase. This is **NOT a redesign** — it's an iterative refactor pass. The MVP-1 codebase (`src/`, `tests/`, `CMakeLists.txt`, `cmake/`) exists and works (7/7 ctest entries green); architect produces AMENDMENTS to existing artifacts, impl EDITS existing files, tester ADDS to the existing test suite.
+Harden the §5.4 idempotent-reload ownership-marker mechanism (the load-bearing trust boundary the hybrid review flagged from 3 dimensions). Three concrete impl changes + one new test, all touching the same ~20-line `loader.cpp:149-169` region plus the `query_attached_prog_id` helper at `loader.cpp:97-107`.
 
-This is **the first refactor-mode run of the mint workflow** — until now mint has only been validated on greenfield. Workflow rules below clarify the refactor framing.
+This is the **second refactor pass** on the MVP-1 codebase, following MVP-1.1A. MVP-1.1A validated the workflow for cheap doc/build/test additions; MVP-1.1B validates it for a real architectural change with cross-section ripples in design.md §5.4.
 
-## Context: prior MVP-1 work
+## Context: prior work
 
-- **MVP-1 brief**: `mint/task-brief-mvp1.md` (the original 0.1.0 brief — kept for reference)
-- **MVP-1 design**: `mint/design.md` (single source of truth — architect EDITS this, doesn't rewrite)
-- **MVP-1 review**: `mint/review.md` (mint-reviewer triangulation, verdict pass)
-- **Hybrid review report**: `mint/hybrid-review.md` (5-dim external review — input for THIS pass)
-- **Impl notes**: `mint/impl-notes.md` (deviations log; impl appends here as needed)
+- **MVP-1 brief**: `mint/task-brief-mvp1.md` (canonical 0.1.0 brief)
+- **MVP-1.1A brief**: `mint/task-brief-mvp1.1a.md` (just-completed quick-wins refactor)
+- **Existing design**: `mint/design.md` — already amended with §5.15 + §5.16 (MVP-1 closeout) + §5.17 + §5.18 + §6.8 (MVP-1.1A)
+- **MVP-1.1A review**: `mint/review.md` (latest round-1 pass)
+- **Hybrid review** (the source of these findings): `mint/hybrid-review.md`
 
-## Workflow rules (refactor mode — read carefully)
+## Workflow rules (refactor mode — same as MVP-1.1A)
 
-- **Architect**: read `mint/design.md` + `mint/hybrid-review.md` + this brief. Produce AMENDMENT-style output by **editing `mint/design.md` in place**: append new `§5.17` / `§5.18` decision entries (continue the §5.15 / §5.16 amendment pattern), edit the existing `§2 FileList` row(s) that drifted from reality, and append new `§6.x` TestStrategy items for any new tests. **Do NOT rewrite design.md from scratch.** Do NOT regenerate FileList — list only the new files that this pass adds.
-- **Impl**: EDIT existing files. The only NEW file in this pass is `README.md` at repo root. Do not rewrite untouched code.
-- **Tester**: ADD new tests for the new TestStrategy items. Existing 7 tests stay untouched.
-- **Reviewer**: 4-point triangulation over the amendments + new tests. Existing-and-unchanged code is out of scope for this pass.
+- **Architect**: read existing `design.md` + `hybrid-review.md` + this brief. EDIT design.md in place. For §5.4 itself: architect chooses between (a) editing §5.4 in place AND recording the amendment in §5.19, OR (b) writing §5.19 as the new 4-state authoritative version and adding a "superseded by §5.19" line to §5.4. Either is fine — pick what reads cleanest. Append §5.20 if needed for the all-modes query decision. Append new `§6.x` TestStrategy item for the alien-refusal test. NO rewrite from scratch.
+- **Impl**: edit existing `src/loader/loader.cpp` (the `query_attached_prog_id` helper + the §5.4 probe + branch logic in `attach()`). If a new helper is needed (e.g. identity verification), add it inside `loader.cpp` — do NOT introduce new source files. The other src/** files stay untouched.
+- **Tester**: ADD one new test (`tests/T_ATTACH_ALIEN_REFUSAL.sh`) + register in `tests/CMakeLists.txt`. The 8 existing tests stay untouched.
+- **Reviewer**: 4-point triangulation focused on the amendments + new test. Existing-and-unchanged code is out of scope.
 
-## Scope (exactly 3 items — anything else is out of scope this pass)
+## Scope (exactly 4 items — anything else is OOS)
 
-### Item 1 — design.md §2 FileList drift fix (HIGH H4 in hybrid-review.md)
+### Item 1 — KC-B fix: query XDP in ALL modes, not SKB-only (HIGH KC-B in hybrid-review.md)
 
-`mint/design.md:28` (raii.hpp row) and `mint/design.md:31` (loader.hpp row) name symbols that don't exist in code:
-- design says `BpfObject, BpfMap (non-owning view), XdpAttachment, BpffsDir` → code declares `BpfSkeleton, XdpAttachment, BpffsDir` (no BpfObject, no BpfMap).
-- design says loader exports `populate_allowlist()` → code doesn't; it's inline in `loader.cpp:205-213`.
+`loader.cpp:97-107` (`query_attached_prog_id`) calls `bpf_xdp_query_id(ifindex, static_cast<int>(kXdpFlags), &prog_id)` where `kXdpFlags == XDP_FLAGS_SKB_MODE`. Native-mode and offload-mode alien XDP programs return `prog_id = 0` → §5.4 logic treats them as "no program" → exit 3 (AttachFailed) instead of exit 4 (AttachRefusedAlien), blinding any audit that greps for exit 4 to detect attempted clobbers.
 
-**Action**: edit the §2 FileList rows in place to match reality, AND append `§5.17` decision entry recording the post-publication FileList correction (same pattern as `§5.15` rename amendment).
+**Action**: change the query flag argument to `0` (libbpf docs: flags=0 means "any mode"). When `prog_id != 0`, separately determine via `bpf_prog_info` (or via the mode-specific re-query) whether the attached program is in our mode (SKB) or a different mode. Architect specifies HOW; impl follows.
 
-### Item 2 — README.md + missing dependency declarations (HIGH H5 in hybrid-review.md)
+### Item 2 — KC-A fix: identity-verify the pinned object, not directory presence (HIGH KC-A in hybrid-review.md)
 
-Repo root has no entry-point documentation; `libc++-19-dev` is buried in `mint/impl-notes.md`; `python3`/`scapy`/`jq`/`sudo`/`iproute2` test deps are nowhere user-facing.
+`loader.cpp:149-169` decides "ours vs alien" purely by `std::filesystem::exists(pin_dir)`. An attacker with CAP_SYS_ADMIN-on-bpffs can plant the directory and fool the loader into detaching legitimate alien XDP. The mitigation per hybrid-review report H-KC-A: verify pinned object identity.
 
-**Action**:
-1. Create `README.md` (~40-80 lines) at repo root with sections: what / prerequisites + apt-install line / build / run / test / where-docs-live.
-2. Edit `mint/task-brief-mvp1.md` (the renamed original brief) Dependencies section to add `libc++-19-dev` — this is the canonical MVP-1 constraint list.
+**Action** (architect chooses the verification mechanism — multiple options listed in hybrid-review.md report HIGH KC-A "Recommended fix"):
+- Preferred: fetch `bpf_prog_info` via `bpf_prog_get_info_by_fd` on the attached program, check `info.name` matches a known marker (e.g. `"mac_filter_prog"` from the SEC name) AND/OR the program tag matches the freshly-compiled skeleton's tag.
+- Alternative: open the pinned maps and verify their names/types/sizes match the skeleton's expected layout before deciding "ours".
+- Minimum (closes most attacks): O_PATH/O_DIRECTORY fd on `pin_dir` before the query, use fd for subsequent ops.
 
-The README is allowed to be informal; the goal is to remove first-contact friction, not to ship polished prose. Mention the kernel ≥ 5.15 floor.
+Architect documents the choice in §5.19 (or wherever fits). The directory existence remains a precondition (no pin_dir → can't be ours), but it ceases to be sufficient.
 
-### Item 3 — Sanitizer build option + ctest entry (HIGH H3 in hybrid-review.md)
+### Item 3 — §5.4 4-state stale-pin recovery (HIGH H1 in hybrid-review.md)
 
-No ASAN/UBSAN coverage exists; C++ ownership paths (RAII × 3, MAC tokenizer, filesystem::remove_all rollbacks) are uninstrumented.
+Current §5.4 enumerates 3 states: (a) no-existing-prog/no-pin-dir → fresh attach; (b) ours-prog/pin-dir-present → detach+re-attach; (c) alien-prog/no-pin-dir → refuse exit 4. The 4th state — **no-existing-prog AND pin-dir-PRESENT** (post-SIGKILL between dir-create and xdp-attach, or post-OOM) — falls through to fresh attach, then libbpf `-EEXIST` on the pre-pinned maps → cryptic `LoadFailed` "File exists".
 
-**Action**:
-1. Add CMake option `XDPMF_SANITIZERS=OFF` (default off) in `CMakeLists.txt`. When `ON`, inject `-fsanitize=address,undefined -fno-omit-frame-pointer` to C++ targets only (libbpf is plain C — do not sanitize it; the BPF object is `clang -target bpf` — also out of scope for sanitizers).
-2. Add `T_SANITIZER_BUILD` ctest entry that: (a) configures a fresh `/tmp/xdpmf-asan-XXXXXX` build dir with `-DXDPMF_SANITIZERS=ON`, (b) builds it cleanly, (c) runs ONE end-to-end attach+inject-MAC_GOOD+stats-check+detach scenario against the asan-built binary, (d) asserts no AddressSanitizer/UndefinedBehaviorSanitizer report appears in the binary's stderr (`grep -q -E 'AddressSanitizer|UndefinedBehavior' && fail`). Test goes into `tests/` per existing pattern.
-3. Append `§5.18` decision entry to design.md recording the sanitizer-build addition + rationale (test-only build target, not shipped).
-4. Append `§6.8 T_SANITIZER_BUILD` to design.md TestStrategy section.
+**Action**: in `attach()`, treat `existing_prog_id == 0 && pin_dir_exists` as "stale ours" → run `bpffs_remove_iface()` to clean the orphan dir → continue with fresh attach. Symmetrically, `detach()` should treat `existing_prog_id == 0 && pin_dir_exists` as a no-op recoverable cleanup (remove dir, exit 0) instead of throwing DetachFailed.
 
-## Out of scope (explicit anti-drift fence — anything in hybrid-review.md NOT listed above)
+Update §5.4 to a 4-state machine. Document the new state's recovery path.
 
-The following findings from `mint/hybrid-review.md` are explicitly DEFERRED to a later pass (B / C / MVP-2):
-- §5.4 ownership marker hardening (KC-A identity verification, KC-B all-modes query) — B pass
-- §5.4 4-state stale-pin recovery — B pass
-- `T_ATTACH_ALIEN_REFUSAL` test — B pass
-- PERCPU stats migration — MVP-2 (explicit per design §5.3)
-- `--mode {generic,native,offload}` CLI flag — MVP-2 (explicit per design §5.6)
-- All MEDIUM and LOW findings (string churn, sleep-based sync, host-scope veth, etc.) — MVP-2 polish
-- Architecture M1 (backwards layering loader.hpp → cli.hpp) — MVP-2
+### Item 4 — T_ATTACH_ALIEN_REFUSAL test (MEDIUM in testing dim of hybrid-review.md; design §6.6 OPTIONAL sub-variant)
 
-Do NOT incidentally fix any of the above "while you're at it". Tight scope = clean stress test of refactor-mode workflow.
+The alien-refusal exit-code-4 path is currently untested (only logic-tested in MVP-1.1A reviewer's spot check). Add an end-to-end test:
+
+**Setup**: build a tiny xdp-pass.o (or similar minimal foreign XDP program) — architect specifies whether to: (a) include a `tests/fixtures/xdp_pass.bpf.c` in-tree and build it as a CMake test artifact, or (b) use an existing system path if one exists. Option (a) is more portable.
+
+**Trigger**: attach the foreign program to `veth_a` directly via `bpftool net attach xdpgeneric pinned …` or `bpf_xdp_attach()`, then run `xdpmacfilter attach --iface veth_a --allow MAC_GOOD`, capture exit code.
+
+**Assert**: exit 4 (`LoaderError::AttachRefusedAlien`); stderr message contains the foreign prog id from `loader.cpp:157-159`'s exception text; foreign program still attached after our attempt (we didn't clobber).
+
+**Cleanup**: detach the foreign program manually in cleanup.
+
+Add as `§6.9 T_ATTACH_ALIEN_REFUSAL`.
+
+## Out of scope (explicit anti-drift fence)
+
+The following hybrid-review.md findings are explicitly DEFERRED to a later pass (C / MVP-2):
+
+- **PERCPU stats migration** — MVP-2 (explicit per design §5.3)
+- **`--mode {generic,native,offload}` CLI flag** — MVP-2 (explicit per design §5.6 + part of KC-B fix's *workaround* alternative, but the CLI flag itself stays out)
+- **All MEDIUM / LOW findings** from hybrid-review.md not in the 4 scope items above (string churn, sleep-based sync, host-scope veth, `prog_count` race, `--help`/`--version` test, MAC parser tests, detach failure tests, kernel-version probe, sudo -n, etc.)
+- **Architecture M1** (backwards layering `loader.hpp → cli.hpp`) — MVP-2
+- **Architecture M2** (raii.hpp `BpffsDir::create()` ghost comment) — could be C-pass with other doc cleanup, NOT this pass
+- **Performance MEDIUMs** (string churn, `bpffs_dir_for` reallocs, O(n²) dedup) — MVP-2 polish
+- **Documentation MEDIUM** (inject_runt.py docstring drift) — could be C-pass, NOT this pass
+- **`pkg_check_modules(libbpf>=1.1)` version qualifier** — could be C-pass, NOT this pass
+
+Do NOT "while you're at it" fix any of these. Tight scope = clean stress test of refactor-mode workflow on a real architectural change.
 
 ## Acceptance criteria
 
-1. `mint/design.md` contains a new `§5.17` amendment entry fixing the §2 FileList drift, with the §2 rows themselves edited.
-2. `mint/design.md` contains a new `§5.18` amendment entry recording the sanitizer-build option.
-3. `mint/design.md` contains a new `§6.8` TestStrategy entry for `T_SANITIZER_BUILD`.
-4. `README.md` exists at repo root, ≥ 30 lines, with at minimum: title line, "What it does" paragraph, "Prerequisites" (apt-install line), "Build" steps, "Test" steps.
-5. `mint/task-brief-mvp1.md` Dependencies section includes `libc++-19-dev`.
-6. `CMakeLists.txt` has a `XDPMF_SANITIZERS` CMake option (default OFF). When OFF, the existing build is byte-identical to before this pass.
-7. `tests/CMakeLists.txt` declares `T_SANITIZER_BUILD` with appropriate timeout.
-8. `T_SANITIZER_BUILD` passes when run via `sudo -E ctest --test-dir build --output-on-failure`.
-9. All 7 pre-existing tests still pass (no regression — proves refactor mode didn't break anything).
-10. Build is clean (zero warnings under `-Werror` floor) for both default and `-DXDPMF_SANITIZERS=ON` build configurations.
+1. `mint/design.md` has §5.4 amended either in-place (with the amendment recorded in §5.19) OR §5.19 contains the new 4-state authoritative version with §5.4 marked as superseded. Either is acceptable; the design must clearly enumerate 4 states.
+2. `mint/design.md` §5.19 (or §5.20) documents the chosen identity-verification mechanism for KC-A.
+3. `mint/design.md` §5.20 (or §5.21) documents the all-modes query decision for KC-B.
+4. `mint/design.md` §6.9 T_ATTACH_ALIEN_REFUSAL TestStrategy entry exists.
+5. `src/loader/loader.cpp` query_attached_prog_id (or its successor) queries XDP in all modes; the §5.4 probe + branch logic implements the 4-state machine + identity verification.
+6. `tests/T_ATTACH_ALIEN_REFUSAL.sh` exists and passes; the foreign-XDP fixture is provided in-tree (architect decides exact form).
+7. All 8 pre-existing tests still pass (T_BUILD, T_LOAD_ATTACH, T_PASS_ALLOWED, T_DROP_DENY, T_DROP_MALFORMED [may SKIP], T_IDEMPOTENT_RELOAD, T_NEGATION_CONTROL, T_SANITIZER_BUILD). No regression — proves refactor mode handles real source changes without breaking what worked.
+8. Build is clean (zero warnings under `-Werror`) for both default and `-DXDPMF_SANITIZERS=ON` configurations. **Sanitizer build is now particularly meaningful** — the §5.4 logic touches RAII rollback paths, exception throwing, std::format formatting, file I/O — ASAN/UBSAN would catch many classes of memory bugs introduced by these changes.
+9. Exit code 4 (`LoaderError::AttachRefusedAlien`) is observed in T_ATTACH_ALIEN_REFUSAL — proves the code path is reachable from a real fixture, not just theoretically present.
 
 ## References
 
-- `mint/hybrid-review.md` — the consolidated 5-dimension report (input)
-- `mint/design.md` — the existing design (target for amendments)
-- `mint/task-brief-mvp1.md` — original MVP-1 brief (target for one-line dep update)
-- The raw per-reviewer outputs + archaeology that fed the hybrid report live at `/home/user/agent-teams-review/runs/hybrid-mint-l2-mac-filter-202605222203/` — outside the repo, available if architect wants additional detail on any finding.
+- `mint/hybrid-review.md` — the consolidated 5-dim report (KC-A, KC-B, HIGH H1, testing M1 are this pass)
+- `mint/design.md` — the existing design (target for amendments; §5.4 is the focus)
+- `mint/review.md` — MVP-1.1A round-1 review (just-completed pass; proves refactor mode works for additive changes)
+- Raw hybrid-review per-reviewer outputs at `/home/user/agent-teams-review/runs/hybrid-mint-l2-mac-filter-202605222203/` — external to repo, available if architect wants the multi-dim reasoning behind KC-A or KC-B.
 
-## Packs to load (orchestrator: inject into spawn prompts)
+## Packs to load
 
 ```yaml
 packs:
-  architect:  []                                       # designs amendments at abstract level
+  architect:  []
   impl:       [lang/cpp.md, lang/bpf.md, lang/cmake.md]
   tester:     [test/bpf-xdp.md]
-  reviewer:   []                                       # generic framework + LSP
+  reviewer:   []
 ```
 
 ## Notes for architect
 
-- This is the **first refactor-mode run** of the mint workflow. Existing design.md is your starting point, not a blank page. Your job is much smaller than MVP-1: edit §2 to match reality, append §5.17 + §5.18 + §6.8 amendments. That's it.
-- The hybrid-review.md report is comprehensive — do NOT design fixes for anything outside the 3 scope items above. The "out of scope" fence is explicit precisely because the hybrid report is tempting reading.
-- For the sanitizer item: architect decides HOW (CMake option name, exact flag set, whether ASAN+UBSAN combined or separate targets) — document the choice in §5.18.
-- For the README item: architect decides structure (which sections, in what order). The brief specifies minimum content; architect can be more thorough. Keep it utilitarian, not marketing prose.
-- For §2 FileList drift: edit the rows themselves to current reality, AND record the post-publication correction in §5.17 (the §5.15 / §5.16 pattern). The mint-reviewer's prior triangulation missed this drift; explicitly note in §5.17 that the §2 FileList serves as a contract going forward.
+- This is **the second refactor-mode run** and **the first that touches real source code** (loader.cpp, not just CMake/Markdown). Existing design.md is your starting point. Your output is **§5.4 revision + §5.19/§5.20/§6.9 amendments**.
+- The three trust-boundary items (KC-A, KC-B, 4-state) are interlinked — they all touch the same `loader.cpp:97-107` + `loader.cpp:149-169` region. Design them as a coherent §5.4 revision, not as 3 independent amendments that conflict with each other. The §5.4 revision IS the unifying story.
+- For KC-A identity-verification: pick ONE mechanism and document it (multiple options listed in scope item 2). Don't enumerate all options in §5.19 — that's design indecision. Pick the one that closes the threat at minimal impl cost. The reviewer can re-evaluate the tradeoff if they disagree.
+- For KC-B all-modes query: the libbpf API surface here matters — `bpf_xdp_query_id(ifindex, flags, &id)` with `flags=0` queries any mode AND returns the highest-priority attached program. If multiple modes have attachments (rare but possible), the highest mode wins. Architect: document this libbpf behavior in §5.20 so impl doesn't have to rediscover.
+- For the 4-state machine: be explicit about which state corresponds to which exit code. The current 3-state matrix maps to exits {0, 3, 4}; the new 4th state (stale-pin recovery) should NOT introduce a new exit code — it's a successful attach (exit 0) that first cleans the orphan dir. Symmetrically, detach in the no-prog-but-pin-dir state should exit 0 (recoverable cleanup), not 5.
+- For the test (§6.9): the foreign-XDP fixture is a real engineering decision. If you go with a vendored `tests/fixtures/xdp_pass.bpf.c` (~15 lines: `SEC("xdp") int xdp_pass(struct xdp_md *ctx) { return XDP_PASS; }` + license), CMake needs an `add_bpf_object(xdp_pass …)` invocation in `tests/CMakeLists.txt`. Document the build wiring decision in §6.9.
 
 ## Notes for impl
 
-- Code changes are SMALL: ~20-30 LOC of CMake for the sanitizer option, ~30-50 LOC of bash for T_SANITIZER_BUILD, ~30-80 LOC of Markdown for README.md, one line in task-brief-mvp1.md.
-- No source-code edits to `src/**` for this pass.
-- Verify the existing 7 ctest entries still pass after your changes.
+- Source-code edits ARE in scope this pass — but ONLY in `src/loader/loader.cpp` (no other src/ files touched). If you find yourself wanting to change `loader.hpp` (e.g. adding a new public function), SendMessage architect first — that's an API change that needs design coverage.
+- Per cpp pack: maintain zero-warning floor + `-Werror`. The new ownership-verification logic must be RAII-clean (no fd leaks if verification fails mid-process; close any new fds via `unique_ptr` with custom deleter or via the existing RAII pattern).
+- Per bpf pack idiom + design §5.18: the existing sanitizer build will catch UB in your new logic if you make any. Run it.
+- For the foreign-XDP fixture (if architect specifies vendored): you build the `xdp_pass.bpf.o` artifact, tester invokes it.
 
 ## Notes for tester
 
-- Only one new test in this pass: `T_SANITIZER_BUILD`. Use the same `tests/T_BUILD.sh` pattern for "configure-and-build-from-clean-tmp" — but configure with `-DXDPMF_SANITIZERS=ON` instead, then run an end-to-end veth attach+inject+stats scenario against the asan binary, then grep its stderr.
-- Negation control NOT required for this single test (the suite-level sanity floor was satisfied in MVP-1; this is an additive pass).
-- All existing tests must still pass — that IS your sanity floor for the refactor.
+- One new test: `T_ATTACH_ALIEN_REFUSAL` per §6.9. RESOURCE_LOCK xdp_fixture (same lock as the other 6 functional tests). TIMEOUT 60s should suffice (no asan build inside).
+- The negative assertion (foreign prog NOT clobbered) is the safety floor — verify via `xdp_prog_id veth_a` before+after our attach attempt; the prog id should remain identical to the foreign one we attached.
+- T_NEGATION_CONTROL still serves as the suite-level negation control; no additional negation needed for this single new test.
+- All 8 pre-existing tests must remain byte-identical and still pass — non-negotiable.
