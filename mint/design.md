@@ -3033,7 +3033,7 @@ might be tempted to add:
 - ~~**No netns isolation for the test fixture (C3 Path A)**~~
   **— SHIPPED in §5.25 (MVP-2 Polish-2, 2026-05-23)** via Q1 = N3
   (setup_veth-level wrap). `tests/lib/common.sh` exports
-  `NETNS="xdpmf_ns_$$"` + `NSEXEC="sudo -n ip netns exec ${NETNS}"`;
+  `NETNS="xdpmf_ns_$$"` + `NSEXEC="sudo -n nsenter --net=/var/run/netns/${NETNS}"` (per EDIT-15 — `nsenter --net` preserves mount-ns so host bpffs at `/sys/fs/bpf` remains visible to the loader child);
   `setup_veth` creates the netns and runs the veth pair inside it;
   `cleanup_veth` deletes the netns (atomic veth + XDP teardown).
   Test bodies edit only the loader-invocation callsites
@@ -3298,7 +3298,7 @@ discipline); Item 4 is a one-line comment fix.
 
 **Choice**: `tests/lib/common.sh setup_veth` creates a per-PID network
 namespace `NETNS="xdpmf_ns_$$"`, creates the veth pair INSIDE it, and
-runs loader + injectors + iface queries via `ip netns exec ${NETNS} …`.
+runs loader + injectors + iface queries via `nsenter --net=/var/run/netns/${NETNS} …` (NSEXEC wrapper, per EDIT-15).
 `cleanup_veth` deletes the netns (atomic teardown of veth + XDP) plus
 the bpffs pin dir. Test bodies retain `${IFACE_A}`/`${IFACE_B}` and
 `${PIN_DIR}` references unchanged; the only mechanical edit at test-body

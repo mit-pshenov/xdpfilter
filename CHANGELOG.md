@@ -10,7 +10,7 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 MVP-2 Polish-2 — netns isolation + CMake-gen `PIN_ROOT` + version-string sync + `inject_runt:37` comment fix (fourth and final MVP-2 pass).
 
 ### Added
-- Per-PID netns isolation for veth-fixture tests (design §5.25 P1, Q1 = N3). `tests/lib/common.sh setup_veth` creates `xdpmf_ns_$$`, builds the veth pair inside it, and runs loader/injectors through `${NSEXEC}` (= `sudo -n ip netns exec ${NETNS}`). Closes the sysctl-pollution gap left by PID-suffix-only iface naming.
+- Per-PID netns isolation for veth-fixture tests (design §5.25 P1, Q1 = N3). `tests/lib/common.sh setup_veth` creates `xdpmf_ns_$$`, builds the veth pair inside it, and runs loader/injectors through `${NSEXEC}` (= `sudo -n nsenter --net=/var/run/netns/${NETNS}` — `nsenter --net` is used instead of `ip netns exec` to preserve the mount namespace so host bpffs at `/sys/fs/bpf` remains visible to the loader child; rationale in design.md EDIT-15). Closes the sysctl-pollution gap left by PID-suffix-only iface naming.
 - Configure-time `XDPMF_BPFFS_ROOT` extraction in `CMakeLists.txt` (design §5.25 P2, Q2 = C1) → generated `${CMAKE_BINARY_DIR}/tests/pins.sh` (template: `tests/lib/pins.sh.in`). `tests/lib/common.sh` sources it (with `:?` integrity guards) instead of mirroring the literal — silent drift between header and test fixture is now impossible.
 - Configure-time `version.h` generation from `project(VERSION ...)` (design §5.25 P3, Q3 = V1) → `${CMAKE_BINARY_DIR}/include/version.h` (template: `include/version.h.in`). `src/loader/cli.cpp` consumes the generated `XDPMF_VERSION_STRING` macro; the hardcoded `kVersion` constant is removed.
 
