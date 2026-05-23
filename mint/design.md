@@ -108,7 +108,7 @@ max_entries: STAT_MAX                  // 3
 pinning:     LIBBPF_PIN_BY_NAME → /sys/fs/bpf/xdpmacfilter/<iface>/stats
 flags:       0
 ```
-Single shared counter (not per-CPU) per design Decision §5.5.
+Single shared counter (not per-CPU) per design Decision §5.3 (superseded by §5.23 MVP-2 Perf — now PERCPU).
 Counters are incremented from BPF with non-atomic `*v += 1` — race-tolerant
 because test fixture uses a single sender and exact equality is asserted
 only after the sender's last frame quiesces.
@@ -305,6 +305,18 @@ Test fixture uses a single sender; race window between BPF write and
 userspace read is closed by the tester waiting for ping/inject to
 quiesce before reading. Acceptable for MVP.
 
+**MVP-2 Perf supersede** (per §5.23, 2026-05-23): this decision is
+overridden. The `stats` map type changes from `BPF_MAP_TYPE_ARRAY` to
+`BPF_MAP_TYPE_PERCPU_ARRAY`. The "race window closed by quiesce"
+rationale is replaced by "no cross-CPU race exists — each CPU writes
+its own slot". `read_stats.py` becomes a sum-across-CPUs reader (see
+§5.23 Item 1). The DataStructures §3.4 callout at line 111 ("Single
+shared counter (not per-CPU) per design Decision §5.5" — note: §5.5 is
+the malformed-frame separation decision; the cross-ref is a pre-existing
+typo for §5.3, fixed here for consistency) is logically amended by
+this supersede — the new map type is PERCPU per §5.23. See §5.23 for
+the full rationale (cache-line bouncing, counter-loss-under-load).
+
 ### 5.4 Idempotent reload = **4-state probe with identity-verified ownership marker** — because
 Brief acceptance #6 requires running the loader twice in sequence leaves
 no leaked objects. Two options were considered:
@@ -399,6 +411,19 @@ combinations and avoids subtle veth-peer requirements (native veth XDP
 needs an XDP program on the peer to redirect traffic). Real-NIC use is
 out of MVP-1 scope. A future MVP-2 flag `--mode {generic,native,offload}`
 is anticipated but not added now.
+
+**MVP-2 Perf supersede** (per §5.23, 2026-05-23): the hardcoded
+`XDP_FLAGS_SKB_MODE` is replaced by a CLI-selectable
+`cfg.mode ∈ {Generic, Native, Offload}` field on `AttachConfig`,
+mapped to `XDP_FLAGS_SKB_MODE` / `XDP_FLAGS_DRV_MODE` /
+`XDP_FLAGS_HW_MODE` respectively at the `bpf_xdp_attach` callsite.
+Default remains `Generic` (preserving MVP-1 baseline behaviour and
+the §6.3–§6.8 fixture contract). `detach` does NOT take a `--mode`
+flag (per Q1 = Option A auto-detect — see §5.23). The "real-NIC use
+out of scope" rationale above is partially relaxed: real-NIC native
+mode is now reachable via `--mode native` but kernel/driver rejection
+still maps to exit 3 (`AttachFailed`, per Q2 = Option K — see §5.23).
+See §5.23 for full rationale on Q1/Q2 and impl surface.
 
 ### 5.7 Default action on empty allow-list = **drop all** — because
 Allow-list semantics by definition: not-in-list ⇒ drop. Empty list ⇒
@@ -775,6 +800,12 @@ only detach what we ourselves attached. The mode discovered by the
 probe is informational on the alien-refusal path; on the ours-path
 the mode is known to be SKB (state-b precondition).
 
+**MVP-2 Perf supersede** (per §5.23 Q1): the detach call now uses the
+**probed** mode (any of SKB/NATIVE/HW), not a hardcoded SKB. This is
+consistent with the `--mode` CLI flag enabling multi-mode attaches.
+The "mode is known to be SKB (state-b precondition)" sentence is
+obsolete — state-b precondition is now "any mode our name+tag match in".
+
 **Performance**: one `bpf_xdp_query()` syscall per attach probe; same
 kernel-side cost as the pre-amendment `bpf_xdp_query_id()` call
 (both go through the same RTM_GETLINK / netdev XDP-info path; the
@@ -994,7 +1025,9 @@ attach(cfg):
   4. open BpffsRootFd (see Q2 / Item 2)
   5. probe = probe_attached_xdp(ifindex, self_tag)
                   — probe internally compares alien's tag against self_tag
-                  — is_ours = (mode==SKB) && (name=="mac_filter_prog") && (tag==self_tag)
+                  — is_ours = (mode ∈ {SKB, NATIVE, HW}) && (name=="mac_filter_prog") && (tag==self_tag)
+                    (per §5.23 Q1 amendment: mode-axis is ANY mode our tag+name match in;
+                     MVP-2 Perf supports multi-mode attach so SKB-only restriction is dropped)
   6. branch on §5.4 state (a/b/c/d) [unchanged logic; identity check is richer]
   7. on state (c): throw AttachRefusedAlien — skel destructor unwinds load
   8. on state (b): bpf_xdp_detach existing + bpffs_remove_iface
@@ -1014,10 +1047,16 @@ detach(iface):
   5. probe = probe_attached_xdp(ifindex, self_tag) [SAME identity gate]
   6. branch on §5.4 state in detach context:
        state (a) — nothing attached, no pin_dir → exit 0 no-op (per §5.21 D4)
-       state (b) — ours (name+tag match)       → bpf_xdp_detach + bpffs_remove_iface
+       state (b) — ours (name+tag match, ANY mode) → bpf_xdp_detach IN PROBED MODE
+                                                     + bpffs_remove_iface
+                   (per §5.23 Q1: detach uses the §5.20-probed mode, NOT a hardcoded
+                    XDP_FLAGS_SKB_MODE; pass probe.mode through to bpf_xdp_detach's
+                    flags arg as XDP_FLAGS_SKB_MODE / DRV_MODE / HW_MODE)
        state (c) — alien (name OR tag mismatch) → throw DetachFailed (exit 5)
                    — tag-mismatch is a new rejection cause within state-(c);
-                     exit code is unchanged from §5.4 baseline
+                   — mode-mismatch is NOT a rejection cause anymore (any-mode tag+name
+                     match is "ours" per §5.23 Q1);
+                   — exit code is unchanged from §5.4 baseline
        state (d) — orphan pin_dir, no prog       → bpffs_remove_iface, exit 0 (§5.21 D4)
   7. skel destructor unwinds load on any exit path
 ```
@@ -1436,6 +1475,265 @@ Evidence: `mint/task-brief.md` MVP-2 Sec brief (items 1-2 + Q1/Q2/Q3
 + symlink-vortex); §5.19 mechanism (i) extension; §5.19 mechanism
 (iii) layering; §7 OOS lines 1378-1385 (now resolved — see updated
 §7 below).
+
+### 5.23 MVP-2 Perf: PERCPU stats migration + `--mode {generic,native,offload}` CLI flag (second MVP-2 pass, 2026-05-23) — amendment block
+
+Append-only amendment closing the two performance items deferred to
+MVP-2 per §7 OOS: (1) PERCPU stats migration (perf HIGH per
+hybrid-review.md — closes counter-loss-under-load + cache-line-bouncing)
+and (2) `--mode {generic,native,offload}` CLI flag (perf MED +
+sec M2 residual — closes "SKB-mode hardcoded" + completes the
+alien-detection loop opened in §5.20).
+
+This is the **second MVP-2 pass** (sixth /mint cycle on this project)
+and the **first BPF C source edit since MVP-1** — the `stats` map
+declaration in `src/bpf/mac_filter.bpf.c` flips type from
+`BPF_MAP_TYPE_ARRAY` to `BPF_MAP_TYPE_PERCPU_ARRAY`. The §5.3 and
+§5.6 decisions are explicitly superseded (see in-place edits above).
+The §5.22 `is_ours` predicate's mode-axis clause is relaxed (any
+mode our tag+name match in, not SKB-only).
+
+**Threat / perf coverage delta**:
+
+| Vector / problem | Pre-§5.23 status | Post-§5.23 status |
+|---|---|---|
+| Counter loss under concurrent multi-CPU XDP dispatch (non-atomic `*v += 1` race) | Open — race window exists; mitigated by single-sender test fixture but real-NIC multi-queue would lose increments | Closed — PERCPU eliminates cross-CPU race; each CPU writes its own slot, no atomicity needed |
+| Cache-line bouncing on shared counter slot (ping-pong between CPUs writing the same `__u64`) | Open — single shared `BPF_MAP_TYPE_ARRAY` slot is a global hotspot | Closed — PERCPU gives each CPU its own slot, zero false sharing |
+| SKB-mode hardcoded — cannot use native / offload XDP for performance-sensitive deployments | Open — `XDP_FLAGS_SKB_MODE` baked into `bpf_xdp_attach` callsite | Closed — `--mode` flag exposes XDP_FLAGS_{SKB,DRV,HW}_MODE selection |
+| Alien-detection bypass via non-SKB modes (sec M2 residual after §5.20) | Detection-layer closed by §5.20 (all-modes probe); CLI surface not yet exposed | Closed — `--mode` CLI flag enables operator-driven multi-mode attaches AND the §5.22 `is_ours` predicate is mode-axis-relaxed (any mode our tag+name match in) |
+
+#### Q1 decision — `detach` semantics for `--mode` = **Option A (auto-detect)**
+
+**Choice**: `detach` does NOT accept `--mode`. If the operator passes
+`--mode <X>` to `detach`, the CLI parser rejects with exit 1 + stderr
+`"detach: --mode is attach-only; mode is auto-detected from the
+attached program"`. The actually-attached mode is read from the
+§5.20 all-modes probe (`probe.mode ∈ {SKB, NATIVE, HW}`) and passed
+through to `bpf_xdp_detach`'s `flags` arg.
+
+**Rationale** (Option S vs Option W vs Option A trade-off):
+
+- **Option S (strict — require `--mode` on detach, default generic)**: symmetric with attach but operator-hostile. An operator who attached with `--mode native` and forgets on detach gets an alien-refusal (exit 4 — confusing: "what alien? I attached this myself yesterday"). The §5.22 detach() identity gate now consumes `is_ours`, which pre-§5.23 includes `mode == SKB` — under Option S we'd ALSO need to carry the CLI-provided mode into `is_ours`, an extra coupling for marginal value.
+- **Option W (wildcard — `--mode` silently ignored on detach)**: operator-friendly but asymmetric AND silently-ignored flags are an anti-pattern (they encourage operators to think `--mode` does something on detach when it doesn't). Subtle bug surface: a typo like `--mod native` would silently be passed as an unknown flag (exit 1) while `--mode native` would silently be accepted-and-ignored (exit 0). Inconsistent.
+- **Option A (auto-detect — `--mode` rejected on detach, mode read from probe)**: leverages the §5.20 all-modes probe that ALREADY runs on detach (per §5.22 detach() symmetry). The probe knows the ground-truth mode; no operator input needed. Explicit rejection of `--mode` on detach prevents the Option-W silent-ignore antipattern. One additional CLI rule for the operator to learn ("`--mode` is attach-only"), but the `--help` text documents it and exit-1 + clear stderr makes the rule self-discoverable.
+
+Option A is **the cleanest of the three** and aligns with the §5.20
+all-modes probe's intent ("we already determine the mode from the
+kernel; expose that knowledge").
+
+**Impl flow** (`detach()` changes from §5.22 symmetry block):
+
+```
+detach(iface):
+  1. resolve ifindex via if_nametoindex                [unchanged]
+  2. open + load skeleton (BpfSkeleton RAII)           [§5.22 early-load]
+  3. self_tag = bpf_prog_get_info_by_fd(...).tag       [§5.22 self-tag capture]
+  4. open BpffsRootFd                                  [§5.22 path hardening]
+  5. probe = probe_attached_xdp(ifindex, self_tag)
+        — is_ours = (probe.mode ∈ {SKB,NATIVE,HW}) && (name=="mac_filter_prog")
+                    && (tag==self_tag)     [§5.23 Q1: mode-axis relaxed]
+  6. branch on §5.4 state:
+       state (a) — exit 0 no-op (per §5.21 D4)
+       state (b) — bpf_xdp_detach(ifindex, -1, probe.mode_to_flags(),
+                                  nullptr)
+                   + bpffs_remove_iface         [§5.23 Q1: detach in PROBED mode]
+       state (c) — throw DetachFailed (exit 5)  [§5.22 baseline]
+       state (d) — bpffs_remove_iface, exit 0    (§5.21 D4)
+```
+
+CLI parser change (`cli.cpp`): when subcommand is `detach`, presence
+of `--mode` on the argv list triggers a CLI usage error (exit 1) —
+the rejection is at the parser level, NOT inside `loader.cpp`. The
+`DetachConfig` struct does NOT gain a `mode` field; the parser never
+materializes one for detach.
+
+#### Q2 decision — Kernel-rejected mode handling = **Option K (keep exit 3 `AttachFailed`)**
+
+**Choice**: when `bpf_xdp_attach` returns `-EOPNOTSUPP` or `-EINVAL`
+on a non-generic mode (e.g. `attach --mode native --iface lo` on a
+kernel/driver combo that doesn't support native XDP), translate to
+the existing `LoaderError::AttachFailed` (exit 3). Stderr captures
+the kernel errno via `strerror`. No new exit code.
+
+**Rationale**: no new exit code; consistent with all other
+kernel-attach failures. Exit-code table conservation matters (MVP-2
+Sec just added 8; further additions increase operator mental load).
+`EOPNOTSUPP` from `bpf_xdp_attach` has false positives (iface vanished
+mid-attach) — pre-classifying would mislead. Exit 7 stays reserved
+for `KernelUnsupported` (MVP-2 Robust). Audit-signal value of a
+distinct exit 9 is marginal — operators who care read stderr anyway.
+Option N (new exit 9) explicitly fenced OOS in §7 MVP-2 Perf
+additions; backward-compatible addition possible in a future pass if
+operational need emerges.
+
+**Stderr format** for the mode-rejected case (impl-shape guidance):
+`xdpmacfilter: XDP attach failed on '<iface>' (mode=<native|offload>): Operation not supported`.
+The literal `mode=<requested-mode-name>` is recommended; tester does
+NOT assert exact format. §6.17 asserts only `exit 3` + stderr
+non-empty + stderr contains `native` (or `mode=native`).
+
+#### Q3 decision — PERCPU stats test coverage = **Option F (fixture-level unit-shaped sum-correctness)**
+
+**Choice**: add `T_PERCPU_STATS_SUM` (§6.18) — a deterministic
+test that bypasses BPF traffic injection entirely and seeds known
+per-CPU values directly into the `stats` map via `bpftool map update`,
+then reads via the new `read_stats.py` and asserts the sum matches
+the seeded total.
+
+**Rationale**: Option F gives the cleanest diagnostic signal at the
+lowest fixture complexity. Option D (defensive multi-CPU aggregation
+via traffic injection) is flaky on single-CPU runners — requires
+`taskset` or kernel rebalancer cooperation, both unreliable. Option I
+(implicit — rely on T_PASS_ALLOWED) has poor diagnostic attribution
+(BPF correctness conflated with sum-logic correctness). Option F seeds
+known per-CPU values, asserts sum equality — failure signal is
+unambiguous: "PERCPU sum logic is wrong".
+
+Implementation hint (mechanism-only; tester picks exact bytes):
+`nr_cpus=$(nproc --all); expected_sum=$(( nr_cpus * (nr_cpus + 1) / 2 ))`;
+seed each CPU slot with `c+1` for `c ∈ [0, nr_cpus-1]`; assert
+`read_stats.py` sum equals `expected_sum`.
+
+#### Public-API surface diff (`loader.hpp` relaxation)
+
+This pass intentionally relaxes the MVP-2 Sec "loader.hpp
+byte-identical" invariant. The diff:
+
+**Addition 1** — new enum class declaration (inside `namespace xdpmf`,
+above `struct AttachConfig`):
+
+```cpp
+enum class XdpMode : int {
+    Generic = 0,   // XDP_FLAGS_SKB_MODE — MVP-1 default, universally supported
+    Native  = 1,   // XDP_FLAGS_DRV_MODE — driver-native XDP, faster, hardware-dependent
+    Offload = 2,   // XDP_FLAGS_HW_MODE  — NIC-offloaded XDP, rare hardware support
+};
+```
+
+The underlying type is `int` (explicit) for stability across compilers
+and to make the kernel-flags mapping trivial in `loader.cpp`. Values
+0/1/2 are arbitrary; do NOT map them directly to XDP_FLAGS_* (the
+mapping happens via a switch in `loader.cpp`'s anon namespace —
+keeps the kernel-ABI coupling out of the public header).
+
+**Addition 2** — new field on `struct AttachConfig`:
+
+```cpp
+struct AttachConfig {
+    std::string iface;
+    std::vector<xdpmf_mac> allow;
+    XdpMode mode = XdpMode::Generic;   // NEW: default preserves MVP-1 SKB-only behaviour
+};
+```
+
+`DetachConfig` is **unchanged** — per Q1 Option A, `detach` does not
+accept `--mode`.
+
+**No changes** to `attach()` / `detach()` function signatures, no new
+`LoaderError` enumerator (per Q2 Option K — no new exit code), no
+changes to `raii.hpp`.
+
+**Reviewer's `loader.hpp`-invariant check** should accept a diff
+containing exactly: one new `enum class XdpMode { … };` declaration
+(~6 lines incl. comments), one new field initializer on `AttachConfig`
+(`XdpMode mode = XdpMode::Generic;`, one line). Any other diff in
+`loader.hpp` is out of spec for this pass.
+
+**Rationale for relaxing the invariant**: the `--mode` CLI flag's
+parsed value MUST cross the `cli.cpp → loader.cpp` boundary (the CLI
+parser produces an `AttachConfig`; `loader.cpp` consumes it and
+selects the kernel flags). The cleanest carrier is a field on
+`AttachConfig`. A struct-field addition is the smallest surface change
+consistent with the existing architecture (§5.21 A1: `AttachConfig`
+is "the contract between `cli.cpp` → `loader.cpp`"). Recorded as a
+deliberate relaxation; the invariant returns to "byte-identical" in
+MVP-2 Robust / Polish-2 unless further design pressure emerges.
+
+#### Impl surface (file:line targets, mirror to brief Scope items 1/2/3)
+
+**Item 1 — PERCPU stats migration**:
+
+| Where | Change |
+|---|---|
+| `src/bpf/mac_filter.bpf.c` (stats map declaration, ~lines 30-34) | `BPF_MAP_TYPE_ARRAY` → `BPF_MAP_TYPE_PERCPU_ARRAY`. Other fields unchanged (key_size=4, value_size=8, max_entries=3, pinning). |
+| `src/bpf/mac_filter.bpf.c` `bump_stat` helper (~lines 41-44) | Verify `*v += 1` compiles and is correct for PERCPU. Per kernel docs: `bpf_map_lookup_elem` on a PERCPU_ARRAY returns a pointer to the **current CPU's** slot — `*v += 1` is now per-CPU local, no `__sync_fetch_and_add` needed. No code change expected; verify only. |
+| `tests/lib/read_stats.py` | Update parser: bpftool's `--json` for PERCPU maps emits `value` as an array of per-CPU objects, e.g. `[{"cpu": 0, "value": 0x05}, {"cpu": 1, "value": 0x03}, …]` wrapped under `"values"` key per entry. Sum across CPUs per key: `sum(int(v["value"], 0) for v in slot["values"])` (or equivalent). |
+| `src/common/mac_filter.h` | No change — the user-facing `enum mac_filter_stat` indices are unchanged; PERCPU is a kernel-side storage change. |
+| `tests/lib/common.sh` `wait_for_stats_sum` helper | No change — already reads via `read_stats.py`; the sum semantics are now PERCPU-aware transparently. |
+
+**Item 2 — `--mode {generic,native,offload}` CLI flag**:
+
+| Where | Change |
+|---|---|
+| `src/loader/cli.cpp` (parser) | Add `--mode` long-option parsing for the `attach` subcommand. Accepts literal strings `generic`, `native`, `offload` (case-sensitive). Unknown value → exit 1 with stderr `"--mode: expected one of {generic, native, offload}, got '<X>'"`. Default if `--mode` omitted: `XdpMode::Generic`. For the `detach` subcommand: if `--mode` appears in argv, exit 1 with stderr `"detach: --mode is attach-only; mode is auto-detected from the attached program"`. |
+| `src/loader/cli.hpp` | No new declarations (uses `XdpMode` from `loader.hpp`); update the `--help` text to include the `--mode` line for the `attach` subcommand. |
+| `src/loader/loader.hpp` | Add `enum class XdpMode { Generic, Native, Offload };` (above `AttachConfig`). Add `XdpMode mode = XdpMode::Generic;` field on `AttachConfig`. See "Public-API surface diff" above. |
+| `src/loader/loader.cpp` (attach call) | Replace hardcoded `XDP_FLAGS_SKB_MODE` at `bpf_xdp_attach` callsite with a switch on `cfg.mode` → `XDP_FLAGS_SKB_MODE` / `XDP_FLAGS_DRV_MODE` / `XDP_FLAGS_HW_MODE`. The switch lives in an anon-namespace helper `static int mode_to_flags(XdpMode m)`. |
+| `src/loader/loader.cpp` (detach call) | Use `mode_to_flags(probe.mode)` instead of hardcoded `XDP_FLAGS_SKB_MODE`. Per Q1 Option A. |
+| `src/loader/loader.cpp` (`is_ours` predicate) | Drop the `mode == SKB` clause; replace with `mode != NONE` (i.e. any of SKB/NATIVE/HW). Per Q1 Option A + §5.22 amendment above. |
+| `src/loader/main.cpp` | Plumb the parsed `--mode` value through the `ParsedCommand` variant into the `attach()` call. No exit-code table change. |
+
+**Item 3 — Tests** (per Q3 + Item 2):
+
+| New test | §6.x | One-line summary |
+|---|---|---|
+| `T_MODE_GENERIC_DEFAULT` | §6.16 | `attach` without `--mode` defaults to generic (SKB); probe confirms SKB mode after attach |
+| `T_MODE_NATIVE_UNSUPPORTED` | §6.17 | `attach --mode native --iface lo` → exit 3 (per Q2 Option K); lo doesn't support native XDP |
+| `T_PERCPU_STATS_SUM` | §6.18 | Seed PERCPU `stats` map via `bpftool map update`, read via `read_stats.py`, assert sum == known total (Q3 Option F) |
+| `T_MODE_DETACH_REJECTS` | §6.19 | `detach --mode native --iface ${IFACE_A}` → exit 1 + stderr substring `"--mode is attach-only"` (per Q1 Option A) |
+
+**Edit to existing test**:
+
+| Existing test | Edit |
+|---|---|
+| `tests/T_CLI_HELP_VERSION.sh` (§6.10) | Assertion grows: `--help` output must now contain the substring `--mode` (verifies the new flag is documented in the help text). |
+
+No edits needed to §6.3–§6.8 (stats-touching tests) — `read_stats.py`
+internally absorbs the PERCPU sum semantics; the outcome assertions
+(`stats[…] == N`) stay byte-identical. No edits to §6.9
+T_ATTACH_ALIEN_REFUSAL — the alien fixture stays in SKB mode (per
+fixture's `xdpgeneric` attach); §6.9 exercises the name+tag axes,
+not the mode axis.
+
+#### Bpftool PERCPU JSON schema (architect-documented, impl reference)
+
+For `BPF_MAP_TYPE_PERCPU_ARRAY`, `bpftool map dump --json pinned <path>`
+returns an array of entries, each entry shaped like:
+
+```json
+[
+  {
+    "key": ["0x00","0x00","0x00","0x00"],
+    "values": [
+      {"cpu": 0, "value": ["0x05","0x00","0x00","0x00","0x00","0x00","0x00","0x00"]},
+      {"cpu": 1, "value": ["0x03","0x00","0x00","0x00","0x00","0x00","0x00","0x00"]}
+    ]
+  }
+]
+```
+
+Key differences from non-PERCPU schema: `"value"` field is replaced
+by `"values"` (plural) — an array of per-CPU records. Each per-CPU
+record has `"cpu"` (integer index) and `"value"` (byte array,
+little-endian for native byte order). `read_stats.py` MUST iterate
+`entry["values"]`, parse each `per_cpu["value"]` as a little-endian
+u64 (8 bytes), and sum across all CPU entries for each `key`.
+
+Stability note: this schema is libbpf 1.1+ stable per the bpftool
+JSON contract. Project depends on libbpf ≥ 1.1 (per §5.21 B2). No
+schema-version probe needed.
+
+#### Performance characterization (architect-asserted, not tested)
+
+- **Counter throughput**: PERCPU eliminates the cross-CPU race on the shared counter slot. On a multi-queue NIC with N RX queues, pre-§5.23 throughput is bounded by cache-line bouncing on the single shared slot (worst case: ~1 increment per cache-line transfer, often ~50 ns/transfer on modern x86 → ~20M increments/sec ceiling). Post-§5.23: each CPU writes its own slot, no contention.
+- **Read latency**: `read_stats.py` now sums N values instead of reading 1. For N ≤ 256 (typical max CPU count), the sum is a few µs of Python work — negligible vs the `bpftool map dump` syscall overhead.
+- **No new perf tests**: the brief explicitly does not request benchmark tests (perf characterization is documentary). T_PERCPU_STATS_SUM is correctness-only.
+
+**Evidence**: `mint/hybrid-review.md` perf HIGH (PERCPU); perf MED
+(SKB-mode hardcoded); sec MED M2 (alien-detection bypass via non-SKB,
+detection-layer closed in §5.20, CLI surface now closed here);
+`mint/task-brief.md` MVP-2 Perf (full brief). §5.3 + §5.6 supersede.
+§5.22 is_ours predicate mode-axis amendment.
 
 ## 6. TestStrategy
 
@@ -2319,6 +2617,104 @@ ensures the destructive setup window does not overlap with any other
 bpffs-touching test. All other tests with veth fixtures already take
 `xdp_fixture` per the existing convention.
 
+### 6.16 T_MODE_GENERIC_DEFAULT — `attach` without `--mode` defaults to generic (per §5.23 Q1, MVP-2 Perf)
+
+Closes the implicit-default-mode question raised by §5.23 Item 2: the
+`--mode` flag, when omitted, MUST default to `XdpMode::Generic` (SKB
+mode) to preserve the MVP-1 baseline behaviour that §6.3–§6.8 depend
+on. This test asserts that default end-to-end.
+
+- **Setup**: standard veth fixture (`setup_veth`, `${IFACE_A}`/`${IFACE_B}`). `RESOURCE_LOCK xdp_fixture`. Requires `require_passwordless_sudo`.
+- **Trigger** (sequential):
+  1. `sudo "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"` (NO `--mode` flag — exercises the default).
+  2. Probe the attached mode via `ip -j link show "${IFACE_A}"` → JSON parse → `.[0].xdp.attached[*].mode` (kernel reports `xdp`, `xdpgeneric`, `xdpdrv`, or `xdpoffload`). The default-generic attach MUST report `xdpgeneric` or the kernel's `generic` synonym.
+- **Outcome** (ALL must hold):
+  - Step 1 exits 0.
+  - Step 2 confirms the attached XDP mode is generic/SKB (accept both `generic` and `xdpgeneric` for kernel-version variance).
+  - `/sys/fs/bpf/xdpmacfilter/${IFACE_A}/{allowlist,stats}` exist.
+- **Mechanism**:
+  - Exit code: `[[ $? -eq 0 ]]`.
+  - Mode check: `ip -j link show "${IFACE_A}" | jq -r '.[0].xdp.attached[]?.mode // .[0].xdp.mode'` → must equal `generic` or `xdpgeneric`.
+  - Pin paths: `sudo -n test -e "${PIN_DIR}/allowlist" && sudo -n test -e "${PIN_DIR}/stats"`.
+- **Cleanup**: `xdpmacfilter detach --iface "${IFACE_A}"` (NO `--mode` per Q1 Option A) + `cleanup_veth`.
+- **Ctest properties**: `TIMEOUT 60`, `RESOURCE_LOCK xdp_fixture`, `SKIP_RETURN_CODE 77`.
+- **Negation control NOT required** — covered by suite-level §6.7.
+
+### 6.17 T_MODE_NATIVE_UNSUPPORTED — `--mode native` on unsupported iface exits 3 (per §5.23 Q2, MVP-2 Perf)
+
+Closes the Q2 Option K choice: when the kernel rejects a non-generic
+mode (EOPNOTSUPP / EINVAL), the loader maps to exit 3 (`AttachFailed`).
+Uses `lo` (the loopback iface) — universally does NOT support native
+XDP — as the unsupported target.
+
+- **Setup**: NO veth fixture (test targets `lo`). NO `RESOURCE_LOCK xdp_fixture` (does not touch the veth pair). Requires `require_passwordless_sudo`. Pre-test snapshot: `xdp_prog_id lo` should be empty; if not, exit 1 with diagnostic (test environment dirty, not our loader's fault).
+- **Trigger** (sequential):
+  1. Pre-check: `[[ -z "$(xdp_prog_id lo)" ]]`; otherwise exit 1 with "lo already has XDP attached; test environment dirty".
+  2. Run: `set +e; sudo "${LOADER_BIN}" attach --iface lo --allow "${MAC_GOOD}" --mode native 2> "${stderr_file}"; rc=$?; set -e`.
+- **Outcome** (ALL must hold):
+  - `rc == 3` — exit code matches `LoaderError::AttachFailed` per §4.1 + Q2 Option K.
+  - Stderr is non-empty AND contains the substring `native` OR `mode=native` (impl-shape; asserts stderr names the mode, not exact format).
+  - Post-test: `[[ -z "$(xdp_prog_id lo)" ]]` — lo's XDP slot still empty.
+  - No orphan pin dir: `sudo -n test ! -e "/sys/fs/bpf/xdpmacfilter/lo"`.
+- **Mechanism**:
+  - `[[ "${rc}" == 3 ]] || fail`
+  - `grep -q -E -- 'native|mode=native' "${stderr_file}" || fail`
+  - `[[ -z "$(xdp_prog_id lo)" ]] || fail`
+  - `sudo -n test ! -e "/sys/fs/bpf/xdpmacfilter/lo" || fail`
+- **Cleanup**: `sudo -n ip link set lo xdpgeneric off 2>/dev/null || true` (belt-and-suspenders); `rm -f "${stderr_file}"`.
+- **Ctest properties**: `TIMEOUT 30`, **no** `RESOURCE_LOCK xdp_fixture`, `SKIP_RETURN_CODE 77`.
+- **Flakiness consideration**: `lo` is universally available; native XDP universally unsupported on `lo`. Stable on any Linux host meeting the project's libbpf ≥ 1.1 / kernel ≥ 5.7 floor. If a future kernel adds native XDP to `lo` (extremely unlikely), this test would need a different unsupported-target iface (tap/dummy).
+- **Negation control NOT required** — §6.7 covers suite-level.
+- **Note on Q2 Option K rationale**: this test asserts ONLY exit 3 + stderr substring; does NOT assert any specific exit-code value beyond 3 (would NOT need rewriting if architect later opts for Option N exit 9).
+
+### 6.18 T_PERCPU_STATS_SUM — PERCPU sum-correctness via direct map seed (per §5.23 Q3 Option F, MVP-2 Perf)
+
+Closes the Q3 Option F choice: deterministic verification that the
+new `read_stats.py` correctly sums across CPU slots in the PERCPU
+`stats` map. No traffic injection; seeds known per-CPU values
+directly via `bpftool map update`, asserts script's sum matches
+seeded total.
+
+- **Setup**: standard veth fixture (`setup_veth`, `${IFACE_A}`/`${IFACE_B}`). Run `xdpmacfilter attach --iface "${IFACE_A}" --allow "${MAC_GOOD}"` (default mode) so the PERCPU `stats` map exists at `${PIN_DIR}/stats`. `RESOURCE_LOCK xdp_fixture`. Requires `require_passwordless_sudo`.
+- **Trigger** (sequential):
+  1. `nr_cpus=$(nproc --all)` — number of possible CPUs (matches PERCPU map slot count).
+  2. Construct known per-CPU values: for CPU index `c ∈ [0, nr_cpus-1]`, value = `c + 1`. Expected sum = `nr_cpus * (nr_cpus + 1) / 2`.
+  3. Build 8-byte little-endian u64 byte sequence per CPU, concatenate (total `nr_cpus * 8` bytes).
+  4. Seed `STAT_PASS` slot (key 0) via `sudo -n bpftool map update pinned "${PIN_DIR}/stats" key hex 00 00 00 00 value hex <concatenated-bytes>`.
+  5. Read sum via `read_stats.py` (whatever invocation form `read_stats.py` exposes; tester uses the documented interface — script returns `<pass> <drop_deny> <drop_malformed>` per MVP-1 convention).
+- **Outcome** (ALL must hold):
+  - Step 4 exits 0 (`bpftool map update` accepts the PERCPU value format).
+  - Step 5 exits 0 and the STAT_PASS field of the returned tuple equals `expected_sum`.
+  - Other stats slots (`STAT_DROP_DENY`, `STAT_DROP_MALFORMED`) NOT asserted in this test (they're at default zero; the test focuses on the sum-correctness of STAT_PASS).
+- **Mechanism**:
+  - `bpftool map update` exit: `[[ $? -eq 0 ]]`.
+  - Sum equality: `read -r pass _ _ < <(read_stats); [[ "${pass}" == "${expected_sum}" ]] || fail`.
+- **Cleanup**: `xdpmacfilter detach --iface "${IFACE_A}"` + `cleanup_veth`.
+- **Ctest properties**: `TIMEOUT 30`, `RESOURCE_LOCK xdp_fixture`, `SKIP_RETURN_CODE 77`.
+- **Flakiness consideration**: `nproc --all` returns possible CPUs. Even on single-CPU runners (`nr_cpus == 1`), test is deterministic: expected_sum = 1, sole CPU's slot seeded with 1, sum reads back 1.
+- **Negation control NOT required** — `read_stats.py` sum-logic failure propagates to §6.3–§6.8 immediately. §6.7 covers suite-level no-op floor.
+- **Diagnostic value**: if T_PERCPU_STATS_SUM fails but §6.3 passes, likely cause is `read_stats.py` reading CPU 0 only OR a bpftool JSON schema mismatch. If T_PERCPU_STATS_SUM passes but §6.3 fails, bug is in BPF program's PERCPU lookup-and-bump, NOT the sum logic — diagnostic separation is the point.
+
+### 6.19 T_MODE_DETACH_REJECTS — `detach --mode <X>` rejected with usage error (per §5.23 Q1 Option A, MVP-2 Perf)
+
+Closes the Q1 Option A explicit-rejection rule: `detach` does NOT
+accept `--mode`; if the operator passes one, the CLI parser exits 1
+with a clear stderr message.
+
+- **Setup**: minimal — no veth needed, no attach needed. NO `RESOURCE_LOCK`. Does NOT require root (parser rejects before any privileged syscall).
+- **Trigger** (sequential):
+  1. `set +e; "${LOADER_BIN}" detach --iface "${IFACE_A:-xdpmf_test}" --mode native 2> "${stderr_file}"; rc=$?; set -e`.
+- **Outcome** (ALL must hold):
+  - `rc == 1` — CLI usage error per §4.1 exit code 1.
+  - Stderr contains `--mode is attach-only` (recommended literal) OR at least the substring `attach-only` (impl-shape flexibility).
+- **Mechanism**:
+  - Exit code: `[[ "${rc}" == 1 ]] || fail`
+  - Stderr: `grep -q -F -- 'attach-only' "${stderr_file}" || fail`.
+- **Cleanup**: `rm -f "${stderr_file}"`.
+- **Ctest properties**: `TIMEOUT 10`, **no** `RESOURCE_LOCK`, **no** `SKIP_RETURN_CODE 77` — does not need root. Pure CLI-parser test, parallels §6.10–§6.12 pattern.
+- **Negation control**: an `attach --mode native` invocation does NOT exit 1 with the same stderr — covered implicitly by §6.17 (attach --mode native on lo exits 3, not 1).
+- **Test variant** (optional, tester's choice): also test `detach --mode generic` — proves rule is flag-presence-driven, not mode-value-driven.
+
 ## 7. Out of scope
 
 The brief's out-of-scope list applies verbatim. Additionally, the
@@ -2327,10 +2723,15 @@ might be tempted to add:
 
 - **No `stats` subcommand** in `xdpmacfilter` — stats are read via
   `bpftool map dump`. Adding a userspace dump is MVP-2.
-- **No `--mode {generic,native,offload}` flag** — generic (SKB) mode is
-  hardcoded per §5.6. The MVP-1.1B all-modes probe (§5.20) closes the
-  detection-layer gap without exposing a CLI surface; the CLI flag
-  itself remains MVP-2.
+- ~~**No `--mode {generic,native,offload}` flag** — generic (SKB) mode is
+  hardcoded per §5.6.~~ **— SHIPPED in §5.23 (MVP-2 Perf, 2026-05-23)**.
+  `--mode {generic,native,offload}` is now a CLI flag on the `attach`
+  subcommand, default `generic` (preserves MVP-1 baseline). `detach`
+  does NOT accept `--mode` (per §5.23 Q1 = Option A auto-detect; mode
+  is read from the §5.20 all-modes probe). Kernel-rejected modes (e.g.
+  `--mode native --iface lo`) map to exit 3 (`AttachFailed`, per §5.23
+  Q2 = Option K). Test coverage: §6.16 T_MODE_GENERIC_DEFAULT, §6.17
+  T_MODE_NATIVE_UNSUPPORTED, §6.19 T_MODE_DETACH_REJECTS.
 - ~~**No `bpf_prog_info.tag` (SHA1-of-bytecode) identity check** in §5.19~~
   **— SHIPPED in §5.22 (MVP-2 Sec, 2026-05-23)**. Tag-check is now
   layered on top of name-check per §5.22 Q1 = Option E (early-load):
@@ -2417,8 +2818,14 @@ might be tempted to add:
 - **No T_VERIFIER_REJECT + kernel-version probe +
   `LoaderError::KernelUnsupported`** — testing MED finding per brief
   OOS section; explicitly MVP-2 (Robust slice).
-- **No PERCPU stats migration** — performance HIGH finding per brief
-  OOS section; design §5.3 + §5.5 explicit MVP-2 (Perf slice).
+- ~~**No PERCPU stats migration** — performance HIGH finding per brief
+  OOS section; design §5.3 + §5.5 explicit MVP-2 (Perf slice).~~
+  **— SHIPPED in §5.23 (MVP-2 Perf, 2026-05-23)**. `stats` map type
+  is now `BPF_MAP_TYPE_PERCPU_ARRAY`; `read_stats.py` sums across
+  CPUs via the libbpf-stable bpftool `--json` PERCPU schema (per-CPU
+  `"values"` array). §5.3 and §5.6 are explicitly superseded by §5.23.
+  Test coverage: §6.18 T_PERCPU_STATS_SUM (Q3 Option F unit-shaped
+  sum-correctness).
 - **No removal of `mint/test-run.log` from the gitignore list** — brief
   flags this as a stale finding (already gitignored AND untracked, no
   work needed). Not a change; documented here so reviewer does not flag
@@ -2491,3 +2898,69 @@ might be tempted to add:
   before invoking our loader. A future MVP-3+ pass could expose an
   `--accept-tag <hex>` registry CLI flag for advanced multi-loader
   scenarios; OOS for MVP-2 Sec.
+
+### MVP-2 Perf additions to OOS (per §5.23)
+
+- **No `detach --mode` acceptance (Q1 Options S and W rejected)** —
+  per §5.23 Q1 = Option A, `detach` rejects `--mode` as a CLI usage
+  error (exit 1). The "strict require --mode on detach" (Option S)
+  and "wildcard silently-ignore --mode on detach" (Option W)
+  alternatives are explicitly OOS. If a future operational pattern
+  emerges where operators want to assert the mode on detach (e.g. as
+  a safety check), an `--expect-mode <X>` flag could be added later —
+  semantically distinct from `--mode` and OOS for MVP-2 Perf.
+- **No new exit code 9 `ModeUnsupported` (Q2 Option N rejected)** —
+  per §5.23 Q2 = Option K, kernel-rejected modes (EOPNOTSUPP /
+  EINVAL on non-generic mode requests) map to existing exit 3
+  (`AttachFailed`). Exit 9 stays free; exit 7 stays reserved for
+  `KernelUnsupported` (MVP-2 Robust). If a future operational
+  pattern emerges where the audit-signal value of a distinct exit
+  code clearly beats the EOPNOTSUPP false-positive risk (e.g.
+  rich-error stderr is also added), exit 9 can be carved out then.
+- **No defensive multi-CPU PERCPU aggregation test (Q3 Option D
+  rejected)** — per §5.23 Q3 = Option F, the test machinery uses
+  `bpftool map update` to seed known per-CPU values directly,
+  bypassing traffic injection. Option D is rejected as flaky on
+  single-CPU runners and overcomplicated.
+- **No implicit-only PERCPU coverage (Q3 Option I rejected)** —
+  per §5.23 Q3, T_PERCPU_STATS_SUM (§6.18) is the dedicated
+  Option-F entry. Relying solely on T_PASS_ALLOWED to catch PERCPU
+  sum bugs is rejected — failure signal would be opaque.
+- **No `--accept-any-mode` / multi-mode-simultaneous attach** — the
+  §5.23 design allows ONE mode per attach (operator picks one of
+  `generic` / `native` / `offload`). Some kernels permit multiple
+  mode-slots simultaneously; this loader does NOT. The §5.4 state
+  machine's "ours" check accepts any single mode (relaxed from
+  SKB-only per §5.23 Q1) but the attach itself produces a single
+  attachment.
+- **No PERCPU migration for the `allowlist` map** — allowlist is
+  read-only at runtime (populated once at attach); PERCPU offers no
+  benefit (each CPU would have an identical copy, wasting memory).
+  Stays `BPF_MAP_TYPE_HASH`.
+- **No atomic counter ops (`__sync_fetch_and_add` etc.)** — PERCPU
+  eliminates cross-CPU race; intra-CPU race is not a concern for the
+  single-threaded XDP per-CPU dispatch model (no preemption inside
+  BPF program execution).
+- **No userspace `stats` subcommand** — PERCPU migration is a
+  kernel-side storage change; the userspace dump interface stays
+  `bpftool map dump` + `read_stats.py`. Adding a `xdpmacfilter
+  stats` subcommand remains MVP-3+ (per pre-existing §7).
+- **No bpftool `--json` schema-version probe** — bpftool's PERCPU
+  JSON schema (`"values"` plural array per entry) is libbpf 1.1+
+  stable. If a future libbpf changes the schema, `read_stats.py`
+  breaks and the bug surfaces via §6.18 immediately. Robust-slice
+  work could add a probe; OOS for MVP-2 Perf.
+- **No `--mode` removal at detach via global CLI grammar** — the
+  `detach`'s `--help` text MUST document that `--mode` is
+  attach-only (so operators can discover the rule). Removing the
+  flag from the global CLI grammar is not possible without breaking
+  the `attach` use case. The explicit-rejection-on-detach pattern
+  is the correct semantic.
+- **No `--mode` for `T_ATTACH_TAG_MISMATCH` (§6.14) fixture** — the
+  tag-check fixture stays in SKB mode; the mode axis is not what
+  §6.14 exercises. If a future test slice wants mode-axis tag-check
+  coverage, a new test is added; §6.14 stays mode-axis-agnostic.
+- **No bpftool dependency version pin beyond libbpf ≥ 1.1** —
+  bpftool packaging varies by distro; the `--json` PERCPU schema
+  is stable per libbpf API. Adding a `bpftool --version` probe is
+  OOS.
