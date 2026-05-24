@@ -69,6 +69,13 @@ echo "--- stderr (apply A) ---"
 cat "${stderr_apply_a}" >&2 || true
 echo "--- end stderr ---"
 
+# Per §5.26 trust_model stderr sub-decision: apply ALWAYS logs `trust_model=<mode>` at attach entry.
+# §6.25 asserts the format here per design.md:4370-4371. [POST-REVIEW SWEEP round 1]
+if ! grep -qE 'xdpmacfilter: trust_model=strict' "${stderr_apply_a}"; then
+    echo "FAIL[1b]: stderr missing 'xdpmacfilter: trust_model=strict' log line" >&2
+    fail=1
+fi
+
 if [[ "${rc_a}" -ne 0 ]]; then
     echo "FAIL[1]: apply A exit ${rc_a} (expected 0)" >&2
     fail=1

@@ -4638,7 +4638,15 @@ In addition to §5.26 Preserved invariants (PI-1..PI-14) above:
 - `git diff main -- src/common/mac_filter.h` shows: ONLY additions (the
   new §5.26 Q6 constants); zero modifications to existing lines.
 - `git diff main -- src/cli/main.cpp` (post file-move) shows: rename +
-  ONE added dispatch arm (`ParsedApply` handling). NO other line diff.
+  `ParsedApply` dispatch arm + `is_config_error` helper + try/catch
+  refactor to suppress `error: ` prefix on `ConfigError` so stderr
+  starts EXACTLY with `xdpmacfilter: config error:` per Q-HG1 stderr
+  contract (load-bearing for `T_EXIT_CODE_9_ON_CONFIG_ERROR.sh:62`
+  `grep -qE '^xdpmacfilter: config error:'`). The original "ONE added
+  dispatch arm. NO other line diff" budget was too strict — the
+  `is_config_error` helper is REQUIRED by the start-of-line stderr
+  contract. Reviewer accepts this expanded shape; OOT [POST-REVIEW
+  SWEEP round 1] amended this invariant for accuracy.
 - `git diff main -- tests/T_*.sh` (existing 20) shows ZERO body
   changes.
 - 7 new ctests pass (§6.21..§6.27); §6.23 + §6.25 are the load-bearing
