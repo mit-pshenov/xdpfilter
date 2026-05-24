@@ -26,14 +26,37 @@ struct xdpmf_mac {
 } __attribute__((packed));
 
 /*
- * Index into the `stats` BPF_MAP_TYPE_ARRAY. Each invocation of the XDP
- * program bumps exactly one slot. STAT_MAX is the array max_entries.
+ * §5.27 (MVP-3.2): L3 src-CIDR axis — see design §5.27 Q1 + Q2.
+ *
+ * LPM_TRIE key for IPv4 CIDR matching. Kernel BPF LPM_TRIE requires the
+ * key to begin with `__u32 prefixlen`; the trailing field holds the
+ * address in NETWORK BYTE ORDER (big-endian; matches `iphdr.saddr` on
+ * the wire — no swap needed in datapath). Total size = 8 bytes.
+ *
+ * `unsigned int` is used (not `__u32`) because this header is included
+ * from BOTH userspace C++ (where `__u32` isn't a libc type) AND BPF C
+ * (where `unsigned int` is binary-compatible with kernel `__u32`).
+ */
+struct xdpmf_cidr_v4 {
+    unsigned int prefixlen;  /* bits in network mask, range [0, 32] */
+    unsigned int addr;       /* IPv4 address, big-endian (network order) */
+} __attribute__((packed));
+
+/*
+ * Index into the `stats` BPF_MAP_TYPE_PERCPU_ARRAY. Each invocation of
+ * the XDP program bumps exactly one slot. STAT_MAX is the array
+ * max_entries (sentinel; bumped 3 → 4 in §5.27 alongside STAT_PASS_CIDR).
+ *
+ * §5.27 PI-10-3.2 carve-out: enum slots 0/1/2 are byte-identical to
+ * pre-§5.27; STAT_PASS_CIDR = 3 is additive; STAT_MAX is a derived
+ * sentinel (allowed to grow with the enum).
  */
 enum mac_filter_stat {
-    STAT_PASS = 0,
-    STAT_DROP_DENY = 1,
+    STAT_PASS           = 0,
+    STAT_DROP_DENY      = 1,
     STAT_DROP_MALFORMED = 2,
-    STAT_MAX = 3,
+    STAT_PASS_CIDR      = 3,  /* §5.27 NEW: frame passed via CIDR-axis match */
+    STAT_MAX            = 4,  /* §5.27 BUMP: 3 → 4 (sentinel = stats max_entries) */
 };
 
 /* Bpffs layout (see design §3.5). The per-interface subdir under this
@@ -61,6 +84,14 @@ enum mac_filter_stat {
 
 /* §5.26 P0a: bpf_link pin basename under the per-iface bpffs dir. */
 #define XDPMF_LINK_PIN_BASENAME        "link"
+
+/* §5.27 (MVP-3.2) Q1 AS1: parallel ARRAY_OF_MAPS outer pointing at two
+ * LPM_TRIE inners (cidr_allowlist_a / cidr_allowlist_b). Same shared
+ * active_idx ARRAY[1] commits both outers' swap with a single u32 write —
+ * see design §5.27 Q1 race-window analysis. */
+#define XDPMF_MAP_CIDR_RULESETS_OUTER_NAME  "cidr_rulesets"     /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] of LPM_TRIE fds */
+#define XDPMF_MAP_CIDR_INNER_A_NAME         "cidr_allowlist_a"  /* inner slot 0, LPM_TRIE */
+#define XDPMF_MAP_CIDR_INNER_B_NAME         "cidr_allowlist_b"  /* inner slot 1, LPM_TRIE */
 
 #ifdef __cplusplus
 }

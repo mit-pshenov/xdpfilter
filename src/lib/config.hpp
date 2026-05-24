@@ -1,18 +1,21 @@
 /*
- * config.hpp — typed schema for the §5.26 MVP-3.1 YAML config.
+ * config.hpp — typed schema for the §5.26/§5.27 YAML config.
  *
- * The schema (cycle 1) is a top-level block mapping with:
- *   schema_version: 1     (optional; default 1; supported set {1})
+ * The schema (cycles 1+2) is a top-level block mapping with:
+ *   schema_version: 1     (optional; default 1; supported set {1}; §5.27 Q5 V1
+ *                          additive: `src_cidr` extension grandfathered into v1)
  *   interface: <name>     (optional; redundant with CLI --iface)
  *   default_action: drop|pass    (REQUIRED)
  *   rules:                (optional; list of rule mappings)
  *     - id: <u32>         (REQUIRED; range [0, XDPMF_ALLOWLIST_MAX-1])
  *       action: pass|drop (REQUIRED)
- *       match:            (REQUIRED mapping)
- *         mac: "AA:BB:..." (REQUIRED in cycle 1; only match type allowed)
+ *       match:            (REQUIRED mapping; §5.27 rule 7: at-least-one-of
+ *                          mac/src_cidr required)
+ *         mac: "AA:BB:..."         (§5.26 — optional in cycle 2 if src_cidr set)
+ *         src_cidr: "10.0.0.0/8"   (§5.27 — IPv4 dotted-decimal CIDR; v6 rejected)
  *
  * All validation failures throw std::system_error{LoaderError::ConfigError, ...}
- * with stderr starting "xdpmacfilter: config error: ..." per §5.26.
+ * with stderr starting "xdpmacfilter: config error: ..." per §5.26/§5.27.
  */
 #pragma once
 
@@ -22,7 +25,7 @@
 #include <string_view>
 #include <vector>
 
-#include "common/mac_filter.h"  // struct xdpmf_mac, XDPMF_ALLOWLIST_MAX
+#include "common/mac_filter.h"  // struct xdpmf_mac, struct xdpmf_cidr_v4, XDPMF_ALLOWLIST_MAX
 #include "yaml_subset.hpp"
 
 namespace xdpmf {
@@ -31,7 +34,8 @@ enum class DefaultAction : std::uint8_t { Drop = 0, Pass = 1 };
 enum class RuleAction    : std::uint8_t { Drop = 0, Pass = 1 };
 
 struct RuleMatch {
-    std::optional<xdpmf_mac> mac;  // cycle 1: MAC-only
+    std::optional<xdpmf_mac>     mac;       // §5.26 MAC axis (cycle 1: required; cycle 2: optional)
+    std::optional<xdpmf_cidr_v4> src_cidr;  // §5.27 NEW (Q3 K2) — IPv4 CIDR axis
 };
 
 struct Rule {

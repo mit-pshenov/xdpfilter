@@ -1,0 +1,8 @@
+# §6.28 / §6.29 — single CIDR-only rule (MVP-3.2 / §5.27).
+# default_action: drop; pass anything with src_ip in 10.0.0.0/8.
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      src_cidr: "10.0.0.0/8"

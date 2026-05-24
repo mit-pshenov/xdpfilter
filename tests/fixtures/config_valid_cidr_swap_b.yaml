@@ -1,0 +1,15 @@
+# §6.31 swap-B side (MVP-3.2 / §5.27).
+# 10.0.0.0/8 OVERLAPS with config_valid_cidr_swap_a.yaml — load-bearing:
+# the same in-flight src_ip (10.x.y.z) must NOT drop across the A→B
+# swap. 192.168.0.0/16 is the discriminator (denied under A, allowed
+# under B).
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      src_cidr: "10.0.0.0/8"
+  - id: 1
+    action: pass
+    match:
+      src_cidr: "192.168.0.0/16"

@@ -1,0 +1,8 @@
+# §6.31 swap-A side (MVP-3.2 / §5.27).
+# Single CIDR rule allowing 10.0.0.0/8.
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      src_cidr: "10.0.0.0/8"

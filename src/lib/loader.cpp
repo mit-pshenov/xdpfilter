@@ -826,12 +826,15 @@ private:
         }
     }
     bpf_map* const pinned_maps[] = {
-        skel->maps.allowlist,      // legacy template — never pinned at runtime
-        skel->maps.allowlist_a,    // §5.26 Q6 inner slot 0
-        skel->maps.allowlist_b,    // §5.26 Q6 inner slot 1
-        skel->maps.rulesets,       // §5.26 Q6 outer MAP_OF_MAPS
-        skel->maps.active_idx,     // §5.26 Q6 active index
-        skel->maps.defaults,       // §5.26 Q6 per-slot default action
+        skel->maps.allowlist,           // legacy template — never pinned at runtime
+        skel->maps.allowlist_a,         // §5.26 Q6 inner slot 0 (MAC HASH)
+        skel->maps.allowlist_b,         // §5.26 Q6 inner slot 1 (MAC HASH)
+        skel->maps.rulesets,            // §5.26 Q6 outer MAP_OF_MAPS (MAC)
+        skel->maps.cidr_allowlist_a,    // §5.27 Q1 AS1 inner slot 0 (CIDR LPM_TRIE)
+        skel->maps.cidr_allowlist_b,    // §5.27 Q1 AS1 inner slot 1 (CIDR LPM_TRIE)
+        skel->maps.cidr_rulesets,       // §5.27 Q1 AS1 outer MAP_OF_MAPS (CIDR)
+        skel->maps.active_idx,          // §5.26 Q6 active index (shared by both outers)
+        skel->maps.defaults,            // §5.26 Q6 per-slot default action
         skel->maps.stats,
     };
     for (bpf_map* m : pinned_maps) {
@@ -1028,6 +1031,45 @@ void populate_inner_slot(int inner_fd, const std::vector<xdpmf_mac>& pass_macs)
         if (rc < 0) {
             throw_loader(classify(rc, LoaderError::LoadFailed),
                          std::format("bpf_map_update_elem(inner): {}",
+                                     std::strerror(-rc)));
+        }
+    }
+}
+
+/* §5.27 Q1 AS1 CIDR-inner population: parallel shape to populate_inner_slot
+ * for the LPM_TRIE-typed inactive CIDR inner. LPM_TRIE keys are
+ * `xdpmf_cidr_v4{prefixlen, addr_be}` — already canonical from
+ * cidr::parse_cidr_v4. Bulk-clear then insert. */
+void populate_cidr_inner_slot(int inner_fd, const std::vector<xdpmf_cidr_v4>& pass_cidrs)
+{
+    xdpmf_cidr_v4 prev{};
+    xdpmf_cidr_v4 cur{};
+    bool          have_prev = false;
+    while (true) {
+        const int rc = bpf_map_get_next_key(inner_fd,
+                                            have_prev ? &prev : nullptr,
+                                            &cur);
+        if (rc != 0) {
+            if (-rc == ENOENT) break;
+            throw_loader(classify(rc, LoaderError::LoadFailed),
+                         std::format("bpf_map_get_next_key(cidr_inner): {}",
+                                     std::strerror(-rc)));
+        }
+        const int drc = bpf_map_delete_elem(inner_fd, &cur);
+        if (drc != 0 && -drc != ENOENT) {
+            throw_loader(classify(drc, LoaderError::LoadFailed),
+                         std::format("bpf_map_delete_elem(cidr_inner): {}",
+                                     std::strerror(-drc)));
+        }
+        prev      = cur;
+        have_prev = true;
+    }
+    for (const xdpmf_cidr_v4& c : pass_cidrs) {
+        const std::uint8_t present = 1;
+        const int rc = bpf_map_update_elem(inner_fd, &c, &present, BPF_ANY);
+        if (rc < 0) {
+            throw_loader(classify(rc, LoaderError::LoadFailed),
+                         std::format("bpf_map_update_elem(cidr_inner): {}",
                                      std::strerror(-rc)));
         }
     }
@@ -1264,6 +1306,28 @@ namespace internal {
     return out;
 }
 
+/* §5.27 sibling of extract_pass_macs for the CIDR axis. Mirror shape:
+ * only Pass-action rules with src_cidr set contribute; dedup by
+ * (prefixlen, addr) tuple equality. Rules with BOTH mac AND src_cidr
+ * populate both axes — OR-compose at the BPF datapath. */
+[[nodiscard]] std::vector<xdpmf_cidr_v4> extract_pass_cidrs(const Config& c)
+{
+    std::vector<xdpmf_cidr_v4> out;
+    out.reserve(c.rules.size());
+    for (const Rule& r : c.rules) {
+        if (r.action != RuleAction::Pass)     continue;
+        if (!r.match.src_cidr.has_value())    continue;
+        const xdpmf_cidr_v4& c4 = *r.match.src_cidr;
+        const bool already = std::any_of(
+            out.begin(), out.end(),
+            [&](const xdpmf_cidr_v4& e) {
+                return e.prefixlen == c4.prefixlen && e.addr == c4.addr;
+            });
+        if (!already) out.push_back(c4);
+    }
+    return out;
+}
+
 /* §5.26 + EDIT-1 atomic apply (single source of truth for the swap flow):
  * see design §5.26 attach() flow update + Phase B EDIT-1 internal-helper
  * contract. Both loader::attach() and apply::apply_config_inmemory() route
@@ -1271,13 +1335,19 @@ namespace internal {
  * lives in exactly ONE place. */
 std::uint32_t apply_request(const ApplyRequest& req)
 {
-    const std::vector<xdpmf_mac> deduped       = extract_pass_macs(req.config);
-    const DefaultAction          default_action = req.config.default_action;
+    const std::vector<xdpmf_mac>      deduped        = extract_pass_macs(req.config);
+    const std::vector<xdpmf_cidr_v4>  deduped_cidrs  = extract_pass_cidrs(req.config);
+    const DefaultAction               default_action = req.config.default_action;
 
     if (deduped.size() > XDPMF_ALLOWLIST_MAX) {
         throw_loader(LoaderError::LoadFailed,
                      std::format("apply: pass-rule count {} exceeds XDPMF_ALLOWLIST_MAX={}",
                                  deduped.size(), XDPMF_ALLOWLIST_MAX));
+    }
+    if (deduped_cidrs.size() > XDPMF_ALLOWLIST_MAX) {
+        throw_loader(LoaderError::LoadFailed,
+                     std::format("apply: pass-cidr-rule count {} exceeds XDPMF_ALLOWLIST_MAX={}",
+                                 deduped_cidrs.size(), XDPMF_ALLOWLIST_MAX));
     }
 
     // §5.24 Q3 Option B: kernel-version probe BEFORE any libbpf API call.
@@ -1405,13 +1475,20 @@ std::uint32_t apply_request(const ApplyRequest& req)
         skel = open_skeleton_only();
 
         struct ReuseSpec { bpf_map* map; const char* name; };
+        // §5.27 D-3.1-4 extension: the reuse_fd loop grows 6 → 9 maps to
+        // cover the new CIDR axis pinned maps (cidr_allowlist_a/_b +
+        // cidr_rulesets). Same reuse_fd mechanism per slot — single
+        // active_idx shared. Order doesn't matter (each slot is independent).
         const ReuseSpec reuse_specs[] = {
-            { skel->maps.allowlist_a, XDPMF_MAP_INNER_A_NAME        },
-            { skel->maps.allowlist_b, XDPMF_MAP_INNER_B_NAME        },
-            { skel->maps.rulesets,    XDPMF_MAP_RULESETS_OUTER_NAME },
-            { skel->maps.active_idx,  XDPMF_MAP_ACTIVE_IDX_NAME     },
-            { skel->maps.defaults,    XDPMF_MAP_DEFAULTS_NAME       },
-            { skel->maps.stats,       XDPMF_MAP_STATS_NAME          },
+            { skel->maps.allowlist_a,      XDPMF_MAP_INNER_A_NAME             },
+            { skel->maps.allowlist_b,      XDPMF_MAP_INNER_B_NAME             },
+            { skel->maps.rulesets,         XDPMF_MAP_RULESETS_OUTER_NAME      },
+            { skel->maps.cidr_allowlist_a, XDPMF_MAP_CIDR_INNER_A_NAME        },
+            { skel->maps.cidr_allowlist_b, XDPMF_MAP_CIDR_INNER_B_NAME        },
+            { skel->maps.cidr_rulesets,    XDPMF_MAP_CIDR_RULESETS_OUTER_NAME },
+            { skel->maps.active_idx,       XDPMF_MAP_ACTIVE_IDX_NAME          },
+            { skel->maps.defaults,         XDPMF_MAP_DEFAULTS_NAME            },
+            { skel->maps.stats,            XDPMF_MAP_STATS_NAME               },
         };
         for (const ReuseSpec& r : reuse_specs) {
             const std::string p = pin_dir + "/" + r.name;
@@ -1452,6 +1529,19 @@ std::uint32_t apply_request(const ApplyRequest& req)
                              "inactive inner fd unavailable (reattach)");
             }
             populate_inner_slot(inactive_inner_fd, deduped);
+        }
+        // §5.27 Q1 AS1: populate the inactive CIDR inner BEFORE the active_idx
+        // flip so the single u32 store commits BOTH axes' new ruleset atomically.
+        {
+            bpf_map* inactive_cidr_inner = (inactive == 0)
+                                              ? skel->maps.cidr_allowlist_a
+                                              : skel->maps.cidr_allowlist_b;
+            const int inactive_cidr_fd = bpf_map__fd(inactive_cidr_inner);
+            if (inactive_cidr_fd < 0) {
+                throw_loader(LoaderError::LoadFailed,
+                             "inactive cidr inner fd unavailable (reattach)");
+            }
+            populate_cidr_inner_slot(inactive_cidr_fd, deduped_cidrs);
         }
         {
             const int defaults_fd = bpf_map__fd(skel->maps.defaults);
@@ -1497,13 +1587,18 @@ std::uint32_t apply_request(const ApplyRequest& req)
 
     // FRESH ATTACH path (state a / state d / state c-fleet).
     struct PinSpec { bpf_map* map; const char* name; };
+    // §5.27 D-3.1-4 mirror: 9 maps to pin (was 6) — adds the 3 CIDR-axis
+    // pinned maps (cidr_allowlist_a/_b + cidr_rulesets) per §5.27 Q1 AS1.
     const PinSpec pin_specs[] = {
-        { skel->maps.allowlist_a, XDPMF_MAP_INNER_A_NAME        },
-        { skel->maps.allowlist_b, XDPMF_MAP_INNER_B_NAME        },
-        { skel->maps.rulesets,    XDPMF_MAP_RULESETS_OUTER_NAME },
-        { skel->maps.active_idx,  XDPMF_MAP_ACTIVE_IDX_NAME     },
-        { skel->maps.defaults,    XDPMF_MAP_DEFAULTS_NAME       },
-        { skel->maps.stats,       XDPMF_MAP_STATS_NAME          },
+        { skel->maps.allowlist_a,      XDPMF_MAP_INNER_A_NAME             },
+        { skel->maps.allowlist_b,      XDPMF_MAP_INNER_B_NAME             },
+        { skel->maps.rulesets,         XDPMF_MAP_RULESETS_OUTER_NAME      },
+        { skel->maps.cidr_allowlist_a, XDPMF_MAP_CIDR_INNER_A_NAME        },
+        { skel->maps.cidr_allowlist_b, XDPMF_MAP_CIDR_INNER_B_NAME        },
+        { skel->maps.cidr_rulesets,    XDPMF_MAP_CIDR_RULESETS_OUTER_NAME },
+        { skel->maps.active_idx,       XDPMF_MAP_ACTIVE_IDX_NAME          },
+        { skel->maps.defaults,         XDPMF_MAP_DEFAULTS_NAME            },
+        { skel->maps.stats,            XDPMF_MAP_STATS_NAME               },
     };
     for (const PinSpec& s : pin_specs) {
         const std::string p = pin_dir + "/" + s.name;
@@ -1545,6 +1640,17 @@ std::uint32_t apply_request(const ApplyRequest& req)
             throw_loader(LoaderError::LoadFailed, "inner-map fd unavailable");
         }
         populate_inner_slot(inner_fd, deduped);
+    }
+    // §5.27 Q1 AS1: populate slot 0 of the CIDR axis alongside MAC slot 0.
+    // Both axes share the same active_idx (0 on fresh attach); single u32
+    // store at active_idx_fd is the atomic commit for BOTH below.
+    {
+        bpf_map* cidr_inner_map = skel->maps.cidr_allowlist_a;
+        const int cidr_inner_fd = bpf_map__fd(cidr_inner_map);
+        if (cidr_inner_fd < 0) {
+            throw_loader(LoaderError::LoadFailed, "cidr inner-map fd unavailable");
+        }
+        populate_cidr_inner_slot(cidr_inner_fd, deduped_cidrs);
     }
     {
         const int defaults_fd = bpf_map__fd(skel->maps.defaults);

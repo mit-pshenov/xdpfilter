@@ -1,0 +1,11 @@
+# §6.22 sub-case 7 (MVP-3.2 / §5.27).
+# Host bits set below prefix — exit 9 with stderr matching
+# 'malformed CIDR: host bits set below prefix'. 10.0.0.5 has bits
+# below /8 (the .0.0.5 octets) → validator rejects per the
+# §5.27 §4.1 stderr message catalogue.
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      src_cidr: "10.0.0.5/8"

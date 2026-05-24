@@ -184,6 +184,14 @@ read_stats() {
     sudo -n python3 "${TEST_DIR}/lib/read_stats.py" "${pin}"
 }
 
+# §5.27 (MVP-3.2): 4-column stats reader — pass drop_deny drop_malformed pass_cidr.
+# Layered ON TOP of read_stats() to preserve PI-13-3.2 back-compat (existing
+# callers continue to see the 3-column shape).
+read_stats_with_cidr() {
+    local pin="${1:-${PIN_DIR}/stats}"
+    sudo -n python3 "${TEST_DIR}/lib/read_stats.py" --include-pass-cidr "${pin}"
+}
+
 # ── Stats-sum poll helper (per §5.21 C1, MVP-1.1C) ───────────────────────
 # Polls the pinned stats map until the SUM of all 3 counters equals
 # expected_sum or until timeout.  Replaces post-inject `sleep 0.3` /
@@ -201,6 +209,28 @@ wait_for_stats_sum() {
     while (( waited_ms < timeout_ms )); do
         if read -r p d m < <(sudo -n python3 "${TEST_DIR}/lib/read_stats.py" "${pin}" 2>/dev/null); then
             sum=$(( p + d + m ))
+            if (( sum == expected )); then
+                return 0
+            fi
+        fi
+        sleep "$(awk -v ms="${poll_ms}" 'BEGIN{printf "%.3f", ms/1000.0}')"
+        waited_ms=$(( waited_ms + poll_ms ))
+    done
+    return 1
+}
+
+# §5.27 (MVP-3.2) parallel sibling of wait_for_stats_sum: sums all 4 counters
+# (pass + drop_deny + drop_malformed + pass_cidr). Used by §6.28-§6.31 CIDR
+# tests; existing wait_for_stats_sum stays UNCHANGED for the 27 pre-§5.27 ctests.
+wait_for_stats_sum_with_cidr() {
+    local iface="$1" expected="$2"
+    local timeout_ms="${3:-2000}" poll_ms="${4:-20}"
+    local pin="${PIN_ROOT}/${iface}/stats"
+    local waited_ms=0
+    local p d m c sum
+    while (( waited_ms < timeout_ms )); do
+        if read -r p d m c < <(sudo -n python3 "${TEST_DIR}/lib/read_stats.py" --include-pass-cidr "${pin}" 2>/dev/null); then
+            sum=$(( p + d + m + c ))
             if (( sum == expected )); then
                 return 0
             fi

@@ -1,14 +1,21 @@
 /*
- * config.cpp — schema validator: yaml::Node → xdpmf::Config (cycle 1 schema).
+ * config.cpp — schema validator: yaml::Node → xdpmf::Config (cycles 1+2 schema).
  *
- * Per §5.26 schema rules (1-6): default_action REQUIRED & ∈ {drop,pass};
- * rules' id ∈ [0,63] unique; action ∈ {pass,drop}; match.mac REQUIRED with
- * canonical 17-char MAC format; only `mac` match type allowed in schema_version 1.
+ * Per §5.26 schema rules (1-6) + §5.27 rules (7-11): default_action REQUIRED &
+ * ∈ {drop,pass}; rules' id ∈ [0,63] unique; action ∈ {pass,drop}; each rule's
+ * match.* mapping MUST contain at-least-one-of {mac, src_cidr} (§5.27 rule 7,
+ * superseding §5.26 rule 5's mac-REQUIRED). `mac` parses canonical 17-char
+ * XX:XX:..., `src_cidr` parses IPv4 A.B.C.D/N with host-bits-zero (§5.27 rule 8);
+ * IPv6 strings rejected at the validator (§5.27 rule 9 / HG-3.2-1).
  *
  * Errors: std::system_error{LoaderError::ConfigError, ...}, stderr shape
- *   "xdpmacfilter: config error: <feature>: <file>:<line>:<col>[: <message>]".
+ *   "xdpmacfilter: config error: <feature>: <file>:<line>:<col>[: <message>]"
+ * EXCEPT CIDR-validation failures, which use cidr::parse_cidr_v4()'s
+ * §5.27-catalogue stderr shape (one of {malformed CIDR: ..., IPv6 CIDR not
+ * supported until MVP-3.2.5: ...}).
  */
 #include "config.hpp"
+#include "cidr.hpp"
 #include "loader.hpp"
 
 #include <cstdint>
@@ -221,31 +228,56 @@ Config validate(const yaml::Node& root, std::string_view file)
                     throw_cfg("rule match", file, match->line, match->col,
                               "rule.match must be a mapping");
                 }
-                // Schema_version 1: exactly one match type — `mac`.
+                // §5.27 schema rule 6 (refined): the accepted match-key set
+                // is {mac, src_cidr}. Other keys (cidr, port, dst_cidr,
+                // vlan, ...) → ConfigError exit 9. `src_cidr` is the §5.27
+                // Q3 K2 chosen name; `cidr` (bare) stays rejected per Q3
+                // rationale (cycle-1 forward-compat hinge for §5.26).
                 for (const std::pair<std::string, yaml::Node>& kv : match->mapping) {
-                    if (kv.first != "mac") {
+                    if (kv.first != "mac" && kv.first != "src_cidr") {
                         throw_cfg("unsupported match type", file,
                                   kv.second.line, kv.second.col,
                                   std::format("match type '{}' not supported in schema_version 1",
                                               kv.first));
                     }
                 }
-                const yaml::Node* mac_node = find_key(*match, "mac");
-                if (mac_node == nullptr) {
-                    throw_cfg("rule match mac", file, match->line, match->col,
-                              "rule.match.mac is required");
+                // §5.27 schema rule 7 (supersedes §5.26 rule 5): each rule's
+                // match MUST contain AT LEAST ONE of {mac, src_cidr}. Empty
+                // match: {} → exit 9 with the catalogue message.
+                const yaml::Node* mac_node      = find_key(*match, "mac");
+                const yaml::Node* src_cidr_node = find_key(*match, "src_cidr");
+                if (mac_node == nullptr && src_cidr_node == nullptr) {
+                    throw_cfg("rule match", file, match->line, match->col,
+                              "rule must specify 'mac' or 'src_cidr' (or both)");
                 }
-                if (mac_node->kind != yaml::Node::Kind::Scalar) {
-                    throw_cfg("rule match mac", file, mac_node->line, mac_node->col,
-                              "rule.match.mac must be a string");
+                if (mac_node != nullptr) {
+                    if (mac_node->kind != yaml::Node::Kind::Scalar) {
+                        throw_cfg("rule match mac", file, mac_node->line, mac_node->col,
+                                  "rule.match.mac must be a string");
+                    }
+                    xdpmf_mac mac{};
+                    if (!parse_mac_canonical(mac_node->scalar, mac)) {
+                        throw_cfg("invalid MAC", file, mac_node->line, mac_node->col,
+                                  std::format("'{}' is not a valid MAC (expected XX:XX:XX:XX:XX:XX)",
+                                              mac_node->scalar));
+                    }
+                    r.match.mac = mac;
                 }
-                xdpmf_mac mac{};
-                if (!parse_mac_canonical(mac_node->scalar, mac)) {
-                    throw_cfg("invalid MAC", file, mac_node->line, mac_node->col,
-                              std::format("'{}' is not a valid MAC (expected XX:XX:XX:XX:XX:XX)",
-                                          mac_node->scalar));
+                if (src_cidr_node != nullptr) {
+                    if (src_cidr_node->kind != yaml::Node::Kind::Scalar) {
+                        throw_cfg("rule match src_cidr", file,
+                                  src_cidr_node->line, src_cidr_node->col,
+                                  "rule.match.src_cidr must be a string");
+                    }
+                    // §5.27 §4.1 stderr message catalogue: cidr::parse_cidr_v4
+                    // throws ConfigError with one of {malformed CIDR: ...,
+                    // IPv6 CIDR not supported until MVP-3.2.5: ...} —
+                    // bypassing throw_cfg's feature/file prefix so the
+                    // catalogue text drives the operator-facing diagnostic.
+                    r.match.src_cidr = cidr::parse_cidr_v4(
+                        src_cidr_node->scalar, file,
+                        src_cidr_node->line, src_cidr_node->col);
                 }
-                r.match.mac = mac;
 
                 // Reject unknown sibling keys in the rule (forward-compat hinge).
                 for (const std::pair<std::string, yaml::Node>& kv : entry.mapping) {

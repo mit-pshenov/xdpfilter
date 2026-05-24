@@ -4,16 +4,23 @@ read_stats.py — read the pinned `stats` BPF_MAP_TYPE_PERCPU_ARRAY via bpftool.
 
 Usage:
     sudo python3 read_stats.py <pin_path>
+    sudo python3 read_stats.py --include-pass-cidr <pin_path>   # §5.27 (MVP-3.2)
 
-The map (per design §3.4, post-§5.23 MVP-2 Perf) is a PERCPU array of u64
-counters keyed by u32 indices STAT_PASS=0, STAT_DROP_DENY=1,
-STAT_DROP_MALFORMED=2. Each entry has a per-CPU `values` array (plural —
-schema differs from non-PERCPU maps' singular `value`); we SUM across CPUs.
+The map (per design §3.4, post-§5.23 MVP-2 Perf, post-§5.27 MVP-3.2) is a
+PERCPU array of u64 counters keyed by u32 indices STAT_PASS=0,
+STAT_DROP_DENY=1, STAT_DROP_MALFORMED=2, STAT_PASS_CIDR=3 (§5.27 NEW).
+Each entry has a per-CPU `values` array (plural — schema differs from
+non-PERCPU maps' singular `value`); we SUM across CPUs.
 
-Prints one line: "<pass> <drop_deny> <drop_malformed>".
+Default output (back-compat with all pre-§5.27 callers — PI-13-3.2):
+    "<pass> <drop_deny> <drop_malformed>"
+
+With --include-pass-cidr (§5.27 opt-in 4-column reader):
+    "<pass> <drop_deny> <drop_malformed> <pass_cidr>"
 
 Exit codes:
     0  on success
+    1  on argument-parse error
     2  if bpftool cannot read the map (pin missing, perms, etc.)
     3  if the JSON shape was not what we expected
 """
@@ -45,10 +52,22 @@ def _decode_key_u32(byte_seq) -> int:
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print("usage: read_stats.py <pin_path>", file=sys.stderr)
+    # §5.27 (MVP-3.2): accept optional `--include-pass-cidr` flag in either
+    # position relative to <pin_path>. Default output (no flag) is BYTE-
+    # IDENTICAL to pre-§5.27 — PI-13-3.2 back-compat for the 27 existing
+    # ctests that read the 3-column shape.
+    include_pass_cidr = False
+    argv = sys.argv[1:]
+    filtered = []
+    for arg in argv:
+        if arg == "--include-pass-cidr":
+            include_pass_cidr = True
+        else:
+            filtered.append(arg)
+    if len(filtered) != 1:
+        print("usage: read_stats.py [--include-pass-cidr] <pin_path>", file=sys.stderr)
         return 1
-    pin = sys.argv[1]
+    pin = filtered[0]
 
     try:
         out = subprocess.check_output(
@@ -110,7 +129,10 @@ def main() -> int:
 
         stats[k] = total
 
-    print(stats.get(0, 0), stats.get(1, 0), stats.get(2, 0))
+    if include_pass_cidr:
+        print(stats.get(0, 0), stats.get(1, 0), stats.get(2, 0), stats.get(3, 0))
+    else:
+        print(stats.get(0, 0), stats.get(1, 0), stats.get(2, 0))
     return 0
 
 

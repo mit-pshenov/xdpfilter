@@ -350,3 +350,48 @@ set_tests_properties(T_EXIT_CODE_9_ON_CONFIG_ERROR PROPERTIES
     ENVIRONMENT "${TEST_ENV}"
     TIMEOUT 10
 )
+
+# ─────────────────────────────────────────────────────────────────────────
+# MVP-3.2 additions (§5.27 / §6.28–§6.31 — L3 src-CIDR rule type).
+#
+# T_PASS_CIDR (§6.28): CIDR-axis rule applied; in-range IPv4 src_ip
+#   passes via STAT_PASS_CIDR; out-of-range drops via STAT_DROP_DENY.
+# T_DROP_CIDR_NOT_IN_RANGE (§6.29): focused negation — no-rule-matches
+#   drops are counter-SPLIT clean (only STAT_DROP_DENY moves).
+# T_PASS_MAC_OR_CIDR (§6.30): LOAD-BEARING OR-compose verification —
+#   single rule with both mac+src_cidr; 3 sub-cases assert counter
+#   SPLIT (STAT_PASS vs STAT_PASS_CIDR vs STAT_DROP_DENY).
+foreach(T IN ITEMS
+    T_PASS_CIDR
+    T_DROP_CIDR_NOT_IN_RANGE
+    T_PASS_MAC_OR_CIDR
+)
+    add_test(
+        NAME ${T}
+        COMMAND bash ${TEST_DIR}/${T}.sh
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    set_tests_properties(${T} PROPERTIES
+        ENVIRONMENT "${TEST_ENV}"
+        RESOURCE_LOCK xdp_fixture
+        TIMEOUT 60
+        SKIP_RETURN_CODE 77
+    )
+endforeach()
+
+# §6.31 LOAD-BEARING CIDR-axis atomic-swap test — runs ≥4s of background
+# IPv4 injection (2s baseline + 2s post-swap) at AF_PACKET rate.
+# SKIP_RETURN_CODE 77 triggers when XDPMF_INJECT_RATE_HZ is too low for
+# the runner's sustained packet-per-second capacity (slow CI), mirroring
+# §6.23's pattern (same env-var knob per §5.27 OOS fence).
+add_test(
+    NAME T_CIDR_ATOMIC_SWAP_NO_DROP
+    COMMAND bash ${TEST_DIR}/T_CIDR_ATOMIC_SWAP_NO_DROP.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_CIDR_ATOMIC_SWAP_NO_DROP PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 120
+    SKIP_RETURN_CODE 77
+)

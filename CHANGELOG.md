@@ -5,6 +5,39 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-24
+
+MVP-3.2 — L3 src-CIDR rule type (Composite 6 cycle 2). First extension WITHIN the §5.26 config-driven path: adds a CIDR axis OR-composed with the existing MAC axis at the BPF datapath. IPv4-only per HG-3.2-1 (v6 explicitly rejected at the validator with a recognizable stderr).
+
+### Added
+- `src_cidr` rule-match key (§5.27 Q3 K2): `match: {src_cidr: "10.0.0.0/8"}`. Rules may set `mac` only, `src_cidr` only, or BOTH (OR-compose; first axis to match wins). Validator enforces "at-least-one-of mac/src_cidr" per rule (§5.27 rule 7, supersedes §5.26 rule 5).
+- `src/lib/cidr.{cpp,hpp}` — IPv4 CIDR string parser (`A.B.C.D/N`) with host-bits-set rejection (`"10.0.0.5/8"` → hint to `10.0.0.0/8`), v6 rejection (any `:` in the value → `IPv6 CIDR not supported until MVP-3.2.5`), and standard `inet_pton(AF_INET, ...)` address parsing. All failures throw `LoaderError::ConfigError` (exit 9) — `loader.hpp` enum is UNCHANGED (PI-7-3.2 strengthened from §5.26).
+- BPF datapath gains CIDR axis (§5.27 Q1 AS1 + Q2 OR1): `cidr_allowlist_a`/`cidr_allowlist_b` LPM_TRIE inners + `cidr_rulesets` ARRAY_OF_MAPS outer (parallel to existing MAC `rulesets`). Both outers share the same `active_idx` map; a single u32 store on `active_idx[0]` is the atomic commit for BOTH axes simultaneously (Composite-6 swap promise preserved byte-for-byte). The BPF program reads `active_idx` ONCE per packet and uses the snapshot for both MAC + CIDR lookups — no intra-packet axis split.
+- `STAT_PASS_CIDR = 3` PERCPU counter (§5.27 stats split): operators reading `read_stats.py --include-pass-cidr` see the MAC-vs-CIDR pass split. `STAT_MAX` sentinel bumps `3 → 4` (additive accounting; existing slots 0/1/2 byte-identical per PI-10-3.2).
+- `tests/lib/read_stats.py --include-pass-cidr` flag (opt-in 4-column output). Default 3-column output BYTE-IDENTICAL to pre-§5.27 per PI-13-3.2 (back-compat for the 27 existing ctests).
+- `tests/lib/common.sh` helpers: `read_stats_with_cidr <pin>` (4-column reader) + `wait_for_stats_sum_with_cidr <iface> <expected_sum>` (4-counter sum poll). Existing `read_stats`/`wait_for_stats_sum` UNCHANGED.
+
+### Changed
+- CMake `project(VERSION)` bumped from `0.3.0` → `0.4.0` (semver minor: new feature axis, backward-compatible CLI surface AND backward-compatible YAML schema).
+- `mac_filter.bpf.c` datapath extended with the OR-compose branch: MAC HASH first (O(1) short-circuit per Q2 OR1), then on IPv4 ethertype lookup src_ip in the CIDR LPM_TRIE (O(prefix-length)). Non-IPv4 frames (ARP, IPv6, VLAN-tagged) bypass the CIDR branch entirely — preserves MVP-3.1 semantic for non-IP traffic. IP-header bounds check is verifier-mandatory before `ip->saddr` deref; truncated IPv4 frames bump `STAT_DROP_MALFORMED` (consistent with §5.5).
+- `src/common/mac_filter.h` gains `struct xdpmf_cidr_v4 {prefixlen, addr}` (LPM_TRIE key shape) + 3 new map-name macros (`XDPMF_MAP_CIDR_{RULESETS_OUTER,INNER_A,INNER_B}_NAME`) + `STAT_PASS_CIDR = 3` enum value + `STAT_MAX = 4` bump. Existing constants UNCHANGED.
+- `internal::apply_request` populates the inactive CIDR LPM_TRIE inner alongside the inactive MAC HASH inner BEFORE the single `active_idx` flip (§5.27 apply ordering steps 1-5). D-3.1-4 state-b `bpf_map__reuse_fd` loop extends 6 → 9 maps to cover `cidr_allowlist_a`/`cidr_allowlist_b`/`cidr_rulesets`.
+- `tests/T_APPLY_REJECTS_MALFORMED.sh` (§6.22) extended with 3 new sub-cases (6/7/8 — v6 reject, host-bits-set reject, not-a-cidr reject) per PI-6-3.2 carve-out (the only ctest body diff allowed in MVP-3.2; all other 27 ctest bodies BYTE-EQUIVALENT). [Tester ships sub-cases; impl provides fixtures.]
+
+### Preserved invariants (verified by impl smoke)
+- PI-7-3.2: `loader.hpp` ZERO diff (strengthened from §5.26's "one new enumerator"). `LoaderError` enum stays at 9 values; CIDR validation reuses `ConfigError = 9`.
+- PI-10-3.2: existing `mac_filter.h` constants + `struct xdpmf_mac` layout + enum slots 0/1/2 BYTE-IDENTICAL.
+- PI-13-3.2: `stats` map type UNCHANGED (PERCPU_ARRAY); `read_stats.py` default mode 3-column output BYTE-IDENTICAL.
+- PI-15: MAC-only configs (`match: {mac: ...}` only) produce byte-equivalent runtime behaviour; the CIDR-inner population path runs as a no-op when no rule has `src_cidr`.
+- PI-17: `schema_version: 1` continues as the only supported value; `src_cidr` is grandfathered into v1 per the §5.26 Q5 SV2 migration-policy refinement (one additive match-key does NOT justify a version bump).
+
+### Out-of-scope fences (per §5.27)
+- IPv6 CIDR matching — fenced to MVP-3.2.5+ (v6 strings rejected with recognizable stderr).
+- `dst_cidr`/port/VLAN match-keys — Q3 K2 leaves space; not in cycle 2.
+- List-of-CIDRs per rule (Option L2) — Q4 L1; additive forward path.
+- Per-rule counters keyed by `rule_id` — MVP-3.4 slice.
+- MVP-3.1 OOT-deferred housekeeping items (OOT-1..OOT-4) — Q6 DEFER.
+
 ## [0.3.0] — 2026-05-24
 
 MVP-3.1 — config-first foundation (Composite 6 cycle 1; six bundled pieces). The largest mint slice to date and the architectural foundation for MVP-3.N.
@@ -213,6 +246,7 @@ got stuck.
 | MVP-2 Perf (performance pass) | 3 items + 4 tests + 3 architect decisions (Q1/Q2/Q3) + Phase B test fixups (3 empirical issues: bpftool broadcast-only, jq numeric mode, stale-pin cleanup) + 2 OUT-OF-TRIANGULATION spec-wording fixes inline-merged + public-API relaxation (XdpMode enum + AttachConfig.mode field) | 14m | 24m | 10m | 48m | round 1 ✓ (0 findings) |
 | MVP-2 Robust (robustness pass) | 2 items + 1 test + 4 architect decisions (Q1=uname / Q2=5.15 / Q3=attach+detach / Q4=hybrid fixture) + Phase B fixups (libbpf 1.x substring reality EDIT-11, fixture-must-have-maps for skeleton-populate, TIMEOUT 30→60 EDIT-12) + 1-line loader.hpp relaxation (KernelUnsupported=7) | 14m | 26m | 9m | 49m | round 1 ✓ (1 negotiated minor) |
 | MVP-2 Polish-2 (final MVP-2 slice) | 4 janitorial items + 4 architect decisions (Q1=N3 netns wrap / Q2=C1 sed extraction / Q3=V1 project(VERSION) source-of-truth + version bump 0.1.0→0.2.3 / Q4=T1 no test edit) + 3 Phase B EDITs inline-merged (EDIT-13 opt-out roster correction, EDIT-14 env-after-NSEXEC idiom, EDIT-15 mount-ns preservation via `nsenter --net` instead of `ip netns exec`) + 3 OUT-OF-TRIANGULATION sweep | 16m | 21m | 10m | 47m | round 1 ✓ (0 findings) |
+| MVP-3.2 (additive within config harness) | 1 axis (L3 src-CIDR LPM_TRIE) + OR-compose datapath + parallel ARRAY_OF_MAPS outer + 6 architect decisions (Q1=AS1 parallel outers / Q2=OR1 MAC-first / Q3=K2 src_cidr naming / Q4=L1 single CIDR per rule / Q5=V1 schema-additive / Q6=DEFER housekeeping) + HG-3.2-1 v4-only + new STAT_PASS_CIDR counter (STAT_MAX bump 3→4) + 4 new ctests + 3 sub-cases on §6.22 + `loader.hpp` ZERO diff (PI-7 strengthened) | TBD | TBD | TBD | TBD | TBD |
 
 Phase 1 ≈ architect time + human-gate read/approve.
 Phase 2–3 ≈ impl + tester running in parallel, plus the build-green / tests-ready handoff.

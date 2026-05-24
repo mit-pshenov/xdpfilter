@@ -10,8 +10,8 @@ endif()
 
 project(xdpmacfilter
     LANGUAGES C CXX
-    VERSION   0.3.0
-    DESCRIPTION "MVP-3.1 L2 MAC allow-list XDP filter (config-first foundation)"
+    VERSION   0.4.0
+    DESCRIPTION "MVP-3.2 L2 MAC + L3 src-CIDR allow-list XDP filter (OR-compose)"
 )
 
 # §5.25 P3: version-string sync — generate include/version.h from the
@@ -99,6 +99,7 @@ add_bpf_skeleton(mac_filter)
 add_library(xdpmf_internal STATIC
     src/lib/loader.cpp
     src/lib/config.cpp
+    src/lib/cidr.cpp          # §5.27 (MVP-3.2) — IPv4 CIDR parser
     src/lib/yaml_subset.cpp
 )
 target_include_directories(xdpmf_internal PRIVATE
