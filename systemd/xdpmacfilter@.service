@@ -1,0 +1,61 @@
+# systemd template unit for xdpmacfilter (MVP-3.3 / design §5.28 PI-24).
+#
+# One instance per network interface (multi-iface = multiple instance
+# names: xdpmacfilter@eth0.service, xdpmacfilter@eth1.service, ...).
+#
+# Operator workflow:
+#   1. Write per-iface config to /etc/xdpfilter/<iface>.yaml
+#      (schema_version: 1 per §5.26 / §5.27 — see docs/FLEET_DEPLOYMENT.md).
+#   2. systemctl daemon-reload (if unit file just changed).
+#   3. systemctl enable --now xdpmacfilter@<iface>.service
+#   4. On config change: systemctl reload xdpmacfilter@<iface>.service
+#      (atomic hot-swap via bpf_link__update_program — no drop window).
+#
+# Trust-model override (operator hardening; secure-by-default is strict —
+# see D-3.3-2): drop in a /etc/systemd/system/xdpmacfilter@.service.d/
+# trust-model.conf with `[Service]\nEnvironment=XDPMF_TRUST_MODEL=fleet`.
+
+[Unit]
+Description=XDP MAC/CIDR filter on %i
+Documentation=file:///usr/share/doc/xdpmacfilter/FLEET_DEPLOYMENT.md
+# D-3.3-4: network-pre.target (NOT network-online) — XDP attaches BEFORE
+# IP layer comes up, so the first frame on the wire is already filtered.
+After=network-pre.target
+Wants=network-pre.target
+# D-3.3-5: silent no-op (not "failed") if operator enabled the instance
+# before writing the per-iface config — avoids boot-time alert storm.
+ConditionPathExists=/etc/xdpfilter/%i.yaml
+# Q4 RT2: rate-limit Restart= so a permanently malformed config can't
+# infinite-loop. Operator must `systemctl reset-failed` after burst.
+# These belong under [Unit], NOT [Service] (modern systemd ≥230) —
+# see design.md §5.28 Q4 note; misplacement is the T_SYSTEMD_RESTART_ON_FAILURE
+# canary.
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Service]
+# Q2 R1: oneshot + RemainAfterExit so `systemctl reload` re-runs apply
+# (idempotent atomic hot-swap via Composite-6 bpf_link__update_program)
+# instead of detach+reattach.
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/xdpmacfilter apply -f /etc/xdpfilter/%i.yaml --iface %i
+# PI-24 (and Q2 R1): ExecReload is BYTE-IDENTICAL to ExecStart. The
+# apply orchestrator detects the existing link pin and routes through
+# bpf_link__update_program (§5.26 Composite-6 atomic swap — no drop).
+ExecReload=/usr/bin/xdpmacfilter apply -f /etc/xdpfilter/%i.yaml --iface %i
+# D-3.3-3: no `|| true` — §5.21 D4 already makes detach idempotent on
+# clean iface (exit 0); masking would hide real failures from systemd.
+ExecStop=/usr/bin/xdpmacfilter detach --iface %i
+Restart=on-failure
+RestartSec=5
+# CAP_BPF: BPF map/prog load. CAP_NET_ADMIN: XDP attach. CAP_SYS_RESOURCE:
+# rlimit-memlock on kernels <5.11 (harmless on newer kernels).
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_SYS_RESOURCE
+# D-3.3-6: mirror BoundingSet to AmbientCapabilities — defense in depth
+# (even a hypothetical loader CVE that tried cap-escalation is bounded).
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_SYS_RESOURCE
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

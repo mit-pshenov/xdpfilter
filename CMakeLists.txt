@@ -10,7 +10,7 @@ endif()
 
 project(xdpmacfilter
     LANGUAGES C CXX
-    VERSION   0.4.0
+    VERSION   0.5.0
     DESCRIPTION "MVP-3.2 L2 MAC + L3 src-CIDR allow-list XDP filter (OR-compose)"
 )
 
@@ -133,6 +133,17 @@ if(XDPMF_SANITIZERS)
     target_link_options(xdpmacfilter PRIVATE
         -fsanitize=address,undefined
     )
+endif()
+
+# §5.28 D-3.3-9: install the systemd template unit at `cmake --install`
+# time. Default ON so the conventional packaging path "just works";
+# operators who handle the unit out-of-band (distro packagers) can set
+# -DXDPMF_INSTALL_SYSTEMD_UNIT=OFF. System install of the unit into
+# /etc/systemd/system or daemon-reload is operator's call (not the build).
+option(XDPMF_INSTALL_SYSTEMD_UNIT "Install systemd unit template" ON)
+if(XDPMF_INSTALL_SYSTEMD_UNIT)
+    install(FILES ${CMAKE_SOURCE_DIR}/systemd/xdpmacfilter@.service
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/systemd/system/)
 endif()
 
 enable_testing()

@@ -16,6 +16,11 @@ set(TEST_ENV
     "SOURCE_DIR=${CMAKE_SOURCE_DIR}"
     "TEST_DIR=${TEST_DIR}"
     "PINS_SH=${CMAKE_BINARY_DIR}/tests/pins.sh"
+    # §5.28 / MVP-3.3 — paths for the systemd / Ansible / fleet-docs tests
+    # to locate the shipped artefacts in the source tree.
+    "SYSTEMD_UNIT_SRC=${CMAKE_SOURCE_DIR}/systemd/xdpmacfilter@.service"
+    "ANSIBLE_PLAYBOOK=${CMAKE_SOURCE_DIR}/ansible/xdpmacfilter-deploy.yml"
+    "FLEET_DOCS=${CMAKE_SOURCE_DIR}/docs/FLEET_DEPLOYMENT.md"
 )
 
 # Foreign-XDP fixture for T_ATTACH_ALIEN_REFUSAL (design §6.9, MVP-1.1B).
@@ -394,4 +399,88 @@ set_tests_properties(T_CIDR_ATOMIC_SWAP_NO_DROP PROPERTIES
     RESOURCE_LOCK xdp_fixture
     TIMEOUT 120
     SKIP_RETURN_CODE 77
+)
+
+# ─────────────────────────────────────────────────────────────────────────
+# MVP-3.3 additions (§5.28 / §6.32–§6.36 — systemd + Ansible + fleet docs).
+#
+# T_SYSTEMD_UNIT_SYNTAX (§6.32): `systemd-analyze verify` accepts the
+#   unit template (positive case) + a deliberately-broken copy is rejected
+#   (NEGATION sub-case). Read-only check — no sudo, no RESOURCE_LOCK.
+#
+# T_SYSTEMD_LIFECYCLE (§6.33): LOAD-BEARING OPS canary. Install unit
+#   + config, daemon-reload, start, assert XDP attached + active_idx=0 +
+#   `trust_model=` in journal; modify config + reload, assert active_idx
+#   flipped + prog id UNCHANGED (atomic swap, NOT re-attach); stop,
+#   assert XDP detached + link pin gone. Aggressive trap-cleanup.
+#   Uses passwordless sudo; RESOURCE_LOCK xdp_fixture (touches veth)
+#   AND systemd_unit_install (touches /etc/systemd/system/<unit>).
+#
+# T_SYSTEMD_RESTART_ON_FAILURE (§6.34): malformed config → systemd retries
+#   per Restart=on-failure → eventually hits StartLimitBurst=5 within
+#   StartLimitIntervalSec=300 (Q4 RT2). Assert NRestarts ∈ [4,5] and
+#   journalctl shows `start request repeated too quickly`. Same locks
+#   as §6.33 + same SKIP_RETURN_CODE 77 (PI-25 carve-out for timing flake).
+#
+# T_ANSIBLE_PLAYBOOK_SYNTAX (§6.35): `ansible-playbook --syntax-check`
+#   on the playbook → exit 0; SKIP-77 if ansible-playbook not in PATH.
+#   No locks (read-only syntax check).
+#
+# T_FLEET_DOCS_SUBSTRING (§6.36): 6-substring grep over FLEET_DEPLOYMENT.md
+#   (PI-23 verbatim stderr citation + PI-1..PI-5 fence references).
+#   Pure file-content check — no locks, no SKIP.
+add_test(
+    NAME T_SYSTEMD_UNIT_SYNTAX
+    COMMAND bash ${TEST_DIR}/T_SYSTEMD_UNIT_SYNTAX.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_SYSTEMD_UNIT_SYNTAX PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    TIMEOUT 30
+    SKIP_RETURN_CODE 77
+)
+
+add_test(
+    NAME T_SYSTEMD_LIFECYCLE
+    COMMAND bash ${TEST_DIR}/T_SYSTEMD_LIFECYCLE.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_SYSTEMD_LIFECYCLE PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK "xdp_fixture;systemd_unit_install"
+    TIMEOUT 120
+    SKIP_RETURN_CODE 77
+)
+
+add_test(
+    NAME T_SYSTEMD_RESTART_ON_FAILURE
+    COMMAND bash ${TEST_DIR}/T_SYSTEMD_RESTART_ON_FAILURE.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_SYSTEMD_RESTART_ON_FAILURE PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK "xdp_fixture;systemd_unit_install"
+    TIMEOUT 120
+    SKIP_RETURN_CODE 77
+)
+
+add_test(
+    NAME T_ANSIBLE_PLAYBOOK_SYNTAX
+    COMMAND bash ${TEST_DIR}/T_ANSIBLE_PLAYBOOK_SYNTAX.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_ANSIBLE_PLAYBOOK_SYNTAX PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    TIMEOUT 30
+    SKIP_RETURN_CODE 77
+)
+
+add_test(
+    NAME T_FLEET_DOCS_SUBSTRING
+    COMMAND bash ${TEST_DIR}/T_FLEET_DOCS_SUBSTRING.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_FLEET_DOCS_SUBSTRING PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    TIMEOUT 10
 )

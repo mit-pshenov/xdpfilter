@@ -1,0 +1,78 @@
+---
+# Minimal example Ansible playbook for xdpmacfilter (MVP-3.3 / §5.28 HG-3.3-2).
+#
+# Scope: single playbook + 1 Jinja2 template + 2 handlers. NOT a role or
+# collection — operators adapt to their fleet (inventory, secrets,
+# multi-iface variations, role packaging). See docs/FLEET_DEPLOYMENT.md.
+#
+# Idempotency (PI-21): re-running with identical vars MUST yield changed=0.
+# `template:` is content-based; `copy:` is byte-identical; `systemd:` with
+# state=started + enabled=true is idempotent. The `daemon-reload` runs as
+# a HANDLER (D-3.3-8) so it fires ONCE per play AND only when something
+# changed — not unconditionally on every run.
+#
+# Prereq: operator has built + installed /usr/bin/xdpmacfilter on the
+# target host (out of this playbook's scope — distro packager / image
+# pipeline / `cmake --install` is the operator's call).
+#
+# Required vars (set via inventory or `-e key=value`):
+#   xdpfilter_iface            string  e.g. "eth0"
+#   xdpfilter_default_action   string  "pass" | "drop"
+#   xdpfilter_rules            list of {id, mac?, src_cidr?}
+#   xdpfilter_trust_model      string  "strict" (default) | "fleet"
+
+- name: Deploy xdpmacfilter to fleet host
+  hosts: xdpfilter_hosts
+  # D-3.3-7: play-level become (every task touches root-owned paths or
+  # systemctl); per-task become would be noisier with zero security gain.
+  become: true
+  vars:
+    xdpfilter_iface: eth0
+    xdpfilter_default_action: drop
+    xdpfilter_rules: []
+    xdpfilter_trust_model: strict
+  tasks:
+    - name: Ensure /etc/xdpfilter directory exists
+      ansible.builtin.file:
+        path: /etc/xdpfilter
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Render per-iface config
+      ansible.builtin.template:
+        src: xdpfilter-config.yaml.j2
+        dest: "/etc/xdpfilter/{{ xdpfilter_iface }}.yaml"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: reload xdpmacfilter
+
+    - name: Install systemd unit
+      ansible.builtin.copy:
+        src: ../systemd/xdpmacfilter@.service
+        dest: /etc/systemd/system/xdpmacfilter@.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify: daemon-reload systemd
+
+    - name: Enable and start xdpmacfilter@{{ xdpfilter_iface }}
+      ansible.builtin.systemd:
+        name: "xdpmacfilter@{{ xdpfilter_iface }}.service"
+        enabled: true
+        state: started
+        daemon_reload: true
+
+  handlers:
+    # D-3.3-8: daemon-reload as a handler (fires once-per-play on notify)
+    # — NOT a task (would run unconditionally and trip PI-21 changed=0).
+    - name: daemon-reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: reload xdpmacfilter
+      ansible.builtin.systemd:
+        name: "xdpmacfilter@{{ xdpfilter_iface }}.service"
+        state: reloaded

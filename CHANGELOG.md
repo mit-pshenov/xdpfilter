@@ -5,6 +5,44 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-05-24
+
+MVP-3.3 — systemd + Ansible + fleet docs (brownfield amendment §5.28). Ops-integration slice that makes the existing loader operator-deployable on a Linux host fleet. **Smallest C++/BPF surface area of MVP-3.x to date — zero `src/`/`include/`/`cmake/` diff except the CMake version bump + optional systemd-unit install rule (PI-26).** Loader, BPF datapath, CLI grammar, and exit-code table all byte-identical to 0.4.0.
+
+### Added
+- `systemd/xdpmacfilter@.service` — template-instanced systemd unit per §5.28 PI-24 directive catalogue (`Type=oneshot RemainAfterExit=yes`; `ExecStart` = `ExecReload` = `apply -f /etc/xdpfilter/%i.yaml --iface %i`; `ExecStop=detach --iface %i`; `Restart=on-failure RestartSec=5` rate-limited to `StartLimitBurst=5 StartLimitIntervalSec=300` under `[Unit]` per Q4 RT2; `AmbientCapabilities`/`CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_SYS_RESOURCE`; `NoNewPrivileges=true`; `After=network-pre.target Wants=network-pre.target` per D-3.3-4; `ConditionPathExists=/etc/xdpfilter/%i.yaml` per D-3.3-5). NO baked-in `Environment=XDPMF_TRUST_MODEL=…` per D-3.3-2 (secure-by-default = strict; operator opts into fleet via Drop-In).
+- `ansible/xdpmacfilter-deploy.yml` — minimal example playbook per HG-3.3-2 (single playbook + 1 Jinja2 template + 2 handlers; NOT a role/collection). Play-level `become: true` per D-3.3-7; `daemon-reload` runs as HANDLER not task per D-3.3-8 (idempotency PI-21).
+- `ansible/templates/xdpfilter-config.yaml.j2` — Jinja2 template emitting a §5.26+§5.27 schema_version-1 config (PI-17: `schema_version: 1` is a literal at line 1, NOT templated).
+- `docs/FLEET_DEPLOYMENT.md` — operator docs (~95 lines) per Q3 D1 covering: `XDPMF_TRUST_MODEL` decision matrix, audit-log story citing the exact stderr prefix `xdpmacfilter: trust_model=` (PI-23 verbatim), systemd Drop-In recipe for fleet posture, Prometheus alert semantic (fleet-wide trust-model uniformity; exporter implementation deferred to MVP-3.4), and the §5.4/§5.19/§5.22/§5.24 fence callout (fleet relaxes ONLY §5.4).
+- README "Production deployment" section per Q5 N1 (~15 lines) pointing to the docs/unit/playbook.
+- 5 new ctests (§6.32..§6.36): `T_SYSTEMD_UNIT_SYNTAX`, `T_SYSTEMD_LIFECYCLE` (LOAD-BEARING OPS canary), `T_SYSTEMD_RESTART_ON_FAILURE` (Q4 RT2 enforcement), `T_ANSIBLE_PLAYBOOK_SYNTAX` (SKIP-77 if ansible-playbook not in PATH), `T_FLEET_DOCS_SUBSTRING` (PI-23 6-substring grep).
+- `XDPMF_INSTALL_SYSTEMD_UNIT` CMake option (default ON per D-3.3-9) — `cmake --install` drops the unit into `${CMAKE_INSTALL_PREFIX}/lib/systemd/system/`.
+
+### Changed
+- CMake `project(VERSION)` bumped from `0.4.0` → `0.5.0` (semver minor: new ops-integration artefacts; no functional binary change).
+
+### Preserved invariants (verified by impl smoke)
+- PI-7-3.3: `loader.hpp` ZERO diff — THIRD consecutive cycle (MVP-3.1 added one enumerator; MVP-3.2 and MVP-3.3 added zero). Strengthened to ENTIRE `src/lib/` + `src/cli/` + `src/bpf/` + `src/common/` tree being byte-identical.
+- PI-26: `git diff main -- src/ include/ cmake/` shows ZERO output; `git diff main -- CMakeLists.txt` shows ONLY the version-bump line + the optional install-rule + the `option(XDPMF_INSTALL_SYSTEMD_UNIT …)` declaration.
+- PI-6-3.3: 31 pre-§5.28 ctest bodies BYTE-EQUIVALENT (`git diff --stat tests/T_*.sh` shows ZERO body changes; only NEW T_SYSTEMD_*/T_ANSIBLE_*/T_FLEET_* files appear). STRICT SUPERSET — no carve-outs this slice.
+- PI-8-3.3: `xdpmacfilter --version` reports `xdpmacfilter 0.5.0` (driven by CMake `project(VERSION)` via `include/version.h.in` per §5.25 P3).
+- PI-9: `--help` / `--version` output FORMAT unchanged (no new CLI flag per D-3.3-1).
+- PI-10-3.2: `src/common/mac_filter.h` constants + struct layout UNCHANGED (strengthened — this slice adds zero new constants).
+- PI-17: `schema_version: 1` literal at line 1 of the Jinja2 template (NOT templated — load-bearing for the architectural promise that the rendered config is grammar-compatible with the existing apply -f validator).
+- PI-19: `systemd-analyze verify` accepts the unit with zero stderr warnings.
+- PI-23: `docs/FLEET_DEPLOYMENT.md` cites the EXACT runtime stderr prefix `xdpmacfilter: trust_model=` (verbatim, not paraphrased).
+- PI-24: unit file directive set EXACTLY matches the §5.28 PI-24 catalogue.
+
+### Out-of-scope fences (per §5.28)
+- Binary rename `xdpmacfilter` → `xdpfilter` — still MVP-3.12 (transitional alias to come).
+- Per-rule counters / `xdpmf-exporter` binary / Prometheus exporter — MVP-3.4 slice. Fleet docs describe the alert SEMANTIC only.
+- SIGHUP signal handler — fenced by Q2 R1 (reload is re-exec-of-apply, atomic-swap-preserving).
+- `--quiet` / `--syslog` / `--log-format=json` CLI flag — fenced by D-3.3-1 (PI-7-3.3 ZERO-diff loader.hpp).
+- Baked-in `Environment=XDPMF_TRUST_MODEL=…` in the shipped unit — fenced by D-3.3-2 (secure-by-default; Drop-In is the explicit-opt-in mechanism).
+- Full Ansible role/collection — minimal example only per HG-3.3-2.
+- systemd hardening beyond `AmbientCapabilities` + `NoNewPrivileges` + `CapabilityBoundingSet` (no `ProtectSystem=` / seccomp / `User=` non-root) — operator's call.
+- MVP-3.1/3.2 OOT-deferred housekeeping items — per Q6 DEFER (candidate dedicated MVP-3.3.5 cycle).
+
 ## [0.4.0] — 2026-05-24
 
 MVP-3.2 — L3 src-CIDR rule type (Composite 6 cycle 2). First extension WITHIN the §5.26 config-driven path: adds a CIDR axis OR-composed with the existing MAC axis at the BPF datapath. IPv4-only per HG-3.2-1 (v6 explicitly rejected at the validator with a recognizable stderr).
@@ -247,6 +285,7 @@ got stuck.
 | MVP-2 Robust (robustness pass) | 2 items + 1 test + 4 architect decisions (Q1=uname / Q2=5.15 / Q3=attach+detach / Q4=hybrid fixture) + Phase B fixups (libbpf 1.x substring reality EDIT-11, fixture-must-have-maps for skeleton-populate, TIMEOUT 30→60 EDIT-12) + 1-line loader.hpp relaxation (KernelUnsupported=7) | 14m | 26m | 9m | 49m | round 1 ✓ (1 negotiated minor) |
 | MVP-2 Polish-2 (final MVP-2 slice) | 4 janitorial items + 4 architect decisions (Q1=N3 netns wrap / Q2=C1 sed extraction / Q3=V1 project(VERSION) source-of-truth + version bump 0.1.0→0.2.3 / Q4=T1 no test edit) + 3 Phase B EDITs inline-merged (EDIT-13 opt-out roster correction, EDIT-14 env-after-NSEXEC idiom, EDIT-15 mount-ns preservation via `nsenter --net` instead of `ip netns exec`) + 3 OUT-OF-TRIANGULATION sweep | 16m | 21m | 10m | 47m | round 1 ✓ (0 findings) |
 | MVP-3.2 (additive within config harness) | 1 axis (L3 src-CIDR LPM_TRIE) + OR-compose datapath + parallel ARRAY_OF_MAPS outer + 6 architect decisions (Q1=AS1 parallel outers / Q2=OR1 MAC-first / Q3=K2 src_cidr naming / Q4=L1 single CIDR per rule / Q5=V1 schema-additive / Q6=DEFER housekeeping) + HG-3.2-1 v4-only + new STAT_PASS_CIDR counter (STAT_MAX bump 3→4) + 4 new ctests + 3 sub-cases on §6.22 + `loader.hpp` ZERO diff (PI-7 strengthened) | TBD | TBD | TBD | TBD | TBD |
+| MVP-3.3 (ops integration, brownfield) | 4 NEW text artefacts (systemd unit + Ansible playbook + Jinja2 template + fleet-deployment docs) + 5 new ctests (§6.32..§6.36) + 6 architect Q-decisions (Q1=I1 system-path / Q2=R1 re-exec-apply / Q3=D1 single MD / Q4=RT2 rate-limited / Q5=N1 1-section README / Q6=DEFER) + 3 human-gate confirmations + 9 D-3.3-N rationale decisions + CMake `XDPMF_INSTALL_SYSTEMD_UNIT` option + version 0.4.0→0.5.0 + 8 NEW preserved invariants (PI-19..PI-26) — **ENTIRE `src/`/`include/`/`cmake/` tree ZERO diff** (PI-7-3.3 + PI-26 strengthened) | TBD | TBD | TBD | TBD | TBD |
 
 Phase 1 ≈ architect time + human-gate read/approve.
 Phase 2–3 ≈ impl + tester running in parallel, plus the build-green / tests-ready handoff.

@@ -83,6 +83,25 @@ Exit codes: `0` ok · `1` CLI usage · `2` BPF load · `3` XDP attach · `4`
 foreign XDP program already on iface (refuses to clobber — see design
 §5.4) · `5` detach failed · `6` permission denied.
 
+## Production deployment
+
+The repo ships a systemd template unit and an example Ansible playbook
+for fleet rollout. The template unit `systemd/xdpmacfilter@.service` is
+template-instanced (`%i` = iface), runs as `Type=oneshot RemainAfterExit=yes`,
+and treats `systemctl reload` as a Composite-6 atomic hot-swap via
+`bpf_link__update_program` (no drop window). `cmake --install` drops it
+into `${CMAKE_INSTALL_PREFIX}/lib/systemd/system/` (gated on the default-ON
+`XDPMF_INSTALL_SYSTEMD_UNIT` option).
+
+The example playbook `ansible/xdpmacfilter-deploy.yml` + Jinja2 config
+template `ansible/templates/xdpfilter-config.yaml.j2` are a minimal
+reference, not a full role/collection — operators adapt to their fleet.
+
+Operator docs for `XDPMF_TRUST_MODEL=fleet` (strict-vs-fleet decision
+matrix, audit-log story, Drop-In recipe, Prometheus alert semantic, and
+the §5.4/§5.19/§5.22/§5.24 fence callout) live in
+`docs/FLEET_DEPLOYMENT.md`.
+
 ## Test
 
 The ctest suite drives a veth pair fixture and needs root (for BPF

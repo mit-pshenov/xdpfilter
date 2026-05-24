@@ -5964,6 +5964,11 @@ Any file NOT listed above is off-limits for impl. If impl needs to edit a file n
 - **D-3.3-7 — Ansible playbook uses `become: true`, NOT per-task `become`** — because every task touches root-owned files (`/etc/xdpfilter/`, `/etc/systemd/system/`, `systemctl`); per-task `become` is noisier with no security gain. The systemd handler ALSO inherits the playbook-level `become`.
 - **D-3.3-8 — Ansible playbook `daemon-reload` is a HANDLER, not a task** — because Ansible's idiom: `daemon-reload` runs ONCE per play even if many units are dropped, AND only if SOMETHING changed (handler-fires-on-notify). Putting it as a task would run unconditionally — non-idempotent (no functional harm, but cosmetic `changed=1` on re-runs, violating PI-21). Handler form: idiomatic + idempotent.
 - **D-3.3-9 — `XDPMF_INSTALL_SYSTEMD_UNIT` CMake option DEFAULTS to ON, not OFF** — because the default `cmake --install` of a project that ships a systemd unit SHOULD install the unit. Operators who want pure-binary install (e.g. distro packagers who handle the unit separately) can set `-DXDPMF_INSTALL_SYSTEMD_UNIT=OFF`. Off-by-default would surprise the default packaging path.
+- **D-3.3-10 — T_SYSTEMD_LIFECYCLE + T_SYSTEMD_RESTART_ON_FAILURE use a HOST-NETNS veth, NOT `setup_veth`** — because systemd-as-PID-1 runs in the HOST netns; ExecStart's `/usr/bin/xdpmacfilter apply -f … --iface %i` calls `if_nametoindex(%i)` in the host netns. The existing `setup_veth` helper (per §5.25 P1) creates the veth inside the per-PID netns `${NETNS}` accessed via `${NSEXEC}` — invisible to systemd. Three alternatives were considered:
+  - (A) **host-netns veth confined to these 2 tests** (CHOSEN): inline `sudo ip link add xsd_a_$$ type veth peer name xsd_b_$$` (no `ip netns add`); aggressive trap-cleanup `ip link del xsd_a_$$ || true`; RESOURCE_LOCK xdp_fixture already serializes; mirrors real ops (operators install units against real host ifaces); CONFINED to T_SYSTEMD_LIFECYCLE + T_SYSTEMD_RESTART_ON_FAILURE (the only systemd-touching tests this slice). **Iface-naming rationale (Phase B EDIT-4)**: Linux `IFNAMSIZ = 16` (15 visible chars + NUL); the earlier-spec'd `xdpmf_sysd_a_$$` (13-char prefix + up to 7-digit PID under `kernel.pid_max=4194304`) overflows to 20 chars and `ip link add` rejects with `wrong: not a valid ifname`. Tester evidence confirmed via Phase 2.5 ctest. The `xsd_*_$$` form (6-char prefix `xsd_a_` / `xsd_b_` + up to 7-digit PID = 13 chars max) fits any PID under kernel default. Project-distinguishability via `xsd` = `x`dpmacfilter-`s`ystemd-test-`d`ev; greppable in stale `ip link` output post-failed-cleanup. NO loss of namespace clarity vs the older `xdpmf_sysd_*_$$` (the test filename `T_SYSTEMD_*.sh` is the canonical reviewer-grep anchor anyway).
+  - (B) Drop-In `NetworkNamespacePath=/var/run/netns/${NETNS}` on the installed unit — keeps netns isolation but MUTATES the shipped unit at test time (extra Drop-In file installed alongside); drift between "what the test exercises" and "what operators ship" — operators won't usually wrap units in a netns. Worse signal-to-noise.
+  - (C) NEW helper `setup_host_veth` in `tests/lib/common.sh` — would breach PI-6-3.3 unchanged-but-affected fence (`tests/lib/common.sh` zero git-diff this slice).
+  Rationale for (A): self-contained per test; no helper-file diff (PI-6-3.3 preserved); RESOURCE_LOCK + trap-on-EXIT handles host-netns pollution; reflects operator deployment reality. Trade-off accepted: T_SYSTEMD_LIFECYCLE and T_SYSTEMD_RESTART_ON_FAILURE are the TWO non-netns-isolated tests in the suite (post-§5.25-P1 fence). Both are tightly scoped to systemd-host-netns coupling and aggressively cleaned. Reviewer's PI-6-3.3 check distinguishes "31 pre-§5.28 ctests byte-equivalent" (which they ARE; the new tests don't touch existing ones) from "all NEW tests use the netns-isolated pattern" (which is NOT a PI — the netns-isolation pattern is a helper-pattern, not an invariant). Tester MAY also inline `read_active_idx` (bpftool dump pinned `${PIN_DIR}/active_idx` with `.formatted.value` fallback to byte-array) directly in these tests rather than adding a `tests/lib/common.sh` helper — same PI-6-3.3 fence preservation.
 
 #### §5.28 TestStrategy entries
 
@@ -5975,7 +5980,7 @@ Any file NOT listed above is off-limits for impl. If impl needs to edit a file n
   - Stderr EMPTY (no warnings).
   - Stdout MAY emit informational lines; assertion is "no warnings/errors", not "silent".
 - **Assertion mechanism**: bash `rc=0` check + `[[ -z "$(cat stderr.log)" ]]` (or `grep -vE '^(Loading|Created)' stderr.log | wc -l == 0` if systemd-analyze emits info lines on stderr in some versions; tester picks the robust form).
-- **Anti-theatricality control**: NEGATION sub-case — also run `systemd-analyze verify` against a deliberately-broken copy (e.g. with `Type=invalid` substituted in) and assert exit-nonzero. Proves the verifier is actually checking, not just exit-0-pass-through. NEGATION sub-case is REQUIRED.
+- **Anti-theatricality control**: NEGATION sub-case (REQUIRED) — also run `systemd-analyze verify` against a deliberately-broken copy of the unit AND assert "actually rejected". **Corruption mechanism** (Phase B EDIT-5 per tester evidence): the original "`Type=invalid` substitution" suggestion is INSUFFICIENT — empirically, Debian's `systemd-analyze` accepts unknown `Type=` values with only a soft stderr warning + rc=0 (does NOT fail). Tester replaced with **`[Service]`-section REMOVAL** via an awk state-machine (strip lines from `[Service]` header through the next `[…]` section header) — empirically yields rc=1 + stderr `Service has no ExecStart=, ExecStop=, or SuccessAction=. Refusing.`. **Failure criterion**: `rc != 0` OR stderr matches the rejection-token ERE `Failed to|missing|Refusing|Invalid|no \[?Service|service has no|nothing to start`. Either signal MUST fire on the broken copy; BOTH MUST be absent on the canonical unit (positive case). Tester MAY choose a different corruption (e.g. malformed `ExecStart=`) IF it triggers the same rejection-token catalogue; the contract is "verifier MUST reject some realistic corruption", not "use exactly the [Service]-removal corruption".
 - **SKIP conditions**: SKIP-77 if `systemd-analyze` not in PATH (rare on modern Linux; brief notes systemd is assumed present).
 - **Cleanup**: `rm -rf ${TMPDIR}`.
 
@@ -5983,7 +5988,7 @@ Any file NOT listed above is off-limits for impl. If impl needs to edit a file n
 
 - **Load-bearing**: this is the OPS-slice canary. If this passes, the systemd integration is real; if it fails, the unit file's directives are wrong somewhere.
 - **Trigger**:
-  1. `setup_veth` (existing helper) → `${IFACE_A}` exists.
+  1. **HOST-netns veth** (per D-3.3-10 — NOT `setup_veth`): `IFACE_A=xsd_a_$$`; `IFACE_B=xsd_b_$$` (IFNAMSIZ-safe per D-3.3-10 Phase B EDIT-4); `sudo ip link add ${IFACE_A} type veth peer name ${IFACE_B}`; `sudo ip link set ${IFACE_A} up`; `sudo ip link set ${IFACE_B} up`. NO `ip netns add`. systemd-as-PID-1 sees the iface in the host netns where `if_nametoindex(%i)` resolves.
   2. `sudo install -D -m 0644 ${SYSTEMD_UNIT_SRC} /etc/systemd/system/xdpmacfilter@.service`.
   3. `sudo install -D -m 0644 ${CMAKE_SOURCE_DIR}/tests/fixtures/config_valid.yaml /etc/xdpfilter/${IFACE_A}.yaml`.
   4. `sudo systemctl daemon-reload`.
@@ -6007,20 +6012,20 @@ Any file NOT listed above is off-limits for impl. If impl needs to edit a file n
   - `systemctl is-active` → `inactive` (or `failed` only if stop itself errored — assert `inactive`).
   - `xdp_prog_id ${IFACE_A}` → empty (XDP detached).
   - Pin `${PIN_DIR}/link` absent.
-- **Assertion mechanism**: bash exit-code checks + `systemctl is-active` substring + existing helpers (`xdp_prog_id`, pin existence via `test -e`, `bpftool map dump … | jq`) + `journalctl` grep.
+- **Assertion mechanism**: bash exit-code checks + `systemctl is-active` substring + an **inline `host_xdp_prog_id()` helper** defined within the test script (per D-3.3-10 host-netns rationale + Phase B EDIT-2 below) — bare `sudo -n ip -j link show "${iface}" | jq …` WITHOUT `${NSEXEC}` wrapping (the existing `tests/lib/common.sh::xdp_prog_id` is netns-LOCKED via NSEXEC and would enter the per-PID netns where the host-netns iface is invisible — NOT netns-agnostic as architect initially claimed; CORRECTION per tester evidence 2026-05-NN) + pin existence via `test -e` + `bpftool map dump … | jq` (inlined, NOT a new common.sh helper) + `journalctl` grep. PI-6-3.3 preserved — `host_xdp_prog_id()` lives INSIDE the test script, not in `tests/lib/common.sh`.
 - **Anti-theatricality controls**:
   - The active_idx flip across reload is the differential — if `systemctl reload` were no-oping or restarting (R3 instead of R1), the flip would NOT occur (restart re-attaches from scratch → active_idx = 0 again).
   - The prog-id UNCHANGED check across reload distinguishes R1 (bpf_link__update_program — same prog, new bytecode at the link) from R3 (detach + re-attach — new prog id).
 - **SKIP conditions**:
   - SKIP-77 if `systemctl` not in PATH (extremely rare; treat as test infra bug otherwise).
   - SKIP-77 if `require_passwordless_sudo` (existing helper) fails (project context says it's available).
-- **Cleanup**: aggressive trap-on-EXIT — `systemctl stop xdpmacfilter@${IFACE_A}.service || true; systemctl disable xdpmacfilter@${IFACE_A}.service || true; rm -f /etc/systemd/system/xdpmacfilter@.service /etc/xdpfilter/${IFACE_A}.yaml; systemctl daemon-reload; systemctl reset-failed xdpmacfilter@${IFACE_A}.service || true; cleanup_veth`.
+- **Cleanup**: aggressive trap-on-EXIT — `systemctl stop xdpmacfilter@${IFACE_A}.service || true; systemctl disable xdpmacfilter@${IFACE_A}.service || true; rm -f /etc/systemd/system/xdpmacfilter@.service /etc/xdpfilter/${IFACE_A}.yaml; systemctl daemon-reload; systemctl reset-failed xdpmacfilter@${IFACE_A}.service || true; sudo ip link del ${IFACE_A} || true` (host-netns veth cleanup per D-3.3-10; deleting one end of the veth pair auto-removes the peer). NO `cleanup_veth` (no netns to delete).
 
 ##### §6.34 T_SYSTEMD_RESTART_ON_FAILURE — Restart=on-failure + StartLimit per Q4 RT2
 
 - **Architect's INCLUDE rationale**: Q4 RT2's StartLimit directives are operator-visible (alert-pattern hinge). The misplacement risk (under `[Service]` vs `[Unit]`) is a real failure mode that `systemd-analyze verify` warns about but does not always reject. A behaviour-level ctest proves the rate-limit kicks in.
 - **Trigger**:
-  1. `setup_veth`.
+  1. **HOST-netns veth** (per D-3.3-10 — NOT `setup_veth`): same pattern as §6.33 step 1. `IFACE_A=xsd_a_$$`; `IFACE_B=xsd_b_$$` (shared name with §6.33; IFNAMSIZ-safe per D-3.3-10 Phase B EDIT-4). Serialization is via `RESOURCE_LOCK xdp_fixture` + `RESOURCE_LOCK systemd_unit_install`, so the two systemd-touching tests never overlap, and `$$` PID-uniqueness handles re-runs within the same kernel. Per-test-disambiguation (architect's earlier `xdpmf_sysd_rof_a_$$` / current `xsd_rof_a_$$`) is unnecessary under RESOURCE_LOCK — shared name reduces touchpoints (Phase B EDIT-3). `sudo ip link add ${IFACE_A} type veth peer name ${IFACE_B}`; both `up`. NO `ip netns add`.
   2. Install unit + install DELIBERATELY MALFORMED config at `/etc/xdpfilter/${IFACE_A}.yaml` (e.g. `tests/fixtures/config_malformed_schema.yaml`).
   3. `sudo systemctl daemon-reload`.
   4. `sudo systemctl start xdpmacfilter@${IFACE_A}.service` → expect exit-nonzero from systemctl (start fails because apply exits 9 because config is malformed).
@@ -6039,7 +6044,7 @@ Any file NOT listed above is off-limits for impl. If impl needs to edit a file n
   - SKIP-77 if `systemctl` not in PATH.
   - SKIP-77 if `require_passwordless_sudo` fails.
   - **OPTIONAL SKIP-77**: if tester finds this test flaky in the ctest harness (systemd timing variation across kernels), MAY SKIP-77 with a stderr message `T_SYSTEMD_RESTART_ON_FAILURE: timing-flaky on this kernel; see §5.28 PI-25 carve-out`. PI-25 enumerates this carve-out explicitly (NOT a free pass — tester MUST document the flakiness mode if invoking).
-- **Cleanup**: same aggressive trap as §6.33, plus `systemctl reset-failed xdpmacfilter@${IFACE_A}.service` to clear the failed state.
+- **Cleanup**: same aggressive trap as §6.33 (including `sudo ip link del ${IFACE_A} || true` host-netns veth cleanup per D-3.3-10), plus `systemctl reset-failed xdpmacfilter@${IFACE_A}.service` to clear the failed state.
 
 ##### §6.35 T_ANSIBLE_PLAYBOOK_SYNTAX — `ansible-playbook --syntax-check` passes
 
@@ -6132,6 +6137,7 @@ In addition to PI-1..PI-26 above:
 - `CHANGELOG.md` entry `[0.5.0] - 2026-05-NN` (Keep-a-Changelog format).
 - Build-pace table in CHANGELOG gains a row for MVP-3.3.
 - 5 new ctests pass (§6.32..§6.36); §6.33 + §6.36 are the load-bearing pair (systemd lifecycle correctness + fleet-docs verbatim citation).
+- §6.33 + §6.34 use HOST-netns veth (`ip link add … type veth …`, NO `ip netns add`) per D-3.3-10, NOT `setup_veth`. Trap-cleanup deletes the veth (`ip link del`); no netns to remove. PI-6-3.3 holds (no `tests/lib/common.sh` diff; `read_active_idx` inlined in test scripts, not promoted to a helper).
 - 31 pre-§5.28 ctests still pass (or legitimately SKIP-77 per §5.24 Q4 hybrid) — PI-6-3.3 STRICT SUPERSET, no carve-out.
 - `XDPMF_SANITIZERS=ON` build clean (no C++ change; build must continue to compile clean under sanitizers).
 
