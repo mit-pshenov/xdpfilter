@@ -87,7 +87,11 @@ None — verdict is `pass`. No rework needed.
 
 ## Out-of-triangulation findings
 
-None this round. Round 1's only OOT (Jinja2 prose ordering) was inline-merged via Phase B EDIT-7 — resolved.
+Round 1's only OOT (Jinja2 prose ordering) was inline-merged via Phase B EDIT-7 — resolved.
+
+### Deferred to next slice
+
+**T_SYSTEMD_RESTART_ON_FAILURE transient flake under back-to-back stress** (surfaced by round-1 reviewer's independent re-run during cleanup-phase activity; 1/5 known runs hit NRestarts=1 instead of 4-5 under reviewer's back-to-back ctest stress pattern; tester's run-of-record + reviewer-2's primary run both PASS at ~30s with NRestarts in band; flake rate ≤20% under stress, ~0% under clean-run pattern). Root cause appears to be systemd state-leak between T_SYSTEMD_LIFECYCLE's cleanup and T_SYSTEMD_RESTART_ON_FAILURE's pre-cleanup when run consecutively. PI-25 SKIP-77 carve-out explicitly anticipates this category of timing flake. Polish options for a future housekeeping cycle: (a) implement PI-25 SKIP-77 fallback in test (NRestarts < 4 + deadline expired + missing journal pattern → exit 77 with verbatim carve-out citation); (b) stronger inter-test isolation via `systemctl reset-failed --all` + `sleep 5` in defensive pre-cleanup; (c) increase polling deadline 60s → 90s. NOT a round-2 fail — verdict stands pass.
 
 ---
 
