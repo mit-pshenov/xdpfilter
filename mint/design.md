@@ -6198,3 +6198,687 @@ In addition to PI-1..PI-26 above:
 Per architecture-v2.md per-phase scope summary line 312: 2-3 cycles, medium risk (Q13 B-vs-C decision is the load-bearing pre-cycle question).
 
 Evidence: `mint/task-brief.md` MVP-3.3 brief (Items 1-4 + Q1-Q6 + HG-3.3-1/2/3); `mint/architecture-v2.md` lines 226-231 (MVP-3.3 dependency-graph row) + line 311 (per-phase scope summary, 1 cycle low risk) + lines 335-336 (per-phase risk register MVP-3.3 rows) + line 24 component-map MVP-3.12 rename deferral; §5.20 attach/detach flow (ExecStart/ExecStop call site); §5.26 (config harness + `apply -f` subcommand + `trust_model=` stderr-log format Q3 fleet-docs cites verbatim); §5.27 (immediate ancestor — CIDR axis preserved unchanged); §4.1 exit-code table (UNCHANGED — no new exit code); §4.3 LoaderError enum (UNCHANGED — PI-7-3.3 ZERO diff); `mint/impl-notes.md` D-3.1-1..D-3.1-4 (MVP-3.1 deviations that STAND unchanged; MVP-3.2 had 0 deviations).
+
+---
+
+### §5.29 MVP-3.4: observability exporter + manual bypass + rules/action_table skeleton (brownfield amendment, defer posture)
+
+**Purpose**: ship the first observability surface (`xdpmf-exporter` Prometheus `/metrics` binary serving the existing global `stats` PERCPU_ARRAY) + a manual operator bypass primitive (`xdpmacfilter bypass`) + forward-compatibility skeleton for MVP-3.4b's per-rule counter wiring (`rules` and `action_table` BPF maps declared and populated, **NOT** consulted on the per-packet datapath). Per Open Q #13 RESOLUTION (architecture-v2.md §"§MVP-3.4 Open Question #13 RESOLUTION", committed 2d4b31a 2026-05-24): **per-rule counters DEFERRED to MVP-3.4b** under Option 1 "Honest defer". Option 2 ("Sparse-direct-bounded ARRAY") is the standing default if MVP-3.4b re-asks; PI-13-3.1 adjudication on inner-allowlist-value extension is the gating Open Q #3 that MVP-3.4b inherits.
+
+**Anchor sections**: §5.26 (config harness — the schema this slice extends with `rules:` block + per-rule `action:` field; the `apply -f` orchestrator that populates the new skeleton maps); §5.27 (CIDR axis — second-axis precedent for additive datapath extension that this slice **explicitly does NOT use** because skeleton maps are not consulted); §5.28 (systemd unit template idiom — exporter unit mirrors directive catalogue under HG-3.4-3 Q5 N3); §4.1 exit-code table (UNCHANGED — no new exit code; bypass uses existing exit 0 / 1 / 5; exporter uses existing exit 0 / 1 / 6); §4.3 LoaderError enum (UNCHANGED — PI-7-3.4 ZERO diff loader.hpp continues for the 4th consecutive cycle); §5.4 / §5.19 / §5.22 trust+identity invariants (bypass primitive MUST NOT silently bypass any of these — it is a wrapper over the EXISTING `detach()` path which already enforces zero of them on its way out, and zero gating logic is bypassed at attach-time-equivalent because bypass does not attach).
+
+**Scope contract (§5.29 short form)**:
+- NEW (binary): `xdpmf-exporter` (project's first NEW binary since MVP-2). Long-running daemon (Q1 D1), embedded minimal HTTP/1.0 server (HG-3.4-3), reads existing global `stats` PERCPU_ARRAY[STAT_MAX=4] per attached iface, emits Prometheus text format on `/metrics`.
+- NEW (CLI subcommand): `xdpmacfilter bypass --iface <X> [--unsafe] [--reason "<text>"]` — wraps existing `loader::detach()` path with audit-stderr + interactive y/N prompt + non-tty `--unsafe` gate (HG-3.4-2). NO new BPF map flag; NO datapath touch.
+- NEW (BPF maps, DECLARED-ONLY): `rules` ARRAY[XDPMF_ALLOWLIST_MAX=64] of `struct rule_entry` + `action_table` ARRAY[ACTION_MAX=2] of `struct action_entry`. Populated from config on `apply` (loader-userspace side). **NOT consulted on the per-packet datapath** (HG-3.4-1; the BPF `mac_filter_prog` function body is byte-equivalent to MVP-3.2 modulo the new map *declarations*).
+- NEW (schema extension): `apply -f` accepts a per-rule `action:` field (`pass` | `drop`) and a top-level `rules:` block grammar (already shipped at §5.26; this slice adds the apply-time map-population side + the WARN emission when the block is non-empty).
+- EDITED: `src/bpf/mac_filter.bpf.c` (two new map declarations only); `src/common/mac_filter.h` (new map-name constants, new structs, new action enum); `src/lib/apply_internal.{cpp,hpp}` (rules+action_table population + WARN emission); `src/lib/config.{cpp,hpp}` (validator extension if needed — `action:` field already accepted per §5.26 schema rule 4 — verify, do not duplicate); `src/lib/yaml_subset.cpp` (no change expected — likely already handles the block); `src/cli/cli.cpp` + `src/cli/main.cpp` (register `bypass` subcommand + dispatch); `CMakeLists.txt` (new `xdpmf-exporter` target linking `xdpmf_internal` + libbpf, version 0.5.0 → 0.6.0); `CHANGELOG.md` ([0.6.0] entry); `tests/CMakeLists.txt` (new add_test entries).
+- UNCHANGED-BUT-AFFECTED (zero git-diff fence): `src/lib/loader.hpp` (PI-7-3.4 strengthening — 4th consecutive ZERO-diff cycle); `src/lib/loader.cpp` (apply orchestrator dispatch is unchanged; rule+action population lives in `apply_internal.cpp` per §5.26 D-3.1-1 layering); `src/bpf/mac_filter.bpf.c` xdp_filter function body (only `SEC(".maps")` declaration block grows); all 36 pre-existing ctest bodies; `tests/lib/common.sh` (new exporter-helper if any is OPTIONAL and additive); systemd existing unit `xdpmacfilter@.service` (zero diff — exporter is a SEPARATE unit at `systemd/xdpmf-exporter.service`).
+
+**Human-gate decisions (confirmed)**:
+
+- **HG-3.4-1 — `rules`+`action_table` = STRUCTURAL-ONLY (not wired in datapath).** Confirmed. The two new maps are DECLARED in `mac_filter.bpf.c` and POPULATED from config in `apply_internal.cpp` on `apply -f`; the `mac_filter_prog` BPF program body does NOT consult them on the per-packet path. Datapath stays MVP-3.2 shape: ethhdr parse → MAC HASH lookup OR (IPv4) CIDR LPM_TRIE lookup → STAT_PASS / STAT_PASS_CIDR / STAT_DROP_DENY / STAT_DROP_MALFORMED. Loader emits stderr WARN if config has non-empty `rules:` block: `xdpmacfilter: rules: section parsed (<N> entries) but per-rule action dispatch deferred to MVP-3.4b — datapath uses MAC/CIDR-only matching this cycle`. This is what the defer realizes — see architecture-v2.md §"§MVP-3.4 Open Question #13 RESOLUTION" Convergence + Composite Option 1 paragraphs.
+
+- **HG-3.4-2 — bypass primitive = CLI subcommand wrapping existing `detach` + audit warning.** Confirmed. `xdpmacfilter bypass --iface <X> [--unsafe] [--reason "<text>"]`. Interactive tty: `BYPASS will detach XDP filter on <iface>. Continue? [y/N]:` prompt; non-`y` → exit 0 (no-op). Non-tty (e.g. systemd, cron, ansible): require `--unsafe` flag; absent → exit 1 with `xdpmacfilter: refusing to bypass in non-interactive context without --unsafe flag (audit safety)`. **Always** logs to stderr BEFORE the detach call: `xdpmacfilter: BYPASS activated on <iface> by uid=<UID> reason="<text or UNSPECIFIED>"`. Implementation: construct `loader::DetachConfig{iface}`, call `loader::detach()`; exit 0 on success, propagate `detach()` exit codes (typically 5 only on kernel detach failure; per §5.21 D4 "nothing attached" maps to 0). NO new BPF map flag; NO new datapath state; NO `loader.hpp` diff.
+
+- **HG-3.4-3 — exporter HTTP = embedded minimal C++23 HTTP/1.0 server, `/metrics` over TCP.** Confirmed. ~150-200 LOC plain-socket implementation in `src/exporter/http.{cpp,hpp}`. Default listen `127.0.0.1:9417` (port checked against the prometheus_exporter_default_ports public registry — `9417` is currently unassigned; if collision discovered during impl/test, impl SendMessages architect and the default flips to the next free port in the 941x range). NO HTTP library dependency, NO third-party dep — aligns with the `cli.cpp:1-3` zero-deps project value (PI-26-equivalent for this slice).
+
+#### §5.29 Q-decisions (mechanism)
+
+##### Q1: exporter runtime model → **D1 (long-running daemon)**
+
+Confirmed per brief recommendation. Reasons: (a) lower per-scrape latency vs `Type=socket-activated` oneshot pattern (no fresh `bpf_obj_get` + `mmap` per scrape); (b) standard Prometheus operational pattern (node_exporter, blackbox_exporter, kube-state-metrics all are long-running); (c) aligns with Q5 N3 single-instance unit shape; (d) D2 (oneshot per scrape via xinetd / `systemd.socket`) adds a per-scrape `accept()`→`fork`→`exec` overhead that for our PERCPU-sum workload (microseconds) is dwarfed by the process startup cost (millseconds) — wrong trade.
+
+##### Q2: exporter binary install path → **`/usr/bin/xdpmf-exporter`**
+
+Confirmed per brief recommendation. Consistent with `xdpmacfilter` at `/usr/bin/xdpmacfilter`. `libexec` convention (`/usr/libexec/xdpmf/exporter`) is for binaries invoked by other binaries, not by operators / systemd directly; this is a user-facing daemon binary, so `/usr/bin/` is correct. CMake `install()` rule uses `${CMAKE_INSTALL_BINDIR}` (which resolves to `${CMAKE_INSTALL_PREFIX}/bin/` under standard layout).
+
+##### Q3: `rules` map value shape (for skeleton-only purposes) → **minimal: `{present, action_id}` + `{action_type}`**
+
+Confirmed per brief recommendation. Definitive structs (live in `src/common/mac_filter.h`; see §5.29 DataStructures additions below):
+
+```c
+struct rule_entry {
+    unsigned char present;     /* 0 = empty slot; 1 = occupied. Mirrors `__u8` semantic of allowlist inner-value PI-13. */
+    unsigned char action_id;   /* index into action_table; valid range [0, ACTION_MAX-1] */
+    unsigned char _pad[2];     /* explicit padding; total sizeof == 4 (u32-aligned for ARRAY value efficiency) */
+};
+
+struct action_entry {
+    unsigned char action_type; /* enum xdpmf_action_type; valid range [0, ACTION_MAX-1] */
+    unsigned char _pad[3];     /* explicit padding; total sizeof == 4 */
+};
+
+enum xdpmf_action_type {
+    ACTION_PASS = 0,
+    ACTION_DROP = 1,
+    ACTION_MAX  = 2,           /* sentinel; future MVP-3.8+ may extend with MIRROR/RL/TAG */
+};
+```
+
+Rationale:
+- Minimal — only the fields strictly necessary for MVP-3.4b's wiring (the action_id indirection lets future action-extensibility happen without touching `rules` value layout; `action_type` is an explicit enum byte for forward-fit).
+- `unsigned char` (not `__u8`) per the existing shared-header convention (§5.27 D-3.2 note on `xdpmf_cidr_v4`): `mac_filter.h` is included from BOTH BPF C and userspace C++; the libc types are the portable choice.
+- 4-byte total per entry → ARRAY map value is naturally u32-aligned (`max_entries = 64 × 4 B = 256 B` for rules; `max_entries = 2 × 4 B = 8 B` for action_table — both rounding errors).
+- NO `rule_id` field embedded in inner allowlist value — the inner allowlist value (HASH `__u8 present` and LPM_TRIE `__u8`) MUST stay byte-equivalent (PI-27 below; load-bearing for the defer).
+- NO operator-name field; if MVP-3.4b picks Option 4 (schema-evolve to named rules per architecture-v2.md §"§MVP-3.4 Open Question #13 RESOLUTION" Option 4) the action_id indirection absorbs the change at userspace; the BPF value shape stays stable.
+
+##### Q4: stats map exposure — direct read vs cached snapshot → **E1 (direct read on scrape)**
+
+Confirmed per brief recommendation. PERCPU sum on a 32-CPU box reading 4 u64 slots × 32 CPUs × N attached ifaces (typical N ≤ 4) = 512 u64 reads = microseconds. Caching layer would introduce a staleness contract operators don't want for at-most-one-scrape-per-15s typical Prometheus cadence. The exporter MAY add caching in a future cycle if a real workload demands it; not in scope here.
+
+`stats_reader.cpp` opens each pinned `${XDPMF_BPFFS_ROOT}/<iface>/stats` map READ-ONLY (no `BPF_F_RDONLY` map-flag needed; `bpf_obj_get` returns an fd whose mode is governed by the pin's `read` discipline — exporter does NOT call `bpf_map_update_elem` ever, per PI-31).
+
+##### Q5: exporter systemd integration → **N3 (single-instance unit, multi-iface inside)**
+
+Confirmed per brief recommendation. `systemd/xdpmf-exporter.service` (single instance, no `@` template). The exporter scans `${XDPMF_BPFFS_ROOT}/*/stats` at boot AND on every scrape (Q4 E1) — operator adds/removes ifaces simply by attach/detach via `xdpmacfilter` and the exporter picks them up dynamically. Per-scrape filesystem stat is microseconds; no inotify needed.
+
+Directive catalogue mirrors §5.28's `xdpmacfilter@.service` template idiom, adapted for `Type=simple` daemon:
+
+```
+[Unit]
+Description=XDP MAC/CIDR filter Prometheus exporter
+Documentation=file:///usr/share/doc/xdpmacfilter/FLEET_DEPLOYMENT.md
+After=network-pre.target
+Wants=network-pre.target
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/xdpmf-exporter --port 9417 --bind 127.0.0.1
+Restart=on-failure
+RestartSec=5
+AmbientCapabilities=CAP_BPF
+CapabilityBoundingSet=CAP_BPF
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Rationale for cap-set divergence from §5.28's 5-cap baseline (anti-misdiagnosis note — see Decisions D-3.4-6 below):
+- Exporter does NOT load BPF programs (no verifier-pass needed) → NO `CAP_SYS_ADMIN`, NO `CAP_PERFMON`.
+- Exporter does NOT attach/detach XDP (no `xdp_attach` ioctl) → NO `CAP_NET_ADMIN`.
+- Exporter does NOT set `rlimit-memlock` (no map creation; reads existing pinned maps via fd) → NO `CAP_SYS_RESOURCE`.
+- ONLY `CAP_BPF` is required (the `BPF_OBJ_GET` syscall on the existing pin path goes through the BPF token check on kernel ≥ 5.8 → minimum cap is `CAP_BPF`).
+
+**Anti-misdiagnosis cross-reference**: MVP-3.3 rework round 1 surfaced that `AmbientCapabilities` declarations MUST be cross-checked against the actual BPF object operations under a stripped-cap shell (the `capsh --drop=` test). For this exporter, the relevant smoke-check is `capsh --drop=cap_sys_admin,cap_net_admin,cap_sys_resource,cap_perfmon -- xdpmf-exporter --port 9417` against a pinned-stats fixture; if this fails with -EPERM, the declared cap-set is wrong. Impl SHOULD run this smoke-check during dev; if it fails, SendMessage architect — do NOT add caps silently. See D-3.4-6.
+
+##### Q6: tackle MVP-3.1/3.2/3.3 OOT-deferred housekeeping items? → **DEFER**
+
+Confirmed per brief recommendation. This slice already ships project's first NEW binary since MVP-2 + 3 distinct piece-types (exporter, bypass, skeleton) + 4-6 new ctests including the first network-server-style test. Folding 5+ OOT items in dilutes review focus. The 5 deferred items (T_SYSTEMD_RESTART_ON_FAILURE flake from MVP-3.3 OOT-1; orphan map pins from T_ATTACH_TAG_MISMATCH; T_APPLY_ATOMIC_SWAP_NO_DROP stale NOTE; §6.25 "replacing existing program" grep; ParsedAttach/Detach/Apply wrapper design-text inaccuracy) stay in their dispositions. Architect surfaces "MVP-3.4.5 housekeeping" as the candidate dedicated cycle if backlog accumulates further; alternatively MVP-3.4b will likely pick up at least the T_SYSTEMD_RESTART_ON_FAILURE flake (which may auto-resolve as ctest stress profile shifts between slices).
+
+#### §5.29 schema extension (data on disk) — `action:` field + `rules:` block apply-time semantic
+
+Per-rule `action:` field is ALREADY in the §5.26 schema (rule 4 — accepted `{pass, drop}`). §5.26 documented `drop` as "accepted-but-no-op (operator may explicitly mark drop rules for documentation; they do not populate the inner map). Future MVP-3.4+ counters distinguish action types at apply time." This slice realizes the **apply-time map-population side** of that promise (write `action_id` into the `rules` map slot, write `action_type` into `action_table[action_id]`), without realizing the **per-packet datapath side** (which is deferred to MVP-3.4b). The schema itself is byte-equivalent to §5.26 + §5.27.
+
+Concretely:
+- For each `rules:` entry with `action: pass` AND `match.mac` → populate `allowlist_<inactive>` HASH with `__u8 present = 1` (UNCHANGED from §5.26).
+- For each `rules:` entry with `action: pass` AND `match.src_cidr` → populate `cidr_allowlist_<inactive>` LPM_TRIE with `__u8 = 1` (UNCHANGED from §5.27).
+- **NEW (§5.29)**: For each `rules:` entry → populate `rules[id] = {present=1, action_id=<0 for pass, 1 for drop>}` AND ensure `action_table[0] = {action_type=ACTION_PASS}` and `action_table[1] = {action_type=ACTION_DROP}` are pre-populated by the loader on `apply` (idempotent). `drop` rules now have a kernel-visible representation (a `rules` slot with `action_id=1`) — but the datapath does NOT read it. The forward-fit is: MVP-3.4b will replace the datapath's "PASS-on-allowlist-hit" branch with "look up `rule_id` from the inner-allowlist-value (PI-13 extension) → look up `action_id` in `rules` → look up `action_type` in `action_table` → dispatch", at which point `drop` rules become operative.
+- **NEW WARN (§5.29)**: if `req.config.rules.size() > 0`, emit to stderr: `xdpmacfilter: rules: section parsed (<N> entries) but per-rule action dispatch deferred to MVP-3.4b — datapath uses MAC/CIDR-only matching this cycle`. Single-line, fires ONCE per `apply` invocation, AFTER the trust_model log line and BEFORE the apply-completion log line. Operators see this in `journalctl -u xdpmacfilter@<iface>.service` when they push a config with explicit rules.
+
+#### §5.29 DataStructures additions
+
+##### BPF + userspace shared (`src/common/mac_filter.h`)
+
+Additions to the existing header (post-§5.29):
+
+```c
+/* §5.29 (MVP-3.4): rules + action_table skeleton — see design §5.29 HG-3.4-1 + Q3.
+ * STRUCTURAL-ONLY this slice. Populated on apply; NOT consulted in datapath (mac_filter_prog).
+ * MVP-3.4b will wire datapath consumption (requires PI-13-3.1 adjudication on inner-value extension). */
+
+struct rule_entry {
+    unsigned char present;     /* 0 = empty slot; 1 = occupied */
+    unsigned char action_id;   /* index into action_table */
+    unsigned char _pad[2];
+};
+
+struct action_entry {
+    unsigned char action_type; /* enum xdpmf_action_type */
+    unsigned char _pad[3];
+};
+
+enum xdpmf_action_type {
+    ACTION_PASS = 0,
+    ACTION_DROP = 1,
+    ACTION_MAX  = 2,
+};
+
+#define XDPMF_MAP_RULES_NAME         "rules"        /* ARRAY[XDPMF_ALLOWLIST_MAX] of struct rule_entry */
+#define XDPMF_MAP_ACTION_TABLE_NAME  "action_table" /* ARRAY[ACTION_MAX] of struct action_entry */
+```
+
+Pinning paths (post-§5.29, per LIBBPF_PIN_BY_NAME):
+- `${PIN_DIR}/rules`
+- `${PIN_DIR}/action_table`
+
+**Critical invariant (PI-27 below)**: existing inner-allowlist value shape stays `unsigned char present` (byte-equivalent to §5.26's `__u8 present` semantic) for `allowlist_a` / `allowlist_b` HASH; stays `unsigned char` (byte-equivalent to §5.27's `__u8`) for `cidr_allowlist_a` / `cidr_allowlist_b` LPM_TRIE. **NO `rule_id` field embedded in either inner value.** This is what the defer realizes; touching this byte-shape would defeat the entire purpose of MVP-3.4 defer-posture.
+
+##### Exporter-internal (`src/exporter/stats_reader.hpp`, namespace `xdpmf::exporter`)
+
+```cpp
+struct StatsSample {
+    std::string      iface;              /* iface name (e.g. "eth0", "veth-test0") */
+    std::uint64_t    stats[STAT_MAX];    /* PERCPU-summed; indices 0..STAT_MAX-1 follow enum mac_filter_stat */
+};
+
+/* Scans ${XDPMF_BPFFS_ROOT}/<iface>/stats for all attached ifaces, opens each RO,
+ * libbpf_map_lookup_elem PERCPU-array reads, sums across CPUs. */
+[[nodiscard]] std::vector<StatsSample> read_all_attached(std::string_view bpffs_root);
+```
+
+##### Exporter-internal (`src/exporter/prom_format.hpp`, namespace `xdpmf::exporter`)
+
+```cpp
+/* Emits Prometheus text-format (version 0.0.4) per scrape.
+ * Output content-type: text/plain; version=0.0.4 (HG-3.4-3).
+ * Format: HELP + TYPE + one sample line per (iface, verdict) tuple.
+ * Verdicts: "pass", "drop_deny", "drop_malformed", "pass_cidr" (mirrors enum mac_filter_stat slot order). */
+[[nodiscard]] std::string emit_metrics(const std::vector<StatsSample>& samples);
+```
+
+Sample expected output (single iface, illustrative):
+```
+# HELP xdpfilter_packets_total Total packets processed by xdpfilter, per iface and verdict.
+# TYPE xdpfilter_packets_total counter
+xdpfilter_packets_total{iface="eth0",verdict="pass"} 12345
+xdpfilter_packets_total{iface="eth0",verdict="drop_deny"} 67
+xdpfilter_packets_total{iface="eth0",verdict="drop_malformed"} 2
+xdpfilter_packets_total{iface="eth0",verdict="pass_cidr"} 891
+```
+
+Empty case (no attached iface): the output is JUST the HELP+TYPE lines, no sample lines. Prometheus tolerates this (it scrapes "0 timeseries" cleanly).
+
+##### Exporter-internal (`src/exporter/http.hpp`, namespace `xdpmf::exporter`)
+
+```cpp
+struct HttpConfig {
+    std::string  bind_addr;   /* default "127.0.0.1" */
+    std::uint16_t port;       /* default 9417 */
+    std::string  bpffs_root;  /* default XDPMF_BPFFS_ROOT */
+};
+
+/* Blocking. Single-threaded acceptor; per-conn synchronous handle.
+ * Returns on SIGINT / SIGTERM (signal handler sets a stop flag the accept loop polls).
+ * Routes: GET /metrics → 200 OK + text/plain; GET /healthz → 200 OK + "ok\n"; other → 404. */
+int run(const HttpConfig& cfg);
+```
+
+NO multithreading, NO async I/O, NO keep-alive (HTTP/1.0 → connection: close per response). The acceptor loop uses `poll()` on the listening socket with a 1-second timeout so the SIGTERM stop-flag is observed promptly. Per-conn budget: read until `\r\n\r\n` or 4 KiB or 5-second timeout; reject malformed requests with 400.
+
+#### §5.29 Interfaces additions
+
+##### CLI grammar (post-§5.29 — supersedes §5.26 grammar block)
+
+```
+xdpmacfilter attach --iface <IFNAME> --allow <MAC>[,<MAC>...]   # unchanged
+xdpmacfilter detach --iface <IFNAME>                            # unchanged
+xdpmacfilter apply  --iface <IFNAME> -f <PATH>                  # unchanged from §5.26 (apply-time WARN added §5.29)
+xdpmacfilter bypass --iface <IFNAME> [--unsafe] [--reason "<text>"]   # NEW (§5.29 HG-3.4-2)
+xdpmacfilter --help                                             # unchanged (text updated to list `bypass`)
+xdpmacfilter --version                                          # unchanged (reports 0.6.0)
+```
+
+Rules for `bypass`:
+- `--iface <IFNAME>` REQUIRED; same `if_nametoindex` validation as `attach`/`detach`/`apply`. Unknown iface → exit 1 with `xdpmacfilter: bypass: unknown interface '<iface>'`.
+- `--unsafe` (boolean flag, no value): mandatory in non-interactive context (`!isatty(STDIN_FILENO) || !isatty(STDERR_FILENO)`); optional in interactive context (interactive prompt is the safety gate there).
+- `--reason "<text>"` (string, optional): free-form audit text. If absent, audit-log line uses literal `UNSPECIFIED`. Length cap 256 bytes; impl truncates with `…` if exceeded (no exit-1, just truncate — audit-log must succeed).
+- Interactive flow: `printf 'BYPASS will detach XDP filter on %s. Continue? [y/N]: ', iface;` read response; ONLY `y` or `Y` → proceed (case-insensitive single char or `yes` exact-match; everything else → exit 0 no-op + stderr `xdpmacfilter: bypass cancelled by operator`).
+- Non-interactive without `--unsafe` → exit 1 + stderr: `xdpmacfilter: refusing to bypass in non-interactive context without --unsafe flag (audit safety)`.
+- Audit-log line (ALWAYS emitted to stderr BEFORE the `loader::detach()` call, regardless of interactive/non-interactive): `xdpmacfilter: BYPASS activated on <iface> by uid=<UID> reason="<reason or UNSPECIFIED>"` — newline-terminated, single line.
+- Implementation: construct `loader::DetachConfig{iface}`, invoke `loader::detach()`; on `std::system_error{LoaderError::*}` propagate exit code per existing §4.1 table; on success → exit 0. NO new exit code; NO loader.hpp diff.
+
+##### Exporter CLI (`xdpmf-exporter`)
+
+```
+xdpmf-exporter [--port <N>] [--bind <addr>] [--bpffs-root <path>]
+xdpmf-exporter --help
+xdpmf-exporter --version
+```
+
+Flags:
+- `--port <N>` (uint16, default `9417`).
+- `--bind <addr>` (string, default `127.0.0.1`). IPv4 dotted-quad OR `0.0.0.0` (all-interfaces); IPv6 fenced (OOS per §7 below — exporter v1 is IPv4-only-listen).
+- `--bpffs-root <path>` (string, default `${XDPMF_BPFFS_ROOT}` macro from `mac_filter.h` = `/sys/fs/bpf/xdpmacfilter`).
+- `--help` (boolean): print usage + exit 0.
+- `--version` (boolean): print `xdpmf-exporter 0.6.0\n` + exit 0. Same version string as `xdpmacfilter --version` (PI-33 — shared `version.h` from §5.25 P3).
+
+Exit codes (subset of §4.1; NO new code):
+- `0` — clean shutdown (SIGINT/SIGTERM).
+- `1` — CLI usage error (bad flag, bad port, etc.).
+- `6` — Permission denied (lacks CAP_BPF for the `BPF_OBJ_GET` on pinned stats maps).
+
+HTTP routes (HG-3.4-3):
+| Method | Path | Response |
+|---|---|---|
+| `GET` | `/metrics` | `200 OK`, `Content-Type: text/plain; version=0.0.4`, body per `emit_metrics()` |
+| `GET` | `/healthz` | `200 OK`, `Content-Type: text/plain`, body `ok\n` |
+| anything else | anything else | `404 Not Found`, `Content-Type: text/plain`, body `not found\n` |
+
+Stdout: NONE in normal operation (the daemon is silent on stdout). Stderr: a single startup line `xdpmf-exporter: listening on <bind>:<port>\n` on bind success; subsequent log lines for SIGINT/SIGTERM / accept errors / per-scrape errors (e.g. `WARN: failed to read stats for <iface>: <errno>`). NO per-scrape success log (would flood at 15s cadence).
+
+##### Loader public API (`src/lib/loader.hpp`) — ZERO diff (PI-7-3.4 strengthening, 4th consecutive cycle)
+
+`AttachConfig` / `DetachConfig` / `attach()` / `detach()` / `LoaderError` enum: ALL UNCHANGED. The new `bypass` subcommand lives entirely in `src/cli/bypass.{cpp,hpp}` and dispatches to `loader::detach()` via the existing public surface. The new BPF maps (`rules`, `action_table`) and their population live in `src/lib/apply_internal.{cpp,hpp}` (internal-namespace, NOT in `loader.hpp`). The exporter lives in `src/exporter/` and links against `xdpmf_internal` static lib for the map-name constants ONLY; it does NOT include `loader.hpp` (no need — exporter doesn't attach/detach).
+
+##### systemd unit (`systemd/xdpmf-exporter.service`)
+
+Per Q5 N3 (single-instance unit). Directive catalogue per §5.29 Q5 above (reproduced inline there). Mirrors §5.28's `xdpmacfilter@.service` template idiom for `[Unit]` After/Wants/StartLimit*, but `Type=simple` (long-running daemon) vs §5.28's `Type=oneshot RemainAfterExit=yes`. NO `Documentation=` install rule shipped (the `file:///usr/share/doc/...` path is for human discoverability via `systemctl status`; we do not install `docs/`).
+
+#### §5.29 apply() flow update (rules + action_table population)
+
+Post-§5.29 `internal::apply_request()` body (incremental over §5.27 step 8 / 9):
+
+```
+internal::apply_request(req):
+  1..7. UNCHANGED from §5.26 (kernel probe, trust_model parse + log, ifindex,
+        skel load + self_tag, BpffsRootFd, §5.4 state-machine, P0a link pin detect).
+
+  8.   populate inactive slot (UNCHANGED from §5.27):
+         active_cur = read active_idx_map[0]
+         inactive   = 1 - active_cur
+
+         ── MAC axis (UNCHANGED) ──────────────────────────────
+         for each rule in req.config.rules with action==Pass AND match.mac.has_value():
+             bpf_map_update_elem(allowlist_<inactive>_fd, &rule.match.mac, &one, BPF_ANY)
+         (one == __u8(1); inner-value shape UNCHANGED per PI-27)
+
+         ── CIDR axis (UNCHANGED §5.27) ───────────────────────
+         for each rule in req.config.rules with action==Pass AND match.src_cidr.has_value():
+             bpf_map_update_elem(cidr_allowlist_<inactive>_fd, &rule.match.src_cidr, &one, BPF_ANY)
+
+         ── defaults (UNCHANGED §5.26) ────────────────────────
+         bpf_map_update_elem(defaults_map, &inactive, &(default_action==Pass ? 1u : 0u), BPF_ANY)
+
+  8.5. NEW §5.29 — populate skeleton maps (idempotent across applies):
+         ── action_table prepopulation (ONE-TIME per apply; cheap to re-do) ─
+         action_table[ACTION_PASS] = struct action_entry{ ACTION_PASS, {0,0,0} }
+         action_table[ACTION_DROP] = struct action_entry{ ACTION_DROP, {0,0,0} }
+         bpf_map_update_elem(action_table_fd, &k, &v, BPF_ANY)   for both k=0,1
+
+         ── rules population ───────────────────────────────────
+         /* Note: rules is a SHARED map (NOT swapped via ARRAY_OF_MAPS; the slice
+          * does not need atomicity here because the datapath doesn't consult it).
+          * We clear-and-rewrite on every apply for simplicity. */
+         /* zero-out: write {present=0, action_id=0, _pad[]=0} to all 64 slots. */
+         for k in 0..XDPMF_ALLOWLIST_MAX-1:
+             bpf_map_update_elem(rules_fd, &k, &empty_rule_entry, BPF_ANY)
+         /* populate occupied slots */
+         for rule in req.config.rules:
+             entry = { present=1, action_id=(rule.action==Pass ? 0 : 1), _pad={0,0} }
+             bpf_map_update_elem(rules_fd, &rule.id, &entry, BPF_ANY)
+
+         ── WARN emission (HG-3.4-1 contract) ──────────────────
+         if !req.config.rules.empty():
+             fprintf(stderr, "xdpmacfilter: rules: section parsed (%zu entries) but "
+                             "per-rule action dispatch deferred to MVP-3.4b — datapath "
+                             "uses MAC/CIDR-only matching this cycle\n",
+                             req.config.rules.size())
+
+  9.   atomic flip (UNCHANGED §5.26):
+         bpf_map_update_elem(active_idx_map, &zero, &inactive, BPF_ANY)
+       ─ single u32 store ─ atomic commit point for BOTH MAC + CIDR axes ─
+       (NOTE: `rules` and `action_table` are NOT swapped — the apply ABOVE leaves
+       them in a consistent state pre-flip; the flip itself does not touch them.)
+
+ 10.   post-flip cleanup (UNCHANGED): leave previous slot populated; no clear.
+       (rules + action_table need no cleanup — they were written in-place above.)
+
+ 11.   bpffs alias pin (UNCHANGED).
+```
+
+State-b reattach path (D-3.1-4 / §5.27 9-map reuse): extends to **11 maps** post-§5.29 (add `rules` + `action_table` to the reuse_fd loop). The two new maps are pinned with `LIBBPF_PIN_BY_NAME`; reuse semantics identical to existing pinned maps.
+
+**Datapath untouched**: `mac_filter_prog` body in `mac_filter.bpf.c` is byte-equivalent to MVP-3.2 — only the `.maps` declaration block grows by two new map definitions (`rules` ARRAY, `action_table` ARRAY). Reviewer asserts via `git diff main -- src/bpf/mac_filter.bpf.c` shows ONLY the new `.maps` declarations; the `xdp` SEC function body shows ZERO diff lines (PI-28 below).
+
+#### §5.29 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+##### NEW (created this slice)
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `src/exporter/main.cpp` | Exporter entry-point: parse args, signal handlers, invoke `http::run()` | C++23 | 80 |
+| `src/exporter/http.cpp` | Embedded minimal HTTP/1.0 server (HG-3.4-3); routes `/metrics`, `/healthz`, `*` → 404 | C++23 | 180 |
+| `src/exporter/http.hpp` | `HttpConfig` struct + `run()` declaration | C++23 | 30 |
+| `src/exporter/prom_format.cpp` | Prometheus text-format emitter for `xdpfilter_packets_total{iface,verdict}` | C++23 | 70 |
+| `src/exporter/prom_format.hpp` | `emit_metrics()` declaration | C++23 | 20 |
+| `src/exporter/stats_reader.cpp` | Scan `${BPFFS_ROOT}/*/stats` pins; libbpf PERCPU lookup + sum-across-CPUs | C++23 | 110 |
+| `src/exporter/stats_reader.hpp` | `StatsSample` struct + `read_all_attached()` declaration | C++23 | 25 |
+| `src/cli/bypass.cpp` | `xdpmacfilter bypass` subcommand: tty-check, audit-log, invoke `loader::detach()` | C++23 | 90 |
+| `src/cli/bypass.hpp` | `bypass_main(argc, argv)` declaration | C++23 | 15 |
+| `systemd/xdpmf-exporter.service` | systemd unit per Q5 N3 directive catalogue above | systemd unit | 30 |
+| `tests/T_EXPORTER_METRICS_FORMAT.sh` | §6.37 test: `curl localhost:9417/metrics` + Prometheus-format regex compliance; SKIP-77 if `curl` absent | bash | 80 |
+| `tests/T_EXPORTER_VALUES_MATCH_STATS.sh` | §6.38 test: inject known traffic via persistent AF_PACKET socket, query exporter, query bpftool stats, assert sum-equal | bash | 140 |
+| `tests/T_EXPORTER_NO_ATTACHED_IFACE.sh` | §6.39 test: exporter starts on system with no attached XDP; `/metrics` returns HELP+TYPE only, no sample lines | bash | 60 |
+| `tests/T_BYPASS_CMD_DETACHES.sh` | §6.40 test: `xdpmacfilter bypass --iface veth-test0 --unsafe --reason test` → XDP detached + stderr audit line matches regex | bash | 70 |
+| `tests/T_BYPASS_REQUIRES_UNSAFE_NONINTERACTIVE.sh` | §6.41 test: bypass in non-tty without `--unsafe` → exit 1 + stderr instructs to use --unsafe | bash | 55 |
+| `tests/T_RULES_SKELETON_NOT_WIRED.sh` | §6.42 test: apply config with `rules:` section, generate traffic that would match if wired, verify datapath behaviour BYTE-IDENTICAL to MVP-3.2 + stderr WARN matches | bash | 110 |
+
+**Note on test numbering**: this slice ships 6 new tests (§6.37..§6.42). Brief target was 4-6; architect picks 6 (all listed in brief, none optional — each one verifies a distinct invariant from PI-27..PI-32, see §6.5 mapping below).
+
+##### EDITED (existing files touched this slice)
+
+| Path | Role (one line) | What changes |
+|---|---|---|
+| `src/bpf/mac_filter.bpf.c` | XDP BPF program + .maps block | ADD two new map declarations (`rules` ARRAY[XDPMF_ALLOWLIST_MAX] of `struct rule_entry`; `action_table` ARRAY[ACTION_MAX] of `struct action_entry`) inside the existing `SEC(".maps")` block. **`mac_filter_prog` xdp function body BYTE-EQUIVALENT to MVP-3.2** (reviewer asserts via `git diff main -- src/bpf/mac_filter.bpf.c` shows ZERO lines changed inside the `mac_filter_prog` function body; only the `.maps` block grows). PI-28 below. |
+| `src/common/mac_filter.h` | Shared header (BPF + userspace) | ADD `struct rule_entry`, `struct action_entry`, `enum xdpmf_action_type` (`ACTION_PASS=0`, `ACTION_DROP=1`, `ACTION_MAX=2`), `XDPMF_MAP_RULES_NAME`, `XDPMF_MAP_ACTION_TABLE_NAME`. No modification of existing constants / structs / enum values (PI-10 strengthened). |
+| `src/lib/apply_internal.cpp` | Apply orchestrator | EXTEND step 8.5 per §5.29 apply() flow above: populate `rules` + `action_table` from `req.config.rules` after the existing MAC/CIDR inner population; emit stderr WARN if `rules` non-empty. Open the two new map fds in the existing skel-load step (step 4). State-b reattach `bpf_map__reuse_fd` loop extends from 9 → 11 maps. |
+| `src/lib/apply_internal.hpp` | Apply orchestrator interface | No struct/signature change. ImplDetail header only — no public API leak. |
+| `src/lib/config.cpp` | Config validator | **VERIFY** (not modify): the §5.26 schema rule 4 already accepts `action: {pass, drop}`. If the existing validator path silently dropped `drop` rules from `Config.rules` rather than carrying them through with `action=Drop`, fix to carry them through (impl reads §5.26 validator before deciding — SendMessage architect if §5.26 actually drops them; this is a §5.26 design promise that this slice realizes). Expected: NO config.cpp change OR minimal change to ensure `Config.rules` contains all rules with their action faithfully preserved. |
+| `src/lib/config.hpp` | Config types | UNCHANGED. `Rule { id, action, match }` from §5.26 already carries the full per-rule shape. |
+| `src/lib/yaml_subset.cpp` | YAML subset parser | Expected UNCHANGED. The parser already handles arbitrary mapping keys; the `action:` and `rules:` keys are recognized at the validator layer in `config.cpp`. Impl verifies; if a parser extension IS required (e.g. depth or key-name budget), architect MUST be SendMessage'd (this would invalidate the "no parser change" expectation). |
+| `src/cli/cli.cpp` | CLI dispatch table | ADD `bypass` subcommand entry; register `bypass.hpp`'s `bypass_main(argc, argv)` in the verb dispatch. NO change to `attach` / `detach` / `apply` / `--help` / `--version` paths beyond the help-text update listing `bypass`. |
+| `src/cli/cli.hpp` | CLI types | ADD `ParsedBypass { iface, unsafe, reason }` to the `ParsedCommand = std::variant<...>` if the existing CLI uses the variant pattern; else add an entry to the dispatch enum/table. |
+| `src/cli/main.cpp` | CLI entry-point | DISPATCH `ParsedBypass` to `cli::bypass_main()` per the existing variant-visit pattern. |
+| `CMakeLists.txt` | Top-level build | (a) `project(xdpmacfilter VERSION 0.5.0 ...)` → `project(xdpmacfilter VERSION 0.6.0 ...)`; (b) NEW `add_executable(xdpmf-exporter src/exporter/...)` target linking `xdpmf_internal` + libbpf; (c) `install(TARGETS xdpmf-exporter DESTINATION ${CMAKE_INSTALL_BINDIR})` (and existing `xdpmacfilter` install MAY be amended to also use BINDIR for symmetry — impl-flexible); (d) extend `XDPMF_INSTALL_SYSTEMD_UNIT` install rule list to also install `systemd/xdpmf-exporter.service` (alongside §5.28's `xdpmacfilter@.service`); (e) NO other CMake changes. |
+| `CHANGELOG.md` | Version history | NEW `## [0.6.0] - 2026-05-NN` section per Keep-a-Changelog. Build-pace table gains a row for MVP-3.4. |
+| `tests/CMakeLists.txt` | ctest registration | (a) 6 new `add_test(...)` entries (§6.37..§6.42); (b) `RESOURCE_LOCK xdp_fixture` for the 5 tests that touch veth (T_EXPORTER_VALUES_MATCH_STATS, T_EXPORTER_NO_ATTACHED_IFACE, T_BYPASS_CMD_DETACHES, T_BYPASS_REQUIRES_UNSAFE_NONINTERACTIVE, T_RULES_SKELETON_NOT_WIRED); T_EXPORTER_METRICS_FORMAT MAY share `xdp_fixture` lock OR run on its own background-spawned exporter against a mocked bpffs root — tester's call; (c) NEW `RESOURCE_LOCK exporter_port_9417` to prevent two parallel exporter-running tests from binding the same port; (d) `TEST_ENV` gains `XDPMF_EXPORTER_BIN=${CMAKE_BINARY_DIR}/xdpmf-exporter`, `EXPORTER_UNIT_SRC=${CMAKE_SOURCE_DIR}/systemd/xdpmf-exporter.service`; (e) NO modification of the 36 existing `add_test` entries (PI-34 strict superset). |
+| `tests/lib/common.sh` | Test helpers | OPTIONAL additive: new helpers `start_exporter_in_background(port, bpffs_root)`, `stop_exporter()`, `curl_metrics(port)` MAY be added. Existing helpers UNCHANGED — additive-only. Tester's call: if a helper would only be used by ONE ctest, inline it instead. |
+
+##### UNCHANGED-BUT-AFFECTED (zero git-diff; behaviour must hold)
+
+| Path | Why it matters |
+|---|---|
+| `src/lib/loader.hpp` | **PI-7-3.4 strengthening — 4th consecutive ZERO-diff cycle** (MVP-3.1 +1 line; MVP-3.2/3.3/3.4 = 0). `git diff main -- src/lib/loader.hpp` shows ZERO output. Any diff = `[INVARIANT-VIOLATED]`. The new `bypass` subcommand uses the EXISTING `loader::detach()` public surface; no new public symbol. |
+| `src/lib/loader.cpp` | UNCHANGED. The apply orchestrator dispatch is unchanged; new map population lives in `apply_internal.cpp` per §5.26 D-3.1-1. The detach codepath used by `bypass` is the existing detach. |
+| `src/lib/cidr.cpp`, `src/lib/cidr.hpp` | UNCHANGED. §5.27 CIDR axis is preserved byte-equivalent. |
+| `src/lib/raii.hpp` | UNCHANGED. Exporter MAY introduce its own RAII fd wrapper INSIDE `src/exporter/`; the shared lib's RAII surface stays put. |
+| `src/cli/apply.cpp`, `src/cli/apply.hpp` | UNCHANGED. The new apply-time WARN fires inside `apply_internal.cpp` (per D-3.1-1 layering), not at the CLI surface. |
+| `src/cli/attach.{cpp,hpp}`, `src/cli/detach.{cpp,hpp}` | UNCHANGED. Bypass is a NEW subcommand alongside, not a modification of detach. |
+| `src/bpf/mac_filter.bpf.c` `mac_filter_prog` xdp function body | UNCHANGED (PI-28). Only the `.maps` declaration block grows. The function body byte-diff is zero. |
+| Existing 36 ctests (`tests/T_*.sh` from MVP-1 + MVP-1.1 + MVP-2 + MVP-3.1 + MVP-3.2 + MVP-3.3) | Bodies UNCHANGED. Reviewer asserts `git diff --stat tests/T_*.sh` shows ZERO body changes; only 6 NEW T_EXPORTER_*, T_BYPASS_*, T_RULES_SKELETON_* files. PI-34 strict superset. |
+| `tests/lib/read_stats.py` | UNCHANGED. The exporter does its OWN PERCPU sum via libbpf; it does not invoke `read_stats.py`. Existing ctests' usage byte-equivalent. |
+| `tests/fixtures/*` (all existing YAML + BPF fixtures) | UNCHANGED. T_RULES_SKELETON_NOT_WIRED introduces a NEW fixture `tests/fixtures/config_rules_skeleton.yaml` (NEW file, not a modification of an existing fixture). |
+| `systemd/xdpmacfilter@.service` | UNCHANGED. The exporter ships a SEPARATE unit `xdpmf-exporter.service`. |
+| `ansible/xdpmacfilter-deploy.yml`, `ansible/templates/xdpfilter-config.yaml.j2` | UNCHANGED this slice. Forward-compat note: the Jinja2 template ALREADY emits a `rules:` block (see §5.28 §5.27-compat template), and the loader at §5.29 will WARN on it; this is intended forward-compat behaviour. Operators authoring `rules:` blocks via Ansible see the WARN in `journalctl` but `apply` exits 0 — feature is forward-ready. NO Ansible template touch required this slice. |
+| `docs/FLEET_DEPLOYMENT.md` | UNCHANGED. The existing Prometheus-alert-semantic prose forward-references MVP-3.4's exporter; this slice realizes that forward-ref but does not require a docs edit (operator-facing material for the exporter ship lives in `CHANGELOG.md [0.6.0]` entry — sufficient for v1). Architect leaves an OPTIONAL impl-discretion FLEET_DEPLOYMENT.md `## Exporter (MVP-3.4)` section addition; if added, it MUST cite the exact `/metrics` endpoint + the exporter unit name + the new alertable counter names. Default: skip; CHANGELOG suffices. |
+| `README.md` | UNCHANGED. The "Production deployment" section (§5.28 Q5 N1) MAY (impl-discretion) gain a one-line pointer to the exporter; default: skip; CHANGELOG suffices. |
+| `cmake/BpfBuild.cmake` | UNCHANGED. New BPF maps are pure header + .bpf.c declaration additions; no Build.cmake change required. |
+| `include/version.h.in`, `tests/lib/pins.sh.in` | UNCHANGED (templates from §5.25 still authoritative; CMake reads new `VERSION 0.6.0` into `version.h.in`). Same version string for both `xdpmacfilter --version` and `xdpmf-exporter --version` (PI-33). |
+| All §5.4 / §5.19 / §5.22 / §5.24 trust+identity gates (alien refusal, name-check, tag-check, O_PATH path-discipline, kernel-version probe) | UNCHANGED. Bypass primitive does NOT invoke `attach()`; it invokes `detach()` only. The trust-model gates fire on `attach()` entry, NEVER on `detach()` (per §5.4/§5.19/§5.22 sub-section flow). Exporter does NOT invoke `attach()` or `detach()`; it reads pinned maps RO. No invariant relaxation; reviewer re-runs §6.9, §6.14, §6.15, §6.20, §6.26 sub-cases — all still pass. |
+
+#### §5.29 Decisions (additional, with rationale)
+
+##### D-3.4-1 — Exporter as separate binary in `src/exporter/`, NOT a subcommand of `xdpmacfilter` — because
+
+A separate long-running daemon is the standard Prometheus exporter shape (node_exporter, blackbox_exporter, kube-state-metrics). Folding it into `xdpmacfilter` as a `serve` subcommand would (a) inflate the loader binary that runs from systemd `Type=oneshot` (LOC + linking surface), (b) confuse the "loader = one-shot CLI" mental model that §5.28 systemd integration depends on, (c) make `xdpmf-exporter --version`-style audit-tooling harder. The cost is one extra ctest harness for binary discovery + one extra systemd unit; the benefit is operational clarity and link-surface minimization.
+
+##### D-3.4-2 — Exporter links against `xdpmf_internal` static lib, NOT against `xdpmacfilter` binary — because
+
+`xdpmf_internal` was created at §5.26 Q1 R1 specifically to be a SHARED INTERNAL static lib for non-test consumers. Exporter is the first non-test consumer outside the `xdpmacfilter` binary. Linking against `xdpmacfilter` would force `xdpmacfilter` to be a library; linking against `xdpmf_internal` is the documented MVP-3.1 idiom paying off. Reviewer asserts `ldd xdpmf-exporter` shows ONLY libbpf + libc + libstdc++ (no `xdpmacfilter`, no third-party dep).
+
+##### D-3.4-3 — Embedded HTTP/1.0 server, NOT a library (HG-3.4-3) — because
+
+Three alternatives evaluated (per brief Q5 rationale): (a) prometheus-cpp adds a new build dep — violates "zero non-standard deps" project value from `src/cli/cli.cpp:1-3`; (b) node_exporter textfile-collector requires `node_exporter` on every operator host + file rotation + extra cron — net cost > embedded server cost AND operator-runtime burden; (c) microhttpd / cpp-httplib smaller deps but still deps. ~150-200 LOC plain-socket HTTP/1.0 server is small, auditable, has no failure mode unrelated to BPF-side concerns, and inherits zero CVE surface. Project value alignment is load-bearing.
+
+##### D-3.4-4 — Rules map is SHARED (not ARRAY_OF_MAPS-swapped), because the datapath does not consult it — because
+
+§5.27 introduced parallel ARRAY_OF_MAPS for CIDR atomicity because the CIDR datapath DOES consult that map per-packet. The `rules` map in §5.29 is NOT consulted per-packet (HG-3.4-1 — datapath byte-equivalent to MVP-3.2). Therefore no atomicity is needed on `rules`; clear-and-rewrite on every apply is fine. MVP-3.4b will need to revisit this decision when wiring the datapath: either promote `rules` to a parallel-outer (`rules_a` / `rules_b` + outer ARRAY_OF_MAPS) for atomic swap, OR rely on per-rule-counter copy-on-write semantic. Surfaced as Open Q for MVP-3.4b scoping (see §7 OOS below).
+
+##### D-3.4-5 — Bypass audit-log fires BEFORE `loader::detach()`, not after — because
+
+The audit-log line is operationally meaningful even if the detach fails (operator's intent was recorded). If we logged AFTER detach and detach raised, the audit trail would be silent on a half-completed bypass attempt. Pre-detach logging mirrors the §5.26 `trust_model=<mode>` log-line discipline (logged at attach() ENTRY, before any kernel call). Reviewer asserts via §6.40 ordering: stderr first shows `BYPASS activated…`, then any detach exit / err output.
+
+##### D-3.4-6 — Exporter cap-set MUST be `CAP_BPF` ONLY; not the §5.28 5-cap set — because
+
+The MVP-3.3 review.md round-1 rework surfaced that the §5.28 5-cap set (CAP_BPF + CAP_NET_ADMIN + CAP_SYS_RESOURCE + CAP_SYS_ADMIN + CAP_PERFMON) is the MINIMUM for loading + attaching XDP programs (verifier trusted-mode gate). The exporter does NONE of those operations: it does `BPF_OBJ_GET` (cap_bpf), reads PERCPU map values (cap_bpf), and serves HTTP (no cap). Declaring extra caps would VIOLATE the principle of least privilege and dilute the audit story (operator wonders "why does the read-only exporter need CAP_SYS_ADMIN?"). The minimal `AmbientCapabilities=CAP_BPF` is the correct decision.
+
+**Anti-misdiagnosis institutional learning (cross-references §5.28 D-3.3-6 + MEMORY entry)**: future cycles touching cap declarations on NEW binaries / NEW invocation paths MUST run `capsh --drop=<all-other-caps> -- <binary> <typical-args>` as a Phase-B smoke check during design dialog. The §5.28 round-1 failure on `xdpmacfilter@.service` happened precisely because no one ran `capsh --drop=cap_sys_admin -- xdpmacfilter attach` before the 3-cap set was committed. For this slice, the equivalent smoke check is:
+
+```
+sudo capsh --keep=1 --user=root --inh=cap_bpf --addamb=cap_bpf -- \
+    -c '/usr/bin/xdpmf-exporter --port 9417 --bpffs-root /sys/fs/bpf/xdpmacfilter'
+```
+
+If this fails with `permission denied` on `BPF_OBJ_GET`, the cap-set declaration in the unit is wrong; impl SendMessages architect, do NOT add caps silently to "make it work" (that masks a different root cause — most likely the pinned-map's permission bits are wrong, OR libbpf path is wrong, OR kernel < 5.8 fallback path is missing). The §5.28 round-1 root cause was the cap-set, not the BPF code; the SAME diagnostic discipline applies here in reverse.
+
+##### D-3.4-7 — Exporter is READ-ONLY by construction; no map mutations, no attach/detach — because
+
+The exporter's only BPF interaction is `bpf_obj_get(pin_path)` (read-only fd) followed by `bpf_map_lookup_elem(fd, key, value)` (read PERCPU value, no `BPF_F_LOCK`, no `update_elem`, no `delete_elem`). The codebase MUST NOT have ANY call to `bpf_map_update_elem`, `bpf_map_delete_elem`, `bpf_obj_pin`, `bpf_link_create`, `bpf_xdp_attach`, `bpf_xdp_detach`, `bpf_prog_load`, `bpf_link_destroy` in `src/exporter/`. Reviewer asserts via `grep -E 'bpf_(map_(update|delete)_elem|obj_pin|link_create|xdp_(attach|detach)|prog_load|link_destroy)' src/exporter/` → zero matches. PI-31 below.
+
+##### D-3.4-8 — `rules` skeleton is clear-and-rewrite, not differential update — because
+
+For MVP-3.4 the apply path writes all 64 slots on every apply (set occupied slots to their `{present=1, action_id=X}` values; clear unoccupied slots to `{present=0, action_id=0}`). This is O(64) BPF syscalls per apply — at most one apply per `systemctl reload` (so per-minute at worst in fleet ops), totally negligible. Differential-update logic would be a premature optimization that adds bug surface (e.g. "operator removed rule id=5 → did we clear slot 5?"). MVP-3.4b MAY revisit if measurement shows it matters.
+
+#### §5.29 TestStrategy entries
+
+##### §6.37 T_EXPORTER_METRICS_FORMAT — `/metrics` endpoint returns Prometheus text-format compliant output
+
+**Trigger**: attach `xdpmacfilter` to a veth fixture (existing `setup_veth` helper) with one MAC-only rule (`config_valid.yaml`); inject N packets so STAT_PASS counter advances; start `xdpmf-exporter` in background bound to ephemeral port (chosen at test setup, exported as `EXPORTER_PORT`); wait for HTTP listener readiness (≤1s, poll loop); `curl -s http://127.0.0.1:${EXPORTER_PORT}/metrics`.
+
+**Observable outcome**: HTTP 200 OK; Content-Type header contains `text/plain; version=0.0.4`; body contains:
+- `# HELP xdpfilter_packets_total ...` substring
+- `# TYPE xdpfilter_packets_total counter` substring (exact match for the Prometheus type-line ERE `^# TYPE xdpfilter_packets_total counter$`)
+- At least one sample line matching ERE `^xdpfilter_packets_total\{iface="[^"]+",verdict="(pass|drop_deny|drop_malformed|pass_cidr)"\} [0-9]+$`
+- Sample lines MUST follow HELP+TYPE; HELP+TYPE MUST appear exactly once each.
+
+**Assertion mechanism**: bash `[[ $rc -eq 0 ]]` on `curl`; `grep -qE` on the 3 required patterns; `wc -l` on `^xdpfilter_packets_total` lines is ≥ 1.
+
+**SKIP conditions**: `curl` not in PATH → SKIP-77 with `EXPORTER_PORT_SKIP: curl absent` rationale (DEV VM should have curl; if not, ctest skips legitimately).
+
+**Cleanup**: kill exporter (PID captured in test setup); `cleanup_veth`.
+
+**Maps to**: PI-31 (exporter READ-ONLY — implicit: if exporter wrote to maps, this test would still pass but T_EXPORTER_VALUES_MATCH_STATS would catch it via subsequent value drift), PI-32 (graceful empty for unattached ifaces — implicit fallthrough), HG-3.4-3 (Prometheus format).
+
+##### §6.38 T_EXPORTER_VALUES_MATCH_STATS — exporter PERCPU sum matches bpftool sum
+
+**Trigger**: attach + apply MAC+CIDR-mixed config; inject **known** counts of (a) allowed-MAC frames N_pass, (b) denied-MAC frames N_drop, (c) malformed (runt) frames N_malf, (d) CIDR-matched IPv4 frames N_pcidr — using the existing persistent AF_PACKET socket idiom from MVP-3.1+ (no per-packet exec overhead); wait for traffic quiesce; start exporter in background on `EXPORTER_PORT`; `curl -s http://127.0.0.1:${EXPORTER_PORT}/metrics > /tmp/metrics.out`; in parallel: `bpftool map dump pinned ${PIN_DIR}/stats --json | jq` and PERCPU-sum via `tests/lib/read_stats.py` (existing helper).
+
+**Observable outcome**: for each of the 4 verdicts (pass, drop_deny, drop_malformed, pass_cidr), the integer in the corresponding `xdpfilter_packets_total{iface="<iface>",verdict="<v>"} <N>` line in `/tmp/metrics.out` MUST EQUAL the corresponding sum from `read_stats.py`.
+
+**Assertion mechanism**: parse each `xdpfilter_packets_total{...} <N>` line via `awk` / `grep -oE`; compare against the `read_stats.py` output via `[[ "$exporter_val" == "$bpftool_val" ]]` for each verdict. Strict equality (NOT approximate — both are reading the SAME PERCPU map).
+
+**SKIP conditions**: `curl` or `jq` not in PATH → SKIP-77. `bpftool` already required by existing tests.
+
+**Cleanup**: kill exporter; `cleanup_veth`.
+
+**Maps to**: PI-31 (READ-ONLY — values match what bpftool sees byte-for-byte), HG-3.4-3 (correctness of `prom_format::emit_metrics` sum logic), Q4 E1 (direct read on scrape: values are FRESH, not cached).
+
+##### §6.39 T_EXPORTER_NO_ATTACHED_IFACE — exporter serves cleanly on system with zero attached XDP
+
+**Trigger**: ensure NO XDP attached anywhere under `${XDPMF_BPFFS_ROOT}` (delete any stale pin dirs); start exporter in background on `EXPORTER_PORT`; `curl -s http://127.0.0.1:${EXPORTER_PORT}/metrics`.
+
+**Observable outcome**: HTTP 200 OK; body contains the HELP + TYPE lines (header-only output is valid for "no series"); NO `xdpfilter_packets_total{...}` sample lines. Exit code 0 on `curl`. Exporter still alive after the request (does NOT crash on empty bpffs).
+
+**Assertion mechanism**: `grep -q '^# HELP xdpfilter_packets_total'`, `grep -q '^# TYPE xdpfilter_packets_total counter'`, AND `grep -cE '^xdpfilter_packets_total\{' /tmp/metrics.out` equals 0. Additionally `kill -0 $EXPORTER_PID` succeeds (proves exporter still running).
+
+**SKIP conditions**: `curl` absent → SKIP-77.
+
+**Cleanup**: kill exporter; cleanup_veth (no-op if no veth created).
+
+**Maps to**: PI-32 (graceful empty / no crash), PI-31 (exporter does not try to attach anything when no iface is present).
+
+**Anti-misdiagnosis note (OPS canary, per architect-spec)**: this test is the load-bearing OPS canary for the exporter binary. The existing 36 ctests invoke other binaries (`xdpmacfilter`) via `nsenter` which preserves full caller caps; the exporter is the FIRST long-running daemon ctest in the suite, and it is also the first test that exercises `BPF_OBJ_GET` on a NON-PRESENT path (the unattached-iface case). If `bpf_obj_get(non-existent)` raises an exception that isn't caught, the exporter crashes on its first scrape against an empty fleet — operationally meaningful failure. This test must NOT be skipped lightly.
+
+##### §6.40 T_BYPASS_CMD_DETACHES — `bypass --unsafe --reason X` detaches XDP + emits audit-log
+
+**Trigger**: attach `xdpmacfilter` to veth-test0 (existing fixture); confirm `bpftool net show dev veth-test0` shows the prog id; run `xdpmacfilter bypass --iface veth-test0 --unsafe --reason "T_BYPASS_test"` capturing stderr.
+
+**Observable outcome**: exit code 0; stderr line matches ERE `^xdpmacfilter: BYPASS activated on veth-test0 by uid=[0-9]+ reason="T_BYPASS_test"$`; `bpftool net show dev veth-test0` shows NO xdp prog attached (matches §6.13 T_DETACH_NOTHING-style assertion); pin dir `${PIN_DIR}/veth-test0/link` does NOT exist (detach cleaned up).
+
+**Assertion mechanism**: `[[ $rc -eq 0 ]]`, `grep -qE` on the audit ERE, `bpftool net show dev veth-test0 2>&1` does NOT contain `prog id`, `[[ ! -e ${PIN_DIR}/veth-test0/link ]]`.
+
+**Additional sub-check**: re-run with `--reason` ABSENT (just `xdpmacfilter bypass --iface veth-test0 --unsafe` after a re-attach setup) → stderr line ends `reason="UNSPECIFIED"`. Confirms the default-reason text per §5.29 CLI grammar above.
+
+**SKIP conditions**: none.
+
+**Cleanup**: `cleanup_veth`.
+
+**Maps to**: PI-30 (bypass = detach-alias + audit, no BPF map flag, no datapath touch), HG-3.4-2.
+
+##### §6.41 T_BYPASS_REQUIRES_UNSAFE_NONINTERACTIVE — bypass without `--unsafe` in non-tty refuses + exit 1
+
+**Trigger**: attach `xdpmacfilter` to veth-test0; run `xdpmacfilter bypass --iface veth-test0` via `setsid sh -c '...' < /dev/null > /tmp/stdout 2> /tmp/stderr` (forces non-tty for stdin/stderr — `isatty()` returns false in this shell).
+
+**Observable outcome**: exit code 1; stderr matches `xdpmacfilter: refusing to bypass in non-interactive context without --unsafe flag (audit safety)`; `bpftool net show dev veth-test0` STILL shows the prog id attached (bypass refused → no detach happened); pin dir `${PIN_DIR}/veth-test0/link` STILL exists.
+
+**Assertion mechanism**: `[[ $rc -eq 1 ]]`, `grep -qE 'refusing to bypass'` on stderr, `bpftool net show dev veth-test0 | grep -qE 'prog id'`, `[[ -e ${PIN_DIR}/veth-test0/link ]]`.
+
+**SKIP conditions**: none.
+
+**Cleanup**: explicit `xdpmacfilter detach --iface veth-test0` (since bypass refused, the test must clean up manually); `cleanup_veth`.
+
+**Maps to**: PI-30 (bypass audit-safety contract — non-interactive context REQUIRES `--unsafe`), risk-register MVP-3.4 row 4 (manual bypass misused as automatic fail-open — the `--unsafe` gate is the named mitigation).
+
+##### §6.42 T_RULES_SKELETON_NOT_WIRED — `rules:` config parsed + maps populated + datapath byte-equivalent to MVP-3.2
+
+**Trigger**: attach `xdpmacfilter` via `apply -f tests/fixtures/config_rules_skeleton.yaml` where the fixture contains an explicit `rules:` block with mixed `action: pass` AND `action: drop` rules (≥ 3 entries, including at least one `drop` rule for a MAC that WOULD otherwise be passed under MVP-3.4b wiring). Inject 5 frames: one matching a `pass` MAC, one matching the `drop` MAC, one matching no rule.
+
+**Observable outcome (all THREE conditions MUST hold)**:
+1. **Schema accepted**: `apply` exits 0 (NOT exit 9 — `rules:` block + `action:` field MUST be accepted post-§5.29).
+2. **WARN emitted**: stderr contains line matching ERE `^xdpmacfilter: rules: section parsed \([0-9]+ entries\) but per-rule action dispatch deferred to MVP-3.4b — datapath uses MAC/CIDR-only matching this cycle$`. The `<N>` MUST equal the entry-count in the fixture.
+3. **Datapath byte-equivalent to MVP-3.2**: frame matching a `pass` MAC increments STAT_PASS (NOT STAT_DROP_DENY); frame matching the `drop` MAC ALSO increments STAT_PASS (the rule is parsed but NOT wired — datapath sees it as "in allowlist" because §5.26 added it to inner-map via the `action: pass` lookup in apply step 8); frame matching no rule increments STAT_DROP_DENY. **Key assertion**: the drop-MAC frame's verdict is PASS, not DROP — this is the operationally-observable signature of "datapath does not consult rules map". If the datapath consulted the `rules` map, the drop-MAC would actually drop.
+
+   Wait — re-read §5.26 apply step 8: "For each rule with `action: pass` AND `mac` match → add the MAC to the inactive-inner-slot ... Rules with `action: drop` → no inner-map entry". So under §5.26 semantic, the drop-MAC was NEVER added to the inner allowlist; therefore that MAC falls through to `default_action: drop` and increments STAT_DROP_DENY. The skeleton's `rules[id].action_id=1` for the drop rule is populated but NOT consulted — so the drop-MAC's verdict matches MVP-3.2 (drop because not in allowlist), NOT a hypothetical MVP-3.4b verdict (drop because rules[id].action_id=1). For the skeleton-not-wired assertion, we want a packet whose verdict WOULD CHANGE under wired vs unwired semantics — that is, a MAC matched by a `drop` rule with the MAC ALSO in the allowlist. Per §5.26: drop rules do NOT populate inner; so the only MAC in the inner is from a `pass` rule. Constructing a divergent case: use a fixture where `id=0` is `action: pass match.mac=AA:..` AND `id=1` is `action: drop match.mac=AA:..` (same MAC, two rule entries, one pass one drop). Per §5.26 the inner-map gets the MAC once (from id=0 pass); per MVP-3.4b wired semantic, the per-packet path would consult `rules[matching_rule_id].action_id`. Either rule id matches — depends on rule-priority semantic which MVP-3.4b will define. Skeleton-unwired semantic: the MAC is in the inner → STAT_PASS. So the test is: same MAC has `pass` AND `drop` rules; under §5.29 skeleton semantic the verdict is PASS; under hypothetical MVP-3.4b wired, the verdict would depend on which rule wins (TBD). The assertion is `verdict == PASS` — matches §5.29; would FAIL under any wiring choice. This is the load-bearing test for HG-3.4-1.
+
+   **Tester note**: if constructing this dual-rule fixture is awkward (validator may reject duplicate MAC?), the simpler alternative is to verify that a `drop`-only rule (no `pass` companion) sees its MAC NOT-in-inner-map (via direct `bpftool map dump pinned ${PIN_DIR}/allowlist_*` inspection of the active inner — assert the drop-MAC is absent), AND simultaneously confirm `bpftool map dump pinned ${PIN_DIR}/rules` shows the drop-rule slot occupied (`present=1, action_id=1`). This is more direct: rules map is POPULATED + allowlist is NOT — proves skeleton-not-wired without traffic injection. Tester chooses; both are acceptable. Architect's preference: the direct map-dump approach (more robust, no kernel-traffic flake risk).
+
+**Assertion mechanism**: `[[ $rc_apply -eq 0 ]]`, `grep -qE` on the WARN-line ERE, `read_stats.py` shows expected (pass, drop_deny, malformed, pass_cidr) tuple, `bpftool map dump pinned ${PIN_DIR}/rules --json | jq` shows occupied slots matching the fixture's id set with the right action_ids, `bpftool map dump pinned ${PIN_DIR}/allowlist_<active> --json | jq` shows only pass-rule MACs.
+
+**SKIP conditions**: none.
+
+**Cleanup**: `cleanup_veth`.
+
+**Maps to**: PI-27 (inner-allowlist-value byte-equivalent — the inner allowlist still uses `__u8 present` semantic; if it had been extended to embed `rule_id`, the bpftool dump would show a different value shape), PI-28 (`mac_filter_prog` body byte-equivalent — verified indirectly via the verdict matching MVP-3.2 expectation), PI-29 (rules+action_table populated but NOT consulted — verified directly via the bpftool map dumps + the verdict expectation), HG-3.4-1, D-3.4-4 (skeleton clear-and-rewrite + WARN).
+
+#### §6.5 Preserved invariants (MVP-3.4 brownfield) — PI-1..PI-26 continue + PI-27..PI-34 NEW
+
+All MVP-3.1 + MVP-3.2 + MVP-3.3 invariants (PI-1..PI-26 per §5.26 + §5.27 + §5.28 sub-sections) continue to hold post-§5.29. NEW invariants PI-27..PI-34 capture MVP-3.4-specific guarantees. Reviewer's 5th framework point walks the COMBINED list (PI-1..PI-34) and reports `[INVARIANT-VIOLATED]` per failed check.
+
+**Continuing invariants** (per §5.28; ALL still apply post-§5.29):
+
+| # | Invariant | §5.29 check mechanism |
+|---|---|---|
+| PI-1 | §5.4 alien-program identity-gate ENFORCED in strict mode | Re-run §6.9, §6.14, §6.26 sub-case 1; all pass. Bypass does NOT invoke attach, so PI-1 is unaffected. |
+| PI-2 | §5.19 name-identity gate ENFORCED in BOTH modes | §6.9 + §6.26 sub-case 3 — both compute name-check. Bypass irrelevant. |
+| PI-3 | §5.22 Item 1 tag-check ENFORCED in BOTH modes | §6.14 still passes. |
+| PI-4 | §5.22 Item 2 O_PATH path-discipline ENFORCED in BOTH modes | §6.15 still passes. |
+| PI-5 | §5.24 kernel-version probe ENFORCED in BOTH modes | §6.20 still passes. |
+| PI-6-3.4 | **36 pre-§5.29 ctests pass byte-equivalent OR legitimately SKIP-77 — STRICT SUPERSET, NO carve-out this slice** | Re-run all 36 tests post-§5.29 → all pass; `git diff --stat tests/T_*.sh` shows ZERO body changes; only 6 NEW test files appear. PI-6-3.3's STRICT SUPERSET property continues. |
+| PI-7-3.4 | **`loader.hpp` ZERO diff — FOURTH consecutive slice** (MVP-3.1 had +1 line for `ConfigError = 9`; MVP-3.2/3.3/3.4 have 0). Strengthened: ENTIRE `src/lib/loader.{cpp,hpp}` is zero-diff this slice (loader.cpp is unchanged because new rule+action population lives in `apply_internal.cpp`). | `git diff main -- src/lib/loader.hpp` shows ZERO output. `git diff main -- src/lib/loader.cpp` shows ZERO output. Any diff in either = `[INVARIANT-VIOLATED]`. |
+| PI-8-3.4 | `xdpmacfilter --version` reports `xdpmacfilter 0.6.0` AND `xdpmf-exporter --version` reports `xdpmf-exporter 0.6.0` (shared `version.h` per §5.25 P3) | Run both `--version` invocations; outputs MUST match the version 0.6.0 (single line each, ends with newline). |
+| PI-9 | `--version` / `--help` output FORMAT unchanged (version-bump only + new line listing `bypass` subcommand in `--help`) | §6.10 T_CLI_HELP_VERSION re-run passes (existing ERE forward-compatible — does NOT pin help-text length). `bypass` MAY (not MUST) appear in --help. |
+| PI-10-3.4 | `src/common/mac_filter.h` existing constants + struct layout UNCHANGED; new additions are purely ADDITIVE (PI-10 strengthens) | `git diff main -- src/common/mac_filter.h` shows ONLY additions: `struct rule_entry`, `struct action_entry`, `enum xdpmf_action_type`, `XDPMF_MAP_RULES_NAME`, `XDPMF_MAP_ACTION_TABLE_NAME`. Zero modifications/removals on existing constants. Inner-allowlist-value shape definitions (the `__u8` / `unsigned char` value type for `allowlist_*` HASH and `cidr_allowlist_*` LPM_TRIE) byte-equivalent. |
+| PI-11 | Internal directory layout = `src/lib/` + `src/cli/` + `src/common/` + `src/bpf/` + NEW `src/exporter/` (additive) | `find src -type d` shows the existing 4 dirs + `src/exporter/` (one new). The new dir is additive — does NOT change the existing four. |
+| PI-12 | Pin paths host-global per `nsenter --net` | New pins `${PIN_DIR}/rules`, `${PIN_DIR}/action_table` visible from `nsenter --net` per existing mechanism (LIBBPF_PIN_BY_NAME under the per-iface dir). |
+| PI-13-3.4 | **inner-allowlist-value byte-equivalent: `allowlist_*` HASH stays `__u8/unsigned char present`; `cidr_allowlist_*` LPM_TRIE stays `__u8/unsigned char`** — THE LOAD-BEARING DEFER PI | `git diff main -- src/bpf/mac_filter.bpf.c` shows ZERO modification to `__type(value, __u8)` for `allowlist_a/b` and `cidr_allowlist_a/b`; `git diff main -- src/common/mac_filter.h` shows ZERO modification to the inner-value type definitions. `bpftool map dump pinned ${PIN_DIR}/allowlist_a --json` value-size is 1 byte. Any extension to `struct {__u8 present; __u32 rule_id; ...}` here = `[INVARIANT-VIOLATED]` — the defer was specifically about NOT making this change. **This is PI-27 below restated for the PI-13 namespace; the two are identical.** |
+| PI-14 | `--mode {generic,native,offload}` flag UNCHANGED | §6.16 + §6.17 + §6.19 all pass. |
+| PI-15 | CIDR axis purely additive | UNCHANGED by §5.29 (no CIDR change). |
+| PI-16 | STAT_PASS_CIDR additive enum slot | UNCHANGED. |
+| PI-17 | `schema_version: 1` accepted; Jinja2 template emits schema_version: 1 | UNCHANGED. The §5.29 `rules:` block + `action:` field is ALREADY part of the §5.26 schema_version 1 grammar; this slice realizes apply-time semantic, not schema. |
+| PI-18 | §6.23 MAC-axis atomic-swap continues | UNCHANGED. The new `rules` + `action_table` maps are NOT swapped (D-3.4-4), but the MAC + CIDR axes' atomic-swap mechanism (single `active_idx` flip) is preserved exactly. |
+| PI-19 | systemd-analyze verify passes on the unit file | EXTENDS to `systemd/xdpmf-exporter.service`: `systemd-analyze verify systemd/xdpmf-exporter.service` exits 0 with zero warnings (PI-19 implicit extension; reviewer verifies during framework point 5 walk). |
+| PI-20 | systemd lifecycle correctness for `xdpmacfilter@.service` | UNCHANGED. The new `xdpmf-exporter.service` lifecycle is NOT covered by §6.33 T_SYSTEMD_LIFECYCLE (that test is iface-specific); the exporter's lifecycle is covered indirectly by §6.37/§6.38/§6.39 spawning the binary manually + verifying liveness. PI-20 invariant preserved for `xdpmacfilter@.service`. |
+| PI-21 | Ansible playbook idempotent | UNCHANGED. The playbook does not yet install the exporter (the `xdpmf-exporter.service` install is OUT-OF-SCOPE for the Ansible playbook this cycle — surfaced as MVP-3.5+ enhancement; see §7 OOS). PI-21 preserved as-is. |
+| PI-22 | `ansible-playbook --syntax-check` exits 0 | UNCHANGED (playbook unchanged). |
+| PI-23 | FLEET_DEPLOYMENT.md cites exact stderr-format from §5.26 | UNCHANGED (docs unchanged). |
+| PI-24 | Unit file directive set matches §5.28 catalogue | UNCHANGED for `xdpmacfilter@.service`. The new `xdpmf-exporter.service` has its OWN directive catalogue per §5.29 Q5 above — reviewer verifies that catalogue separately as part of PI-19's extension. |
+| PI-25 | T_SYSTEMD_RESTART_ON_FAILURE flakiness carve-out | UNCHANGED. |
+| PI-26 | NO C++/BPF source change for §5.28 was correct (PI-26 was MVP-3.3-specific "no C++ change"). §5.29 INVALIDATES PI-26 by intent — this slice ADDS the exporter binary in `src/exporter/` + the bypass CLI in `src/cli/bypass.{cpp,hpp}` + extends `src/lib/apply_internal.cpp`. PI-26's MVP-3.3-bounded check still passes (PI-26 was a check on `git diff main^^^` vs MVP-3.3 boundary, NOT on the current cycle). | Reviewer treats PI-26 as MVP-3.3-historical: its check fires on the MVP-3.3 commit set, NOT on the MVP-3.4 commit set. MVP-3.4 explicitly ships new C++ code. **No re-strengthening of PI-26 needed**; the four §5.29-new C++ piece-types (exporter binary, bypass CLI, apply_internal extension, mac_filter.h additions) ARE the deliverable. |
+
+**NEW invariants** (MVP-3.4-specific):
+
+| # | Invariant | Check mechanism |
+|---|---|---|
+| **PI-27** | **Inner-allowlist-value shape BYTE-EQUIVALENT to MVP-3.2** — `allowlist_a/b` HASH `__type(value, __u8)` UNCHANGED; `cidr_allowlist_a/b` LPM_TRIE `__type(value, __u8)` UNCHANGED. **THE load-bearing PI of the defer posture.** Touching this shape would defeat Open Q #13 RESOLUTION's defer rationale entirely. | `git diff main -- src/bpf/mac_filter.bpf.c` matched against the LPM_TRIE + HASH `__type(value, __u8)` lines — zero modifications. `bpftool map show pinned ${PIN_DIR}/allowlist_a` reports `value_size 1`; same for `allowlist_b`, `cidr_allowlist_a`, `cidr_allowlist_b`. Any value_size ≠ 1 on any of the 4 inner maps = `[INVARIANT-VIOLATED]`. **Identical to PI-13-3.4 above (cross-referenced for emphasis — this is the central defer-posture PI).** |
+| **PI-28** | **`mac_filter_prog` BPF function body BYTE-EQUIVALENT to MVP-3.2** modulo new `.maps` block declarations (the `rules` + `action_table` map definitions). Per-packet datapath does NOT consult `rules` or `action_table`. | `git diff main -- src/bpf/mac_filter.bpf.c` shows: (a) NEW `rules` map declaration inside `SEC(".maps")`, (b) NEW `action_table` map declaration inside `SEC(".maps")`, (c) ZERO diff lines inside the `SEC("xdp") int mac_filter_prog(...)` function body. Reviewer verifies via `git diff main -- src/bpf/mac_filter.bpf.c` + manual scope check (the function-body braces enclose zero diff lines). Additionally: `bpftool prog show id $(...)` `xlated bytes` and `jited bytes` SHOULD be greater than MVP-3.2 baseline by an amount consistent with the new map definitions ONLY (`.maps` declarations get translated to map-reuse hints + skel symbols — typically a small overhead, not zero, but the xdp prog itself does not grow). Acceptable diff range: < 200 xlated bytes growth attributable to skel symbol emission. Larger growth = function body changed → `[INVARIANT-VIOLATED]`. |
+| **PI-29** | **`rules` + `action_table` POPULATED on apply but NOT consulted by datapath** — populated per §5.29 apply step 8.5 with `{present, action_id}` / `{action_type}`; the per-packet `mac_filter_prog` function does NOT issue `bpf_map_lookup_elem` against either. | `bpftool map dump pinned ${PIN_DIR}/rules` shows occupied slots matching the applied config's rule set. `bpftool map dump pinned ${PIN_DIR}/action_table` shows two entries: index 0 = `{action_type=0 (PASS)}`, index 1 = `{action_type=1 (DROP)}`. Datapath non-consultation verified via PI-28 (function-body byte-equivalence) AND via §6.42 T_RULES_SKELETON_NOT_WIRED expected-verdict assertion. **Additionally**: stderr line `xdpmacfilter: rules: section parsed (<N> entries) but per-rule action dispatch deferred to MVP-3.4b ...` MUST appear in the apply log when `rules:` block is non-empty (the WARN is the operator-facing signature of this PI; absence on non-empty `rules:` = `[INVARIANT-VIOLATED]`). |
+| **PI-30** | **`bypass` primitive = `detach`-alias + audit-log + `--unsafe` gate; NO new BPF map flag, NO datapath touch** — `xdpmacfilter bypass --iface X --unsafe --reason Y` is observably equivalent to `xdpmacfilter detach --iface X` PLUS an audit-stderr-line. | §6.40 + §6.41. Additionally: `git diff main -- src/lib/loader.hpp` shows ZERO output (PI-7-3.4); `git diff main -- src/lib/loader.cpp` shows ZERO output; `git diff main -- src/bpf/mac_filter.bpf.c` shows NO new map-flag definitions / NO new XDP_BYPASS-style verdict / NO new bypass-state state-machine. The bypass primitive lives ENTIRELY in `src/cli/bypass.{cpp,hpp}` (newly-added userspace files). |
+| **PI-31** | **Exporter is READ-ONLY by construction** — no `bpf_map_update_elem`, no `bpf_map_delete_elem`, no `bpf_obj_pin`, no `bpf_link_*`, no `bpf_xdp_attach/detach`, no `bpf_prog_load` calls in `src/exporter/`. | `grep -rE 'bpf_(map_(update\|delete)_elem\|obj_pin\|link_create\|link_destroy\|xdp_(attach\|detach)\|prog_load)' src/exporter/` returns ZERO matches. Reviewer asserts during framework point 5 walk. Test signals: §6.38 T_EXPORTER_VALUES_MATCH_STATS — the values served on `/metrics` equal the `bpftool` view BYTE-FOR-BYTE; if the exporter were mutating values, the equality would not hold. |
+| **PI-32** | **Exporter handles missing/empty bpffs gracefully** — `xdpmf-exporter --bpffs-root <nonexistent>` OR `--bpffs-root <empty>` MUST: bind to port; serve `/metrics` with HELP+TYPE only (no sample lines); serve `/healthz` with `ok\n`; not crash; remain alive across requests. | §6.39 T_EXPORTER_NO_ATTACHED_IFACE. Additionally: if `${XDPMF_BPFFS_ROOT}` does not exist, exporter logs ONE warning line at startup (`WARN: bpffs root <path> does not exist; will serve empty metrics`) but continues to run; periodic `/metrics` scrapes return HELP+TYPE only. |
+| **PI-33** | **Both binaries report version `0.6.0`** — `xdpmacfilter --version` AND `xdpmf-exporter --version` BOTH report `0.6.0` (shared `version.h` per §5.25 P3 V1 mechanism). | Run both `--version` invocations; assert single-line output with `0.6.0` and trailing newline. CMake `project(VERSION)` is the single source of truth; both binaries `#include "version.h"`. |
+| **PI-34** | **36 pre-§5.29 ctests pass byte-equivalent OR legitimately SKIP-77 — STRICT SUPERSET, NO carve-out this slice** | Re-run all 36 tests post-§5.29 → all pass (or skip with rc 77 per §5.24 Q4 hybrid). `git diff main -- tests/T_*.sh` shows ZERO body changes; only 6 NEW test files appear (T_EXPORTER_METRICS_FORMAT, T_EXPORTER_VALUES_MATCH_STATS, T_EXPORTER_NO_ATTACHED_IFACE, T_BYPASS_CMD_DETACHES, T_BYPASS_REQUIRES_UNSAFE_NONINTERACTIVE, T_RULES_SKELETON_NOT_WIRED). NEW fixture `tests/fixtures/config_rules_skeleton.yaml` MAY appear; existing fixtures byte-equivalent. **PI-34 == PI-6-3.4 above (cross-referenced; this is the suite-level strict-superset PI restated for the MVP-3.4 namespace).** |
+
+**No deletions/relaxations** of PI-1..PI-26 in this slice. PI-7-3.4 STRENGTHENS PI-7-3.3 (4th consecutive ZERO-diff cycle on `loader.hpp`). PI-10-3.4 STRENGTHENS PI-10-3.3 implicitly via additive-only diff. PI-13-3.4 is identical to PI-27 and is the load-bearing defer PI. PI-6-3.4 is identical to PI-34 (the suite-level strict-superset PI for MVP-3.4).
+
+#### §5.29 verifiable invariants for reviewer
+
+(Per architect-spec §6.5 "Verification-hints discipline": these are GUIDANCE for the reviewer, NOT contracts for impl. Default MAY. Reserve MUST only for true PI-* contracts (PI-27..PI-34 above ARE MUSTs by definition; the items below MAY be relaxed by impl if a contract-elsewhere demands it). Resolution rule for prose-vs-invariants conflict: invariants block wins, prose loses; if impl deviates on a hint to satisfy a PI-* contract, reviewer's correct disposition is `inline-merge` on the hint text, NOT `[UNRELATED-EDIT]` on impl.)
+
+In addition to PI-1..PI-34 above:
+
+- `git diff main -- src/lib/loader.hpp` SHOULD show ZERO output (PI-7-3.4 strengthened, 4th consecutive cycle).
+- `git diff main -- src/lib/loader.cpp` SHOULD show ZERO output.
+- `git diff main -- src/common/mac_filter.h` SHOULD show ONLY additions (new `struct rule_entry`, `struct action_entry`, `enum xdpmf_action_type`, `XDPMF_MAP_RULES_NAME`, `XDPMF_MAP_ACTION_TABLE_NAME`); zero modifications of existing constants / struct layouts / enum values.
+- `git diff main -- src/bpf/mac_filter.bpf.c` SHOULD show: NEW `rules` ARRAY map declaration, NEW `action_table` ARRAY map declaration. ZERO modification to inner-allowlist value `__type(value, __u8)` for `allowlist_a/b` or `cidr_allowlist_a/b`. ZERO modification to the `SEC("xdp") int mac_filter_prog(...)` function body.
+- `git diff main -- src/lib/apply_internal.cpp` SHOULD show the step 8.5 extension (rules + action_table population + WARN emission) + the state-b reattach loop extension from 9 → 11 reuse_fd maps. ZERO change to the trust_model / identity-gate / kernel-version-probe codepaths.
+- `git diff main -- src/lib/config.cpp` SHOULD show ZERO or near-zero change (the schema already accepts `rules:` block + `action:` field per §5.26; this slice only realizes apply-time semantic). If a config.cpp change IS made, impl SendMessages architect for confirmation (the §5.26 schema is supposed to already accept the grammar — a real change implies a §5.26 promise was not fully realized).
+- `git diff main -- tests/T_*.sh` SHOULD show: 6 NEW test files (T_EXPORTER_METRICS_FORMAT, T_EXPORTER_VALUES_MATCH_STATS, T_EXPORTER_NO_ATTACHED_IFACE, T_BYPASS_CMD_DETACHES, T_BYPASS_REQUIRES_UNSAFE_NONINTERACTIVE, T_RULES_SKELETON_NOT_WIRED). ZERO modification to the 36 existing test bodies.
+- `git diff main -- tests/lib/common.sh` SHOULD show ZERO OR ADDITIVE-ONLY (new exporter helpers `start_exporter_in_background`, `stop_exporter`, `curl_metrics`); existing helpers byte-equivalent. Tester's discretion whether to add helpers or inline.
+- `git diff main -- tests/lib/read_stats.py` SHOULD show ZERO output.
+- `git diff main -- tests/fixtures/` SHOULD show: NEW `config_rules_skeleton.yaml` (for §6.42 T_RULES_SKELETON_NOT_WIRED); existing fixtures byte-equivalent.
+- `git diff main -- tests/CMakeLists.txt` SHOULD show ONLY 6 new `add_test(...)` entries + `RESOURCE_LOCK exporter_port_9417` declaration; the 36 existing entries byte-equivalent.
+- New files SHOULD exist: `src/exporter/{main,http,prom_format,stats_reader}.{cpp,hpp}`, `src/cli/bypass.{cpp,hpp}`, `systemd/xdpmf-exporter.service`, plus 6 T_*.sh under `tests/` + 1 new fixture.
+- `systemd-analyze verify systemd/xdpmf-exporter.service` SHOULD exit 0 with no warnings (PI-19 extension).
+- 6 new ctests SHOULD pass (§6.37..§6.42); §6.38 + §6.42 are the load-bearing pair (exporter values match stats + skeleton-not-wired).
+- 36 pre-§5.29 ctests SHOULD still pass (or legitimately SKIP-77) — PI-34 STRICT SUPERSET, no carve-out.
+- `xdpmacfilter --version` SHOULD report `xdpmacfilter 0.6.0` AND `xdpmf-exporter --version` SHOULD report `xdpmf-exporter 0.6.0` (PI-33).
+- `XDPMF_SANITIZERS=ON` build SHOULD be clean for BOTH binaries.
+- `CHANGELOG.md` entry `[0.6.0] - 2026-05-NN` (Keep-a-Changelog format).
+- Build-pace table in CHANGELOG SHOULD gain a row for MVP-3.4.
+- `ldd $(which xdpmf-exporter)` SHOULD show ONLY libbpf + libc + libstdc++ (D-3.4-3 zero-deps).
+- `grep -rE 'bpf_(map_(update|delete)_elem|obj_pin|link_create|link_destroy|xdp_(attach|detach)|prog_load)' src/exporter/` SHOULD return ZERO matches (PI-31).
+- `capsh --keep=1 --user=root --inh=cap_bpf --addamb=cap_bpf -- -c '/usr/bin/xdpmf-exporter --port 9417 ... &'` SHOULD start successfully against a pinned-stats fixture (D-3.4-6 anti-misdiagnosis smoke-check; tester MAY add as a final ctest sub-step in T_EXPORTER_METRICS_FORMAT, OPTIONAL).
+
+#### §7 OOS — MVP-3.4 components SHIPPED + new fences
+
+##### Moved from deferred to SHIPPED (per MVP-3.4)
+
+- ~~**`xdpmf-exporter` binary / Prometheus exporter implementation** — MVP-3.4 slice.~~ **— SHIPPED in §5.29 (MVP-3.4, 2026-05-NN)** as `xdpmf-exporter` long-running daemon (Q1 D1) with embedded HTTP/1.0 server (HG-3.4-3) serving `/metrics` (Q4 E1 direct read) + `/healthz`. Single-instance unit (Q5 N3). Installed at `/usr/bin/xdpmf-exporter` (Q2).
+- ~~**Manual bypass primitive** — MVP-3.4 slice (mitigates risk-register MVP-3.4 row 4).~~ **— SHIPPED in §5.29** as `xdpmacfilter bypass --iface X [--unsafe] [--reason Y]` (HG-3.4-2). `detach`-alias + audit-stderr + non-tty `--unsafe` gate.
+- ~~**`rules` + `action_table` BPF skeleton (B.2 partial — wires rule_id → counter index, structurally only)** — MVP-3.4 slice.~~ **— SHIPPED in §5.29** as DECLARED-AND-POPULATED-NOT-WIRED maps per HG-3.4-1 + Q3 minimal struct layout. Forward-compatibility scaffold for MVP-3.4b wiring; datapath untouched.
+
+##### NEW out-of-scope fences (per §5.29)
+
+- **Per-rule counter map (`per_rule_counters` BPF_MAP_TYPE_PERCPU_*)** — MVP-3.4b slice per Open Q #13 RESOLUTION (architecture-v2.md §"§MVP-3.4 Open Question #13 RESOLUTION"). DO NOT add this map in §5.29. The Option 2 default ("Sparse-direct-bounded ARRAY") becomes the candidate when MVP-3.4b is scoped.
+- **Inner-allowlist-value extension (`__u8` → `struct {__u8 present; __u32 rule_id;}`)** — MVP-3.4b. Gated by PI-13-3.1 adjudication (Open Q #3 in arch-v2 §"§MVP-3.4 Open Question #13 RESOLUTION" Open questions). MVP-3.4 explicitly DOES NOT touch this shape (PI-27/PI-13-3.4).
+- **Datapath wiring of `rules` or `action_table`** — MVP-3.4b. Per HG-3.4-1, `mac_filter_prog` body byte-equivalent to MVP-3.2 (PI-28). Adding any `bpf_map_lookup_elem(&rules, ...)` or `bpf_map_lookup_elem(&action_table, ...)` inside `mac_filter_prog` = `[INVARIANT-VIOLATED]`.
+- **Action types beyond {PASS, DROP}** — MVP-3.8+. The `enum xdpmf_action_type` reserves ACTION_MAX = 2 for cycle; MIRROR / RATE_LIMIT / TAG / REDIRECT are future additive enum slots, gated by their own scoping.
+- **JSON structured logs from exporter** — MVP-3.5 candidate. Exporter v1 emits plain stderr lines only (startup bind notice + accept errors).
+- **sFlow integration** — MVP-3.6 conditional.
+- **Exporter HTTPS / TLS** — operator wraps with stunnel / nginx-as-reverse-proxy if required. Adding TLS to the embedded HTTP/1.0 server would violate D-3.4-3 (zero-deps).
+- **Exporter authentication** — Prometheus scrape is unauthenticated by convention. Operators wanting auth wrap with a reverse-proxy.
+- **Exporter histograms / summary / labels beyond `{iface, verdict}`** — kept minimal. Histograms ship with MVP-3.5 candidate (per-packet-size distribution) or later; new labels (e.g. `verdict_reason`) gate on operator demand.
+- **Bypass via BPF map flag (in-datapath bypass-bit)** — explicitly fenced by HG-3.4-2. The datapath stays byte-equivalent (PI-28). A future "fast bypass" via map-flag would require a datapath branch + a new BPF map; MVP-3.6+ optional, gated on actual operator demand for "bypass without detach" (currently zero demand).
+- **Library extraction `libxdpmf.so.0`** — MVP-3.6+ optional. The exporter linking against `xdpmf_internal` STATIC is the v1 mechanism (D-3.4-2).
+- **Daemon `xdpmfd`** — MVP-3.6+ optional. The exporter is a daemon but does NOT do attach/detach; it's read-only observability, not control-plane.
+- **L4 ports / VLAN / IPv6 CIDR** — still fenced per MVP-3.2 §7 OOS (unchanged from §5.27).
+- **Binary rename `xdpmacfilter` → `xdpfilter`** — still MVP-3.12 (per §5.28 HG-3.3-1 disposition). The exporter is named `xdpmf-exporter` (NOT `xdpfilter-exporter`) — same naming-prefix discipline as the loader; both rename together at MVP-3.12.
+- **Exporter listening on IPv6 / dual-stack** — v1 IPv4-only (`--bind` accepts dotted-quad or `0.0.0.0` only). v6 fenced; operators wanting v6 wrap with HAProxy / nginx.
+- **Exporter inotify on `${XDPMF_BPFFS_ROOT}/`** — v1 polls on every scrape (Q4 E1). Inotify-based dynamic-iface-detection is MVP-3.5+ candidate IF a workload demands sub-15s detection of new ifaces (no current demand).
+- **Exporter `--include-pass-cidr` flag parallel to `read_stats.py`** — exporter ALWAYS emits all 4 verdicts (pass, drop_deny, drop_malformed, pass_cidr). The `read_stats.py` `--include-pass-cidr` flag is for the test helper, NOT the exporter; the exporter emits the full PERCPU map content. No flag parity needed.
+- **Ansible installs of `xdpmf-exporter`** — MVP-3.5+ candidate. `ansible/xdpmacfilter-deploy.yml` UNCHANGED this slice (operators add exporter install manually OR fork the playbook).
+- **`docs/EXPORTER.md` operator docs** — MVP-3.5+ candidate. CHANGELOG `[0.6.0]` entry + `xdpmf-exporter --help` text are the v1 operator docs surface; if operator demand surfaces, a dedicated docs file ships in MVP-3.5+.
+- **Per-rule counters / labels in exporter output beyond global stats** — MVP-3.4b. The exporter does NOT emit per-rule counters because the BPF datapath does not produce them (HG-3.4-1).
+- **Exporter unit drop-in for non-default `${XDPMF_BPFFS_ROOT}`** — the unit defaults to `XDPMF_BPFFS_ROOT` macro; operators wanting non-default override via Drop-In with `Environment=XDPMF_BPFFS_ROOT=/custom/path` + `ExecStart=/usr/bin/xdpmf-exporter ...`. Not shipped in repo.
+- **Bypass via SIGTERM / signal-handler in the long-running loader** — fenced. The loader is `Type=oneshot`; there is no long-running process to send signals to. `xdpmacfilter bypass --iface X --unsafe` is the operator path.
+- **Bypass with auto-reattach after N seconds** — fenced. v1 bypass is permanent until next `apply` / `attach`. Auto-reattach is operator scope (cron / systemd timer).
+- **Bypass auditing to syslog instead of (or in addition to) stderr** — fenced. v1 is stderr-only; under systemd this lands in `journalctl` (which IS syslog-equivalent in modern deployments). MVP-3.5+ JSON-log slice MAY add structured-logging surface.
+- **Atomic-swap on `rules` map (parallel-outer pattern from §5.27)** — fenced this slice (D-3.4-4: skeleton-only doesn't need atomicity). Surfaced as a question for MVP-3.4b scoping: if datapath wires `rules`, the map MUST be promoted to a parallel-outer or copy-on-write equivalent. Architect surfaces explicitly: "MVP-3.4b atomic-swap question on `rules` map" as a pre-cycle Open Q.
+- **MVP-3.1/3.2/3.3 OOT-deferred housekeeping items** — per Q6 DEFER. The 5 items stay in their dispositions.
+
+##### Surfaced as next-natural slice
+
+**MVP-3.4b — per-rule counter wiring** (this is the explicit next-slice surfaced by the Open Q #13 RESOLUTION):
+- per-rule counter map (Option 2 default per arch-v2.md §"§MVP-3.4 Open Question #13 RESOLUTION" Recommendation: PERCPU_ARRAY[64] with `XDPMF_RULE_COUNTERS_MAX = XDPMF_ALLOWLIST_MAX = 64` alias from T.9)
+- inner-allowlist-value extension (`__u8` → `struct {__u8 present; __u32 rule_id;}` for BOTH `allowlist_*` HASH and `cidr_allowlist_*` LPM_TRIE — symmetric per T.5 OQ #3)
+- datapath wiring of `rules` → `action_table` lookup chain inside `mac_filter_prog`
+- atomic-swap promotion of `rules` to parallel-outer (D-3.4-4 surfaced Open Q)
+- Prometheus `xdpfilter_rule_match_total{iface, rule_id}` series in exporter
+- sidecar JSON `${PIN_DIR}/rule_index.json` (optional; per arch-v2.md Option 2)
+- PI-13-3.1 adjudication (Open Q #3) BEFORE the slice starts
+
+Estimated budget per arch-v2.md §"§MVP-3.4 Open Question #13 RESOLUTION" Option 2 cost row: ~5 fixture touches (PI-13 migration); CIDR LPM_TRIE inner-value sister change; +16 KiB BPF memory (negligible). Risk: medium (gated on PI-13-3.1 adjudication). If adjudication returns VIOLATE, fall back to Option 3 ("Decouple via two-map shadow") which inflates the slice budget; if VIOLATE confirms persistently, defer per-rule counters indefinitely.
+
+Evidence: `mint/task-brief.md` MVP-3.4 brief (Items 1-4 + Q1-Q6 + HG-3.4-1/2/3); `mint/architecture-v2.md` MVP-3.4 row (lines 234-243) + per-phase scope summary (line 312) + risk register (lines 337-340) + **§"§MVP-3.4 Open Question #13 RESOLUTION" (lines 421-561) — the load-bearing defer-rationale source**; §5.26 (schema's `rules:` block + `action:` field this slice realizes apply-time semantic for); §5.27 (CIDR axis — second-axis precedent for additive datapath extension, NOT used here because skeleton maps are NOT consulted); §5.28 (systemd unit template idiom + D-3.3-6 anti-misdiagnosis pattern that D-3.4-6 inherits); §4.1 exit-code table (UNCHANGED — no new exit code); §4.3 LoaderError enum (UNCHANGED — PI-7-3.4 ZERO diff); §5.4 / §5.19 / §5.22 (trust+identity gates preserved untouched — bypass invokes `detach` which does NOT consult them); `mint/impl-notes.md` D-3.1-1..D-3.3-10 (prior deviations that STAND unchanged).
+
+##### Anti-misdiagnosis notes (institutional learning, per architect-spec §6.6)
+
+This slice carries two anti-misdiagnosis guards forward from prior rework rounds:
+
+1. **Cap-set declaration on a NEW invocation path** (inherited from §5.28 D-3.3-6 rework round 1): the exporter is a NEW binary with a NEW systemd unit declaring `AmbientCapabilities=CAP_BPF`. Future cycles touching cap declarations on NEW binaries MUST run `capsh --drop=<all-other-caps> -- <binary> <typical-args>` as a Phase-B smoke-check during design dialog BEFORE committing the cap-set. The §5.28 round-1 failure was a 3-cap set that worked under NSEXEC-preserved-caps but failed under systemd-stripped-caps. The §5.29 risk surface is the inverse: declaring TOO MANY caps would dilute the audit story but would not fail-loud. Mitigation: D-3.4-6 explicit cap-set rationale (CAP_BPF only, with explicit "we do NOT need CAP_SYS_ADMIN/NET_ADMIN/SYS_RESOURCE/PERFMON because we do not load/attach/rlimit/perfcount" justification).
+
+2. **Silent-inheritance-pattern recurrence** (inherited from the Open Q #13 RESOLUTION round, architecture-v2.md Hidden Assumption #1): the brief BODY at lines 35-40 of the design-brief contained a factual contradiction with shipped §5.26 schema rule 3 (`id ∈ [0, 63]`). ARRAY + T architects caught it; HASH architect inherited the brief framing silently. **Mitigation for this slice**: the MVP-3.4 task-brief is faithful to the defer posture (Open Q #13 RESOLUTION human-gate Option 1) — the architect (this document) verified against the just-amended architecture-v2.md section before drafting. **Future-cycle guard**: when MVP-3.4b is scoped, the architect drafting that brief MUST cross-check the inner-allowlist-value PI (PI-13-3.4 / PI-27 in this design) against shipped `src/common/mac_filter.h` and `src/bpf/mac_filter.bpf.c` BEFORE assuming any extension; the brief MUST cite the PI's current shape verbatim. If the brief misframes the existing inner-value as anything other than `__u8 / unsigned char`, the synthesizer's "line of defense" must catch it (per arch-v2.md Hidden Assumption #1 register entry).
