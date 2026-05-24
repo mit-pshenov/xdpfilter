@@ -1,0 +1,33 @@
+# §6.42 T_RULES_SKELETON_NOT_WIRED fixture (MVP-3.4 / §5.29).
+#
+# Mixed pass/drop rules block. Per HG-3.4-1 + §5.26 apply step 8:
+#   - `action: pass` rules → MAC added to inner allowlist on apply.
+#   - `action: drop` rules → MAC NOT added to inner allowlist (rule
+#     still populated into the `rules` skeleton map with action_id=1,
+#     but the datapath does NOT consult it — datapath sees the drop-MAC
+#     as "not in inner allowlist" → falls through to default_action=drop
+#     and increments STAT_DROP_DENY).
+#
+# Architect-preferred direct-map-dump approach (per §6.42 tester note):
+#   - `bpftool map dump pinned ${PIN_DIR}/rules` must show ALL 3 ids
+#     occupied with the right action_id (0 = PASS, 1 = DROP);
+#   - `bpftool map dump pinned ${PIN_DIR}/action_table` must show
+#     index 0 = ACTION_PASS, index 1 = ACTION_DROP;
+#   - `bpftool map dump pinned ${PIN_DIR}/allowlist_<active>` must
+#     contain the two pass-rule MACs (ids 0+1) but MUST NOT contain
+#     the drop-rule MAC (id 2). This is the operationally-observable
+#     signature of "skeleton populated but datapath NOT consulting it".
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      mac: "02:00:00:00:00:01"
+  - id: 1
+    action: pass
+    match:
+      mac: "02:00:00:00:00:02"
+  - id: 2
+    action: drop
+    match:
+      mac: "02:00:00:00:00:03"

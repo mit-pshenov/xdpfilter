@@ -21,6 +21,10 @@ set(TEST_ENV
     "SYSTEMD_UNIT_SRC=${CMAKE_SOURCE_DIR}/systemd/xdpmacfilter@.service"
     "ANSIBLE_PLAYBOOK=${CMAKE_SOURCE_DIR}/ansible/xdpmacfilter-deploy.yml"
     "FLEET_DOCS=${CMAKE_SOURCE_DIR}/docs/FLEET_DEPLOYMENT.md"
+    # §5.29 / MVP-3.4 — paths for the exporter / bypass / skeleton tests
+    # to locate the shipped artefacts in the build / source trees.
+    "XDPMF_EXPORTER_BIN=${CMAKE_BINARY_DIR}/xdpmf-exporter"
+    "EXPORTER_UNIT_SRC=${CMAKE_SOURCE_DIR}/systemd/xdpmf-exporter.service"
 )
 
 # Foreign-XDP fixture for T_ATTACH_ALIEN_REFUSAL (design §6.9, MVP-1.1B).
@@ -484,3 +488,52 @@ set_tests_properties(T_FLEET_DOCS_SUBSTRING PROPERTIES
     ENVIRONMENT "${TEST_ENV}"
     TIMEOUT 10
 )
+
+# ─────────────────────────────────────────────────────────────────────────
+# MVP-3.4 additions (§5.29 / §6.37–§6.42 — observability exporter + bypass +
+# rules/action_table skeleton).
+#
+# T_EXPORTER_METRICS_FORMAT  (§6.37): attach + inject; spawn exporter on
+#   per-PID-derived port; assert /metrics returns Prometheus text-format
+#   compliant output (HELP+TYPE+sample-line regex) + PI-33 --version smoke.
+#   SKIP-77 if curl absent.
+# T_EXPORTER_VALUES_MATCH_STATS (§6.38): LOAD-BEARING — inject known
+#   per-verdict counts; compare exporter PERCPU sum vs read_stats.py
+#   PERCPU sum strict-equal. SKIP-77 if curl OR jq absent.
+# T_EXPORTER_NO_ATTACHED_IFACE (§6.39): exporter against empty/missing
+#   bpffs root (PI-32 graceful-empty). 2 requests succeed; process stays
+#   alive. SKIP-77 if curl absent.
+# T_BYPASS_CMD_DETACHES (§6.40): `xdpmacfilter bypass --unsafe --reason X`
+#   detaches XDP + emits audit line (regex ERE); sub-case verifies the
+#   `reason="UNSPECIFIED"` default path. PI-30.
+# T_BYPASS_REQUIRES_UNSAFE_NONINTERACTIVE (§6.41): NEGATION CONTROL —
+#   bypass under setsid (non-tty) without --unsafe refuses (exit 1, stderr
+#   audit-safety message, XDP STILL attached). Fail-open regression guard.
+# T_RULES_SKELETON_NOT_WIRED (§6.42): apply config_rules_skeleton.yaml;
+#   verify WARN regex + rules/action_table populated + drop-MAC ABSENT
+#   from inner allowlist (the load-bearing defer-posture signature).
+#   SKIP-77 if jq absent.
+#
+# All 6 tests share RESOURCE_LOCK xdp_fixture — they touch the veth pair
+# AND/OR spawn the exporter against the host-global PIN_ROOT bpffs.
+# Serialized against the 30 other veth-touching tests.
+foreach(T IN ITEMS
+    T_EXPORTER_METRICS_FORMAT
+    T_EXPORTER_VALUES_MATCH_STATS
+    T_EXPORTER_NO_ATTACHED_IFACE
+    T_BYPASS_CMD_DETACHES
+    T_BYPASS_REQUIRES_UNSAFE_NONINTERACTIVE
+    T_RULES_SKELETON_NOT_WIRED
+)
+    add_test(
+        NAME ${T}
+        COMMAND bash ${TEST_DIR}/${T}.sh
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    set_tests_properties(${T} PROPERTIES
+        ENVIRONMENT "${TEST_ENV}"
+        RESOURCE_LOCK xdp_fixture
+        TIMEOUT 60
+        SKIP_RETURN_CODE 77
+    )
+endforeach()

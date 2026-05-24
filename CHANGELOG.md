@@ -5,6 +5,45 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-05-24
+
+MVP-3.4 — observability exporter + manual bypass primitive + `rules`/`action_table` BPF skeleton (brownfield amendment §5.29; defer posture per Open Q #13 RESOLUTION). First NEW binary since MVP-2 (`xdpmf-exporter`). Per-rule counters DEFERRED to MVP-3.4b; inner-allowlist-value shape preserved byte-equivalent (PI-13-3.4 / PI-27 — the load-bearing defer PI). Datapath byte-equivalent to MVP-3.2 modulo two new `.maps` declarations (PI-28).
+
+### Added
+- `xdpmf-exporter` binary (§5.29 HG-3.4-3, Q1 D1) — long-running Prometheus `/metrics` daemon, embedded minimal C++23 HTTP/1.0 server (~250 LOC plain sockets, NO third-party HTTP dep per D-3.4-3). Reads existing global `stats` `BPF_MAP_TYPE_PERCPU_ARRAY[STAT_MAX=4]` via libbpf RO fds (PI-31). Routes: `GET /metrics` (text/plain; version=0.0.4 — `xdpfilter_packets_total{iface,verdict}` counter family with `verdict ∈ {pass, drop_deny, drop_malformed, pass_cidr}`), `GET /healthz` (200 OK). Defaults: `--port 9417 --bind 127.0.0.1 --bpffs-root ${XDPMF_BPFFS_ROOT}`. Links `xdpmf_internal` STATIC (D-3.4-2). Installed at `${CMAKE_INSTALL_BINDIR}/xdpmf-exporter`.
+- `systemd/xdpmf-exporter.service` (§5.29 Q5 N3) — single-instance unit (NOT @-templated). `Type=simple` long-running, `Restart=on-failure RestartSec=5`, rate-limited via `StartLimitBurst=5 StartLimitIntervalSec=300`. Capability set INTENTIONALLY MINIMAL: `AmbientCapabilities=CAP_BPF` ONLY (D-3.4-6; explicit anti-misdiagnosis rationale — no `CAP_SYS_ADMIN`/`CAP_NET_ADMIN`/`CAP_SYS_RESOURCE`/`CAP_PERFMON` because the exporter does not load programs, attach/detach, set rlimits, or use perfcount).
+- `xdpmacfilter bypass --iface <X> [--unsafe] [--reason "<text>"]` subcommand (§5.29 HG-3.4-2) — operator-facing manual bypass primitive wrapping the existing `loader::detach()` codepath. Interactive tty prompts `y/N`; non-tty REQUIRES `--unsafe` (audit safety gate; exit 1 + recognisable stderr message on absence). ALWAYS emits an audit-log line to stderr BEFORE the detach (D-3.4-5): `xdpmacfilter: BYPASS activated on <iface> by uid=<UID> reason="<text or UNSPECIFIED>"`. NO new BPF map flag, NO new datapath state (PI-30); the cleanest path that preserves the defer-posture invariants.
+- `rules` BPF map (ARRAY[XDPMF_ALLOWLIST_MAX=64] of `struct rule_entry`) + `action_table` BPF map (ARRAY[ACTION_MAX=2] of `struct action_entry`) — DECLARED-AND-POPULATED-NOT-WIRED skeleton per HG-3.4-1. `mac_filter.bpf.c` datapath body is BYTE-EQUIVALENT to MVP-3.2 modulo the two new `.maps` declarations (PI-28). Populated from `Config.rules` on every `apply` (clear-and-rewrite per D-3.4-8; SHARED — not parallel-swapped — per D-3.4-4 because the datapath does not consult them). Forward-compatibility scaffold for MVP-3.4b wiring once PI-13-3.1 adjudication on the inner-allowlist-value extension lands.
+- `apply` orchestrator emits a one-shot stderr WARN when `Config.rules` is non-empty: `xdpmacfilter: rules: section parsed (<N> entries) but per-rule action dispatch deferred to MVP-3.4b — datapath uses MAC/CIDR-only matching this cycle`. Operator-facing signature of PI-29.
+- `src/common/mac_filter.h` additive types: `struct rule_entry`, `struct action_entry`, `enum xdpmf_action_type` (`ACTION_PASS=0`, `ACTION_DROP=1`, `ACTION_MAX=2`), `XDPMF_MAP_RULES_NAME`, `XDPMF_MAP_ACTION_TABLE_NAME` (PI-10-3.4 strengthened: pure additive diff; existing constants/structs/enum values UNCHANGED).
+- 6 new ctests (§6.37..§6.42 — written by tester in parallel against `design.md` §5.29 TestStrategy): `T_EXPORTER_METRICS_FORMAT`, `T_EXPORTER_VALUES_MATCH_STATS`, `T_EXPORTER_NO_ATTACHED_IFACE`, `T_BYPASS_CMD_DETACHES`, `T_BYPASS_REQUIRES_UNSAFE_NONINTERACTIVE`, `T_RULES_SKELETON_NOT_WIRED`.
+
+### Changed
+- CMake `project(VERSION)` bumped from `0.5.0` → `0.6.0` (semver minor: new observability binary + new CLI subcommand + new BPF maps; backward-compatible CLI grammar + backward-compatible YAML schema).
+- `--help` lists the new `bypass` subcommand + the new `--unsafe` / `--reason` flags (PI-9: help-text format preserved; only an additive line block).
+- `CMake install()` rule: both `xdpmacfilter` and `xdpmf-exporter` now install to `${CMAKE_INSTALL_BINDIR}` (single `install(TARGETS …)` line). The `XDPMF_INSTALL_SYSTEMD_UNIT` rule now also installs `systemd/xdpmf-exporter.service` alongside the existing template unit.
+
+### Preserved invariants (verified by impl smoke)
+- PI-7-3.4: `loader.hpp` ZERO diff — **FOURTH consecutive cycle** (MVP-3.1 added one enumerator; MVP-3.2/3.3/3.4 added zero). `loader.cpp`'s `apply_request` body extends in step 8.5 + step 4 fd opening + the state-b reuse_fd loop grows 9 → 11 — see impl-notes D-3.4-1 (peer-noted; design §5.29 EDITED-row label resolves to loader.cpp in physical layout).
+- PI-13-3.4 / PI-27 (the load-bearing defer PI): inner-allowlist-value shape `unsigned char present` UNCHANGED in `allowlist_a/b` HASH and `cidr_allowlist_a/b` LPM_TRIE. `__type(value, __u8)` byte-equivalent. **The defer was specifically about NOT making this change.**
+- PI-28: `mac_filter_prog` BPF function body BYTE-EQUIVALENT to MVP-3.2 modulo two new `.maps` declarations (`rules` ARRAY + `action_table` ARRAY). Datapath does NOT issue `bpf_map_lookup_elem` against either new map.
+- PI-29: `rules` + `action_table` POPULATED on apply but NOT consulted by datapath; the WARN line above is the operator-facing signature.
+- PI-30: `bypass` primitive = `detach`-alias + audit-log + `--unsafe` gate (no new BPF map flag, no datapath touch).
+- PI-31: exporter READ-ONLY by construction; `grep -rE 'bpf_(map_(update|delete)_elem|obj_pin|link_create|link_destroy|xdp_(attach|detach)|prog_load)' src/exporter/` returns ZERO matches.
+- PI-33: `xdpmacfilter --version` AND `xdpmf-exporter --version` BOTH report `0.6.0` (shared `version.h` from CMake `project(VERSION)`).
+- PI-34 (= PI-6-3.4): 36 pre-§5.29 ctests pass byte-equivalent OR legitimately SKIP-77; existing test bodies UNCHANGED.
+
+### Out-of-scope fences (per §5.29; expanded list in design.md §7 OOS)
+- Per-rule counter map (`per_rule_counters` `BPF_MAP_TYPE_PERCPU_*`) — MVP-3.4b per Open Q #13 RESOLUTION.
+- Inner-allowlist-value extension (`__u8` → `struct {__u8 present; __u32 rule_id;}`) — MVP-3.4b. Gated by PI-13-3.1 adjudication.
+- Datapath wiring of `rules` or `action_table` — MVP-3.4b.
+- Action types beyond `{PASS, DROP}` — MVP-3.8+.
+- JSON structured logs from exporter / sFlow / HTTPS / authentication / histograms / IPv6 bind / inotify on bpffs root — all MVP-3.5+ or operator-wrap-with-reverse-proxy.
+- Bypass via BPF map flag (versus detach-alias) — fenced by HG-3.4-2.
+- Ansible installs of `xdpmf-exporter` / `docs/EXPORTER.md` — MVP-3.5+ candidates.
+- Atomic-swap on `rules` map (parallel-outer pattern from §5.27) — fenced this slice (D-3.4-4); surfaced as MVP-3.4b Open Q.
+- MVP-3.1/3.2/3.3 OOT-deferred housekeeping items — per Q6 DEFER.
+
 ## [0.5.0] — 2026-05-24
 
 MVP-3.3 — systemd + Ansible + fleet docs (brownfield amendment §5.28). Ops-integration slice that makes the existing loader operator-deployable on a Linux host fleet. **Smallest C++/BPF surface area of MVP-3.x to date — zero `src/`/`include/`/`cmake/` diff except the CMake version bump + optional systemd-unit install rule (PI-26).** Loader, BPF datapath, CLI grammar, and exit-code table all byte-identical to 0.4.0.

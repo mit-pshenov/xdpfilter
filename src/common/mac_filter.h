@@ -93,6 +93,38 @@ enum mac_filter_stat {
 #define XDPMF_MAP_CIDR_INNER_A_NAME         "cidr_allowlist_a"  /* inner slot 0, LPM_TRIE */
 #define XDPMF_MAP_CIDR_INNER_B_NAME         "cidr_allowlist_b"  /* inner slot 1, LPM_TRIE */
 
+/* §5.29 (MVP-3.4): rules + action_table skeleton — see design §5.29 HG-3.4-1 + Q3.
+ *
+ * STRUCTURAL-ONLY this slice. Populated on apply; NOT consulted in datapath
+ * (mac_filter_prog). MVP-3.4b will wire datapath consumption (gated on the
+ * PI-13-3.1 adjudication of the inner-allowlist-value extension).
+ *
+ * `unsigned char` (not `__u8`) for the same reason as xdpmf_cidr_v4: this
+ * header is included from BOTH BPF C (after vmlinux.h) AND userspace C++
+ * — `__u8` isn't a libc type, but `unsigned char` is binary-compatible
+ * with kernel `__u8` on every supported architecture.
+ */
+struct rule_entry {
+    unsigned char present;     /* 0 = empty slot; 1 = occupied */
+    unsigned char action_id;   /* index into action_table; valid range [0, ACTION_MAX-1] */
+    unsigned char _pad[2];     /* explicit padding; total sizeof == 4 (u32-aligned) */
+};
+
+struct action_entry {
+    unsigned char action_type; /* enum xdpmf_action_type */
+    unsigned char _pad[3];     /* explicit padding; total sizeof == 4 */
+};
+
+enum xdpmf_action_type {
+    ACTION_PASS = 0,
+    ACTION_DROP = 1,
+    ACTION_MAX  = 2,           /* sentinel; future MVP-3.8+ may extend (MIRROR/RL/TAG) */
+};
+
+/* Pinned at ${PIN_DIR}/rules and ${PIN_DIR}/action_table respectively. */
+#define XDPMF_MAP_RULES_NAME         "rules"        /* ARRAY[XDPMF_ALLOWLIST_MAX] of struct rule_entry */
+#define XDPMF_MAP_ACTION_TABLE_NAME  "action_table" /* ARRAY[ACTION_MAX] of struct action_entry */
+
 #ifdef __cplusplus
 }
 #endif

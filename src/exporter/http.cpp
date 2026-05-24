@@ -1,0 +1,311 @@
+/*
+ * http.cpp — embedded minimal HTTP/1.0 server (HG-3.4-3).
+ *
+ * Single-threaded acceptor; per-conn synchronous handler with bounded read
+ * budget (4 KiB request line + headers; 5-second read timeout per conn);
+ * each response sets `Connection: close` and the socket is closed after.
+ *
+ * Why hand-rolled (not microhttpd / cpp-httplib): D-3.4-3 "zero non-standard
+ * deps" project value. Same reason cli.cpp hand-rolls its argv parser.
+ */
+#include "http.hpp"
+
+#include "prom_format.hpp"
+#include "stats_reader.hpp"
+
+#include <cerrno>
+#include <chrono>
+#include <csignal>
+#include <cstdio>
+#include <cstring>
+#include <format>
+#include <string>
+#include <string_view>
+
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+namespace xdpmf::exporter {
+
+namespace {
+
+/* sig_atomic_t is the only safely-signal-handlable type per the standard;
+ * the accept loop polls this between poll() calls. */
+volatile std::sig_atomic_t g_stop = 0;
+
+extern "C" void stop_handler(int /*signo*/) noexcept
+{
+    g_stop = 1;
+}
+
+/* Read up to `max_bytes` from `fd` until we see "\r\n\r\n" (end-of-headers)
+ * OR a 5-second wall clock budget elapses. Returns the bytes read OR -1 on
+ * error / -2 on timeout / -3 on overflow. Defensive against slowloris-style
+ * partial-write attackers — the daemon is not high-security but neither
+ * should it be trivially DoS-able by a misbehaving scraper.
+ *
+ * NOT a general HTTP parser — we only need the request line for routing,
+ * so we read JUST until headers end. */
+[[nodiscard]] int read_request(int fd, std::string& out, std::size_t max_bytes)
+{
+    using clock = std::chrono::steady_clock;
+    const auto deadline = clock::now() + std::chrono::seconds{5};
+
+    out.clear();
+    out.reserve(1024);
+    char buf[1024];
+    while (out.size() < max_bytes) {
+        const auto now = clock::now();
+        if (now >= deadline) {
+            return -2;
+        }
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - now).count();
+        struct pollfd pfd{};
+        pfd.fd = fd;
+        pfd.events = POLLIN;
+        const int pr = ::poll(&pfd, 1, static_cast<int>(remaining));
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (pr == 0) {
+            return -2;
+        }
+        const ssize_t n = ::read(fd, buf, sizeof(buf));
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (n == 0) {
+            break;  // peer closed
+        }
+        out.append(buf, buf + n);
+        /* Found end-of-headers? */
+        if (out.find("\r\n\r\n") != std::string::npos) {
+            break;
+        }
+    }
+    if (out.size() > max_bytes) {
+        return -3;
+    }
+    return 0;
+}
+
+/* Write the full `data` blob to `fd`, looping on partial writes. Returns
+ * true on full success. We don't actually care if the client closed mid-
+ * response (Prometheus scrapers may abort on timeout); just don't crash. */
+bool write_all(int fd, std::string_view data) noexcept
+{
+    const char* p   = data.data();
+    std::size_t rem = data.size();
+    while (rem > 0) {
+        const ssize_t n = ::write(fd, p, rem);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        p   += n;
+        rem -= static_cast<std::size_t>(n);
+    }
+    return true;
+}
+
+/* Parse the request line (first line of the request). Populates method and
+ * path; returns false on malformed shape (caller emits 400). */
+[[nodiscard]] bool parse_request_line(std::string_view req,
+                                       std::string&     method,
+                                       std::string&     path)
+{
+    const auto eol = req.find("\r\n");
+    if (eol == std::string_view::npos) {
+        return false;
+    }
+    std::string_view line = req.substr(0, eol);
+    const auto sp1 = line.find(' ');
+    if (sp1 == std::string_view::npos) return false;
+    const auto sp2 = line.find(' ', sp1 + 1);
+    if (sp2 == std::string_view::npos) return false;
+    method.assign(line.substr(0, sp1));
+    path.assign(line.substr(sp1 + 1, sp2 - sp1 - 1));
+    /* version (line.substr(sp2+1)) ignored — we send HTTP/1.0 on responses
+     * regardless of the requested version; HTTP/1.1 clients gracefully
+     * downgrade per the spec's lower-version-tolerance rule. */
+    return true;
+}
+
+[[nodiscard]] std::string build_response(int                status,
+                                          std::string_view   status_text,
+                                          std::string_view   content_type,
+                                          std::string_view   body)
+{
+    return std::format(
+        "HTTP/1.0 {} {}\r\n"
+        "Content-Type: {}\r\n"
+        "Content-Length: {}\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "{}",
+        status, status_text, content_type, body.size(), body);
+}
+
+void handle_connection(int conn_fd, std::string_view bpffs_root)
+{
+    constexpr std::size_t kMaxRequestBytes = 4096;
+    std::string raw;
+    const int rrc = read_request(conn_fd, raw, kMaxRequestBytes);
+    if (rrc != 0) {
+        const std::string resp = build_response(400, "Bad Request",
+                                                "text/plain", "bad request\n");
+        (void)write_all(conn_fd, resp);
+        return;
+    }
+
+    std::string method, path;
+    if (!parse_request_line(raw, method, path)) {
+        const std::string resp = build_response(400, "Bad Request",
+                                                "text/plain", "bad request\n");
+        (void)write_all(conn_fd, resp);
+        return;
+    }
+    /* Strip query string (we don't accept query params on any route). */
+    const auto qpos = path.find('?');
+    if (qpos != std::string::npos) {
+        path.resize(qpos);
+    }
+
+    if (method != "GET") {
+        const std::string resp = build_response(405, "Method Not Allowed",
+                                                "text/plain", "method not allowed\n");
+        (void)write_all(conn_fd, resp);
+        return;
+    }
+    if (path == "/metrics") {
+        const auto samples = read_all_attached(bpffs_root);
+        const std::string body = emit_metrics(samples);
+        const std::string resp = build_response(
+            200, "OK", "text/plain; version=0.0.4", body);
+        (void)write_all(conn_fd, resp);
+        return;
+    }
+    if (path == "/healthz") {
+        const std::string resp = build_response(200, "OK", "text/plain", "ok\n");
+        (void)write_all(conn_fd, resp);
+        return;
+    }
+    const std::string resp = build_response(404, "Not Found", "text/plain",
+                                             "not found\n");
+    (void)write_all(conn_fd, resp);
+}
+
+/* Resolve an IPv4 dotted-quad to in_addr. Returns false on parse failure
+ * (caller exits 1). IPv6 explicitly OOS this slice (§7 OOS). */
+[[nodiscard]] bool parse_bind_addr(std::string_view s, struct in_addr& out)
+{
+    /* inet_pton wants a NUL-terminated C-string. */
+    std::string copy{s};
+    return ::inet_pton(AF_INET, copy.c_str(), &out) == 1;
+}
+
+}  // namespace
+
+void install_signal_handlers()
+{
+    struct sigaction sa{};
+    sa.sa_handler = stop_handler;
+    ::sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;  // NOT SA_RESTART — we want poll() to return on signal
+    (void)::sigaction(SIGINT,  &sa, nullptr);
+    (void)::sigaction(SIGTERM, &sa, nullptr);
+    /* SIGPIPE from a client that closed mid-response should NOT kill us;
+     * write_all swallows EPIPE via its error return. */
+    struct sigaction ign{};
+    ign.sa_handler = SIG_IGN;
+    ::sigemptyset(&ign.sa_mask);
+    (void)::sigaction(SIGPIPE, &ign, nullptr);
+}
+
+int run(const HttpConfig& cfg)
+{
+    struct in_addr bind_inaddr{};
+    if (!parse_bind_addr(cfg.bind_addr, bind_inaddr)) {
+        std::fprintf(stderr, "xdpmf-exporter: invalid --bind address: '%s'\n",
+                     cfg.bind_addr.c_str());
+        return 1;
+    }
+
+    const int listen_fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (listen_fd < 0) {
+        std::fprintf(stderr, "xdpmf-exporter: socket(): %s\n",
+                     std::strerror(errno));
+        return 1;
+    }
+
+    /* SO_REUSEADDR so a quick restart doesn't TIME_WAIT-stick on the port. */
+    int one = 1;
+    (void)::setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+
+    struct sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr   = bind_inaddr;
+    addr.sin_port   = ::htons(cfg.port);
+    if (::bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr),
+                sizeof(addr)) < 0) {
+        std::fprintf(stderr, "xdpmf-exporter: bind(%s:%u): %s\n",
+                     cfg.bind_addr.c_str(), cfg.port,
+                     std::strerror(errno));
+        (void)::close(listen_fd);
+        return 1;
+    }
+    if (::listen(listen_fd, 16) < 0) {
+        std::fprintf(stderr, "xdpmf-exporter: listen(): %s\n",
+                     std::strerror(errno));
+        (void)::close(listen_fd);
+        return 1;
+    }
+
+    std::fprintf(stderr, "xdpmf-exporter: listening on %s:%u\n",
+                 cfg.bind_addr.c_str(), cfg.port);
+
+    while (g_stop == 0) {
+        struct pollfd pfd{};
+        pfd.fd = listen_fd;
+        pfd.events = POLLIN;
+        const int pr = ::poll(&pfd, 1, 1000 /* ms */);
+        if (pr < 0) {
+            if (errno == EINTR) continue;
+            std::fprintf(stderr, "xdpmf-exporter: poll(): %s\n",
+                         std::strerror(errno));
+            break;
+        }
+        if (pr == 0) {
+            continue;  // poll timeout — re-check g_stop and loop
+        }
+
+        struct sockaddr_in client{};
+        socklen_t          client_len = sizeof(client);
+        const int conn_fd = ::accept4(
+            listen_fd,
+            reinterpret_cast<struct sockaddr*>(&client),
+            &client_len,
+            SOCK_CLOEXEC);
+        if (conn_fd < 0) {
+            if (errno == EINTR) continue;
+            std::fprintf(stderr, "xdpmf-exporter: accept(): %s\n",
+                         std::strerror(errno));
+            continue;
+        }
+        handle_connection(conn_fd, cfg.bpffs_root);
+        (void)::close(conn_fd);
+    }
+
+    (void)::close(listen_fd);
+    std::fprintf(stderr, "xdpmf-exporter: shutdown\n");
+    return 0;
+}
+
+}  // namespace xdpmf::exporter

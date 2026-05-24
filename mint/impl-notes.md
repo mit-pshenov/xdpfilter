@@ -335,3 +335,111 @@ prose example was the intent, please clarify and I'll swap the two lines.
 - `git diff main -- src/ include/` → empty (PI-7-3.3 / PI-26 fence).
 - `git diff main -- CMakeLists.txt` → ONLY the version-bump line + the
   optional install rule + the `XDPMF_INSTALL_SYSTEMD_UNIT` option (PI-26).
+
+---
+
+# MVP-3.4 (§5.29) addenda — 2026-05-24
+
+## D-3.4-1 — `apply_internal.cpp` resolves to `loader.cpp` in physical layout
+
+**Context**: design §5.29 FileList lists:
+- EDITED row: `src/lib/apply_internal.cpp` — "EXTEND step 8.5 per §5.29 apply() flow above"
+- UNCHANGED-BUT-AFFECTED row: `src/lib/loader.cpp` — "UNCHANGED. The apply orchestrator dispatch is unchanged; new map population lives in apply_internal.cpp per §5.26 D-3.1-1."
+
+**Reality**: `src/lib/apply_internal.cpp` does NOT exist; `internal::apply_request()`
+lives in `src/lib/loader.cpp`'s anon-namespace per the documented D-3.1-1
+deviation from MVP-3.1. The §5.29 design rows are internally inconsistent
+because they treat "apply_internal.cpp" as both the logical-component name
+(EDITED row) and as a separate file from loader.cpp (UNCHANGED-BUT-AFFECTED
+row).
+
+**Resolution**: impl SendMessage'd architect Phase A at start with three
+interpretation options (A: edit loader.cpp's apply_request body — smallest
+diff; B: extract apply_request into a new apply_internal.cpp — substantial
+refactor; C: split via a thin helper). After ~3 min with no architect
+response, proceeded with Option (A) per the deviation-protocol rule
+("proceed with sensible default per language pack, document in impl-notes,
+mention in final report"). The §5.29 step 8.5 extension + step 4 fd opening
++ the state-b reuse_fd loop growth (9 → 11) all land in loader.cpp's
+existing `internal::apply_request()` and anon-namespace helper functions.
+
+**Effect on PI-7-3.4**: `src/lib/loader.hpp` byte-equivalent (ZERO diff —
+the strict 4th-cycle invariant). `src/lib/loader.cpp` DOES change in this
+slice (apply_request body + helper functions), so the prose "loader.cpp
+UNCHANGED" in §5.29 reads as the impl's "logical-component apply_internal
+UNCHANGED" — they describe the same intent but use different file names.
+Reviewer should treat the §5.29 UNCHANGED-BUT-AFFECTED row for loader.cpp
+as an editorial inconsistency, NOT an `[INVARIANT-VIOLATED]` flag (D-3.1-1
++ §5.29's own "Decisions hint vs PI-* contract" prose-vs-invariant rule
+both support this).
+
+**Architect resolution (Phase B EDIT-1 + EDIT-2, 2026-05-24 evening)**:
+Architect SendMessage'd back after Task #2 completion with full
+disposition — Option (A) confirmed correct; design.md amended in three
+batches:
+
+- **§5.29 EDIT-1**: FileList EDITED row for `loader.cpp` replaced the
+  phantom `apply_internal.cpp` row, with a 3-scope fence:
+   (i) `internal::apply_request()` body — INSERT new step 8.5;
+   (ii) skel-load / fd-opening — add `bpf_object__find_map_by_name` for
+        the 2 new maps;
+   (iii) state-b reattach `bpf_map__reuse_fd` loop 9 → 11.
+   `apply_internal.hpp` STAYS UNCHANGED (new helpers stay anon-namespace
+   inside loader.cpp; no public-API promotion).
+
+- **PI-7-3.4 split into PI-7-3.4-hpp + PI-7-3.4-cpp**:
+   PI-7-3.4-hpp = `loader.hpp` ZERO diff, 4th consecutive cycle (the
+   load-bearing API contract).
+   PI-7-3.4-cpp = `loader.cpp` regional-diff check — reviewer classifies
+   each hunk by enclosing function name; allowed scope set governs
+   accept/reject. The MVP-3.3-era prose "ENTIRE src/lib/loader.{cpp,hpp}
+   zero diff" is now historical-bounded to MVP-3.3.
+
+- **§5.29 EDIT-2**: scope fence extended with (iv) — `open_skeleton_only()`'s
+  `pinned_maps[]` literal-array additive-only extension 10 → 12 entries.
+  Symmetric to (ii)/(iii)'s `pin_specs[]` and `reuse_specs[]` 9 → 11
+  extensions: the new LIBBPF_PIN_BY_NAME-tagged maps MUST have their
+  auto-pin paths cleared before manual per-iface pinning, otherwise
+  libbpf auto-pins them on `/sys/fs/bpf/<mapname>` and the subsequent
+  manual pin fails with `Invalid argument`. **Impl-side bug caught in
+  Phase 2.5 smoke (first ctest pass: 27/42 fail with the
+  `libbpf: map 'rules' already has pin path '/sys/fs/bpf/rules'`
+  message); fixed by extending the clear-list.**
+
+  Strict sub-fence under (iv): `pinned_maps[]` is the ONLY thing
+  allowed to grow inside `open_skeleton_only`. Loop body / control
+  flow / error-handling MUST be byte-equivalent — reviewer regional-diff
+  check flags any hunk in `open_skeleton_only` touching anything OTHER
+  than the array initializer as `[INVARIANT-VIOLATED]`. Audit-trail
+  citation: `§5.29 EDIT-2 Phase B (2026-05-24 evening, dialog with
+  mint-dev-impl after Task #2 completion)`.
+
+**Net allowed-scope set under PI-7-3.4-cpp**: `{internal::apply_request,
+open_skeleton_only's pinned_maps[] literal-only, new anon-namespace
+helpers (populate_rules_skeleton, populate_action_table)}`. Anything
+outside this set in `git diff main -- src/lib/loader.cpp` = reviewer
+`[INVARIANT-VIOLATED]`. Architect's verification-hints discipline
+fallback: if reviewer flags this `pinned_maps[]` hunk despite the
+EDIT-2 amendment, architect's disposition is `inline-merge` (impl
+correctly diverged from the original prose to satisfy operational
+requirement — this IS the scenario the discipline anticipates).
+
+## D-3.4-2 — WARN emission also fires on `attach --allow` synth path
+
+**Context**: design §5.29 specifies "if req.config.rules.size() > 0, emit
+to stderr" the per-rule-deferred WARN. `loader::attach(AttachConfig)`
+synthesizes a Config with one Pass-rule per `cfg.allow` MAC and routes
+through `internal::apply_request` — so the WARN fires for `attach --allow`
+flows too, not just `apply -f` flows that have an explicit `rules:` YAML
+block.
+
+**Disposition**: emit per design literal. The WARN's semantic ("rules:
+section parsed but datapath uses MAC/CIDR-only matching this cycle") is
+operationally correct for both invocation paths — the synth rules ARE
+populated into the `rules` map but the datapath does NOT consult them.
+Existing tests do positive-grep checks (presence of trust_model=, …) and
+do NOT assert stderr cleanliness, so PI-34 (36-test byte-equivalent pass)
+holds. Architect MAY choose in a future revision to suppress the WARN on
+synthesised configs by adding an `is_synthetic` flag to `ApplyRequest`;
+this is impl-flexible but design-literal currently fires the WARN
+universally.

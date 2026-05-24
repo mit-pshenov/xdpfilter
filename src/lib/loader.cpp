@@ -836,6 +836,8 @@ private:
         skel->maps.active_idx,          // §5.26 Q6 active index (shared by both outers)
         skel->maps.defaults,            // §5.26 Q6 per-slot default action
         skel->maps.stats,
+        skel->maps.rules,               // §5.29 (MVP-3.4) HG-3.4-1 skeleton
+        skel->maps.action_table,        // §5.29 (MVP-3.4) HG-3.4-1 skeleton
     };
     for (bpf_map* m : pinned_maps) {
         if (bpf_map__set_pin_path(m, nullptr) != 0) {
@@ -1100,6 +1102,69 @@ void write_active_idx(int active_idx_fd, std::uint32_t idx)
     }
 }
 
+/* §5.29 (MVP-3.4): populate the `rules` skeleton ARRAY[XDPMF_ALLOWLIST_MAX]
+ * from the validated Config. Clear-and-rewrite per D-3.4-8 (the map is
+ * SHARED — not parallel-swapped — because the datapath does NOT consult it
+ * this cycle; PI-28 + PI-29). Idempotent across applies.
+ *
+ * Encoding: a Config.rules entry at id=k with action=Pass becomes
+ * rules[k] = {present=1, action_id=ACTION_PASS}; action=Drop becomes
+ * rules[k] = {present=1, action_id=ACTION_DROP}. Empty slots are written
+ * as {present=0, action_id=0} so a removed rule doesn't leave stale state. */
+void populate_rules_skeleton(int rules_fd, const std::vector<Rule>& rules)
+{
+    /* Clear all 64 slots first — operator may have removed rules across
+     * applies; the prior occupant must not survive. */
+    const struct rule_entry empty{};
+    for (std::uint32_t k = 0; k < static_cast<std::uint32_t>(XDPMF_ALLOWLIST_MAX); ++k) {
+        const int rc = bpf_map_update_elem(rules_fd, &k, &empty, BPF_ANY);
+        if (rc < 0) {
+            throw_loader(classify(rc, LoaderError::LoadFailed),
+                         std::format("bpf_map_update_elem(rules[{}] clear): {}",
+                                     k, std::strerror(-rc)));
+        }
+    }
+    /* Then write occupied slots. id range already validated in config.cpp. */
+    for (const Rule& r : rules) {
+        struct rule_entry entry{};
+        entry.present   = 1;
+        entry.action_id = (r.action == RuleAction::Pass)
+            ? static_cast<unsigned char>(ACTION_PASS)
+            : static_cast<unsigned char>(ACTION_DROP);
+        const int rc = bpf_map_update_elem(rules_fd, &r.id, &entry, BPF_ANY);
+        if (rc < 0) {
+            throw_loader(classify(rc, LoaderError::LoadFailed),
+                         std::format("bpf_map_update_elem(rules[{}]): {}",
+                                     r.id, std::strerror(-rc)));
+        }
+    }
+}
+
+/* §5.29 (MVP-3.4): pre-populate action_table with the two reserved actions
+ * (PASS=0, DROP=1) per §5.29 apply step 8.5. Idempotent (write-same-value).
+ * The action_id field stored in `rules` is an index into THIS array. */
+void populate_action_table(int action_table_fd)
+{
+    struct action_entry pass_entry{};
+    pass_entry.action_type = static_cast<unsigned char>(ACTION_PASS);
+    struct action_entry drop_entry{};
+    drop_entry.action_type = static_cast<unsigned char>(ACTION_DROP);
+    const std::uint32_t k_pass = static_cast<std::uint32_t>(ACTION_PASS);
+    const std::uint32_t k_drop = static_cast<std::uint32_t>(ACTION_DROP);
+    int rc = bpf_map_update_elem(action_table_fd, &k_pass, &pass_entry, BPF_ANY);
+    if (rc < 0) {
+        throw_loader(classify(rc, LoaderError::LoadFailed),
+                     std::format("bpf_map_update_elem(action_table[PASS]): {}",
+                                 std::strerror(-rc)));
+    }
+    rc = bpf_map_update_elem(action_table_fd, &k_drop, &drop_entry, BPF_ANY);
+    if (rc < 0) {
+        throw_loader(classify(rc, LoaderError::LoadFailed),
+                     std::format("bpf_map_update_elem(action_table[DROP]): {}",
+                                 std::strerror(-rc)));
+    }
+}
+
 /* Read active_idx[0]. Returns 0 if unset; throws on real lookup error. */
 [[nodiscard]] std::uint32_t read_active_idx(int active_idx_fd)
 {
@@ -1360,6 +1425,18 @@ std::uint32_t apply_request(const ApplyRequest& req)
     const TrustModel trust_model = parse_trust_model_env();
     log_trust_model(trust_model);
 
+    // §5.29 (MVP-3.4) HG-3.4-1: operator-facing deferred-wiring notice. Fires
+    // ONCE per apply when the config carries an explicit `rules:` block.
+    // Sits AFTER trust_model log and BEFORE any kernel-touch / completion log
+    // per the §5.29 ordering contract. PI-29 operator-facing signature.
+    if (!req.config.rules.empty()) {
+        std::fprintf(stderr,
+                     "xdpmacfilter: rules: section parsed (%zu entries) but "
+                     "per-rule action dispatch deferred to MVP-3.4b — datapath "
+                     "uses MAC/CIDR-only matching this cycle\n",
+                     req.config.rules.size());
+    }
+
     const int ifindex = resolve_ifindex(req.iface, LoaderError::AttachFailed);
 
     // §5.22 Item 2: BpffsRootFd guards the bpffs root via O_PATH|O_NOFOLLOW.
@@ -1479,6 +1556,13 @@ std::uint32_t apply_request(const ApplyRequest& req)
         // cover the new CIDR axis pinned maps (cidr_allowlist_a/_b +
         // cidr_rulesets). Same reuse_fd mechanism per slot — single
         // active_idx shared. Order doesn't matter (each slot is independent).
+        //
+        // §5.29 (MVP-3.4) extension: grows 9 → 11 to include the new
+        // skeleton maps (rules + action_table). Reuse semantic is identical
+        // (LIBBPF_PIN_BY_NAME on both). Datapath does NOT consult them per
+        // PI-28; reuse is needed to preserve their pin-dentry across the
+        // hot-swap so a parallel `bpftool map dump pinned ${PIN_DIR}/rules`
+        // observer doesn't ENOENT mid-reattach.
         const ReuseSpec reuse_specs[] = {
             { skel->maps.allowlist_a,      XDPMF_MAP_INNER_A_NAME             },
             { skel->maps.allowlist_b,      XDPMF_MAP_INNER_B_NAME             },
@@ -1489,6 +1573,8 @@ std::uint32_t apply_request(const ApplyRequest& req)
             { skel->maps.active_idx,       XDPMF_MAP_ACTIVE_IDX_NAME          },
             { skel->maps.defaults,         XDPMF_MAP_DEFAULTS_NAME            },
             { skel->maps.stats,            XDPMF_MAP_STATS_NAME               },
+            { skel->maps.rules,            XDPMF_MAP_RULES_NAME               },
+            { skel->maps.action_table,     XDPMF_MAP_ACTION_TABLE_NAME        },
         };
         for (const ReuseSpec& r : reuse_specs) {
             const std::string p = pin_dir + "/" + r.name;
@@ -1552,6 +1638,29 @@ std::uint32_t apply_request(const ApplyRequest& req)
             write_default_slot(defaults_fd, inactive, default_action);
         }
 
+        // §5.29 (MVP-3.4) step 8.5: populate the skeleton maps in-place.
+        // `rules` + `action_table` are SHARED (not parallel-swapped) per
+        // D-3.4-4 because the datapath does NOT consult them; the
+        // active_idx flip below does not gate their content. Writing them
+        // here BEFORE the flip leaves the system in a consistent state
+        // across reattach. PI-29 + PI-28 (datapath byte-equivalent).
+        {
+            const int rules_fd = bpf_map__fd(skel->maps.rules);
+            if (rules_fd < 0) {
+                throw_loader(LoaderError::LoadFailed,
+                             "rules fd unavailable (reattach)");
+            }
+            populate_rules_skeleton(rules_fd, req.config.rules);
+        }
+        {
+            const int at_fd = bpf_map__fd(skel->maps.action_table);
+            if (at_fd < 0) {
+                throw_loader(LoaderError::LoadFailed,
+                             "action_table fd unavailable (reattach)");
+            }
+            populate_action_table(at_fd);
+        }
+
         // Atomic prog swap. The OLD prog has been reading from these same
         // (reused) maps; after update_program, the NEW prog reads from them.
         bpf_link* link = bpf_link__open(link_pin_path_for(req.iface).c_str());
@@ -1589,6 +1698,10 @@ std::uint32_t apply_request(const ApplyRequest& req)
     struct PinSpec { bpf_map* map; const char* name; };
     // §5.27 D-3.1-4 mirror: 9 maps to pin (was 6) — adds the 3 CIDR-axis
     // pinned maps (cidr_allowlist_a/_b + cidr_rulesets) per §5.27 Q1 AS1.
+    // §5.29 (MVP-3.4) extension: 11 maps total — adds the two new skeleton
+    // maps `rules` + `action_table` per HG-3.4-1. Both use LIBBPF_PIN_BY_NAME
+    // (same mechanism as the existing 9) so a future reattach reuse-loop sees
+    // them by name. PI-29 (declared + populated, not consulted).
     const PinSpec pin_specs[] = {
         { skel->maps.allowlist_a,      XDPMF_MAP_INNER_A_NAME             },
         { skel->maps.allowlist_b,      XDPMF_MAP_INNER_B_NAME             },
@@ -1599,6 +1712,8 @@ std::uint32_t apply_request(const ApplyRequest& req)
         { skel->maps.active_idx,       XDPMF_MAP_ACTIVE_IDX_NAME          },
         { skel->maps.defaults,         XDPMF_MAP_DEFAULTS_NAME            },
         { skel->maps.stats,            XDPMF_MAP_STATS_NAME               },
+        { skel->maps.rules,            XDPMF_MAP_RULES_NAME               },
+        { skel->maps.action_table,     XDPMF_MAP_ACTION_TABLE_NAME        },
     };
     for (const PinSpec& s : pin_specs) {
         const std::string p = pin_dir + "/" + s.name;
@@ -1658,6 +1773,25 @@ std::uint32_t apply_request(const ApplyRequest& req)
             throw_loader(LoaderError::LoadFailed, "defaults map fd unavailable");
         }
         write_default_slot(defaults_fd, 0u, default_action);
+    }
+
+    // §5.29 (MVP-3.4) step 8.5: populate the skeleton maps on fresh attach.
+    // Same payload as the reattach path above (D-3.4-8 clear-and-rewrite).
+    // PI-28: datapath does NOT read these; the population is purely for
+    // bpftool-map-dump observability + MVP-3.4b forward-compat. PI-29.
+    {
+        const int rules_fd = bpf_map__fd(skel->maps.rules);
+        if (rules_fd < 0) {
+            throw_loader(LoaderError::LoadFailed, "rules map fd unavailable");
+        }
+        populate_rules_skeleton(rules_fd, req.config.rules);
+    }
+    {
+        const int at_fd = bpf_map__fd(skel->maps.action_table);
+        if (at_fd < 0) {
+            throw_loader(LoaderError::LoadFailed, "action_table map fd unavailable");
+        }
+        populate_action_table(at_fd);
     }
 
     // First attach: create+pin the XDP link with the operator-selected mode.

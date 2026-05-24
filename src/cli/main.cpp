@@ -10,7 +10,8 @@
 #include <system_error>
 #include <variant>
 
-#include "apply.hpp"  // §5.26 Q4 G1: apply subcommand dispatcher
+#include "apply.hpp"   // §5.26 Q4 G1: apply subcommand dispatcher
+#include "bypass.hpp"  // §5.29 HG-3.4-2: bypass subcommand dispatcher (MVP-3.4)
 #include "cli.hpp"
 #include "lib/loader.hpp"
 
@@ -54,6 +55,14 @@ int run_apply(const xdpmf::ApplyConfig& cfg)
                                          cfg.config_path, cfg.iface, prog_id);
     std::fputs(line.c_str(), stdout);
     return kExitOk;
+}
+
+/* §5.29 HG-3.4-2 (MVP-3.4): `bypass --iface <X> [--unsafe] [--reason ...]`
+ * dispatcher. bypass_main() handles tty-check, audit-log, and delegates to
+ * loader::detach() via the existing public surface (PI-7-3.4 / PI-30). */
+int run_bypass(const xdpmf::BypassConfig& cfg)
+{
+    return xdpmf::bypass_main(cfg);
 }
 
 /* Map an xdpmf LoaderError carried inside std::system_error directly to
@@ -109,6 +118,8 @@ int main(int argc, char* argv[])
                     return run_detach(arg);
                 } else if constexpr (std::is_same_v<T, xdpmf::ApplyConfig>) {
                     return run_apply(arg);
+                } else if constexpr (std::is_same_v<T, xdpmf::BypassConfig>) {
+                    return run_bypass(arg);
                 } else {
                     static_assert(sizeof(T) == 0, "unhandled ParsedCommand alternative");
                 }

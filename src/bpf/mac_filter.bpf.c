@@ -140,6 +140,34 @@ struct {
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } stats SEC(".maps");
 
+/*
+ * §5.29 (MVP-3.4) HG-3.4-1: rules + action_table SKELETON. DECLARED here +
+ * POPULATED from config in userspace at apply time; the xdp datapath
+ * (mac_filter_prog below) does NOT consult either map per-packet (PI-28
+ * function-body byte-equivalence). MVP-3.4b will wire datapath consumption
+ * once PI-13-3.1 adjudication on the inner-allowlist-value extension lands.
+ *
+ * `rules` is a SHARED ARRAY (NOT parallel-swapped via ARRAY_OF_MAPS, D-3.4-4):
+ * because the datapath ignores it this cycle, atomic-swap is unnecessary;
+ * clear-and-rewrite on every apply suffices. MVP-3.4b will revisit if the
+ * map becomes datapath-consulted.
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __type(key, __u32);
+    __type(value, struct rule_entry);
+    __uint(max_entries, XDPMF_ALLOWLIST_MAX);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} rules SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __type(key, __u32);
+    __type(value, struct action_entry);
+    __uint(max_entries, ACTION_MAX);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} action_table SEC(".maps");
+
 /* PERCPU bump: pointer returned is to this CPU's slot only. No atomic. */
 static __always_inline void bump_stat(__u32 idx)
 {

@@ -81,6 +81,7 @@ std::string usage_text()
         "  {0} attach --iface <IFNAME> [--allow <MAC>[,<MAC>...] ...] [--mode <M>]\n"
         "  {0} detach --iface <IFNAME>\n"
         "  {0} apply  --iface <IFNAME> -f <PATH> [--mode <M>]\n"
+        "  {0} bypass --iface <IFNAME> [--unsafe] [--reason \"<text>\"]\n"
         "  {0} --help | --version\n"
         "\n"
         "Options:\n"
@@ -95,6 +96,10 @@ std::string usage_text()
         "                              XDP attach mode (attach / apply only;\n"
         "                              default generic). detach auto-detects\n"
         "                              from the attached program.\n"
+        "  --unsafe                    bypass: required in non-interactive context;\n"
+        "                              suppresses interactive y/N prompt.\n"
+        "  --reason \"<text>\"           bypass: audit-log reason (free-form; default\n"
+        "                              UNSPECIFIED; capped at 256 bytes).\n"
         "\n"
         "Exit codes: 0 ok, 1 usage, 2 load-fail, 3 attach-fail,\n"
         "            4 attach-refused-alien, 5 detach-fail, 6 permission,\n"
@@ -262,6 +267,32 @@ ParsedCommand parse_detach(std::span<char* const> args)
     return cfg;
 }
 
+/* §5.29 HG-3.4-2: `bypass --iface <X> [--unsafe] [--reason "<text>"]`.
+ * --iface is REQUIRED; --unsafe is a boolean flag; --reason takes a value
+ * (free-form, may contain spaces — consumed as a single string). */
+ParsedCommand parse_bypass(std::span<char* const> args)
+{
+    BypassConfig cfg;
+    std::size_t i = 0;
+    while (i < args.size()) {
+        std::string_view tok{args[i]};
+        if (tok == "--iface" || tok.starts_with("--iface=")) {
+            cfg.iface = std::string{consume_flag_value(args, i, "iface")};
+        } else if (tok == "--unsafe") {
+            cfg.unsafe = true;
+            ++i;
+        } else if (tok == "--reason" || tok.starts_with("--reason=")) {
+            cfg.reason = std::string{consume_flag_value(args, i, "reason")};
+        } else {
+            throw CliError(std::format("unknown bypass flag: '{}'", tok));
+        }
+    }
+    if (cfg.iface.empty()) {
+        throw CliError("bypass requires --iface <IFNAME>");
+    }
+    return cfg;
+}
+
 }  // namespace
 
 ParsedCommand parse(int argc, char* const argv[])
@@ -285,6 +316,9 @@ ParsedCommand parse(int argc, char* const argv[])
     }
     if (sub == "apply") {
         return parse_apply(rest);
+    }
+    if (sub == "bypass") {
+        return parse_bypass(rest);
     }
     throw CliError(std::format("unknown subcommand: '{}'", sub));
 }

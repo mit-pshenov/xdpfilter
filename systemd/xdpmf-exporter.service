@@ -1,0 +1,36 @@
+# systemd unit for xdpmf-exporter (MVP-3.4 / design §5.29 Q5 N3).
+#
+# Single-instance daemon (NOT @-templated): scans ${XDPMF_BPFFS_ROOT}/*/stats
+# at every Prometheus scrape and emits per-iface labels — operators add or
+# remove ifaces via xdpmacfilter@<iface>.service; the exporter picks them up
+# dynamically (Q4 E1 direct read on scrape).
+#
+# Capability set is INTENTIONALLY MINIMAL — CAP_BPF only (D-3.4-6):
+#   - NO program load (no verifier-pass needed) → no CAP_SYS_ADMIN / CAP_PERFMON
+#   - NO attach/detach (no xdp ioctl) → no CAP_NET_ADMIN
+#   - NO rlimit-memlock (no map creation; reads existing pinned maps) → no CAP_SYS_RESOURCE
+# Future cap changes MUST be smoke-checked via
+#   capsh --keep=1 --user=root --inh=cap_bpf --addamb=cap_bpf -- \
+#       -c '/usr/bin/xdpmf-exporter --port 9417'
+# against a populated bpffs fixture before commit (anti-misdiagnosis lesson
+# from §5.28 D-3.3-6 rework round 1, see §5.29 D-3.4-6).
+
+[Unit]
+Description=XDP MAC/CIDR filter Prometheus exporter
+Documentation=file:///usr/share/doc/xdpmacfilter/FLEET_DEPLOYMENT.md
+After=network-pre.target
+Wants=network-pre.target
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/xdpmf-exporter --port 9417 --bind 127.0.0.1
+Restart=on-failure
+RestartSec=5
+AmbientCapabilities=CAP_BPF
+CapabilityBoundingSet=CAP_BPF
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

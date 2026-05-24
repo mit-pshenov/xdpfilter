@@ -10,8 +10,8 @@ endif()
 
 project(xdpmacfilter
     LANGUAGES C CXX
-    VERSION   0.5.0
-    DESCRIPTION "MVP-3.2 L2 MAC + L3 src-CIDR allow-list XDP filter (OR-compose)"
+    VERSION   0.6.0
+    DESCRIPTION "MVP-3.4 L2 MAC + L3 src-CIDR allow-list XDP filter (OR-compose) + Prometheus exporter"
 )
 
 # §5.25 P3: version-string sync — generate include/version.h from the
@@ -116,11 +116,37 @@ add_dependencies(xdpmf_internal mac_filter_skel)
 
 add_subdirectory(src/cli)
 
-# Sanitizer injection (design §5.18; §5.26 Q1 R1 update): apply ASAN+UBSAN
-# flags to BOTH xdpmf_internal AND xdpmacfilter so a sanitizer-enabled
-# build doesn't mix instrumented and non-instrumented TUs (ASAN refuses
-# mixed objects at link/runtime). target_*_options is scoped; flag never
-# reaches the BPF object.
+# §5.29 (MVP-3.4) D-3.4-1 + D-3.4-2: xdpmf-exporter is a SEPARATE binary
+# living under src/exporter/, linking the same xdpmf_internal STATIC lib as
+# xdpmacfilter — no third-party HTTP library dep (D-3.4-3). Read-only by
+# construction (PI-31): no map mutation / attach / detach. install() goes
+# alongside the loader under ${CMAKE_INSTALL_BINDIR}.
+add_executable(xdpmf-exporter
+    src/exporter/main.cpp
+    src/exporter/http.cpp
+    src/exporter/prom_format.cpp
+    src/exporter/stats_reader.cpp
+)
+target_include_directories(xdpmf-exporter PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_BINARY_DIR}/include
+)
+target_include_directories(xdpmf-exporter SYSTEM PRIVATE
+    ${CMAKE_BINARY_DIR}
+)
+target_link_libraries(xdpmf-exporter PRIVATE xdpmf_internal)
+add_dependencies(xdpmf-exporter mac_filter_skel)
+
+include(GNUInstallDirs)
+install(TARGETS xdpmacfilter xdpmf-exporter
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+# Sanitizer injection (design §5.18; §5.26 Q1 R1 update; §5.29 extension):
+# apply ASAN+UBSAN flags to xdpmf_internal AND BOTH binaries so a sanitizer-
+# enabled build doesn't mix instrumented and non-instrumented TUs (ASAN
+# refuses mixed objects at link/runtime). target_*_options is scoped; flag
+# never reaches the BPF object.
 if(XDPMF_SANITIZERS)
     target_compile_options(xdpmf_internal PRIVATE
         -fsanitize=address,undefined
@@ -133,6 +159,13 @@ if(XDPMF_SANITIZERS)
     target_link_options(xdpmacfilter PRIVATE
         -fsanitize=address,undefined
     )
+    target_compile_options(xdpmf-exporter PRIVATE
+        -fsanitize=address,undefined
+        -fno-omit-frame-pointer
+    )
+    target_link_options(xdpmf-exporter PRIVATE
+        -fsanitize=address,undefined
+    )
 endif()
 
 # §5.28 D-3.3-9: install the systemd template unit at `cmake --install`
@@ -140,9 +173,14 @@ endif()
 # operators who handle the unit out-of-band (distro packagers) can set
 # -DXDPMF_INSTALL_SYSTEMD_UNIT=OFF. System install of the unit into
 # /etc/systemd/system or daemon-reload is operator's call (not the build).
+#
+# §5.29 (MVP-3.4) extension: also install the exporter unit (single-instance,
+# Q5 N3) under the same option — same operator deploy story for both units.
 option(XDPMF_INSTALL_SYSTEMD_UNIT "Install systemd unit template" ON)
 if(XDPMF_INSTALL_SYSTEMD_UNIT)
-    install(FILES ${CMAKE_SOURCE_DIR}/systemd/xdpmacfilter@.service
+    install(FILES
+            ${CMAKE_SOURCE_DIR}/systemd/xdpmacfilter@.service
+            ${CMAKE_SOURCE_DIR}/systemd/xdpmf-exporter.service
         DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/systemd/system/)
 endif()
 
