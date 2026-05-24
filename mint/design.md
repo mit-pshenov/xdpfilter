@@ -5156,9 +5156,15 @@ Additions to the existing header (post-§5.27):
  * the address in NETWORK BYTE ORDER (big-endian; matches `iphdr.saddr`
  * on the wire — no swap needed in datapath). Total size = 8 bytes. */
 struct xdpmf_cidr_v4 {
-    __u32 prefixlen;    /* bits in network mask, range [0, 32] */
-    __u32 addr;         /* IPv4 address, big-endian (network order) */
+    unsigned int prefixlen;  /* bits in network mask, range [0, 32] */
+    unsigned int addr;       /* IPv4 address, big-endian (network order) */
 } __attribute__((packed));
+/* NOTE: `unsigned int` (not `__u32`) per the existing shared-header
+ * convention — this header is included from BOTH userspace C++
+ * (where `__u32` isn't a libc type) AND BPF C. Mirrors `xdpmf_mac`'s
+ * use of `unsigned char` over `__u8` at mac_filter.h:24. Structurally
+ * byte-identical on all supported architectures. [POST-REVIEW SWEEP
+ * round 1, OOT-1 inline-merge.] */
 
 #define XDPMF_MAP_CIDR_RULESETS_OUTER_NAME  "cidr_rulesets"     /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] of LPM_TRIE fds */
 #define XDPMF_MAP_CIDR_INNER_A_NAME         "cidr_allowlist_a"  /* inner slot 0, LPM_TRIE */
@@ -5190,7 +5196,13 @@ keep their indices 0/1/2. Reviewer's PI-10 check accepts the
 diff pattern: new enum value `STAT_PASS_CIDR = 3` added + STAT_MAX
 incremented `3 → 4`; existing enum values byte-identical.
 
-##### Userspace (`src/lib/cidr.hpp`, namespace `xdpmf`)
+##### Userspace (`src/lib/cidr.hpp`, namespace `xdpmf::cidr`)
+
+<!-- [POST-REVIEW SWEEP round 1, OOT-2 inline-merge.] Sub-namespace
+     `xdpmf::cidr` mirrors the existing `xdpmf::yaml` precedent for
+     parser modules (scope-narrowing). Call site: `xdpmf::cidr::
+     parse_cidr_v4(...)`. -->
+
 
 NEW file. Pure parser + struct converter (no I/O, no kernel touch):
 
@@ -5314,11 +5326,16 @@ either (the new field is inside the nested `RuleMatch`).
 
 `xdpmacfilter apply -f <file> --iface <iface>` / `attach --allow
 <MAC>` / `detach` / `--help` / `--version` — all UNCHANGED.
-`--help` text gains ONE line mentioning the new `src_cidr` match-
-key under the `apply` subcommand description (impl-flexible
-wording; tester asserts only that `src_cidr` substring appears
-in `--help` post-§5.27). The grammar block at the top of §4.1
-needs NO change (only operator-facing help-text expansion).
+`--help` text MAY (not MUST) gain a line mentioning the new
+`src_cidr` match-key under the `apply` subcommand description
+(impl-flexible wording AND impl-flexible presence per the
+verifiable-invariant block below; tester does NOT assert
+presence — `src_cidr` discoverability via docs/CHANGELOG is
+sufficient). The grammar block at the top of §4.1 needs NO
+change. [POST-REVIEW SWEEP round 1, OOT-3 inline-merge: normalized
+"gains ONE line" → "MAY gain a line" to match verifiable-invariant
+section's "MAY list" relaxation; impl correctly chose the relaxed
+reading.]
 
 ##### Loader public API (`src/lib/loader.hpp`) — ZERO diff
 

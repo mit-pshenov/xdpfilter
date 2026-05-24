@@ -1,4 +1,4 @@
-# Review — MVP-3.1: config-first foundation (brownfield, mint triangulation)
+# Review — MVP-3.2: L3 src-CIDR rule type (mint triangulation, brownfield 5-point)
 
 ## Verdict
 `pass`
@@ -7,164 +7,158 @@
 
 | Framework point | Findings | Tags |
 |---|---|---|
-| 1. Spec ↔ Code | 0 | — (D-3.1-1..D-3.1-4 all negotiated per impl-notes; architect EDIT-1 approved D-3.1-1) |
-| 2. Spec ↔ Tests | 0 hard | (2 soft SPEC-UNTESTED noted as OOT, both covered indirectly by other suites) |
-| 3. Code ↔ Tests | 0 | 27/27 pass (1 legitimate skip = T_DROP_MALFORMED, kernel-pad runt skip per §6.5; reproduced locally 151s) |
-| 4. Out-of-Scope Drift | 0 | (no CIDR axis, no per-rule counters, no exporter, no daemon — §7 OOS fences intact) |
-| 5. Behaviour preserved (brownfield) | 0 | PI-1..PI-14 all hold |
+| 1. Spec ↔ Code | 0 | — |
+| 2. Spec ↔ Tests | 0 | — |
+| 3. Code ↔ Tests | 0 (30/31 PASS + 1 legitimate SKIP) | — |
+| 4. Out-of-Scope Drift | 0 | — |
+| 5. Behaviour preserved (PI-1..PI-18) | 0 | — |
+| Out-of-triangulation | 3 | — (all `inline-merge`) |
 
-## Spec ↔ Code (point 1) — verified
+## Findings (each with cite + recommendation)
 
-- **FileList match**: all NEW files exist at spec'd paths (`src/lib/yaml_subset.{cpp,hpp}`, `src/lib/config.{cpp,hpp}`, `src/lib/apply_internal.hpp`, `src/cli/apply.{cpp,hpp}`); all EDITED files relocated/modified per §5.26 §EDITED list. `find src -type d` = `src/{lib,cli,common,bpf}` exactly (PI-11 holds; `src/loader/` absent).
-- **Decisions Q1-Q6 + HG1-HG3 honored**:
-  - Q1 R1+STATIC: `xdpmf_internal` STATIC lib at `CMakeLists.txt:99`, binary at `src/cli/CMakeLists.txt`; identity helpers stay in loader.cpp anon ns (no `src/lib/identity.*`). ✓
-  - Q2 A1: BPF program implements `active_idx_p → rulesets → inner` chained lookup at `src/bpf/mac_filter.bpf.c:131-149`; Q2-extension defaults[active] at lines 152-161. ✓
-  - Q3 BC1: `loader::attach()` synthesizes Config{Drop, Pass-rules…} and routes through `internal::apply_request` at `src/lib/loader.cpp:1121-1139`. ✓
-  - Q4 G1: `apply` subcommand at `src/cli/cli.cpp:207-239`; main.cpp dispatch arm at `src/cli/main.cpp:107+`. ✓
-  - Q5 SV2: optional, default 1, only `{1}` supported, ConfigError on other values at `src/lib/config.cpp:146-155`. ✓
-  - Q6 M1: all new constants in `src/common/mac_filter.h:51-61` (additions-only — PI-10 holds). ✓
-  - HG1 (custom YAML): `grep -r 'yaml-cpp\|rapidyaml' src/ CMakeLists.txt cmake/` returns empty. Custom parser at `src/lib/yaml_subset.cpp` (719 LOC) implements full Q-HG1 reject table (tab indentation, flow form, anchors/aliases/tags, block scalars, booleans, multi-doc, BOM, 1MiB cap, 4KiB scalar cap, nesting≤8, duplicate keys) — verified via `grep -n` on yaml_subset.cpp matching every Q-HG1 row. ✓
-  - HG2 P0a: link pin at `${PIN_DIR}/link` via `bpf_link_create + bpf_obj_pin` at `src/lib/loader.cpp:966-994`; idempotent reattach via `bpf_link__open + bpf_link__update_program` at `src/lib/loader.cpp:1467-1485`. ✓
-  - HG3 trust_model: parsed at `src/lib/loader.cpp:934-946`; strict=default, fleet=relaxed-§5.4-only, garbage=ConfigError exit 9; §5.19 + §5.22 unaffected (fetch_prog_identity still runs in fleet branch, only state-(c) disposition diverges at `src/lib/loader.cpp:1338-1361`). Stderr log unconditional at `src/lib/loader.cpp:950-954`. ✓
-- **Negotiated deviations** (impl-notes §D-3.1-*):
-  - D-3.1-1 (`src/lib/apply_internal.hpp`): architect EDIT-1 explicitly approved (design.md §5.26 NEW FileList row 4385 lists this file). ✓
-  - D-3.1-2 (`${PIN_DIR}/allowlist` legacy alias): design §5.26 Q6 M1 grep claim ("existing 20 ctests do NOT poke `allowlist` pin path directly") was factually wrong — confirmed via `grep -n allowlist tests/T_*.sh`: 4 hits (T_LOAD_ATTACH.sh:29, T_ATTACH_TAG_MISMATCH.sh:275, T_MODE_GENERIC_DEFAULT.sh:95, T_BPFFS_ROOT_SYMLINK.sh:300). Impl adds the alias at `src/lib/loader.cpp:1517-1534` to preserve PI-6. Honored as legitimate impl-flagged workaround for a design grep-error; PI-6 holds via this alias.
-  - D-3.1-3 (file-IO → CliError exit 1): matches design Q4 explicit: "non-existent / unreadable → exit 1 (CLI usage error), NOT exit 9". `src/cli/apply.cpp:62-65` + `:81-83`. ✓
-  - D-3.1-4 (state-b reattach via `bpf_map__reuse_fd` for all 6 maps): preserves T_ATTACH_TAG_MISMATCH negation control (new prog_id) AND keeps stats accumulating across applies (PI-13 spirit) via reuse of pinned stats FD. Implementation at `src/lib/loader.cpp:1407-1495`. ✓
-
-## Spec ↔ Tests (point 2) — verified
-
-Each §6.21-§6.27 TestStrategy item has a matching test asserting the spec'd outcome:
-- §6.21 → `tests/T_APPLY_VALID_CONFIG.sh` — rc=0, trust_model=strict in stderr, link/active_idx/inner pin existence, PASS/DROP_DENY deltas, blanket-pass sub-case (lines 38-230). Negation control at line 184 (MAC_NOT_IN_FIXTURE → STAT_DROP_DENY += 1).
-- §6.22 → `tests/T_APPLY_REJECTS_MALFORMED.sh` — 5 sub-cases each asserting rc=9 + `xdpmacfilter: config error:` + (for sub-cases 1,2,3,5) `<line>:<col>` + (for sub-case 4) both file's iface name and `--iface` value + no XDP attached + no bpffs dir (lines 138-142). Cross-test negation: §6.21 valid → exit 0 is the negation pair.
-- §6.23 → `tests/T_APPLY_ATOMIC_SWAP_NO_DROP.sh` — concurrent injector (1 long-lived python AF_PACKET process, not bash loop — `lines 93-131`), 2s baseline window, swap mid-stream, post-swap drop_count=0, post-swap pass_count ≥ LOWER_BOUND, active_idx flip asserted (line 221-224), negation control at line 295 (MAC_DENY → drop_delta=1 proves drop machinery works). SKIP at line 179 if baseline below threshold.
-- §6.24 → `tests/T_APPLY_REPLACES_RULESET.sh` — bidirectional A→B→A swap with MAC_Y as discriminator; step 6 (line 189) is the negation differential proving second-apply-A actually replaces (not leaks B state).
-- §6.25 → `tests/T_LINK_PERSIST_ACROSS_LOADER_EXIT.sh` — pin survives loader exit (line 85), XDP slot still occupied (line 91), MAC_X enforced post-exit (line 128), MAC_Y dropped post-exit (line 141 — negation), re-apply B → MAC_Y now passes (line 170 — bidirectional differential).
-- §6.26 → `tests/T_TRUST_MODEL_FLEET_RELAXES_GATE.sh` — 4 sub-cases: strict-default (line 86), strict-explicit (line 114), fleet bypasses (line 142, true differential), garbage→exit 9 fail-closed (line 181). Uses REAL alien fixture `xdp_pass.bpf.o` per §5.26 sub-decision.
-- §6.27 → `tests/T_EXIT_CODE_9_ON_CONFIG_ERROR.sh` — bare-bones exit-9 audit; rc==9, stderr starts with `xdpmacfilter: config error:`, contains `unknown trust model`, contains rejected value. NO veth, NO root, NO fixture deps. Cross-test negation: T_CLI_HELP_VERSION exit-0 path.
-
-**Negation controls**: every new suite has either an in-suite negation step (§6.21, §6.22 cross-test, §6.23, §6.24, §6.25) OR is itself a differential test (§6.26 strict-vs-fleet, §6.27 vs T_CLI_HELP_VERSION). NO `[NO-NEGATION-CONTROL]`.
-
-**Circular tests**: none. All assertions hit observable kernel state (bpftool map dumps, packet injection, exit codes, stderr) not impl-internal state.
-
-## Code ↔ Tests (point 3) — verified
-
-- `ctest --output-on-failure -j 1` re-run by reviewer (151.02s, captured /tmp/mint-review-tests-202605241600.log): 26/27 PASS + 1 SKIP (T_DROP_MALFORMED, the same legitimate kernel-pad skip from MVP-2 baseline). Reproduces tester's mint/test-run.log result byte-equivalently (tester's run 155.84s, mine 151.02s — same outcome set).
-- `UNEXERCISED-EXPORT` check: `apply_config_inmemory()` (apply.hpp:38) — exercised transitively via `apply_config()→apply_config_inmemory()` at `src/cli/apply.cpp:114`; the `apply -f` path covers it on every §6.21-§6.27 invocation. Sole "direct" call would be a future external caller; semantically exercised. Pass.
-
-## Out-of-Scope Drift (point 4) — verified
-
-- §7 fences searched: no CIDR axis in src/ (matches §5.26 OOS line 4602). No per-rule counter machinery (stats stay at the §5.23 PERCPU 3-counter shape). No exporter binary, no systemd template, no daemon, no SONAME-committed libxdpmf.so, no AF_XDP, no JSON logs, no sFlow, no SIGHUP reload, no `--dry-run`, no `--validate-only`. ✓
-- No identity helper extraction (`src/lib/identity.{cpp,hpp}` absent per Q1 R1 carve-out). ✓
-- No multi-iface YAML structure. ✓
-- No schema_version other than 1 supported (`src/lib/config.cpp:148-155`). ✓
-
-## Behaviour preserved (point 5, brownfield) — verified
-
-| PI | Mechanism | Evidence | Status |
-|---|---|---|---|
-| PI-1 | §5.4 alien gate ENFORCED in strict | T_ATTACH_ALIEN_REFUSAL + T_ATTACH_TAG_MISMATCH both PASS; T_TRUST_MODEL sub-cases 1+2 confirm exit 4 + alien preserved | ✓ |
-| PI-2 | §5.19 name-check in BOTH modes | T_ATTACH_ALIEN_REFUSAL PASS in strict; fleet's stderr at `src/lib/loader.cpp:1347-1352` proves `is_ours=false` was COMPUTED (otherwise the disposition would diverge), then disposition relaxed; T_TRUST_MODEL sub-case 3 verifies alien replacement (not "treated as ours and skipped") | ✓ |
-| PI-3 | §5.22 Item 1 tag-check in BOTH modes | T_ATTACH_TAG_MISMATCH PASS in strict — `src/lib/loader.cpp:715-719` `is_ours = name_matches && tag == self_tag` always runs | ✓ |
-| PI-4 | §5.22 Item 2 path discipline UNCONDITIONAL | T_BPFFS_ROOT_SYMLINK PASS; BpffsRootFd at `src/lib/loader.cpp:358-447` always opened before trust-model branching | ✓ |
-| PI-5 | §5.24 kernel-version probe | T_VERIFIER_REJECT PASS; `kernel_version_probe()` called at `src/lib/loader.cpp:1284` (attach) + `:1145` (detach) | ✓ |
-| PI-6 | 20 pre-existing ctests pass byte-equivalent | `git diff --stat 4440920 HEAD -- 'tests/T_*.sh'`: only 7 NEW files, ZERO modifications to pre-existing T_*.sh. ctest run: 19 PASS + 1 SKIP (matches prior baseline) | ✓ |
-| PI-7 | `loader.hpp` diff = exactly one enumerator line | `git diff -M 4440920 HEAD -- src/loader/loader.hpp src/lib/loader.hpp`: rename + `+    ConfigError        = 9,` — single-line addition. No reformatting | ✓ |
-| PI-8 | `--version` reports `xdpmacfilter 0.3.0` | CMakeLists.txt:13 VERSION 0.3.0; T_CLI_HELP_VERSION PASS | ✓ |
-| PI-9 | `--help` format unchanged + adds apply line | usage_text() at `src/cli/cli.cpp:79-103` has `apply` row; T_CLI_HELP_VERSION PASS (ERE forward-compat) | ✓ |
-| PI-10 | mac_filter.h existing constants UNCHANGED | `git diff 4440920 HEAD -- src/common/mac_filter.h`: only additions (lines 51-61 new constants); existing xdpmf_mac/mac_filter_stat/XDPMF_BPFFS_ROOT/XDPMF_ALLOWLIST_MAX/XDPMF_MAP_ALLOWLIST_NAME/XDPMF_MAP_STATS_NAME untouched | ✓ |
-| PI-11 | src layout = lib+cli+common+bpf, no src/loader/ | `find src -type d` returns exactly those 4 dirs | ✓ |
-| PI-12 | Pins host-global, visible via nsenter --net | common.sh:51 `NSEXEC="sudo -n nsenter --net=..."` (mount-ns preserved per §5.25 EDIT-15); §6.21 + §6.23 + §6.24 + §6.25 all read pins via `${PIN_DIR}` after netns entry — all PASS | ✓ |
-| PI-13 | stats map type + read protocol UNCHANGED | mac_filter.bpf.c:92-98 still BPF_MAP_TYPE_PERCPU_ARRAY; T_PERCPU_STATS_SUM PASS; D-3.1-4 reuse_fd preserves stats FD on reattach (no map recreation) | ✓ |
-| PI-14 | --mode flag UNCHANGED + forwarded by apply | T_MODE_GENERIC_DEFAULT + T_MODE_NATIVE_UNSUPPORTED + T_MODE_DETACH_REJECTS all PASS; apply parser accepts --mode at cli.cpp:225-227 | ✓ |
-
-No [REGRESSION] (prior baseline 19P+1S; current 26P+1S — strict superset, same skip). No [UNRELATED-EDIT] (every touched file is in §5.26 EDITED or NEW list). No [INVARIANT-VIOLATED].
+None blocking. Three documentation-shape OOT items listed below.
 
 ## Test execution
 
-Last 20 lines of /tmp/mint-review-tests-202605241600.log:
+Independent re-run on this reviewer machine, captured to
+`/tmp/mint-review-tests-202605241845.log`. Last 30 lines:
+
 ```
-21/27 Test #21: T_APPLY_VALID_CONFIG ................   Passed    4.80 sec
-22/27 Test #22: T_APPLY_REJECTS_MALFORMED ...........   Passed    1.57 sec
-23/27 Test #23: T_APPLY_REPLACES_RULESET ............   Passed    4.91 sec
-24/27 Test #24: T_LINK_PERSIST_ACROSS_LOADER_EXIT ...   Passed    5.88 sec
-25/27 Test #25: T_TRUST_MODEL_FLEET_RELAXES_GATE ....   Passed    3.34 sec
-26/27 Test #26: T_APPLY_ATOMIC_SWAP_NO_DROP .........   Passed    7.39 sec
-27/27 Test #27: T_EXIT_CODE_9_ON_CONFIG_ERROR .......   Passed    0.03 sec
+20/31 Test #20: T_VERIFIER_REJECT ...................   Passed   12.15 sec
+21/31 Test #21: T_APPLY_VALID_CONFIG ................   Passed    4.93 sec
+22/31 Test #22: T_APPLY_REJECTS_MALFORMED ...........   Passed    2.04 sec
+23/31 Test #23: T_APPLY_REPLACES_RULESET ............   Passed    5.19 sec
+24/31 Test #24: T_LINK_PERSIST_ACROSS_LOADER_EXIT ...   Passed    6.02 sec
+25/31 Test #25: T_TRUST_MODEL_FLEET_RELAXES_GATE ....   Passed    3.27 sec
+26/31 Test #26: T_APPLY_ATOMIC_SWAP_NO_DROP .........   Passed    7.49 sec
+27/31 Test #27: T_EXIT_CODE_9_ON_CONFIG_ERROR .......   Passed    0.02 sec
+28/31 Test #28: T_PASS_CIDR .........................   Passed    1.55 sec
+29/31 Test #29: T_DROP_CIDR_NOT_IN_RANGE ............   Passed    1.34 sec
+30/31 Test #30: T_PASS_MAC_OR_CIDR ..................   Passed    1.72 sec
+31/31 Test #31: T_CIDR_ATOMIC_SWAP_NO_DROP ..........   Passed    6.49 sec
 
-100% tests passed, 0 tests failed out of 27
-Total Test time (real) = 151.02 sec
-
+100% tests passed, 0 tests failed out of 31
+Total Test time (real) = 176.53 sec
 The following tests did not run:
-	  5 - T_DROP_MALFORMED (Skipped)
+  5 - T_DROP_MALFORMED (Skipped)
 ```
+
+Third independent confirmation: matches impl's pre-Phase-B smoke
+(30/31) and tester's formal Phase B (30/31). T_DROP_MALFORMED skip is
+the longstanding kernel-pad behaviour per §6.5 — unrelated to MVP-3.2.
+
+## Point-by-point evidence
+
+### Point 1 — Spec ↔ Code (Design §5.27 ↔ source)
+
+- **FileList NEW**: `src/lib/cidr.{cpp,hpp}` present ✓.
+  - `cidr.hpp:33-36` declares `parse_cidr_v4(string_view, string_view, uint32_t, uint32_t) → xdpmf_cidr_v4` — byte-matches design §5.27 lines 5201-5205.
+  - `cidr.cpp:69-72` performs v6 detection by scanning for `:` BEFORE the slash-split → matches design §5.27 line 5114 ("Validator detects v6 by scanning for `:` in the value").
+  - `cidr.cpp:104-114` uses `inet_pton(AF_INET, ...)` per design §5.27 line 5216.
+- **FileList EDITED**:
+  - `src/bpf/mac_filter.bpf.c`: BPF datapath at lines 152-236 implements Q2 OR1 (MAC HASH first short-circuit at line 188-192; CIDR LPM_TRIE on IPv4 ethertype at lines 199-220). Single `active_idx` snapshot at line 180 used for BOTH outers (lines 182, 207) → Q1 AS1 race-window invariant honored. LPM_TRIE key at 212-215 sets `prefixlen=32` (host-route lookup) and `addr=ip->saddr` in network byte order — matches design §5.27 lines 4844 + 5156. STAT_PASS_CIDR increment at line 218 — matches design §5.27 line 4846.
+  - `src/common/mac_filter.h:24` `xdpmf_mac` unchanged (PI-10-3.2 ✓). `mac_filter.h:40-43` `xdpmf_cidr_v4` packed 8-byte struct prefix-len-first per kernel LPM_TRIE convention. `mac_filter.h:54-60` enum `mac_filter_stat`: STAT_PASS=0/STAT_DROP_DENY=1/STAT_DROP_MALFORMED=2 byte-identical; STAT_PASS_CIDR=3 + STAT_MAX bumped 3→4 (additive per design §5.27 lines 5176-5191).
+  - `src/lib/config.{cpp,hpp}`: `config.hpp:36-39` adds `std::optional<xdpmf_cidr_v4> src_cidr` to `RuleMatch` — matches design §5.27 line 5225. `config.cpp:236-243` accepts `{mac, src_cidr}` keyset; rejects `cidr`/`port`/`dst_cidr`/`vlan` with the design §5.27 line 4912 forward-compat hinge. `config.cpp:247-252` enforces schema-rule-7 ("at-least-one-of mac or src_cidr"). `config.cpp:266-280` delegates CIDR parse to `cidr::parse_cidr_v4`.
+  - `src/lib/loader.cpp:1043-1076` `populate_cidr_inner_slot` mirrors `populate_inner_slot` per design §5.27 lines 5349-5352. The state-b reuse_fd loop at lines 1482-1492 now covers 9 maps (was 6) — matches D-3.1-4 extension at design §5.27 lines 5373-5378. `loader.cpp:1533-1545` populates inactive CIDR inner BEFORE active_idx flip per Q1 AS1 apply-ordering (design §5.27 lines 4770-4783). The single `write_active_idx` call at line 1578 (state-b) / 1680 (fresh attach) is the unchanged atomic-commit point.
+- **PI-7-3.2 fence**: `git diff 7f4c56a HEAD -- src/lib/loader.hpp` yields zero lines. `LoaderError` enum unchanged at 9 values.
+- **Q1-Q6 decisions all honored**: AS1 parallel outers (`mac_filter.bpf.c:93-101` `cidr_rulesets` ARRAY_OF_MAPS shares `active_idx`); OR1 MAC-first (datapath order is MAC then CIDR with explicit short-circuit returns); K2 `src_cidr` key (`config.cpp:237`); L1 single CIDR scalar (no list-handling code; `config.hpp:38` is `optional<xdpmf_cidr_v4>` not `vector`); V1 additive at schema_version 1 (`config.cpp:155-159` rejects v != 1); Q6 DEFER housekeeping (no OOT-1/OOT-2 changes — diff confirmed).
+- **HG-3.2-1 v6 fail-closed**: smoke-tested via `xdpmacfilter apply -f config_malformed_cidr_v6.yaml --iface notexist` → rc=9 + `xdpmacfilter: config error: IPv6 CIDR not supported until MVP-3.2.5: '::1/128': .../config_malformed_cidr_v6.yaml:9:7: config error ...`. Specific stderr substring confirmed.
+- **D-3.1-1..D-3.1-4 unchanged**: `apply_internal.hpp` zero-diff (verified); legacy `${PIN_DIR}/allowlist` alias still emitted (`loader.cpp:1618-1629`); `apply -f` file-IO still raises `CliError` (no change to `apply.cpp`); reuse_fd loop covers 9 maps now per D-3.1-4 extension.
+
+### Point 2 — Spec ↔ Tests (Design TestStrategy ↔ tests)
+
+- **§6.28 T_PASS_CIDR** (`tests/T_PASS_CIDR.sh:1-156`): asserts STAT_PASS_CIDR delta == 1 on in-range src_ip with non-allowlist MAC (line 118-126: explicitly distinguishes MAC vs CIDR axis pass). Out-of-range step asserts STAT_DROP_DENY delta == 1 with no STAT_PASS_CIDR movement (line 141-153) — outcome-based per design §6.28 "Anti-theatricality control" (line 5470).
+- **§6.29 T_DROP_CIDR_NOT_IN_RANGE** (`tests/T_DROP_CIDR_NOT_IN_RANGE.sh:1-101`): two-injection idempotent-denial pattern per design §6.29 (lines 5479-5480). Counter SPLIT enforced (lines 64-76, 87-98).
+- **§6.30 T_PASS_MAC_OR_CIDR** (`tests/T_PASS_MAC_OR_CIDR.sh:1-191`): 3 sub-cases in sequence per design §6.30 (lines 5489-5499) — (a) MAC-only match → STAT_PASS (Q2 OR1 short-circuit); (b) CIDR-only match → STAT_PASS_CIDR; (c) neither match → STAT_DROP_DENY (the load-bearing negation control per design line 5496). Both inner pins asserted non-empty (lines 95-109) — single OR-compose rule populates BOTH axes.
+- **§6.31 T_CIDR_ATOMIC_SWAP_NO_DROP** (`tests/T_CIDR_ATOMIC_SWAP_NO_DROP.sh:1-315`): persistent AF_PACKET injector pattern (lines 92-161) matches §6.31 spec. Overlap of `10.0.0.0/8` across configs A and B (fixtures lines 6-8 of each), concurrent `apply` during traffic (line 228), assertion `STAT_DROP_DENY == 0` post-swap (line 277-284), lower-bound `STAT_PASS_CIDR >= LOWER_BOUND` (line 287-294), active_idx flip verified (line 246-252), negation control by injecting one OUT-of-CIDR packet to prove drops are detectable on the runner (lines 296-311). SKIP 77 path on under-rate runners (lines 210-214).
+- **§6.22 sub-cases 6/7/8** (`tests/T_APPLY_REJECTS_MALFORMED.sh:175-181`): 6 asserts stderr substring `IPv6 CIDR not supported until MVP-3.2.5` (line 177); 7 asserts `malformed CIDR: host bits set below prefix` (line 179); 8 asserts `malformed CIDR: missing prefix length` (line 181). All distinct per design §5.27 message catalogue (lines 5057-5066).
+- **Negation controls**: §6.28 step 5 + §6.29 (whole test) + §6.30 sub-case (c) + §6.31 step 11 = four independent negation paths in the new suite. NO `[NO-NEGATION-CONTROL]`.
+- **No `[CIRCULAR-TEST]`**: all assertions read external observables (stats counters, pin existence, bpftool map dump, stderr text), not impl-internal state.
+
+### Point 3 — Code ↔ Tests
+
+- **All exports exercised**: `parse_cidr_v4` invoked by `config.cpp:277` (config validation), which is reached by all CIDR fixtures (config_valid_cidr.yaml, config_valid_mac_or_cidr.yaml, config_valid_cidr_swap_a/b.yaml, all 3 malformed CIDR fixtures). `populate_cidr_inner_slot` invoked by `loader.cpp:1544 + 1653` — reached by every test that applies a CIDR config.
+- **Test re-run**: 30/31 PASS + 1 legitimate SKIP, matching impl/tester reports. Zero failures.
+
+### Point 4 — Out-of-Scope Drift
+
+Walked design §5.27 §7 OOS fences against impl + tests:
+- **No IPv6** — confirmed via v6 reject path (smoke + sub-case 6).
+- **No `dst_cidr`** — `config.cpp:237` whitelist is `{mac, src_cidr}`; unsupported-match sub-case (T_APPLY_REJECTS_MALFORMED sub-case 5 unchanged) still works.
+- **No L4 port** — no port-handling code anywhere; validator rejects.
+- **No VLAN-aware** — datapath only branches on ETH_P_IP (`bpf/mac_filter.bpf.c:199`).
+- **No L2 list** — `RuleMatch.mac` is still `optional<xdpmf_mac>`, not `vector` (`config.hpp:37`).
+- **No schema_version: 2** — `config.cpp:155-159` rejects v != 1.
+- **No new exit code** — `LoaderError` enum unchanged (PI-7-3.2 ✓).
+- **No `T_CIDR_INVALID_REJECTED.sh`** — folded into §6.22 sub-cases per design line 5400-5407 ✓.
+- **No `--allow CIDR`** — CLI grammar unchanged (`--help` output unchanged for `attach --allow`).
+- **No rename / no library / no systemd / no per-rule counter / no exporter / no JIT-size assertion** — none of these surface in diff.
+
+### Point 5 — Behaviour preserved (PI-1..PI-18)
+
+| PI | Status | Evidence |
+|---|---|---|
+| PI-1 strict alien-refusal | ✓ | T_ATTACH_TAG_MISMATCH + T_ATTACH_ALIEN_REFUSAL + T_TRUST_MODEL_FLEET_RELAXES_GATE all PASS |
+| PI-2 name-identity gate both modes | ✓ | Same trio + name-check code unchanged in `loader.cpp` |
+| PI-3 tag-check both modes | ✓ | T_ATTACH_TAG_MISMATCH PASS |
+| PI-4 O_PATH path-discipline | ✓ | T_BPFFS_ROOT_SYMLINK PASS |
+| PI-5 kernel-version probe | ✓ | T_VERIFIER_REJECT PASS |
+| PI-6-3.2 27 pre-§5.27 tests byte-equivalent + §6.22 carve-out | ✓ | `git diff --stat 7f4c56a HEAD -- 'tests/T_*.sh'` shows ONLY T_APPLY_REJECTS_MALFORMED + 4 NEW; all other 26 test bodies byte-identical |
+| PI-7-3.2 loader.hpp ZERO diff | ✓ | `git diff 7f4c56a HEAD -- src/lib/loader.hpp` empty |
+| PI-8-3.2 --version reports 0.4.0 | ✓ | `xdpmacfilter --version` → `xdpmacfilter 0.4.0` |
+| PI-9 --help format unchanged | ✓ | T_CLI_HELP_VERSION PASS |
+| PI-10-3.2 mac_filter.h additions-only | ✓ | Diff confirmed: existing constants byte-identical; only additions + STAT_MAX sentinel bump |
+| PI-11 dir layout | ✓ | `find src -type d` → 4 dirs (lib, cli, bpf, common); no new |
+| PI-12 pin paths host-global | ✓ | Tests pass with NSEXEC pattern; new pins under same PIN_DIR |
+| PI-13-3.2 default read_stats.py 3-column | ✓ | `read_stats.py` w/o flag prints 3 cols (diff confirms); existing helpers in common.sh unchanged |
+| PI-14 --mode flag unchanged | ✓ | T_MODE_GENERIC_DEFAULT + T_MODE_NATIVE_UNSUPPORTED + T_MODE_DETACH_REJECTS all PASS |
+| PI-15 CIDR additive (MAC-only configs still work) | ✓ | T_APPLY_VALID_CONFIG PASS; T_APPLY_ATOMIC_SWAP_NO_DROP (MAC-only swap) PASS |
+| PI-16 STAT_PASS_CIDR additive | ✓ | T_PERCPU_STATS_SUM PASS; STAT_PASS/DENY/MALFORMED indices 0/1/2 byte-identical |
+| PI-17 schema_version: 1 still accepted | ✓ | T_APPLY_VALID_CONFIG PASS (fixture omits schema_version → defaulted to 1) |
+| PI-18 §6.23 MAC-axis swap byte-equivalent | ✓ | T_APPLY_ATOMIC_SWAP_NO_DROP (test #26) PASS |
+
+No `[REGRESSION]` / `[INVARIANT-VIOLATED]` / `[UNRELATED-EDIT]`.
 
 ## Out-of-triangulation findings
 
-### [OUT-OF-TRIANGULATION] Orphan map pins at `/sys/fs/bpf/` root after T_ATTACH_TAG_MISMATCH
-**Location**: `tests/T_ATTACH_TAG_MISMATCH.sh:93-96` (`bpftool prog load` without `pinmaps <dir>`)
-**Evidence**: After local re-run, `ls /sys/fs/bpf/` shows `active_idx defaults rulesets` orphan map pins at root in addition to the `xdpmacfilter/` per-iface dir. §5.26 added 4 LIBBPF_PIN_BY_NAME maps (rulesets, active_idx, defaults, stats) where MVP-2 had 2 (allowlist, stats); the preflight in T_ATTACH_TAG_MISMATCH calls `bpftool prog load <obj> <pin>` without `pinmaps`, causing bpftool to auto-pin LIBBPF_PIN_BY_NAME maps to `/sys/fs/bpf/<mapname>`. The test passes (loader's `bpf_map__set_pin_path(m, nullptr)` at `src/lib/loader.cpp:828-844` correctly clears LIBBPF_PIN_BY_NAME defaults so loader's own pins go to `${PIN_DIR}/`), but the test's preflight leaks state across runs.
-**Recommended disposition**: `defer`
-**Rationale**: Cosmetic test-hygiene leak; doesn't affect correctness or pass/fail. Fix is a one-line cleanup in T_ATTACH_TAG_MISMATCH (add `sudo -n rm -f /sys/fs/bpf/{active_idx,defaults,rulesets,stats} || true` to trap/cleanup, or pass `pinmaps /tmp/xdpmf-preflight-$$/` to the two bpftool prog load calls). Suite stayed green after pre-run wipe per tester report — no impact on this slice's pass verdict. Fold into next housekeeping cycle.
-
-### [OUT-OF-TRIANGULATION] Tester-reported "stats reset on every apply" appears stale per current impl
-**Location**: `tests/T_APPLY_ATOMIC_SWAP_NO_DROP.sh:242-254` (test code's NOTE comment); `src/lib/loader.cpp:1407-1433` (current reuse_fd path including stats); `mint/impl-notes.md:209-211` (D-3.1-4 claims "Stats counters survive across applies")
-**Evidence**: Test code's NOTE describes the OLD intermediate-draft behavior (stats reset on re-pin). Current impl's state-b reattach explicitly calls `bpf_map__reuse_fd(skel->maps.stats, ...)` at `src/lib/loader.cpp:1414` — kernel-side stats map FD is reused, so counters DO persist across `apply -f`. Test passes either way because assertions use post-swap TOTALS (`d_f == 0` + `p_f >= LOWER_BOUND`), not deltas. No active proof either way in the test suite.
-**Recommended disposition**: `defer`
-**Rationale**: If the actual runtime behaviour matches the impl-notes claim (stats persist), tester's OOT 2 observation is incorrect/stale and no fix is needed beyond updating the test's NOTE comment. If the runtime behaviour matches the test's NOTE (stats reset), then D-3.1-4 is misimplemented and a dedicated regression test asserting "post-state-b-reattach stats > 0" would be warranted. Cheap verification: add 1 assertion to T_LINK_PERSIST step 8 ("after re-apply B, STAT_PASS still > 0 from pre-re-apply traffic"). Doesn't affect this slice's verdict — the spec test (§6.23) passes; the disagreement is between tester's empirical observation and impl-notes claim, resolvable in a 5-minute spike rather than blocking ship.
-
-### [OUT-OF-TRIANGULATION] `src/cli/main.cpp` diff exceeds "ONE added dispatch arm" verifiable-invariant
-**Location**: `src/cli/main.cpp:46-58` (new `run_apply` function), `:71-83` (new `is_config_error` helper + try/catch refactor) vs design.md:4640-4641 ("`git diff main -- src/cli/main.cpp` shows: rename + ONE added dispatch arm. NO other line diff")
-**Evidence**: `git diff -M 4440920 HEAD -- src/loader/main.cpp src/cli/main.cpp` shows: rename + `run_apply` function (12 lines) + `is_config_error` helper (10 lines) + try/catch arm to suppress "error: " prefix when ConfigError so stderr starts EXACTLY with `xdpmacfilter: config error:` (load-bearing for T_EXIT_CODE_9 and T_APPLY_REJECTS_MALFORMED assertions per Q-HG1 stderr discipline at design.md:3861).
+### [OUT-OF-TRIANGULATION] design.md §5.27 uses `__u32` for `xdpmf_cidr_v4` fields; impl uses `unsigned int`
+**Location**: `src/common/mac_filter.h:40-43` vs `design.md:5158-5161`
+**Evidence**: design schema-illustrative block uses `__u32 prefixlen; __u32 addr`; impl uses `unsigned int prefixlen; unsigned int addr`. Header comment (`mac_filter.h:36-38`) explicitly explains the choice ("`unsigned int` is used … because this header is included from BOTH userspace C++ (where `__u32` isn't a libc type) AND BPF C"). Structurally byte-identical on all supported architectures (4-byte unsigned). The existing `struct xdpmf_mac` in the same header (`mac_filter.h:24-26`) uses the same convention with `unsigned char` (not `__u8`) — impl matched the pre-existing convention, which is the right call.
 **Recommended disposition**: `inline-merge`
-**Rationale**: The extra change is REQUIRED by the design's Q-HG1 stderr contract (`^xdpmacfilter: config error:` start-of-line, asserted by T_EXIT_CODE_9_ON_CONFIG_ERROR.sh:62 grep `-qE '^xdpmacfilter: config error:'` — the legacy `error: ` prefix would break this). The verifiable-invariants table at design.md:4640-4641 was too strict; impl correctly chose the contract-satisfaction over the line-count-budget. Architect should update the verifiable-invariants accounting at the next §5.26 amendment to acknowledge the necessary `is_config_error` helper.
+**Rationale**: design's illustrative kernel-side typing differs from the header's own portability convention; the impl's choice is consistent with the file's longstanding "shared-header uses plain C types" pattern and is documented inline. Architect should update §5.27 DataStructures block to match the header convention. No code change required.
 
-### [OUT-OF-TRIANGULATION] `cli.hpp` variant uses bare configs, not `ParsedAttach/ParsedDetach/ParsedApply` wrappers
-**Location**: `src/cli/cli.hpp:23` (`std::variant<AttachConfig, DetachConfig, ApplyConfig, HelpRequest, VersionRequest>`) vs design.md:4193-4198 (`std::variant<ParsedAttach, ParsedDetach, ParsedApply, ...>` with wrapper structs marked `// unchanged`)
-**Evidence**: Pre-MVP-3.1 cli.hpp also used bare configs (no wrappers ever existed). Design's "// unchanged" annotation was incorrect — the wrapper structs never existed. Impl correctly preserved the actual MVP-2 shape and added bare ApplyConfig. Main dispatch at `src/cli/main.cpp:101-115` uses `if constexpr (std::is_same_v<T, xdpmf::AttachConfig>)` etc., consistent with bare-config layout.
-**Recommended disposition**: `defer`
-**Rationale**: Pure design-text inaccuracy. Behaviour, dispatch semantics, and exit codes are identical between the two shapes. Architect should clean up the design text at the next amendment opportunity (s/`ParsedAttach { AttachConfig cfg; }`/`AttachConfig` (direct variant member)/).
+### [OUT-OF-TRIANGULATION] design.md §5.27 declares `namespace xdpmf` for cidr.hpp; impl uses `namespace xdpmf::cidr`
+**Location**: `src/lib/cidr.hpp:19` vs `design.md:5193`
+**Evidence**: design says "Userspace (`src/lib/cidr.hpp`, namespace `xdpmf`)"; impl uses sub-namespace `xdpmf::cidr` (and call-site `xdpmf::cidr::parse_cidr_v4` at `config.cpp:277`). Sub-namespacing the parser is a reasonable scope-narrowing choice (mirrors the `xdpmf::yaml` subset namespace).
+**Recommended disposition**: `inline-merge`
+**Rationale**: pure design-text alignment; impl is structurally fine and follows the existing `xdpmf::yaml` precedent. Architect should update §5.27 namespace declaration.
 
-### [OUT-OF-TRIANGULATION] §6.25 test does not grep for `trust_model=strict` stderr log line
-**Location**: `tests/T_LINK_PERSIST_ACROSS_LOADER_EXIT.sh` (no `trust_model` grep anywhere) vs design.md:4370-4371 ("Tester asserts the log line presence + format in §6.26 + §6.25")
-**Evidence**: Design's §5.26 trust_model stderr sub-decision lists §6.25 as one of the two tests asserting the log line. T_LINK_PERSIST doesn't grep for `trust_model=`. §6.21 (line 64) and §6.26 (lines 90, 118, 146) DO assert it.
-**Recommended disposition**: `inline-merge` (cheap fix)
-**Rationale**: Contract IS tested (multiple times) — just not in §6.25 specifically. One-line addition (`grep -qE 'xdpmacfilter: trust_model=strict' "${stderr_apply_a}"` after `cat "${stderr_apply_a}" >&2`) would close the gap. Doesn't affect verdict since the contract is verified elsewhere.
+### [OUT-OF-TRIANGULATION] `xdpmacfilter --help` does not mention `src_cidr`
+**Location**: `src/cli/cli.cpp` help block (no edit this slice; `xdpmacfilter --help` output verified)
+**Evidence**: design §5.27 line 5319 says "--help text gains ONE line mentioning the new `src_cidr` match-key" (impl-flexible wording). Design §5.27 verifiable-invariant block at line 5627 relaxes this to "MAY list `src_cidr` (impl-flexible; tester asserts substring presence in §6.30 setup if applicable, otherwise no assertion)". Inconsistency is internal to design.md; the controlling line is the "MAY" relaxation. Impl chose not to add the line; tester chose not to assert. No test fails.
+**Recommended disposition**: `inline-merge`
+**Rationale**: design self-inconsistency between §5.27 main block ("gains ONE line") and verifiable-invariant section ("MAY list"). Architect should normalize §5.27 to "MAY" so the brief, design, impl, and tests all line up. Per RETROSPECTIVES backlog item 2: "design.md verifiable invariants … MAY be too strict if impl needed extras to satisfy contracts elsewhere" — same pattern applies in reverse here (design over-stated; impl chose the relaxed reading; both internally consistent with the MAY clause).
 
-### [OUT-OF-TRIANGULATION] §6.25 step 8 does not grep for `replacing existing program` stderr signal
-**Location**: `tests/T_LINK_PERSIST_ACROSS_LOADER_EXIT.sh:158-161` (only asserts rc==0 after re-apply B) vs design.md:4532 ("Step 8 exits 0 with stderr containing `replacing existing program on ${IFACE_A}` OR equivalent operator-readable signal")
-**Evidence**: Impl emits this exact stderr at `src/lib/loader.cpp:1490-1492`. Test does not grep for it.
-**Recommended disposition**: `defer`
-**Rationale**: Design gave explicit latitude ("OR equivalent operator-readable signal (impl-shape flexibility)"); behaviour IS verified indirectly (idempotent reattach works → step 9's "MAC_Y now allowed" passes). One-line grep would strengthen the test; not blocking.
+## Rework assignments
 
-## Summary
+None — verdict is `pass`. Three OOT items are all `inline-merge` (design-text harmonization), not impl/tester rework.
 
-MVP-3.1 lands clean. All 5 framework points pass (1=spec↔code, 2=spec↔tests, 3=code↔tests, 4=OOS, 5=behaviour preserved). All 14 PI invariants hold. 4 negotiated impl-deviations (D-3.1-1..D-3.1-4) all documented in impl-notes.md and architect-approved (D-3.1-1 via EDIT-1 explicitly; D-3.1-2/3/4 as legitimate tactical workarounds for design's grep-error / Q4 explicit spec / Phase-B atomic-swap tightening). 27/27 tests pass (1 legitimate skip = baseline).
+---
 
-The largest mint slice to date (~3× MVP-2 Sec/Perf/Robust per design.md:3486) — Composite 6 foundation lands cleanly on first review pass. 6 OOT items noted with dispositions; none affect verdict. Reviewer recommends architect take inline-merge on the §6.25 trust_model grep gap and the main.cpp `is_config_error` verifiable-invariants accounting; defer the rest to next housekeeping cycle.
-
-**Verdict: `pass`. No rework needed.**
-
-Project state: MVP-2 fully closed; MVP-3 territory entered; Composite 6 cycle 1 (config-first foundation) shipped.
+Test log archived at `/tmp/mint-review-tests-202605241845.log`.
+Independent verification of impl's 30/31 smoke + tester's 30/31 formal
+Phase B = third confirmation. Greenlight Phase 4 ship.
 
 ---
 
 ### Post-review sweep — round 1
 
-Orchestrator applied 2 `inline-merge` OOT findings before Phase 6 commit:
+Orchestrator applied 3 `inline-merge` OOT findings before Phase 6 commit. All are pure design-text harmonization — no impl, test, or behaviour changes:
 
-1. **OOT-3 (`src/cli/main.cpp` diff exceeds "ONE added dispatch arm" verifiable-invariant)** → `mint/design.md:4640-4641` edited to acknowledge `is_config_error` helper + try/catch refactor as REQUIRED by Q-HG1 stderr contract (`^xdpmacfilter: config error:` start-of-line). The original invariant was too strict — impl correctly chose contract-satisfaction over line-count budget. 1-line summary: design.md verifiable-invariant for main.cpp expanded from "ONE added dispatch arm" to "dispatch arm + is_config_error helper + try/catch refactor per Q-HG1 stderr contract".
+1. **OOT-1 (`__u32` → `unsigned int` for `xdpmf_cidr_v4` fields)** → `mint/design.md:5158-5161` edited. New explanatory comment cites the shared-header convention (mirrors `xdpmf_mac`'s `unsigned char`). 1-line summary: design.md `xdpmf_cidr_v4` struct illustration now matches the impl's `unsigned int` typing — both consistent with `mac_filter.h`'s longstanding "shared-header uses plain C types" pattern.
 
-2. **OOT-5 (§6.25 test does not grep for `trust_model=strict` stderr log line)** → `tests/T_LINK_PERSIST_ACROSS_LOADER_EXIT.sh:71-75` added `grep -qE 'xdpmacfilter: trust_model=strict' "${stderr_apply_a}"` assertion right after the `cat "${stderr_apply_a}"` block (FAIL[1b]). Re-ran T_LINK_PERSIST_ACROSS_LOADER_EXIT: passed 6.63s — confirms impl emits the log line as designed. 1-line summary: §6.25 now actively asserts the trust_model stderr contract per design.md:4370-4371.
+2. **OOT-2 (namespace `xdpmf` → `xdpmf::cidr`)** → `mint/design.md:5193` edited. Added comment noting the precedent (`xdpmf::yaml`) and call-site form. 1-line summary: design.md namespace declaration for `cidr.hpp` now matches the impl's sub-namespacing choice, consistent with the existing `xdpmf::yaml` parser module precedent.
 
-### Deferred to next slice
+3. **OOT-3 (design self-inconsistency on `--help` `src_cidr` mention)** → `mint/design.md:5315-5321` edited. Normalized "gains ONE line" → "MAY gain a line" to align with the verifiable-invariant block's "MAY list" relaxation. 1-line summary: design.md `--help` text requirement softened from MUST to MAY; impl correctly chose the relaxed reading; tester correctly chose not to assert. This is the **same pattern as MVP-3.1's OOT-3** (design verifiable-invariant too strict) but in the inverse direction (design over-stated, impl pulled back to the consistent reading). Validates RETROSPECTIVES backlog item #2.
 
-Orchestrator deferred 4 OOT findings to a future housekeeping cycle (none affect MVP-3.1 ship):
-
-1. **OOT-1 (Orphan map pins at `/sys/fs/bpf/` root from T_ATTACH_TAG_MISMATCH)** — `tests/T_ATTACH_TAG_MISMATCH.sh:93-96` calls `bpftool prog load <obj> <pin>` without `pinmaps`, leaking 4 auto-pinned map names (rulesets, active_idx, defaults, stats) at bpffs root. Fix candidates: (a) add cleanup to trap in the test (PI-6 forbidden — needs architect amendment); (b) extend `cleanup_veth` in common.sh; (c) pass `pinmaps /tmp/xdpmf-preflight-$$/` to the bpftool prog load calls. Cosmetic only — suite stayed green after pre-run wipe. Fold into MVP-3.x housekeeping batch.
-
-2. **OOT-2 (Tester-reported "stats reset on every apply" appears stale)** — `tests/T_APPLY_ATOMIC_SWAP_NO_DROP.sh:242-254` NOTE comment describes OLD intermediate-draft behavior; current impl D-3.1-4 `bpf_map__reuse_fd` at `src/lib/loader.cpp:1414` reuses stats FD. Discrepancy resolvable via 1-assertion add to T_LINK_PERSIST step 8 ("after re-apply B, STAT_PASS still > 0 from pre-re-apply traffic"). Test passes either way (post-swap TOTAL assertions, not deltas). Defer to next slice's spike.
-
-3. **OOT-4 (`cli.hpp` variant uses bare configs vs design `ParsedAttach/ParsedDetach/ParsedApply` wrappers)** — `src/cli/cli.hpp:23` uses `std::variant<AttachConfig, DetachConfig, ApplyConfig, ...>` directly; design.md:4193-4198 incorrectly annotated wrapper structs as `// unchanged` (they never existed pre-MVP-3.1). Pure design-text inaccuracy; behaviour identical. Architect should clean up design text at next amendment.
-
-4. **OOT-6 (§6.25 step 8 does not grep for `replacing existing program` stderr)** — `tests/T_LINK_PERSIST_ACROSS_LOADER_EXIT.sh:158-161` only asserts rc==0 after re-apply B; design.md:4532 gave explicit latitude ("OR equivalent operator-readable signal — impl-shape flexibility"). Behaviour verified indirectly (step 9 MAC_Y allowed passes). One-line grep would strengthen; not blocking.
+No `defer` items this cycle. No `promote-to-rework`.
