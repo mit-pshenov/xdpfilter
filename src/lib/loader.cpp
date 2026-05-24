@@ -31,6 +31,8 @@
  * collects unpinned programs/maps). On success the guards release().
  */
 #include "loader.hpp"
+#include "apply_internal.hpp"
+#include "config.hpp"
 
 #include <algorithm>
 #include <array>
@@ -49,6 +51,7 @@
 
 #include <dirent.h>
 #include <fcntl.h>           // O_PATH, O_DIRECTORY, O_NOFOLLOW, O_CLOEXEC, openat
+#include <linux/bpf.h>       // BPF_XDP, BPF_LINK_TYPE_XDP
 #include <linux/if_link.h>   // XDP_FLAGS_SKB_MODE
 #include <net/if.h>
 #include <sys/stat.h>        // fstatat, mkdirat, S_IS*
@@ -217,6 +220,7 @@ public:
             case LoaderError::Permission:         return "permission denied (need CAP_BPF / CAP_NET_ADMIN)";
             case LoaderError::KernelUnsupported:  return "kernel version too old for xdpmacfilter";
             case LoaderError::PathRefused:        return "bpffs path refused (symlink or non-directory at the bpffs root or per-iface entry)";
+            case LoaderError::ConfigError:        return "config error (YAML parse / schema / trust_model violation)";
         }
         return "unknown loader error";
     }
@@ -801,10 +805,12 @@ private:
     return holder;
 }
 
-[[nodiscard]] BpfSkeleton load_skeleton()
+/* Open (no load) — used by both the direct-load path and the reuse_fd
+ * path. Clears LIBBPF_PIN_BY_NAME pin paths for all 7 maps so libbpf's
+ * load() does NOT auto-pin (we pin/reuse manually after the §5.4 state
+ * machine). */
+[[nodiscard]] BpfSkeleton open_skeleton_only()
 {
-    // §5.24 Q4: env-var fixture-path override. Default (env unset or empty)
-    // is byte-identical to pre-§5.24 — embedded ELF via the skeleton.
     const char* env_path = std::getenv(kBpfObjectPathEnv.data());
     const char* obj_path = (env_path != nullptr && *env_path != '\0') ? env_path : nullptr;
 
@@ -819,18 +825,43 @@ private:
                          std::format("mac_filter_bpf__open: {}", std::strerror(e)));
         }
     }
-    if (bpf_map__set_pin_path(skel->maps.allowlist, nullptr) != 0
-        || bpf_map__set_pin_path(skel->maps.stats,    nullptr) != 0) {
-        const int e = errno;
-        throw_loader(classify(-e, LoaderError::LoadFailed),
-                     std::format("bpf_map__set_pin_path(clear): {}",
-                                 std::strerror(e)));
+    bpf_map* const pinned_maps[] = {
+        skel->maps.allowlist,      // legacy template — never pinned at runtime
+        skel->maps.allowlist_a,    // §5.26 Q6 inner slot 0
+        skel->maps.allowlist_b,    // §5.26 Q6 inner slot 1
+        skel->maps.rulesets,       // §5.26 Q6 outer MAP_OF_MAPS
+        skel->maps.active_idx,     // §5.26 Q6 active index
+        skel->maps.defaults,       // §5.26 Q6 per-slot default action
+        skel->maps.stats,
+    };
+    for (bpf_map* m : pinned_maps) {
+        if (bpf_map__set_pin_path(m, nullptr) != 0) {
+            const int e = errno;
+            throw_loader(classify(-e, LoaderError::LoadFailed),
+                         std::format("bpf_map__set_pin_path(clear): {}",
+                                     std::strerror(e)));
+        }
     }
+    return skel;
+}
+
+/* Finish-load: invokes mac_filter_bpf__load. Separate from open_skeleton_only
+ * so the caller can interject bpf_map__reuse_fd between open and load (the
+ * state-b idempotent-reattach path uses this hook to swap in the pinned
+ * kernel maps). */
+void finish_load_skeleton(BpfSkeleton& skel)
+{
     const int rc = mac_filter_bpf__load(skel.get());
     if (rc < 0) {
         throw_loader(classify(rc, LoaderError::LoadFailed),
                      std::format("mac_filter_bpf__load: {}", std::strerror(-rc)));
     }
+}
+
+[[nodiscard]] BpfSkeleton load_skeleton()
+{
+    BpfSkeleton skel = open_skeleton_only();
+    finish_load_skeleton(skel);
     return skel;
 }
 
@@ -886,6 +917,180 @@ private:
  * so mode is no longer a refusal sub-case — it falls into the name branch
  * via fetch_prog_identity's name comparison if the kernel rejects the
  * identity fetch for any reason. */
+/* §5.26 HG3: trust-model env-var name. Single switch — strict | fleet. */
+constexpr std::string_view kTrustModelEnv{"XDPMF_TRUST_MODEL"};
+
+enum class TrustModel : std::uint8_t { Strict, Fleet };
+
+[[nodiscard]] constexpr std::string_view to_string(TrustModel m) noexcept
+{
+    return (m == TrustModel::Strict) ? "strict" : "fleet";
+}
+
+/* §5.26 HG3: parse XDPMF_TRUST_MODEL. Unset/empty → Strict (default).
+ * "strict" → Strict. "fleet" → Fleet. Anything else → ConfigError (exit 9)
+ * with the canonical "xdpmacfilter: config error: unknown trust model: '<v>'"
+ * stderr shape. Caller MUST log the resolved mode at attach() entry. */
+[[nodiscard]] TrustModel parse_trust_model_env()
+{
+    const char* raw = std::getenv(kTrustModelEnv.data());
+    if (raw == nullptr || *raw == '\0' || std::string_view{raw} == "strict") {
+        return TrustModel::Strict;
+    }
+    if (std::string_view{raw} == "fleet") {
+        return TrustModel::Fleet;
+    }
+    throw_loader(LoaderError::ConfigError,
+                 std::format("xdpmacfilter: config error: unknown trust model: '{}' "
+                             "(expected: strict|fleet)", raw));
+}
+
+/* §5.26 sub-decision: stderr-log the resolved trust_model at attach() entry.
+ * Single-line, fixed format, audit-grep-friendly. */
+void log_trust_model(TrustModel m) noexcept
+{
+    std::fprintf(stderr, "xdpmacfilter: trust_model=%s\n",
+                 std::string{to_string(m)}.c_str());
+}
+
+[[nodiscard]] std::string link_pin_path_for(const std::string& iface)
+{
+    return std::string{XDPMF_BPFFS_ROOT} + "/" + iface + "/" XDPMF_LINK_PIN_BASENAME;
+}
+
+/* §5.26 HG2 P0a: pin the bpf_link via the raw fd returned by bpf_link_create
+ * (the libbpf 1.1 API doesn't expose attach-with-mode-flags via
+ * bpf_program__attach_xdp; we drive bpf_link_create directly so the
+ * operator-selected XDP mode survives the link create). Returns the link
+ * fd (caller closes after pinning) or throws AttachFailed. */
+[[nodiscard]] int create_xdp_link(int prog_fd, int ifindex, XdpMode mode)
+{
+    // Cannot use LIBBPF_OPTS() macro under C++23 — it expands to a GNU
+    // statement expression + compound literal that fail under -Werror.
+    // Zero-init manually, then set the two load-bearing fields (sz +
+    // flags). bpf_link_create_opts is forward/backward-compat via the
+    // explicit sz field.
+    bpf_link_create_opts opts{};
+    opts.sz    = sizeof(opts);
+    opts.flags = mode_to_flags(mode);
+    const int link_fd = bpf_link_create(prog_fd, ifindex, BPF_XDP, &opts);
+    if (link_fd < 0) {
+        throw_loader(classify(link_fd, LoaderError::AttachFailed),
+                     std::format("bpf_link_create (xdp mode={}): {}",
+                                 to_string(mode), std::strerror(-link_fd)));
+    }
+    return link_fd;
+}
+
+/* §5.26 HG2 P0a: pin a bpf-object fd at <path>. Equivalent to bpf_link__pin
+ * but works for the raw fd returned by bpf_link_create. */
+void pin_fd(int fd, const std::string& path)
+{
+    if (bpf_obj_pin(fd, path.c_str()) < 0) {
+        const int e = errno;
+        throw_loader(classify(-e, LoaderError::AttachFailed),
+                     std::format("bpf_obj_pin('{}'): {}", path, std::strerror(e)));
+    }
+}
+
+/* §5.26 Q2 inner-slot population: bulk-clear the inactive inner map then
+ * insert the new pass_macs presence markers. Caller passes the FD of the
+ * inactive inner allowlist (allowlist_a or allowlist_b). */
+void populate_inner_slot(int inner_fd, const std::vector<xdpmf_mac>& pass_macs)
+{
+    // Bulk-clear: iterate keys via bpf_map_get_next_key and delete each.
+    // The map is small (≤ 64 entries) so cost is bounded.
+    xdpmf_mac prev{};
+    xdpmf_mac cur{};
+    bool      have_prev = false;
+    while (true) {
+        const int rc = bpf_map_get_next_key(inner_fd,
+                                            have_prev ? &prev : nullptr,
+                                            &cur);
+        if (rc != 0) {
+            if (-rc == ENOENT) break;
+            throw_loader(classify(rc, LoaderError::LoadFailed),
+                         std::format("bpf_map_get_next_key(inner): {}",
+                                     std::strerror(-rc)));
+        }
+        const int drc = bpf_map_delete_elem(inner_fd, &cur);
+        if (drc != 0 && -drc != ENOENT) {
+            throw_loader(classify(drc, LoaderError::LoadFailed),
+                         std::format("bpf_map_delete_elem(inner): {}",
+                                     std::strerror(-drc)));
+        }
+        prev      = cur;
+        have_prev = true;
+    }
+    for (const xdpmf_mac& m : pass_macs) {
+        const std::uint8_t present = 1;
+        const int rc = bpf_map_update_elem(inner_fd, &m, &present, BPF_ANY);
+        if (rc < 0) {
+            throw_loader(classify(rc, LoaderError::LoadFailed),
+                         std::format("bpf_map_update_elem(inner): {}",
+                                     std::strerror(-rc)));
+        }
+    }
+}
+
+/* Write defaults_map[slot] = (default_action == Pass ? 1 : 0). */
+void write_default_slot(int defaults_fd, std::uint32_t slot, DefaultAction da)
+{
+    const std::uint32_t value = (da == DefaultAction::Pass) ? 1u : 0u;
+    const int rc = bpf_map_update_elem(defaults_fd, &slot, &value, BPF_ANY);
+    if (rc < 0) {
+        throw_loader(classify(rc, LoaderError::LoadFailed),
+                     std::format("bpf_map_update_elem(defaults[{}]): {}",
+                                 slot, std::strerror(-rc)));
+    }
+}
+
+/* Write active_idx[0] = idx. Single u32 store — kernel-atomic on aligned
+ * word writes. THIS IS THE ATOMIC SWAP COMMIT POINT. */
+void write_active_idx(int active_idx_fd, std::uint32_t idx)
+{
+    const std::uint32_t zero = 0;
+    const int rc = bpf_map_update_elem(active_idx_fd, &zero, &idx, BPF_ANY);
+    if (rc < 0) {
+        throw_loader(classify(rc, LoaderError::LoadFailed),
+                     std::format("bpf_map_update_elem(active_idx): {}",
+                                 std::strerror(-rc)));
+    }
+}
+
+/* Read active_idx[0]. Returns 0 if unset; throws on real lookup error. */
+[[nodiscard]] std::uint32_t read_active_idx(int active_idx_fd)
+{
+    const std::uint32_t zero = 0;
+    std::uint32_t       cur  = 0;
+    const int rc = bpf_map_lookup_elem(active_idx_fd, &zero, &cur);
+    if (rc < 0) {
+        // Map slot uninitialized → kernel returns ENOENT which userspace
+        // surfaces as -ENOENT. Treat as "first time, defaults to 0".
+        if (-rc == ENOENT) return 0;
+        throw_loader(classify(rc, LoaderError::LoadFailed),
+                     std::format("bpf_map_lookup_elem(active_idx): {}",
+                                 std::strerror(-rc)));
+    }
+    return cur;
+}
+
+/* Check existence of a per-iface file under root, fd-relative + NOFOLLOW. */
+[[nodiscard]] bool iface_file_exists(const BpffsRootFd& root,
+                                      const std::string& iface,
+                                      const char*        basename)
+{
+    const std::string rel = iface + "/" + basename;
+    if (::faccessat(root.fd(), rel.c_str(), F_OK, AT_SYMLINK_NOFOLLOW) == 0) {
+        return true;
+    }
+    const int e = errno;
+    if (e == ENOENT) return false;
+    if (e == ELOOP)  throw_iface_symlink(iface);
+    throw_loader(classify(-e, LoaderError::LoadFailed),
+                 std::format("faccessat bpffs/{}: {}", rel, std::strerror(e)));
+}
+
 [[noreturn]] void throw_alien_refused(const XdpProbe& probe, const std::string& iface)
 {
     if (std::string_view{probe.name} != kOwnedProgName) {
@@ -915,124 +1120,22 @@ const std::error_category& loader_error_category() noexcept
 
 std::uint32_t attach(const AttachConfig& cfg)
 {
-    // §5.24 Q3 Option B: fast-fail before ANY libbpf API call (in particular
-    // before the §5.22 Q1 early skeleton load). Replaces a cryptic deep
-    // BPF_PROG_LOAD "Invalid argument" with a clean KernelUnsupported.
-    kernel_version_probe();
-
-    const int ifindex = resolve_ifindex(cfg.iface, LoaderError::AttachFailed);
-
-    // §5.22 Item 2: open bpffs root with O_PATH|O_NOFOLLOW. All subsequent
-    // bpffs ops are fd-relative against root.fd() — symlink at the root
-    // can't be substituted post-open.
-    BpffsRootFd root{};
-
-    // §5.22 Q1 Option E: load skeleton FIRST so we can compute self_tag
-    // before the probe needs it. On a state-(c) refusal below, the
-    // BpfSkeleton dtor unwinds the kernel-side program+maps (nothing is
-    // pinned to disk yet — pinning happens after the state machine).
-    BpfSkeleton skel = load_skeleton();
-    const TagArray self_tag = capture_self_tag(skel);
-
-    // §5.4 + §5.19 + §5.20 + §5.22 4-state probe with name+tag identity.
-    const XdpProbe probe = probe_attached_xdp(ifindex, self_tag);
-    const bool pin_dir_exists = iface_entry_is_real_dir(root, cfg.iface);
-
-    if (probe.prog_id != 0) {
-        if (probe.is_ours && pin_dir_exists) {
-            // State (b): our prior instance — clean detach then proceed.
-            // §5.23 Q1: detach in the probed mode (not hardcoded SKB), so we
-            // can reload an attach made in any mode (native/offload too).
-            const int rc = bpf_xdp_detach(ifindex,
-                                          probed_mode_to_flags(probe.mode), nullptr);
-            if (rc < 0) {
-                throw_loader(classify(rc, LoaderError::AttachFailed),
-                             std::format("bpf_xdp_detach (idempotent cleanup): {}",
-                                         std::strerror(-rc)));
-            }
-            bpffs_remove_iface(root, cfg.iface);
-        } else {
-            // State (c): alien — refuse. Sub-case dispatch (name vs tag)
-            // happens inside throw_alien_refused.
-            throw_alien_refused(probe, cfg.iface);
-        }
-    } else if (pin_dir_exists) {
-        // State (d): no XDP attached, but a stale pin dir survives from a
-        // crash/SIGKILL between mkdirat and bpf_xdp_attach on a previous
-        // run. Clean the orphan and fall through to fresh attach.
-        bpffs_remove_iface(root, cfg.iface);
-    }
-    // State (a): nothing attached, no pin dir — straight to fresh attach.
-
-    // Fresh bpffs layout (fd-relative). Arm the rollback guard before any
-    // operation that might throw (libbpf pin, allowlist populate, attach).
-    ensure_iface_dir(root, cfg.iface);
-    IfaceDirGuard dir_guard{root, cfg.iface};
-    dir_guard.arm();
-
-    // §5.22 Q1 Option E: maps still need pinning (LIBBPF_PIN_BY_NAME) but
-    // since we loaded without pin_root_path, do it manually now that the
-    // dir exists. The TOCTOU window between our mkdirat and libbpf's
-    // path-based bpf_obj_pin is explicit OOS per §5.22 Q2 Maximum.
-    const std::string pin_dir = bpffs_dir_for(cfg.iface);
-    {
-        const std::string p = pin_dir + "/" XDPMF_MAP_ALLOWLIST_NAME;
-        const int rc = bpf_map__pin(skel->maps.allowlist, p.c_str());
-        if (rc < 0) {
-            throw_loader(classify(rc, LoaderError::LoadFailed),
-                         std::format("bpf_map__pin({}): {}", p, std::strerror(-rc)));
-        }
-    }
-    {
-        const std::string p = pin_dir + "/" XDPMF_MAP_STATS_NAME;
-        const int rc = bpf_map__pin(skel->maps.stats, p.c_str());
-        if (rc < 0) {
-            throw_loader(classify(rc, LoaderError::LoadFailed),
-                         std::format("bpf_map__pin({}): {}", p, std::strerror(-rc)));
-        }
-    }
-
-    // Populate allow-list.
-    const int allow_fd = bpf_map__fd(skel->maps.allowlist);
-    if (allow_fd < 0) {
-        throw_loader(LoaderError::LoadFailed, "allowlist map fd unavailable");
-    }
+    /* §5.26 BC1 + EDIT-1: synthesize Config{default_action=Drop, rules=
+     * [{id: i, action: Pass, match.mac: cfg.allow[i]}, ...]} then route
+     * through internal::apply_request. AttachConfig stays unchanged per
+     * PI-7. Sequential rule ids per architect's EDIT-1 prescription. */
+    Config synth;
+    synth.default_action = DefaultAction::Drop;
+    synth.rules.reserve(cfg.allow.size());
+    std::uint32_t next_id = 0;
     for (const xdpmf_mac& m : cfg.allow) {
-        const std::uint8_t present = 1;
-        const int rc = bpf_map_update_elem(allow_fd, &m, &present, BPF_ANY);
-        if (rc < 0) {
-            throw_loader(classify(rc, LoaderError::LoadFailed),
-                         std::format("bpf_map_update_elem(allowlist): {}",
-                                     std::strerror(-rc)));
-        }
+        Rule r{};
+        r.id        = next_id++;
+        r.action    = RuleAction::Pass;
+        r.match.mac = m;
+        synth.rules.push_back(r);
     }
-
-    // §5.23 Item 2: attach in the operator-selected XDP mode (default
-    // generic per AttachConfig.mode initializer; preserves MVP-1 baseline).
-    const int prog_fd = bpf_program__fd(skel->progs.mac_filter_prog);
-    if (prog_fd < 0) {
-        throw_loader(LoaderError::AttachFailed, "mac_filter_prog fd unavailable");
-    }
-    const std::uint32_t attach_flags = mode_to_flags(cfg.mode);
-    {
-        const int rc = bpf_xdp_attach(ifindex, prog_fd, attach_flags, nullptr);
-        if (rc < 0) {
-            throw_loader(classify(rc, LoaderError::AttachFailed),
-                         std::format("bpf_xdp_attach (mode={}): {}",
-                                     to_string(cfg.mode), std::strerror(-rc)));
-        }
-    }
-    XdpAttachment xdp_guard{ifindex, attach_flags};
-
-    // Query the just-assigned prog id for stdout reporting. We re-use the
-    // probe helper (passing self_tag for the is_ours predicate, though we
-    // ignore its result here — we only want the prog id).
-    const XdpProbe after = probe_attached_xdp(ifindex, self_tag);
-
-    // Commit: kernel keeps the XDP slot (Decision §5.9); maps stay pinned.
-    xdp_guard.release();
-    dir_guard.release();
-    return after.prog_id;
+    return internal::apply_request(internal::ApplyRequest{cfg.iface, cfg.mode, std::move(synth)});
 }
 
 std::uint32_t detach(const std::string& iface)
@@ -1040,6 +1143,12 @@ std::uint32_t detach(const std::string& iface)
     // §5.24 Q3 Option B: symmetric with attach() — detach() also early-loads
     // the skeleton (§5.22 Q1), so kernel-version gating must precede that.
     kernel_version_probe();
+
+    // §5.26 HG3: parse trust_model env even on detach so unknown values
+    // fail-closed before any kernel touch. The stderr-log policy is
+    // attach-only per §5.26 sub-decision; detach is silent on success
+    // (preserves MVP-2 surface).
+    (void)parse_trust_model_env();
 
     const int ifindex = resolve_ifindex(iface, LoaderError::DetachFailed);
 
@@ -1102,16 +1211,373 @@ std::uint32_t detach(const std::string& iface)
                                  probe.name, format_tag_hex(probe.tag), iface));
     }
 
+    // §5.26 HG2 P0a: unpin the link BEFORE bpf_xdp_detach so the kernel
+    // ref-count drops to zero in the expected order. unlinkat on the link
+    // pin path; ENOENT is fine (link was never pinned — pre-§5.26 install
+    // or already cleaned up). After unpin, bpf_xdp_detach drops the slot
+    // proper (or returns idempotent-success if the kernel already collapsed
+    // the slot under the link removal).
+    if (::unlinkat(root.fd(), (iface + "/" XDPMF_LINK_PIN_BASENAME).c_str(), 0) != 0) {
+        const int e = errno;
+        if (e != ENOENT) {
+            throw_loader(classify(-e, LoaderError::DetachFailed),
+                         std::format("unlinkat bpffs/{}/{}: {}",
+                                     iface, XDPMF_LINK_PIN_BASENAME, std::strerror(e)));
+        }
+    }
+
     // State (b): our prior instance. §5.23 Q1 Option A: detach in the
     // §5.20-probed mode (not hardcoded SKB) — operator did not supply
     // --mode on detach; the kernel told us which slot to detach.
+    // ENOENT here means the link pin removal already triggered kernel-side
+    // cleanup — treat as idempotent success.
     const int rc = bpf_xdp_detach(ifindex, probed_mode_to_flags(probe.mode), nullptr);
-    if (rc < 0) {
+    if (rc < 0 && -rc != ENOENT) {
         throw_loader(classify(rc, LoaderError::DetachFailed),
                      std::format("bpf_xdp_detach: {}", std::strerror(-rc)));
     }
     bpffs_remove_iface(root, iface);
     return probe.prog_id;
 }
+
+namespace internal {
+
+/* Extract the inner-allowlist contents from the validated Config: only
+ * rules with action==Pass + a present mac contribute. Drop-action rules
+ * are accepted-but-no-op in cycle 1 (the global default_action carries
+ * them) per design §5.26 schema rule 4. Dedup preserved by insertion-order. */
+[[nodiscard]] std::vector<xdpmf_mac> extract_pass_macs(const Config& c)
+{
+    std::vector<xdpmf_mac> out;
+    out.reserve(c.rules.size());
+    for (const Rule& r : c.rules) {
+        if (r.action != RuleAction::Pass) continue;
+        if (!r.match.mac.has_value())    continue;
+        const xdpmf_mac& m = *r.match.mac;
+        const bool already = std::any_of(
+            out.begin(), out.end(),
+            [&](const xdpmf_mac& e) {
+                return std::memcmp(e.octets, m.octets, sizeof(m.octets)) == 0;
+            });
+        if (!already) out.push_back(m);
+    }
+    return out;
+}
+
+/* §5.26 + EDIT-1 atomic apply (single source of truth for the swap flow):
+ * see design §5.26 attach() flow update + Phase B EDIT-1 internal-helper
+ * contract. Both loader::attach() and apply::apply_config_inmemory() route
+ * through here so the active_idx-flip + ruleset/defaults population logic
+ * lives in exactly ONE place. */
+std::uint32_t apply_request(const ApplyRequest& req)
+{
+    const std::vector<xdpmf_mac> deduped       = extract_pass_macs(req.config);
+    const DefaultAction          default_action = req.config.default_action;
+
+    if (deduped.size() > XDPMF_ALLOWLIST_MAX) {
+        throw_loader(LoaderError::LoadFailed,
+                     std::format("apply: pass-rule count {} exceeds XDPMF_ALLOWLIST_MAX={}",
+                                 deduped.size(), XDPMF_ALLOWLIST_MAX));
+    }
+
+    // §5.24 Q3 Option B: kernel-version probe BEFORE any libbpf API call.
+    kernel_version_probe();
+
+    // §5.26 HG3: trust_model env parse — fail-closed on unknown values; log
+    // the resolved mode at attach entry per the §5.26 sub-decision (audit
+    // story for ops greps). The log line is the load-bearing signal for
+    // §6.21 / §6.26 stderr assertions.
+    const TrustModel trust_model = parse_trust_model_env();
+    log_trust_model(trust_model);
+
+    const int ifindex = resolve_ifindex(req.iface, LoaderError::AttachFailed);
+
+    // §5.22 Item 2: BpffsRootFd guards the bpffs root via O_PATH|O_NOFOLLOW.
+    BpffsRootFd root{};
+
+    // §5.22 Q1 Option E: load skeleton FIRST so self_tag is available for
+    // the §5.4 probe BEFORE we make any kernel-mutating decisions.
+    BpfSkeleton skel = load_skeleton();
+    const TagArray self_tag = capture_self_tag(skel);
+
+    const XdpProbe probe          = probe_attached_xdp(ifindex, self_tag);
+    const bool     pin_dir_exists = iface_entry_is_real_dir(root, req.iface);
+
+    // §5.26 HG2 P0a: classify the link pin's presence — separate from the
+    // dir-presence check because the dir may exist without a link (state-d
+    // half-init). Only relevant for the idempotent-reattach branch.
+    const bool link_pin_exists = pin_dir_exists
+        && iface_file_exists(root, req.iface, XDPMF_LINK_PIN_BASENAME);
+
+    bool reattach_via_link = false;
+
+    if (probe.prog_id != 0) {
+        if (probe.is_ours && pin_dir_exists) {
+            // State (b): our prior instance. HG2 idempotent-reattach if a
+            // link pin survives; else fall through to fresh attach with the
+            // existing pin dir cleaned out (preserves pre-§5.26 cleanup-
+            // and-reattach pattern for first-time-upgrades from MVP-2).
+            if (link_pin_exists) {
+                reattach_via_link = true;
+                // Don't detach: bpf_link__update_program hot-swaps under
+                // the existing kernel link. Maps stay in place. Defaults
+                // and inner-map population happens below into the INACTIVE
+                // slot; active_idx flip is the atomic commit.
+            } else {
+                // No link pin — pre-§5.26 instance; fall back to MVP-2
+                // detach-then-reattach (one short packet window).
+                const int rc = bpf_xdp_detach(ifindex,
+                                              probed_mode_to_flags(probe.mode), nullptr);
+                if (rc < 0) {
+                    throw_loader(classify(rc, LoaderError::AttachFailed),
+                                 std::format("bpf_xdp_detach (idempotent cleanup): {}",
+                                             std::strerror(-rc)));
+                }
+                bpffs_remove_iface(root, req.iface);
+            }
+        } else {
+            // State (c): alien. §5.26 HG3: trust_model gates disposition.
+            if (trust_model == TrustModel::Strict) {
+                throw_alien_refused(probe, req.iface);
+            }
+            // Fleet: bypass alien refusal — detach the alien, clean the dir,
+            // proceed with a fresh attach. §5.19 + §5.22 hardening already
+            // ran BEFORE this branch (we read name/tag to compute is_ours);
+            // only §5.4 disposition is relaxed.
+            std::fprintf(stderr,
+                         "xdpmacfilter: trust_model=fleet — bypassing alien-program check; "
+                         "replacing prog id %u (mode=%s, name='%s')\n",
+                         probe.prog_id,
+                         std::string{to_string(probe.mode)}.c_str(),
+                         probe.name.c_str());
+            const int rc = bpf_xdp_detach(ifindex,
+                                          probed_mode_to_flags(probe.mode), nullptr);
+            if (rc < 0) {
+                throw_loader(classify(rc, LoaderError::AttachFailed),
+                             std::format("bpf_xdp_detach (fleet bypass): {}",
+                                         std::strerror(-rc)));
+            }
+            if (pin_dir_exists) bpffs_remove_iface(root, req.iface);
+        }
+    } else if (pin_dir_exists) {
+        // State (d): no XDP attached, stale pin dir survives. Clean and
+        // fresh-attach.
+        bpffs_remove_iface(root, req.iface);
+    }
+    // State (a): nothing → fresh attach.
+
+    // Ensure per-iface dir + arm rollback guard before any throw-risky op.
+    // On reattach we MUST NOT remove the dir on rollback — the existing
+    // link pin lives there and removing the dir would orphan the kernel link.
+    ensure_iface_dir(root, req.iface);
+    IfaceDirGuard dir_guard{root, req.iface};
+    if (!reattach_via_link) {
+        dir_guard.arm();
+    }
+
+    const std::string pin_dir = bpffs_dir_for(req.iface);
+
+    if (reattach_via_link) {
+        // §5.26 HG2 idempotent reattach per design step 10 +
+        // §5.26 EDIT-1 single-implementation contract:
+        //   bpf_link__open(link_pin) + bpf_link__update_program(link, new_prog).
+        //
+        // Strategy:
+        //   1. Discard the just-loaded skel; reopen + bpf_map__reuse_fd
+        //      against the SIX pinned kernel maps so the SECOND load's
+        //      maps ARE the existing pinned maps (same kernel objects,
+        //      same accumulated state — stats counts in particular are
+        //      preserved across the swap per T_APPLY_ATOMIC_SWAP_NO_DROP).
+        //   2. Read CURRENT active_idx (now visible via the reused map fd
+        //      on the new skel) to determine the inactive slot.
+        //   3. Populate the inactive inner slot + defaults via the (reused)
+        //      map fds; the OLD prog still reads from these maps but the
+        //      INACTIVE slot is unobserved until the flip.
+        //   4. bpf_link__update_program — atomically swap to the NEW prog
+        //      (different prog_id; same maps).
+        //   5. Atomic commit: write active_idx = inactive (one u32 store).
+        //
+        // No re-pinning needed (pins already point at the maps we use).
+        // No stats loss (stats map fd is reused; counts continue accumulating
+        // through the new prog). T_ATTACH_TAG_MISMATCH's
+        // our_id_2 != our_id_1 invariant holds (second load → different prog_id).
+        skel.reset();
+        skel = open_skeleton_only();
+
+        struct ReuseSpec { bpf_map* map; const char* name; };
+        const ReuseSpec reuse_specs[] = {
+            { skel->maps.allowlist_a, XDPMF_MAP_INNER_A_NAME        },
+            { skel->maps.allowlist_b, XDPMF_MAP_INNER_B_NAME        },
+            { skel->maps.rulesets,    XDPMF_MAP_RULESETS_OUTER_NAME },
+            { skel->maps.active_idx,  XDPMF_MAP_ACTIVE_IDX_NAME     },
+            { skel->maps.defaults,    XDPMF_MAP_DEFAULTS_NAME       },
+            { skel->maps.stats,       XDPMF_MAP_STATS_NAME          },
+        };
+        for (const ReuseSpec& r : reuse_specs) {
+            const std::string p = pin_dir + "/" + r.name;
+            const int fd = bpf_obj_get(p.c_str());
+            if (fd < 0) {
+                const int e = errno;
+                throw_loader(classify(-e, LoaderError::LoadFailed),
+                             std::format("bpf_obj_get (reuse '{}'): {}",
+                                         p, std::strerror(e)));
+            }
+            UniqueFd dup_holder{fd};
+            if (bpf_map__reuse_fd(r.map, dup_holder.get()) != 0) {
+                const int e = errno;
+                throw_loader(classify(-e, LoaderError::LoadFailed),
+                             std::format("bpf_map__reuse_fd({}): {}",
+                                         r.name, std::strerror(e)));
+            }
+            // bpf_map__reuse_fd dup()'s the fd internally; safe to close ours.
+        }
+        finish_load_skeleton(skel);
+
+        const int active_idx_reused_fd = bpf_map__fd(skel->maps.active_idx);
+        if (active_idx_reused_fd < 0) {
+            throw_loader(LoaderError::LoadFailed,
+                         "active_idx fd unavailable (reattach reuse)");
+        }
+        const std::uint32_t cur      = read_active_idx(active_idx_reused_fd);
+        const std::uint32_t inactive = (cur == 0) ? 1u : 0u;
+
+        // Populate the INACTIVE slot via the (reused) inner-map fds.
+        {
+            bpf_map* inactive_inner = (inactive == 0)
+                                          ? skel->maps.allowlist_a
+                                          : skel->maps.allowlist_b;
+            const int inactive_inner_fd = bpf_map__fd(inactive_inner);
+            if (inactive_inner_fd < 0) {
+                throw_loader(LoaderError::LoadFailed,
+                             "inactive inner fd unavailable (reattach)");
+            }
+            populate_inner_slot(inactive_inner_fd, deduped);
+        }
+        {
+            const int defaults_fd = bpf_map__fd(skel->maps.defaults);
+            if (defaults_fd < 0) {
+                throw_loader(LoaderError::LoadFailed,
+                             "defaults fd unavailable (reattach)");
+            }
+            write_default_slot(defaults_fd, inactive, default_action);
+        }
+
+        // Atomic prog swap. The OLD prog has been reading from these same
+        // (reused) maps; after update_program, the NEW prog reads from them.
+        bpf_link* link = bpf_link__open(link_pin_path_for(req.iface).c_str());
+        const long open_err = libbpf_get_error(link);
+        if (open_err) {
+            throw_loader(classify(static_cast<int>(open_err), LoaderError::AttachFailed),
+                         std::format("bpf_link__open('{}'): {}",
+                                     link_pin_path_for(req.iface),
+                                     std::strerror(-static_cast<int>(open_err))));
+        }
+        const int upd_rc = bpf_link__update_program(link, skel->progs.mac_filter_prog);
+        if (upd_rc < 0) {
+            bpf_link__disconnect(link);
+            bpf_link__destroy(link);
+            throw_loader(classify(upd_rc, LoaderError::AttachFailed),
+                         std::format("bpf_link__update_program: {}",
+                                     std::strerror(-upd_rc)));
+        }
+        bpf_link__disconnect(link);  // keep kernel link alive past loader exit
+        bpf_link__destroy(link);
+
+        // ATOMIC SWAP COMMIT — single u32 store on the reused active_idx.
+        // (Map dentries unchanged; userspace bpftool dumps see the new value.)
+        write_active_idx(active_idx_reused_fd, inactive);
+
+        std::fprintf(stderr,
+                     "xdpmacfilter: replacing existing program on %s\n",
+                     req.iface.c_str());
+
+        const XdpProbe after_probe = probe_attached_xdp(ifindex, self_tag);
+        return after_probe.prog_id;
+    }
+
+    // FRESH ATTACH path (state a / state d / state c-fleet).
+    struct PinSpec { bpf_map* map; const char* name; };
+    const PinSpec pin_specs[] = {
+        { skel->maps.allowlist_a, XDPMF_MAP_INNER_A_NAME        },
+        { skel->maps.allowlist_b, XDPMF_MAP_INNER_B_NAME        },
+        { skel->maps.rulesets,    XDPMF_MAP_RULESETS_OUTER_NAME },
+        { skel->maps.active_idx,  XDPMF_MAP_ACTIVE_IDX_NAME     },
+        { skel->maps.defaults,    XDPMF_MAP_DEFAULTS_NAME       },
+        { skel->maps.stats,       XDPMF_MAP_STATS_NAME          },
+    };
+    for (const PinSpec& s : pin_specs) {
+        const std::string p = pin_dir + "/" + s.name;
+        const int rc = bpf_map__pin(s.map, p.c_str());
+        if (rc < 0) {
+            throw_loader(classify(rc, LoaderError::LoadFailed),
+                         std::format("bpf_map__pin({}): {}", p, std::strerror(-rc)));
+        }
+    }
+
+    // §5.26 backward-compat: pin allowlist_a ALSO at the legacy
+    // ${PIN_DIR}/allowlist path so MVP-2-era ctests that grep for pin
+    // existence (T_LOAD_ATTACH, T_ATTACH_TAG_MISMATCH, T_MODE_GENERIC_DEFAULT,
+    // T_BPFFS_ROOT_SYMLINK) pass byte-equivalent (PI-6 invariant). The
+    // legacy alias is a separate bpffs dentry wrapping the same kernel-side
+    // inner-map; tests only check existence, not contents.
+    {
+        const int inner_a_fd = bpf_map__fd(skel->maps.allowlist_a);
+        if (inner_a_fd < 0) {
+            throw_loader(LoaderError::LoadFailed, "allowlist_a fd unavailable (legacy alias)");
+        }
+        const std::string legacy = pin_dir + "/" XDPMF_MAP_ALLOWLIST_NAME;
+        if (bpf_obj_pin(inner_a_fd, legacy.c_str()) < 0) {
+            const int e = errno;
+            throw_loader(classify(-e, LoaderError::LoadFailed),
+                         std::format("bpf_obj_pin (legacy {}): {}", legacy, std::strerror(e)));
+        }
+    }
+
+    // Fresh attach: populate slot 0 (the initial active slot).
+    const int active_idx_fd = bpf_map__fd(skel->maps.active_idx);
+    if (active_idx_fd < 0) {
+        throw_loader(LoaderError::LoadFailed, "active_idx map fd unavailable");
+    }
+    {
+        bpf_map* inner_map = skel->maps.allowlist_a;
+        const int inner_fd = bpf_map__fd(inner_map);
+        if (inner_fd < 0) {
+            throw_loader(LoaderError::LoadFailed, "inner-map fd unavailable");
+        }
+        populate_inner_slot(inner_fd, deduped);
+    }
+    {
+        const int defaults_fd = bpf_map__fd(skel->maps.defaults);
+        if (defaults_fd < 0) {
+            throw_loader(LoaderError::LoadFailed, "defaults map fd unavailable");
+        }
+        write_default_slot(defaults_fd, 0u, default_action);
+    }
+
+    // First attach: create+pin the XDP link with the operator-selected mode.
+    {
+        const int prog_fd = bpf_program__fd(skel->progs.mac_filter_prog);
+        if (prog_fd < 0) {
+            throw_loader(LoaderError::AttachFailed, "mac_filter_prog fd unavailable");
+        }
+        const int link_fd = create_xdp_link(prog_fd, ifindex, req.mode);
+        try {
+            pin_fd(link_fd, link_pin_path_for(req.iface));
+        } catch (...) {
+            (void)::close(link_fd);
+            throw;
+        }
+        (void)::close(link_fd);
+    }
+
+    // ATOMIC SWAP COMMIT: active_idx[0] = 0 (slot 0 with our just-written rules).
+    write_active_idx(active_idx_fd, 0u);
+
+    const XdpProbe after = probe_attached_xdp(ifindex, self_tag);
+    dir_guard.release();
+    return after.prog_id;
+}
+
+}  // namespace internal
 
 }  // namespace xdpmf

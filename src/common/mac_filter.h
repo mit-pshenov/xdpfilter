@@ -48,6 +48,20 @@ enum mac_filter_stat {
 #define XDPMF_MAP_ALLOWLIST_NAME "allowlist"
 #define XDPMF_MAP_STATS_NAME     "stats"
 
+/* §5.26 (MVP-3.1): atomic apply via ARRAY_OF_MAPS[2] — see design §5.26 Q2.
+ * Outer map of maps holds two inner allowlist instances; a one-slot
+ * active_idx ARRAY selects the live one; a two-slot defaults ARRAY parallels
+ * the outer indexing so default_action atomically swaps with the ruleset. */
+#define XDPMF_RULESET_COUNT            2                  /* outer max_entries */
+#define XDPMF_MAP_ACTIVE_IDX_NAME      "active_idx"      /* ARRAY[1] of __u32 */
+#define XDPMF_MAP_RULESETS_OUTER_NAME  "rulesets"        /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] */
+#define XDPMF_MAP_INNER_A_NAME         "allowlist_a"     /* inner slot 0 */
+#define XDPMF_MAP_INNER_B_NAME         "allowlist_b"     /* inner slot 1 */
+#define XDPMF_MAP_DEFAULTS_NAME        "defaults"        /* ARRAY[XDPMF_RULESET_COUNT] of __u32 */
+
+/* §5.26 P0a: bpf_link pin basename under the per-iface bpffs dir. */
+#define XDPMF_LINK_PIN_BASENAME        "link"
+
 #ifdef __cplusplus
 }
 #endif

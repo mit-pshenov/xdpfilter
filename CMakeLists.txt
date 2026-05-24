@@ -10,8 +10,8 @@ endif()
 
 project(xdpmacfilter
     LANGUAGES C CXX
-    VERSION   0.2.3
-    DESCRIPTION "MVP-1 L2 MAC allow-list XDP filter"
+    VERSION   0.3.0
+    DESCRIPTION "MVP-3.1 L2 MAC allow-list XDP filter (config-first foundation)"
 )
 
 # §5.25 P3: version-string sync — generate include/version.h from the
@@ -93,30 +93,38 @@ include(${CMAKE_SOURCE_DIR}/cmake/BpfBuild.cmake)
 add_bpf_object(mac_filter ${CMAKE_SOURCE_DIR}/src/bpf/mac_filter.bpf.c)
 add_bpf_skeleton(mac_filter)
 
-add_executable(xdpmacfilter
-    src/loader/main.cpp
-    src/loader/cli.cpp
-    src/loader/loader.cpp
+# §5.26 Q1 R1: internal STATIC library aggregates src/lib/*.cpp (loader +
+# config + yaml_subset). No installed headers; no SONAME; no public ABI
+# surface (library promotion is MVP-3.6+ optional branch).
+add_library(xdpmf_internal STATIC
+    src/lib/loader.cpp
+    src/lib/config.cpp
+    src/lib/yaml_subset.cpp
 )
-target_include_directories(xdpmacfilter PRIVATE
+target_include_directories(xdpmf_internal PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${CMAKE_BINARY_DIR}/include
 )
-# bpftool-generated skel.h uses C-style casts and other C-isms that fail
-# our zero-warning C++23 build. Treat the build dir as a SYSTEM include so
-# diagnostics in skel.h are suppressed by default (matching how libbpf
-# headers in /usr/include are already treated).
-target_include_directories(xdpmacfilter SYSTEM PRIVATE
+# bpftool-generated skel.h uses C-style casts and other C-isms; treat the
+# build dir as SYSTEM include so its diagnostics are suppressed by default.
+target_include_directories(xdpmf_internal SYSTEM PRIVATE
     ${CMAKE_BINARY_DIR}
 )
-target_link_libraries(xdpmacfilter PRIVATE PkgConfig::LIBBPF)
-add_dependencies(xdpmacfilter mac_filter_skel)
+target_link_libraries(xdpmf_internal PUBLIC PkgConfig::LIBBPF)
+add_dependencies(xdpmf_internal mac_filter_skel)
 
-# Sanitizer injection (design §5.18): apply ASAN+UBSAN flags to the C++
-# loader target ONLY, on both compile and link. target_*_options is scoped
-# (unlike add_compile_options), so the flag never reaches the BPF object
-# nor any other target. -fno-omit-frame-pointer keeps ASAN traces readable.
+add_subdirectory(src/cli)
+
+# Sanitizer injection (design §5.18; §5.26 Q1 R1 update): apply ASAN+UBSAN
+# flags to BOTH xdpmf_internal AND xdpmacfilter so a sanitizer-enabled
+# build doesn't mix instrumented and non-instrumented TUs (ASAN refuses
+# mixed objects at link/runtime). target_*_options is scoped; flag never
+# reaches the BPF object.
 if(XDPMF_SANITIZERS)
+    target_compile_options(xdpmf_internal PRIVATE
+        -fsanitize=address,undefined
+        -fno-omit-frame-pointer
+    )
     target_compile_options(xdpmacfilter PRIVATE
         -fsanitize=address,undefined
         -fno-omit-frame-pointer

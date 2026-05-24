@@ -1,0 +1,7 @@
+# Apply-A ruleset for §6.23 + §6.24: pass MAC_GOOD (02:00:00:00:00:01) only.
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      mac: "02:00:00:00:00:01"

@@ -1,0 +1,11 @@
+# Schema violation: two rules share id=0. Used by §6.22 sub-case 3.
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      mac: "02:00:00:00:00:01"
+  - id: 0
+    action: pass
+    match:
+      mac: "02:00:00:00:00:02"

@@ -48,6 +48,7 @@ enum class LoaderError : int {
     Permission         = 6,
     KernelUnsupported  = 7,
     PathRefused        = 8,
+    ConfigError        = 9,
 };
 
 /* Singleton category whose error_code values are LoaderError integers.

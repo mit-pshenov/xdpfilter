@@ -4094,11 +4094,99 @@ struct ApplyConfig {
                                                   XdpMode mode);
 ```
 
-Both functions internally route through ONE helper (impl detail) that
-implements the active_idx-flip-based atomic swap. The CLI dispatcher
-calls `apply_config(ApplyConfig{...})` for `apply -f`; the
-`attach --allow` path calls `apply_config_inmemory(iface,
-synthesized_config, mode)`.
+Both functions internally route through ONE shared helper —
+`xdpmf::internal::apply_request()` declared in `src/lib/apply_internal.hpp`
+— that implements the active_idx-flip-based atomic swap. See "Internal
+layering helper" sub-section below for the contract.
+
+##### Internal layering helper (`src/lib/apply_internal.hpp`, namespace `xdpmf::internal`)
+
+Added per §5.26 Phase B clarification 2026-05-24 EDIT-1 (impl flagged
+the under-spec: §5.26 attach() flow step 12 referenced `cfg.default_action`,
+but `AttachConfig` is UNCHANGED per PI-7 — it carries no `default_action`
+field. Resolution = a single shared internal helper that both
+`loader::attach()` and `apply::apply_config_inmemory()` route through;
+neither AttachConfig nor loader.hpp gain any new field/symbol).
+
+```
+struct ApplyRequest {
+    std::string  iface;
+    XdpMode      mode;
+    Config       config;     // fully-validated; if config.iface is set, caller has
+                             // already reconciled it against `iface` (interface-mismatch
+                             // check happens in apply_config/apply_config_inmemory,
+                             // NOT here — apply_request trusts its input).
+};
+
+// Performs the full atomic-apply sequence:
+//   1. kernel_version_probe (§5.24)
+//   2. parse XDPMF_TRUST_MODEL + stderr log (§5.26 Item 6)
+//   3. resolve ifindex (§5.4)
+//   4. open + load skel + capture self_tag (§5.22 Q1)
+//   5. open BpffsRootFd (§5.22 Q2)
+//   6. probe_attached_xdp + state-(a/b/c/d) branching with trust_model gating
+//      (§5.4 + §5.26 §5.4 trust_model gating sub-section)
+//   7. P0a link-pin detection (§5.26 Item 5):
+//        existing pin → bpf_link__open + bpf_link__update_program (hot-swap)
+//        no pin       → bpf_program__attach_xdp_opts + bpf_link__pin
+//   8. populate inactive defaults_map slot (req.config.default_action) +
+//      populate inactive inner allowlist (req.config.rules with action == Pass +
+//      MAC match)
+//   9. atomic bpf_map_update_elem(active_idx_map, &zero, &inactive_idx, BPF_ANY)
+// Returns prog_id of the attached program (post-attach probe).
+// Throws std::system_error with LoaderError codes on failure.
+[[nodiscard]] std::uint32_t apply_request(const ApplyRequest& req);
+```
+
+**Routing contract** (replaces the original "ONE helper (impl detail)"
+hand-wave):
+
+- `loader::attach(const AttachConfig& cfg)` (public API, signature
+  unchanged from MVP-2): body synthesizes a Config per Q3 BC1
+  semantics (`default_action: Drop`, `rules:` one `action: Pass` rule
+  per MAC in `cfg.allow` with sequential IDs starting at 0), then
+  calls `internal::apply_request(ApplyRequest{cfg.iface, cfg.mode,
+  std::move(synth_config)})`. ATTACHCONFIG STAYS UNCHANGED — no
+  `default_action` field is added.
+- `apply::apply_config_inmemory(const std::string& iface, const Config&
+  parsed, XdpMode mode)` (NEW, in src/cli/apply.hpp): if
+  `parsed.iface` is set, asserts it equals `iface` (else throws
+  `ConfigError` exit 9 with `interface mismatch (file declares '<Y>',
+  --iface is '<X>')`); then calls `internal::apply_request(ApplyRequest{iface,
+  mode, parsed})`.
+- `apply::apply_config(const ApplyConfig& cfg)` (NEW, in
+  src/cli/apply.hpp): reads `cfg.config_path` (1 MiB cap per Q-HG1)
+  → `yaml::parse()` → `config::validate()` → builds Config →
+  delegates to `apply_config_inmemory(cfg.iface, parsed_config, cfg.mode)`.
+
+**Layering**: `src/cli/apply.cpp` includes `src/lib/apply_internal.hpp`
+and `src/lib/config.hpp`; `src/lib/loader.cpp` includes
+`src/lib/apply_internal.hpp` (header co-located with the
+implementation). `internal::apply_request()` body lives in
+`src/lib/loader.cpp` (where the BPF/kernel-touch machinery already
+lives — single source of truth; no duplication). `apply_internal.hpp`
+is NOT installed; NOT in loader.hpp public API; reviewer asserts
+`git diff loader.hpp` shows ONLY the `ConfigError = 9,` enumerator
+line (PI-7 holds). The `xdpmf::internal` namespace makes the
+"internal-only" intent textually obvious to grep-readers.
+
+**`AttachConfig` post-§5.26 semantic note**: AttachConfig STAYS at
+`{iface, allow, mode}` (MVP-2 + §5.23 layout); the `default_action`
+information is implicit in the routing — `loader::attach()` ALWAYS
+synthesizes a `default_action: Drop` Config (matching MVP-1's §5.7
+"empty allow-list = drop-all" semantic and the post-§5.7 "explicit
+allow-list = drop-others" semantic). An operator who wants `default_action:
+pass` MUST use `apply -f` with a YAML file declaring it; `--allow`
+shorthand never produces a pass-default. This is consistent with the
+brief's Q3 BC1 "synthesizes a single-rule config in-memory" semantic
+and matches MVP-2 behaviour byte-for-byte.
+
+**CLI variants UNCHANGED from initial §5.26 spec**: `cli.cpp`'s `attach`
+parser still emits `ParsedAttach{AttachConfig}`; `main.cpp`'s `attach`
+dispatch arm still calls `loader::attach(cfg.attach)`. The `apply`
+parser emits `ParsedApply{ApplyConfig}`; dispatch arm calls
+`apply::apply_config(cfg.apply)`. Zero CLI-surface or main-dispatch
+restructure beyond the new `apply` arm.
 
 ##### CLI variants (`src/cli/cli.hpp`)
 
@@ -4293,7 +4381,8 @@ log line presence + format in §6.26 + §6.25.
 | `src/lib/config.hpp` | Header for typed config schema per §5.26 schema: `Config`, `Rule`, `RuleMatch`, `DefaultAction`, `RuleAction` | C++23 | 30 |
 | `src/lib/config.cpp` | Schema validator: takes `yaml::Node` root → produces `Config` or throws `ConfigError` (rules 1-6 per §5.26 schema) | C++23 | 100 |
 | `src/cli/apply.hpp` | Header for apply orchestrator: `ApplyConfig`, `apply_config()`, `apply_config_inmemory()` declarations | C++23 | 25 |
-| `src/cli/apply.cpp` | Apply orchestrator: parse → validate → reconcile-with-iface → atomic-swap via active_idx flip; calls into loader's attach helpers for first-attach path | C++23 | 130 |
+| `src/cli/apply.cpp` | Apply orchestrator: parse → validate → reconcile-with-iface → routes through `internal::apply_request()` (see `src/lib/apply_internal.hpp`) | C++23 | 80 |
+| `src/lib/apply_internal.hpp` | Internal-only helper exposing the shared atomic-apply implementation (skel-load + probe + identity-gate + active_idx flip + populate-inner + link-pin / update-program) used by BOTH `loader::attach()` (synthesized-Config wrapper per Q3 BC1) AND `apply::apply_config_inmemory()`. NOT in loader.hpp public API; NOT installed; namespace `xdpmf::internal`. See "Internal layering helper" sub-section in §5.26 Interfaces additions. Added per §5.26 Phase B clarification 2026-05-24 EDIT-1 (impl flagged ambiguity in attach() flow step 12 — `cfg.default_action` reference vs PI-7 `loader.hpp` byte-equivalence). | C++23 | 25 |
 | `tests/T_APPLY_VALID_CONFIG.sh` | §6.21 test | bash | tester |
 | `tests/T_APPLY_REJECTS_MALFORMED.sh` | §6.22 test | bash | tester |
 | `tests/T_APPLY_ATOMIC_SWAP_NO_DROP.sh` | §6.23 test (load-bearing for Composite 6 promise) | bash | tester |
@@ -4534,6 +4623,9 @@ walks this list and reports `[INVARIANT-VIOLATED]` per failed check.
 - **No `bpf_link__update_program` fallback for kernels that don't support hot-swap** — assumed-supported per libbpf 1.x + kernel 5.7+; floor 5.15 enforces this. If a future kernel regresses, impl falls back to unpin + fresh-attach (one extra packet-window) and emits stderr `link update unsupported on this kernel; falling back to detach+attach` — but this fallback path is OOS for cycle 1 (no test, no contract; if observed in Phase B, fold via standard inline-merge per HG2).
 - **No background-injector framework abstraction** — §6.23 ships with a one-off bash `&` loop; if MVP-3.2+ tests need more concurrent traffic patterns, a generic `inject_continuous` helper lands then.
 - **No `XDPMF_INJECT_RATE_HZ` documentation in `--help`** — env var is test-only infrastructure (per §6.23 SKIP-rate threshold mechanism); intentionally undocumented in public CLI surface.
+- **No exposing of `internal::apply_request` on `loader.hpp` public API** (per Phase B clarification EDIT-1) — the shared atomic-apply helper lives in `src/lib/apply_internal.hpp`, namespace `xdpmf::internal`. `loader.hpp` byte-equivalence (PI-7) is load-bearing for reviewer's invariant check. Promoting `apply_request` to a public `xdpmf::` symbol is MVP-3.6+ work (only if the library extraction branch lands AND a named external consumer needs it).
+- **No `default_action` field on `AttachConfig`** (per Phase B clarification EDIT-1) — AttachConfig stays at MVP-2/§5.23 `{iface, allow, mode}`. `loader::attach()` ALWAYS synthesizes `default_action: Drop` per Q3 BC1; operators needing pass-default use `apply -f`. This preserves AttachConfig binary compatibility AND matches the MVP-2 §5.7 "empty allow-list = drop-all" semantic.
+- **No alternative layering where `apply.cpp` calls into `loader.cpp` anon-namespace machinery directly** (per Phase B clarification EDIT-1) — anon-namespace symbols are translation-unit-private; cross-TU access requires the named `internal::` symbol exported via `apply_internal.hpp`. The internal header is the ONLY mechanism for sharing the atomic-apply machinery between loader.cpp and apply.cpp.
 
 #### §5.26 verifiable invariants for reviewer
 

@@ -285,3 +285,68 @@ set_tests_properties(T_VERIFIER_REJECT PROPERTIES
     TIMEOUT 60
     SKIP_RETURN_CODE 77
 )
+
+# ─────────────────────────────────────────────────────────────────────────
+# MVP-3.1 additions (§5.26 / §6.21-§6.27 — Composite 6 config-first foundation).
+#
+# T_APPLY_VALID_CONFIG (§6.21): valid YAML → applied; MAC filtering matches.
+# T_APPLY_REJECTS_MALFORMED (§6.22): 5 malformed sub-cases → exit 9.
+# T_APPLY_ATOMIC_SWAP_NO_DROP (§6.23): LOAD-BEARING — concurrent traffic +
+#   apply; zero drops for overlapping-allowed MAC across the swap window.
+# T_APPLY_REPLACES_RULESET (§6.24): bidirectional A↔B↔A swap verification.
+# T_LINK_PERSIST_ACROSS_LOADER_EXIT (§6.25): LOAD-BEARING P0a — bpf_link
+#   pin persists across loader exit; filter still enforces on fresh
+#   traffic; idempotent reattach via bpf_link__update_program.
+# T_TRUST_MODEL_FLEET_RELAXES_GATE (§6.26): XDPMF_TRUST_MODEL=fleet
+#   bypasses §5.4 alien refusal; strict re-confirms refusal; garbage value
+#   fails closed exit 9. Uses xdp_pass.bpf.o alien fixture (already built).
+# T_EXIT_CODE_9_ON_CONFIG_ERROR (§6.27): bare-bones exit-9 audit-grep via
+#   garbage XDPMF_TRUST_MODEL — NO veth, NO root, NO fixture deps.
+foreach(T IN ITEMS
+    T_APPLY_VALID_CONFIG
+    T_APPLY_REJECTS_MALFORMED
+    T_APPLY_REPLACES_RULESET
+    T_LINK_PERSIST_ACROSS_LOADER_EXIT
+    T_TRUST_MODEL_FLEET_RELAXES_GATE
+)
+    add_test(
+        NAME ${T}
+        COMMAND bash ${TEST_DIR}/${T}.sh
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    set_tests_properties(${T} PROPERTIES
+        ENVIRONMENT "${TEST_ENV}"
+        RESOURCE_LOCK xdp_fixture
+        TIMEOUT 60
+        SKIP_RETURN_CODE 77
+    )
+endforeach()
+
+# §6.23 LOAD-BEARING concurrent-traffic test — longer TIMEOUT because the
+# test runs ≥4s of background injection (2s baseline + 2s post-swap). The
+# SKIP_RETURN_CODE 77 path triggers when XDPMF_INJECT_RATE_HZ is too low
+# for the runner's sustained packet-per-second capacity (slow CI).
+add_test(
+    NAME T_APPLY_ATOMIC_SWAP_NO_DROP
+    COMMAND bash ${TEST_DIR}/T_APPLY_ATOMIC_SWAP_NO_DROP.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_APPLY_ATOMIC_SWAP_NO_DROP PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 120
+    SKIP_RETURN_CODE 77
+)
+
+# §6.27 bare-bones exit-code-9 audit-grep — NO veth, NO root, NO
+# RESOURCE_LOCK; pure binary invocation test (env-parse rejection
+# happens before iface resolution per §5.26 attach() flow step 2).
+add_test(
+    NAME T_EXIT_CODE_9_ON_CONFIG_ERROR
+    COMMAND bash ${TEST_DIR}/T_EXIT_CODE_9_ON_CONFIG_ERROR.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_EXIT_CODE_9_ON_CONFIG_ERROR PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    TIMEOUT 10
+)

@@ -1,5 +1,5 @@
 /*
- * cli.hpp — argv → {Subcommand + AttachConfig|DetachConfig} parser.
+ * cli.hpp — argv → {Subcommand + AttachConfig|DetachConfig|ApplyConfig} parser.
  *
  * Errors are reported via `CliError` thrown by parse(); main() catches
  * and maps to exit codes per design §4.1.
@@ -11,15 +11,16 @@
 #include <string_view>
 #include <variant>
 
+#include "apply.hpp"        // ApplyConfig — §5.26 Q4 G1
 #include "common/mac_filter.h"
-#include "loader.hpp"  // AttachConfig / DetachConfig (moved here in MVP-1.1C §5.21 A1)
+#include "lib/loader.hpp"  // AttachConfig / DetachConfig (moved here in MVP-1.1C §5.21 A1; §5.26 Q1 R1 relocated to lib/)
 
 namespace xdpmf {
 
 struct HelpRequest    {};
 struct VersionRequest {};
 
-using ParsedCommand = std::variant<AttachConfig, DetachConfig, HelpRequest, VersionRequest>;
+using ParsedCommand = std::variant<AttachConfig, DetachConfig, ApplyConfig, HelpRequest, VersionRequest>;
 
 class CliError : public std::runtime_error {
 public:

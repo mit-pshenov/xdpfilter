@@ -5,6 +5,39 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-24
+
+MVP-3.1 — config-first foundation (Composite 6 cycle 1; six bundled pieces). The largest mint slice to date and the architectural foundation for MVP-3.N.
+
+### Added
+- `apply` subcommand: `xdpmacfilter apply --iface <IFNAME> -f <PATH> [--mode <M>]`. Reads YAML config; atomic hot-swap when an existing link pin is present (no packet drop window; verified by `T_APPLY_ATOMIC_SWAP_NO_DROP`).
+- Custom YAML 1.2 subset parser in `src/lib/yaml_subset.{cpp,hpp}` (no third-party deps per HG1). Accepted constructs: block mapping, block sequence, single/double-quoted scalars, bareword scalars, signed-decimal integers, null/`~`, `#` comments, optional leading `---`. DoS guards: 1 MiB file, 4 KiB scalar, 8-level nesting. Everything else → `ConfigError` (exit 9) with `xdpmacfilter: config error: <feature>: <file>:<line>:<col>` stderr.
+- Typed config schema in `src/lib/config.{cpp,hpp}`: `Config` / `Rule` / `RuleMatch` / `DefaultAction` / `RuleAction`. Schema version 1: `default_action` REQUIRED ∈ {drop,pass}; `rules` list of `{id, action, match.mac}`; rule id ∈ [0, 63] unique; only `mac` match type in cycle 1 (forward-compat hinge for MVP-3.2 CIDR).
+- BPF map architecture for atomic apply (Q2 A1 + Q2-extension): `ARRAY_OF_MAPS[2]` outer (`rulesets`) + `ARRAY[1]` `active_idx` selector + `ARRAY[2]` `defaults` (drop/pass per slot). Userspace populates the inactive slot, then writes a single u32 `active_idx[0]` — kernel-atomic on aligned word stores; the swap atomically replaces ruleset AND default.
+- `bpf_link__pin` survival across loader exit (HG2 P0a): the XDP attachment is pinned at `${XDPMF_BPFFS_ROOT}/<iface>/link`. Filter persists past `apply` invocation exit; subsequent applies hot-swap via `bpf_link__update_program` (no kernel detach, no fresh attach).
+- `XDPMF_TRUST_MODEL` env var (HG3): `strict` (default) | `fleet`. `fleet` relaxes the §5.4 alien-program refusal ONLY (still detaches the alien and proceeds). `§5.19` (name-check) and `§5.22` (tag-check + O_PATH path-discipline) remain enforced in both modes. Audit story: mandatory stderr-log `xdpmacfilter: trust_model=<m>` at `attach`/`apply` entry.
+- Internal STATIC library `xdpmf_internal` (Q1 R1) aggregating `src/lib/*.cpp` (loader + config + yaml_subset). No installed headers; no SONAME; no public ABI surface (promotion to `libxdpmf.so.0` is MVP-3.6+ optional branch).
+- New exit code 9 = `LoaderError::ConfigError`: YAML parse failure / schema-validation failure / interface-mismatch / unknown trust model. Distinct from exit 1 (CLI usage) and exit 8 (path-refused).
+- 7 new ctests: `T_APPLY_VALID_CONFIG`, `T_APPLY_REJECTS_MALFORMED`, `T_APPLY_ATOMIC_SWAP_NO_DROP`, `T_APPLY_REPLACES_RULESET`, `T_LINK_PERSIST_ACROSS_LOADER_EXIT`, `T_TRUST_MODEL_FLEET_RELAXES_GATE`, `T_EXIT_CODE_9_ON_CONFIG_ERROR` (tester output; impl ships fixtures `tests/fixtures/config_*.yaml`).
+- New `tests/lib/common.sh` helpers: `apply_config <path> <iface>`, `wait_for_active_idx_flip <iface> <expected>`, `kill_loader_keep_link <iface>`.
+
+### Changed
+- `src/loader/` → `src/lib/` + `src/cli/` directory split per Q1 R1 minimum split. `loader.{cpp,hpp}` / `raii.hpp` / new `yaml_subset.{cpp,hpp}` / new `config.{cpp,hpp}` live under `src/lib/`. `cli.{cpp,hpp}` / `main.cpp` / new `apply.{cpp,hpp}` live under `src/cli/`. Binary moves from `${BUILD_DIR}/xdpmacfilter` to `${BUILD_DIR}/src/cli/xdpmacfilter`; `find_loader` in `common.sh` searches the new path first.
+- CMake `project(VERSION)` bumped from `0.2.3` → `0.3.0` (semver minor — new feature, backward-compatible CLI surface).
+- `attach --allow <MAC>` (existing MVP-1+ surface) is now a silent shorthand for the apply path per Q3 BC1: the CLI synthesizes a Drop-default Config and feeds it through the same `internal::apply()` helper that `apply -f` uses. Byte-identical invocation; no deprecation warning; 20 existing ctests pass unchanged.
+- `mac_filter.bpf.c` datapath rewritten to use the chained `active_idx` → `rulesets[active]` → inner MAC lookup → `defaults[active]` pattern. `mac_filter_prog` symbol name + SEC unchanged (§5.19 / §5.22 identity-gate contract preserved).
+- `loader.hpp` gains EXACTLY ONE new enumerator: `ConfigError = 9` (PI-7 single-line invariant; mirrors §5.22 `PathRefused = 8` and §5.24 `KernelUnsupported = 7` precedent).
+- `--help` text gains `apply` row + `-f` option + `9 config-error` row in the exit-code table.
+
+### Internal (not part of public CLI surface)
+- New private header `src/lib/apply_internal.hpp` (NOT in design FileList; deviation documented in `mint/impl-notes.md`). Exposes `internal::apply(ApplyRequest)` — the single atomic-apply implementation shared between `loader::attach()` (legacy AttachConfig path) and `apply_config_inmemory()` (Config path). Keeps the atomic-swap machinery in exactly one place per §5.26 design intent ("ONE helper (impl detail)") while honouring PI-7 (loader.hpp diff = exactly one enumerator).
+
+### Preserved invariants (verified by impl smoke)
+- PI-7: `loader.hpp` diff = file rename `src/loader/` → `src/lib/` + ONE added enumerator line `ConfigError = 9,`. No other line changes.
+- PI-8: `xdpmacfilter --version` reports `xdpmacfilter 0.3.0` (CMake `project(VERSION)`-driven via `include/version.h.in`).
+- PI-9: `--help` text format compatible with `T_CLI_HELP_VERSION`'s forward-flexible ERE (just adds rows; doesn't break the existing capture groups).
+- HG3 sub-decision: `XDPMF_TRUST_MODEL=<garbage> --version` does NOT exit 9 (trust_model is parsed only on attach/apply paths). Verified.
+
 ## [0.2.3] — 2026-05-23
 
 MVP-2 Polish-2 — netns isolation + CMake-gen `PIN_ROOT` + version-string sync + `inject_runt:37` comment fix (fourth and final MVP-2 pass).

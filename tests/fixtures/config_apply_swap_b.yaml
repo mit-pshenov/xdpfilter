@@ -1,0 +1,14 @@
+# Apply-B ruleset for §6.23 + §6.24: pass MAC_GOOD + MAC_BAD.
+# MAC_GOOD overlap is the load-bearing element for §6.23 (must NEVER drop
+# across the swap). MAC_BAD becomes allowed under B (was denied under A) —
+# the discriminator for §6.24 bidirectional verification.
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      mac: "02:00:00:00:00:01"
+  - id: 1
+    action: pass
+    match:
+      mac: "02:00:00:00:00:02"

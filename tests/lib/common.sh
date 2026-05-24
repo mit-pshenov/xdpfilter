@@ -71,12 +71,17 @@ require_passwordless_sudo() {
 }
 
 # ── Locate the loader binary in BUILD_DIR ─────────────────────────────────
+# §5.26 Q1 R1: binary moved from build/xdpmacfilter (pre-§5.26 implicit
+# top-level placement) to build/src/cli/xdpmacfilter (proper add_subdirectory
+# layout). Search order keeps the new path first; older paths follow only
+# as fallback for partial rebuilds.
 find_loader() {
     if [[ -n "${LOADER:-}" && -x "${LOADER}" ]]; then
         printf '%s\n' "${LOADER}"; return 0
     fi
     local cand
     for cand in \
+        "${BUILD_DIR}/src/cli/xdpmacfilter" \
         "${BUILD_DIR}/xdpmacfilter" \
         "${BUILD_DIR}/src/loader/xdpmacfilter" \
         "${BUILD_DIR}/loader/xdpmacfilter" \
@@ -240,4 +245,49 @@ xdp_prog_id() {
 # Retained for any out-of-tree or diagnostic use.
 prog_count() {
     sudo -n bpftool prog show --json 2>/dev/null | jq 'length'
+}
+
+# ── §5.26 MVP-3.1 helpers ────────────────────────────────────────────────
+# apply_config <path-to-yaml> <iface> [extra-args...]
+#   Thin wrapper that invokes the loader's `apply` subcommand inside the
+#   per-PID netns. Same NSEXEC discipline as inject_eth / xdp_prog_id —
+#   the iface lives in ${NETNS} so we must enter the netns to address it.
+#   Returns the loader's exit code untouched (so tests can assert rc==9
+#   on ConfigError, rc==0 on success, etc.).
+apply_config() {
+    local config_path="$1" iface="$2"
+    shift 2
+    ${NSEXEC} "$(find_loader)" apply -f "${config_path}" --iface "${iface}" "$@"
+}
+
+# wait_for_active_idx_flip <iface> <expected> [timeout_ms=2000] [poll_ms=20]
+#   Polls bpftool's dump of the per-iface active_idx pin until the slot-0
+#   value matches `expected`. Returns 0 on match, 1 on timeout.
+#   Used by §6.23 / §6.24 / §6.25 to observe the atomic swap commit.
+wait_for_active_idx_flip() {
+    local iface="$1" expected="$2"
+    local timeout_ms="${3:-2000}" poll_ms="${4:-20}"
+    local pin="${PIN_ROOT}/${iface}/active_idx"
+    local waited_ms=0 cur
+    while (( waited_ms < timeout_ms )); do
+        cur=$(sudo -n bpftool map dump pinned "${pin}" -j 2>/dev/null \
+              | jq -r '.[0].formatted.value // .[0].value[0] // .[0].value' 2>/dev/null || true)
+        if [[ "${cur}" == "${expected}" ]]; then
+            return 0
+        fi
+        sleep "$(awk -v ms="${poll_ms}" 'BEGIN{printf "%.3f", ms/1000.0}')"
+        waited_ms=$(( waited_ms + poll_ms ))
+    done
+    return 1
+}
+
+# kill_loader_keep_link <iface>
+#   Sends SIGKILL to any lingering xdpmacfilter process AFTER the apply has
+#   pinned the link. P0a's contract is the link survives loader-process
+#   termination — this helper makes the test explicit. In practice the
+#   `apply` invocation has already exited by the time the test reaches the
+#   step, so this is belt-and-suspenders (per §6.25 step 10). ENOENT-safe.
+kill_loader_keep_link() {
+    local iface="$1"
+    sudo -n pkill -9 -f "xdpmacfilter.*${iface}" 2>/dev/null || true
 }

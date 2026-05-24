@@ -1,0 +1,2 @@
+# Schema violation: default_action ∉ {drop, pass}. Used by §6.22 sub-case 2.
+default_action: maybe

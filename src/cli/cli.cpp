@@ -80,6 +80,7 @@ std::string usage_text()
         "Usage:\n"
         "  {0} attach --iface <IFNAME> [--allow <MAC>[,<MAC>...] ...] [--mode <M>]\n"
         "  {0} detach --iface <IFNAME>\n"
+        "  {0} apply  --iface <IFNAME> -f <PATH> [--mode <M>]\n"
         "  {0} --help | --version\n"
         "\n"
         "Options:\n"
@@ -88,13 +89,16 @@ std::string usage_text()
         "                              be a comma-separated list. Max {1} unique.\n"
         "                              Format: XX:XX:XX:XX:XX:XX (hex).\n"
         "                              Empty allow-list drops all frames.\n"
+        "  -f <PATH>                   YAML config file (apply only). Schema\n"
+        "                              version 1. Max 1 MiB.\n"
         "  --mode {{generic|native|offload}}\n"
-        "                              XDP attach mode (attach only; default generic).\n"
-        "                              detach auto-detects from the attached program.\n"
+        "                              XDP attach mode (attach / apply only;\n"
+        "                              default generic). detach auto-detects\n"
+        "                              from the attached program.\n"
         "\n"
         "Exit codes: 0 ok, 1 usage, 2 load-fail, 3 attach-fail,\n"
         "            4 attach-refused-alien, 5 detach-fail, 6 permission,\n"
-        "            8 path-refused.\n",
+        "            8 path-refused, 9 config-error.\n",
         kProgName, XDPMF_ALLOWLIST_MAX);
 }
 
@@ -197,6 +201,43 @@ ParsedCommand parse_attach(std::span<char* const> args)
     return cfg;
 }
 
+/* §5.26 Q4 G1: `apply -f <path> --iface <iface> [--mode <m>]`. Both
+ * --iface and -f are REQUIRED; --mode is optional (forwarded to first attach
+ * only; ignored when an existing link pin is reused). */
+ParsedCommand parse_apply(std::span<char* const> args)
+{
+    ApplyConfig cfg;
+    std::size_t i = 0;
+    while (i < args.size()) {
+        std::string_view tok{args[i]};
+        if (tok == "--iface" || tok.starts_with("--iface=")) {
+            cfg.iface = std::string{consume_flag_value(args, i, "iface")};
+        } else if (tok == "-f") {
+            if (i + 1 >= args.size()) {
+                throw CliError("apply: -f requires a value");
+            }
+            ++i;
+            cfg.config_path = std::string{args[i]};
+            if (cfg.config_path.empty()) {
+                throw CliError("apply: -f requires a non-empty path");
+            }
+            ++i;
+        } else if (tok == "--mode" || tok.starts_with("--mode=")) {
+            std::string_view v = consume_flag_value(args, i, "mode");
+            cfg.mode = parse_mode_token(v);
+        } else {
+            throw CliError(std::format("unknown apply flag: '{}'", tok));
+        }
+    }
+    if (cfg.iface.empty()) {
+        throw CliError("apply requires --iface <IFNAME>");
+    }
+    if (cfg.config_path.empty()) {
+        throw CliError("apply requires -f <PATH>");
+    }
+    return cfg;
+}
+
 ParsedCommand parse_detach(std::span<char* const> args)
 {
     DetachConfig cfg;
@@ -241,6 +282,9 @@ ParsedCommand parse(int argc, char* const argv[])
     }
     if (sub == "detach") {
         return parse_detach(rest);
+    }
+    if (sub == "apply") {
+        return parse_apply(rest);
     }
     throw CliError(std::format("unknown subcommand: '{}'", sub));
 }
