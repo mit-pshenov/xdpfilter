@@ -1,172 +1,196 @@
-# Task brief — MVP-3.2: L3 src-CIDR rule type (brownfield)
+# Task brief — MVP-3.3: systemd + Ansible + fleet docs (brownfield)
 
 ## Goal
 
-Extend MVP-3.1's `config-first foundation` harness with **L3 src-CIDR matching as a new in-config rule type**. Per `mint/architecture-v2.md` MVP-3.2 row: this is the first extension *within* the config-driven path (NOT as a CLI flag — that path was deliberately rejected during architecture round-2 rework to avoid throwaway surface).
+Make the loader **operator-deployable** by adding systemd integration + an example Ansible playbook + identity-gate-relax `fleet` mode operator docs. Per `mint/architecture-v2.md` MVP-3.3 row: ops/integration slice, low BPF/C++ surface area, mostly unit file + playbook + docs.
 
-The slice adds 4 pieces:
+The slice ships 4 pieces:
 
-1. **BPF datapath** — `cidr_allowlist_*` LPM_TRIE maps + `xdpmf_cidr_v4` key type + OR-compose with MAC match in `mac_filter_prog`. Per design Q1 (architect), the existing `ARRAY_OF_MAPS` atomic-swap mechanism extends to both MAC + CIDR consistently.
-2. **Config schema** — `RuleMatch` gains optional `cidr` field (e.g., `match: {cidr: "10.0.0.0/8"}`); validator accepts a rule with `mac` only, `cidr` only, or BOTH (OR-semantic within a single rule — first match wins). `xdpmf_subset` YAML parser already accepts arbitrary string scalars per HG1 grammar, so no parser changes (only validator).
-3. **Apply orchestrator** — `internal::apply_request` extends to populate both `mac_allowlist_*` and `cidr_allowlist_*` inner slots atomically.
-4. **Counter + tests** — new `STAT_PASS_CIDR` PERCPU_ARRAY index (per §5.23 pattern) incremented when the CIDR axis matched (not MAC). 3 ctests minimum: `T_PASS_CIDR`, `T_DROP_CIDR_NOT_IN_RANGE`, `T_PASS_MAC_OR_CIDR` (the OR-compose verification per risk-register MVP-3.2 row 2 mitigation).
+1. **systemd unit template** `xdpmacfilter@.service` — one instance per iface, `Type=oneshot RemainAfterExit=yes`, ExecStart re-runs `xdpmacfilter apply -f /etc/xdpfilter/%i.yaml --iface %i`, ExecReload re-runs the same (idempotent reattach via MVP-3.1's bpf_link__update_program), ExecStop runs `xdpmacfilter detach --iface %i`. `Restart=on-failure` for the apply (oneshot exit-nonzero retry).
+2. **Ansible example playbook** at `ansible/xdpmacfilter-deploy.yml` — installs binary + systemd unit + `/etc/xdpfilter/<iface>.yaml` config (Jinja2 template) + handler `notify: reload xdpmacfilter` driving `systemctl reload`. Reference example only — not a full collection/role; operator adapts to fleet specifics.
+3. **Fleet-mode operator docs** at `docs/FLEET_DEPLOYMENT.md` — when to set `XDPMF_TRUST_MODEL=fleet`, the audit story (stderr emits `trust_model=<mode>` at attach per MVP-3.1 HG3), recommended Prometheus alert pattern (fleet-wide trust-model distribution divergence — implementation is MVP-3.4 exporter scope; this slice just specifies the alert semantic). README pointer added.
+4. **Integration tests** — systemd unit install + daemon-reload + start/reload/stop lifecycle exercised via real `sudo systemctl` on dev VM (user has passwordless root per project context). Ansible playbook gets `ansible-playbook --syntax-check` validation (skipped if ansible not installed). 3-5 ctests.
 
-**IPv4 only for cycle 1** — IPv6 LPM_TRIE shape (128-bit key) is fenced to MVP-3.2.5 or later. If product owner wants v4+v6 in this cycle, escalate at human-gate; default is v4-only.
-
-Estimated budget per `architecture-v2.md` per-phase scope summary: ~1 cycle, ~120-180 LOC source + ~80 LOC test, **3-5 ctests**. Smaller than MVP-3.1 (config harness is built; this slice extends it).
+Estimated budget per `architecture-v2.md` per-phase scope summary: ~1 cycle, low risk. Smallest LOC delta of MVP-3.x to date — mostly text files (unit + YAML playbook + Markdown docs) + a thin ctest shim around systemctl.
 
 ## Context: prior work
 
-- **All prior briefs**: `mint/task-brief-mvp1{,.1a,.1b,.1c}.md` + `mint/task-brief-mvp2-{sec,perf,robust,polish2}.md` + `mint/task-brief-mvp3.1.md`.
-- **Existing design**: `mint/design.md` — §5.26 (MVP-3.1 config harness) is the immediate ancestor; §6.21-§6.27 TestStrategy is the pattern this slice extends; §6.5 PI-1..PI-14 invariants must continue to hold; §4.1 exit-code table currently active through row 9 `ConfigError`.
+- **All prior briefs**: archived in `mint/task-brief-mvp{1,1.1*,2-*,3.1,3.2}.md`.
+- **Existing design**: `mint/design.md` — §5.26 (config harness) + §5.27 (L3 src-CIDR) are the immediate ancestors. PI-1..PI-18 must continue to hold; this slice adds PI-19+ for systemd/Ansible/docs invariants.
 - **Architecture document**: `mint/architecture-v2.md` —
-  - **MVP-3.2 dependency graph row**: lines 215-223 (concise scope sketch).
-  - **MVP-3.2 per-phase scope summary**: line 310.
-  - **MVP-3.2 risk register**: lines 333-334 — 2 risks named (atomic swap consistency across MAC+CIDR inner maps; OR-compose UX surprise).
-- **MVP-3.1 review**: `mint/review.md` — round-1 pass with 4 deferred OOT items; 2 are "housekeeping" candidates this slice could opportunistically tackle if scope allows (architect decides per Q5 below).
-- **MVP-3.1 deviations**: `mint/impl-notes.md` D-3.1-1..D-3.1-4 are the legacy carry-overs (apply_internal.hpp internal helper, ${PIN_DIR}/allowlist alias, file-IO→CliError, reuse_fd state-b) — all stand; do NOT undo any.
+  - **MVP-3.3 dependency graph row**: lines 226-231.
+  - **MVP-3.3 per-phase scope summary**: line 311 (1 cycle, low risk).
+  - **MVP-3.3 risk register**: lines 335-336 — 2 risks: (a) Ansible idempotency drift across heterogeneous fleet; (b) `XDPMF_TRUST_MODEL` mis-set escapes audit (silent posture change).
+  - **Component map** row 6: `xdpfilter@.service` (systemd unit template) — note the name uses `xdpfilter`; this slice ships under `xdpmacfilter@.service` (HG-3.3-1 below) and the rename is deferred to MVP-3.12.
+- **MVP-3.2 review**: `mint/review.md` — round-1 pass with 3 inline-merged design-text OOTs; clean baseline.
+- **MVP-3.1/3.2 deviations**: `mint/impl-notes.md` D-3.1-1..D-3.1-4 stand; MVP-3.2 had 0 deviations. Do NOT undo any.
+- **User permission context**: dev VM has passwordless `sudo` available (per project context). `systemctl daemon-reload`, `systemctl start xdpmacfilter@veth-test0`, etc. can run directly.
 
 ## Workflow rules (brownfield mode)
 
-- **Architect**: read existing `design.md` (focus §5.26 — your harness contract; §6.21-§6.27 — your TestStrategy pattern; §4.1 — you may add row 10 if a new exit code is warranted, OR confirm `ConfigError = 9` covers CIDR validation failures too; §6.5 — extend PI table for MVP-3.2 invariants) + `architecture-v2.md` MVP-3.2 rows + this brief. EDIT `design.md` in place. Append `§5.27 MVP-3.2: L3 src-CIDR rule type` after §5.26. Add new §6.x TestStrategy entries for the 3-5 new ctests. Update §6.5 Preserved invariants for MVP-3.2 (PI-1..PI-14 from MVP-3.1 must continue + new PIs for CIDR axis). Update §7 OOS — move MVP-3.2 components from deferred to shipped; surface what's NEXT (MVP-3.3 systemd / MVP-3.4 per-rule counters).
-- **Impl**: EDIT `src/bpf/mac_filter.bpf.c` (add LPM_TRIE inner maps + ARRAY_OF_MAPS wiring per Q1 + OR-compose match logic + STAT_PASS_CIDR increment); EDIT `src/lib/config.{cpp,hpp}` (RuleMatch.cidr field + validator + CIDR string parse to {addr, prefix_len}); EDIT `src/lib/loader.cpp` `internal::apply_request` (populate cidr inner alongside mac inner); EDIT `src/common/mac_filter.h` (new LPM_TRIE key struct + map names + STAT_PASS_CIDR enum). loader.hpp PUBLIC-API is fenced UNCHANGED (per PI-7-style invariant — `LoaderError` enum stays at 9 values unless architect adds new error category). NEW file likely: `src/lib/cidr.{cpp,hpp}` for CIDR string parsing (`10.0.0.0/8` → `{network: 0x0A000000, prefix_len: 8}`) — architect decides whether to inline this in config.cpp or carve out.
-- **Tester**: ADD 3-5 ctests + 2-3 YAML fixtures (e.g., `config_valid_cidr.yaml`, `config_valid_mac_or_cidr.yaml`, `config_malformed_cidr.yaml`). DO NOT modify existing 27 tests (the 20 pre-MVP-3.1 PI-6 invariant continues + the 7 MVP-3.1 ctests should not regress). Use the established AF_PACKET persistent-socket pattern from `tests/T_APPLY_ATOMIC_SWAP_NO_DROP.sh` for any high-rate concurrent traffic. Existing helpers in `tests/lib/common.sh` (apply_config, NSEXEC, MAC_GOOD/MAC_BAD constants) ARE part of TestStrategy context — read freely.
+- **Architect**: read existing `design.md` (focus §5.26+§5.27 — your immediate ancestors; §6.5 PI-1..PI-18 — invariants you extend; §4.1 — exit codes through 9; §5.20 attach/detach flow — systemd ExecStart/ExecStop call into this; §5.26 trust_model env var — fleet-mode docs describe this) + `architecture-v2.md` MVP-3.3 rows + this brief. EDIT `design.md` in place. Append `§5.28 MVP-3.3: systemd + Ansible + fleet docs` after §5.27. Add new §6.x TestStrategy entries for the 3-5 new ctests. Update §6.5 Preserved invariants — PI-1..PI-18 continue + add PI-19+ for systemd/Ansible/docs invariants (e.g., "unit file syntax accepted by `systemd-analyze verify`"; "ansible playbook passes --syntax-check"; "fleet-mode docs cite the actual stderr log format from §5.26"). Update §7 OOS — move MVP-3.3 components from deferred to shipped; surface MVP-3.4 (per-rule counters / exporter) as the next-natural slice.
+- **Impl**: NEW files: `systemd/xdpmacfilter@.service` (unit template), `ansible/xdpmacfilter-deploy.yml` (example playbook), `ansible/templates/xdpfilter-config.yaml.j2` (config template), `docs/FLEET_DEPLOYMENT.md` (operator docs). EDIT: `README.md` (add pointer to FLEET_DEPLOYMENT.md), `CMakeLists.txt` (version bump 0.4.0 → 0.5.0; install rules if architect picks them — install the unit file to a project-relative path for ctest; system install is OOS), `CHANGELOG.md` (new [0.5.0] entry). loader.hpp/loader.cpp/cli.cpp/apply.cpp/bpf/* probably UNCHANGED — this slice is pure ops integration unless architect surfaces a need (e.g., new `--quiet` flag for cleaner systemd journal output, which would be a Q decision). PI-7-3.2 ZERO diff on loader.hpp continues — strengthen to PI-7-3.3.
+- **Tester**: NEW ctests in `tests/` (3-5). Suggested naming: `T_SYSTEMD_UNIT_SYNTAX.sh`, `T_SYSTEMD_LIFECYCLE.sh` (install + start + reload + stop end-to-end against veth fixture), `T_SYSTEMD_RESTART_ON_FAILURE.sh` (force apply exit-nonzero, verify Restart=on-failure kicks in), `T_ANSIBLE_PLAYBOOK_SYNTAX.sh` (SKIP-77 if `ansible-playbook` not in PATH), `T_FLEET_DOCS_SUBSTRING.sh` (regex-check that FLEET_DEPLOYMENT.md cites the actual stderr `trust_model=<mode>` format and not stale prose). New helpers in `tests/lib/common.sh` ONLY IF needed (e.g., `setup_systemd_unit_in_test_path()`); existing helpers UNCHANGED. DO NOT modify existing 31 tests (PI-6-3.3 = PI-6-3.2 strict superset).
 - **Reviewer**: 5-point brownfield framework. Special attention:
-  - **(1) MVP-3.1 invariants preserved**: ALL of PI-1..PI-14 still hold. New CIDR axis must not regress trust_model, P0a, atomic swap, or identity gates.
-  - **(2) ARRAY_OF_MAPS atomic-swap consistency** (per risk register MVP-3.2 row 1): if architect picks two-step swap (independent MAC + CIDR inner maps), a `T_CIDR_ATOMIC_SWAP_NO_DROP_HALF_APPLIED` ctest must demonstrate no packet drop during the half-applied window. `[INVARIANT-VIOLATED]` if test is theatrical.
-  - **(3) OR-compose negation**: `T_PASS_MAC_OR_CIDR` must verify BOTH branches independently (rule with MAC only matches, rule with CIDR only matches, rule with BOTH matches via either axis). `[NO-NEGATION-CONTROL]` if only happy-path.
-  - **(4) PI-13 stats**: STAT_PASS_CIDR is a new index; the existing 3 indices (STAT_PASS, STAT_DROP_DENY, STAT_DROP_MALFORMED) must continue to fire as before. `[REGRESSION]` if existing T_PERCPU_STATS_SUM breaks.
-  - **(5) PI-10 mac_filter.h additions-only**: new constants for LPM_TRIE + STAT_PASS_CIDR enum index are additions; existing constants untouched. `[UNRELATED-EDIT]` otherwise.
+  - **(1) PI-1..PI-18 preserved**: nothing in MVP-3.3 should touch identity gates, trust_model semantics, atomic apply, or counter behaviour.
+  - **(2) systemd ExecStart/ExecReload/ExecStop verify against actual loader CLI**: ExecStart calls `xdpmacfilter apply -f ... --iface %i`; assert this is the ACTUAL exit-0 path (T_APPLY_VALID_CONFIG already verifies that).
+  - **(3) Ansible playbook idempotency**: per risk register row 1 — playbook should be idempotent (re-running yields no changes if config unchanged). `ansible-playbook --check` validates dry-run path.
+  - **(4) Fleet-mode docs must cite ACTUAL stderr format**: per MVP-3.1 HG3 the format is literally `xdpmacfilter: trust_model=<strict|fleet>`. Docs must match grep-able reality (mitigation for risk register row 2).
+  - **(5) No CLI surface change**: PI-7-3.3 ZERO diff on loader.hpp. New `--quiet` or similar must be explicitly negotiated.
 
-## Human-gate decision (default applied — see Out-of-Scope to override)
+## Human-gate decisions (defaults applied — override at architect Phase A if you disagree)
 
-**HG-3.2-1: IPv4 only for cycle 1**. IPv6 LPM_TRIE shape (128-bit key) deferred to MVP-3.2.5 or later. Rationale: v4 establishes the LPM_TRIE pattern; v6 is mechanical repetition with a wider key; combining v4+v6 in one slice doubles ctest count and inflates schema design (operators want `{cidr: "...""}` to accept either family with auto-detection, which adds validator complexity). If product owner wants v4+v6 simultaneously, escalate at architect Phase A or at human gate; baseline is v4-only.
+### HG-3.3-1: Unit name = `xdpmacfilter@.service`
 
-## Open mechanism questions (architect decides; document in §5.27)
+Match the current binary name (`xdpmacfilter`). Architecture-v2.md component map calls it `xdpfilter@.service` but explicitly defers the binary rename to MVP-3.12. Shipping `xdpfilter@.service` now would create a rename transition burden NOW instead of in MVP-3.12.
 
-### Q1: ARRAY_OF_MAPS atomic-swap shape for two inner-map types
+**Default**: `xdpmacfilter@.service`. MVP-3.12 will rename + ship transitional `xdpfilter@.service → xdpmacfilter@.service` alias.
 
-MVP-3.1 wired `rulesets_outer = ARRAY_OF_MAPS[2]` pointing at `mac_allowlist_a` / `mac_allowlist_b` (both HASH). Adding LPM_TRIE for CIDR breaks the type-uniformity of ARRAY_OF_MAPS (one outer can only point at one inner-type). Architect picks:
+### HG-3.3-2: Ansible scope = single example playbook + handler
 
-- **Option AS1 (parallel outer maps)**: add `cidr_rulesets_outer = ARRAY_OF_MAPS[2]` → `cidr_allowlist_a` / `cidr_allowlist_b` (both LPM_TRIE). Both outers share the same `active_idx`. Apply orchestrator populates inactive slot of BOTH outers, then flips `active_idx`. Single u32 flip is still atomic for BOTH axes — same Composite-6 promise.
-- **Option AS2 (combined outer struct)**: change `rulesets_outer` value type to a struct `{mac_inner_fd, cidr_inner_fd}` (via a new outer map type or by widening the slot value). More complex but single outer.
-- **Option AS3 (two-step swap, half-applied tolerance)**: keep MAC and CIDR as independent maps, swap in two steps, make BPF read tolerant of half-applied state. Risk-register MVP-3.2 row 1 flags this as the riskier path.
+Not a full Ansible collection or role. One working example playbook + one Jinja2 template + one handler (`reload xdpmacfilter` → `systemctl reload xdpmacfilter@<iface>`). Operator adapts to fleet specifics (inventory, secrets, multi-iface variations).
 
-**Recommendation**: **AS1** — single `active_idx` flipping two outers in a single u32-write is still atomic per kernel BPF map semantics; preserves the Composite-6 swap promise; no new outer-map type needed. AS2 is over-clever; AS3 violates the atomic-swap invariant.
+**Default**: minimal example only. Production-grade collection is OOS.
 
-### Q2: OR-compose precedence + short-circuit order
+### HG-3.3-3: systemd test approach = real `sudo systemctl`
 
-When a rule has both `mac:` and `cidr:`, which axis is checked first? Architect picks:
+User confirmed passwordless sudo available on dev VM. Tests run real `systemctl daemon-reload`, `systemctl start xdpmacfilter@veth-test0`, etc. Avoid stub-validation-only approach — it doesn't catch unit file semantic bugs.
 
-- **Option OR1 (MAC first, then CIDR)**: hot-path lookups MAC HASH first (O(1)); if miss, falls through to LPM_TRIE CIDR (O(log n)). Optimizes for the common case where MAC matches (fewer comparisons per packet).
-- **Option OR2 (CIDR first, then MAC)**: opposite order.
-- **Option OR3 (parallel, no short-circuit)**: both checked regardless; OR'd at the end. Slowest per-packet but simplest semantics.
+**Default**: real systemctl. Install unit to a ctest-controlled path (e.g., `/etc/systemd/system/` if architect picks system install for the test, OR `~/.config/systemd/user/` for user-mode). Cleanup in trap.
 
-**Recommendation**: **OR1** (MAC first). HASH is O(1); LPM_TRIE is O(prefix-length); short-circuit on first match shaves cycles on the common path.
+## Open mechanism questions (architect decides; document in §5.28)
 
-### Q3: CIDR schema key naming
+### Q1: systemd unit install path for ctest
 
-Per `architecture-v2.md` line 220 ("OR-compose with MAC match") the term is generic. The YAML key for the CIDR matcher needs to be named. Architect picks:
+- **Option I1 (system path)**: `/etc/systemd/system/xdpmacfilter@.service`. Requires sudo (have it). Standard production path. Risk: stale install if cleanup fails.
+- **Option I2 (user path)**: `~/.config/systemd/user/xdpmacfilter@.service` + `--user` systemctl. No sudo for the install. **But**: BPF attach needs CAP_BPF — user systemd can't grant that. ExecStart would need to `sudo xdpmacfilter ...` from within user-mode unit, which is awkward.
+- **Option I3 (ctest-local path + DropInDirectory override)**: install to `/tmp/xdpmf-systemd-test-$$/system/` and pass `SYSTEMD_UNIT_PATH=...` to a child systemctl invocation. Most isolated but most complex.
 
-- **Option K1 (`cidr`)**: `match: {cidr: "10.0.0.0/8"}` — short, generic, family-agnostic (auto-detect v4/v6 — but v4-only per HG-3.2-1).
-- **Option K2 (`src_cidr`)**: `match: {src_cidr: "10.0.0.0/8"}` — explicit about WHICH field of the packet is matched. Future-proof if dst_cidr lands later.
-- **Option K3 (`cidr_v4`)**: explicit family in the key. Future schema: `cidr_v4` + `cidr_v6` as siblings.
+**Recommendation**: **I1** (system path) with aggressive cleanup in test trap (`systemctl stop xdpmacfilter@... ; rm /etc/systemd/system/xdpmacfilter@.service ; systemctl daemon-reload`). Production-realistic and simplest. Single data point of stale install (test trap failure) is easy to spot.
 
-**Recommendation**: **K2** (`src_cidr`). Brief language uses "L3 src-CIDR" consistently; explicit `src_cidr` makes future `dst_cidr` an obvious sibling without breaking change. K1 reads cleaner but couples the schema to "always src" which is an unwritten assumption. K3 over-commits to family-in-key naming.
+### Q2: ExecReload mechanism
 
-### Q4: Single CIDR per rule vs list
+- **Option R1 (re-exec `apply -f`)**: ExecReload re-runs `xdpmacfilter apply -f /etc/xdpfilter/%i.yaml --iface %i`. Idempotent reattach via MVP-3.1's bpf_link__update_program. Same as ExecStart.
+- **Option R2 (SIGHUP)**: loader gets a signal handler that re-reads the config file. Currently no SIGHUP handler exists; MVP-3.1 OOS explicitly fenced SIGHUP. Would require new code.
+- **Option R3 (no ExecReload, force restart)**: `systemctl reload` falls back to restart. Slower (full detach+reattach, brief drop window) but simpler.
 
-Architect picks:
+**Recommendation**: **R1**. SIGHUP is explicitly OOS per MVP-3.1; restart-as-reload (R3) breaks the atomic-swap promise that Composite 6 was built for. R1 is the natural answer (ExecReload = ExecStart in this design).
 
-- **Option L1 (single CIDR per rule)**: `match: {src_cidr: "10.0.0.0/8"}`. Operator writes multiple rules for multiple CIDRs.
-- **Option L2 (list of CIDRs per rule)**: `match: {src_cidr: ["10.0.0.0/8", "192.168.0.0/16"]}`. Operator can union CIDRs in one rule.
+### Q3: Fleet-mode docs depth
 
-**Recommendation**: **L1** for cycle 1. Matches the MVP-3.1 pattern (`mac:` is single string, not list). L2 is sugar that can be added in a later slice without breaking L1; reverse direction would be a breaking schema change. Plus: with L1, rule-counting (and future per-rule counters in MVP-3.4) is unambiguous.
+- **Option D1 (single MD file)**: `docs/FLEET_DEPLOYMENT.md` ~50-100 lines. README pointer. Covers: when fleet mode, audit story, recommended alert pattern (described semantically — exporter is MVP-3.4 scope).
+- **Option D2 (extended)**: D1 + `docs/SECURITY.md` + `docs/AUDIT.md`. Comprehensive docs sprint within this slice.
 
-### Q5: Schema versioning bump?
+**Recommendation**: **D1**. D2 is scope creep — this slice's brief explicitly fences exporter / Prometheus implementation to MVP-3.4. Docs grow as features land.
 
-MVP-3.1 shipped `schema_version: 1` (or implicit-default-1) accepting only `mac:` in match. Architect picks:
+### Q4: Restart=on-failure tuning
 
-- **Option V1 (stay at schema_version 1, additive extension)**: accept `mac:` (MVP-3.1) AND `cidr:` (new) AND both-together (OR-compose). Existing configs still valid. No breaking change.
-- **Option V2 (bump to schema_version 2)**: signals operators that the schema has grown. Existing `schema_version: 1` configs still accepted (per SV2 from MVP-3.1), but new `cidr:` features require explicit `schema_version: 2`.
+systemd defaults: no restart limit. Could runaway-loop if config is permanently broken.
 
-**Recommendation**: **V1** (additive). The MVP-3.1 SV2 policy was explicitly "future breaking changes ship as schema_version 2 with 1 still accepted"; adding a new match key is NOT breaking (existing configs work unchanged). Bumping to 2 cheapens the signal for actual future breakage.
+- **Option RT1 (default no limit)**: `Restart=on-failure`. Apply failure (e.g., bad YAML) → systemd loops forever.
+- **Option RT2 (rate-limited)**: `Restart=on-failure` + `StartLimitBurst=5 StartLimitIntervalSec=300`. After 5 failures in 5 min, systemd gives up. Operator must reset via `systemctl reset-failed`.
+- **Option RT3 (no restart)**: `Restart=no`. Apply failure → unit stays dead. Operator must manually `systemctl start`.
 
-### Q6 (optional): Tackle MVP-3.1 OOT-deferred housekeeping items?
+**Recommendation**: **RT2**. Production-sensible — handles transient failures (race condition on boot, brief network blip during config push) but doesn't infinite-loop on permanent failures (bad config syntax).
 
-Two MVP-3.1 OOT items are cheap to fix:
-- **OOT-1**: orphan map pins at `/sys/fs/bpf/` root from T_ATTACH_TAG_MISMATCH (one-line cleanup in test's trap).
-- **OOT-2**: T_APPLY_ATOMIC_SWAP_NO_DROP stale NOTE comment (1-line edit).
+### Q5: README integration
 
-Architect picks: include in MVP-3.2 scope, OR defer to dedicated housekeeping cycle. **Recommendation**: include if architect judges scope budget allows; defer otherwise. These are NOT in the canonical MVP-3.2 scope per `architecture-v2.md` and adding them is opportunistic only.
+- **Option N1 (add 1 section)**: README gains a "Production deployment" section pointing to FLEET_DEPLOYMENT.md and the systemd unit. ~10-15 lines.
+- **Option N2 (rewrite)**: README restructured to lead with deployment.
+- **Option N3 (no README change)**: docs/FLEET_DEPLOYMENT.md discoverable only via file browsing.
 
-## Scope (4 core items + tests — anything else is OOS)
+**Recommendation**: **N1**. Minimal disturbance; preserves existing README structure.
 
-### Item 1 — BPF datapath: LPM_TRIE inner + OR-compose (per Q1 + Q2)
+### Q6 (optional): tackle MVP-3.1/3.2 OOT-deferred housekeeping items?
 
-**Where**: EDIT `src/bpf/mac_filter.bpf.c` (add `xdpmf_cidr_v4` key struct per common header; declare `cidr_allowlist_a` + `cidr_allowlist_b` LPM_TRIE maps; declare `cidr_rulesets_outer` per Q1 AS1; extend `mac_filter_prog` with LPM_TRIE lookup after MAC lookup per Q2 OR1 ordering); EDIT `src/common/mac_filter.h` (new LPM_TRIE key struct + map names per architect).
+5 items still deferred from prior cycles (orphan map pins from T_ATTACH_TAG_MISMATCH; stale NOTE comment; cli.hpp ParsedAttach wrapper design-text; §6.25 "replacing existing program" grep; MVP-3.2 had 0 deferred). Architect picks: include if scope budget allows; defer otherwise.
 
-**Action**: implement OR-compose datapath. If MAC matches → PASS + STAT_PASS. If MAC misses, derive `src_ip` from packet (IPv4 ethertype 0x0800), lookup CIDR LPM_TRIE → if match → PASS + STAT_PASS_CIDR. Otherwise → DROP_DENY + STAT_DROP_DENY. Non-IPv4 ethertypes go through MAC-only path (preserve MVP-3.1 semantics for ARP, IPv6, VLAN-tagged, etc.).
+**Recommendation**: **DEFER**. This slice's scope is already 4 piece-types (unit + playbook + docs + tests), and ops integration tests are new territory. Housekeeping in a dedicated cycle is cleaner than mixing.
 
-### Item 2 — Schema extension + CIDR string parser (per Q3 + Q4 + Q5)
+## Scope (4 items + 3-5 tests — anything else is OOS)
 
-**Where**: EDIT `src/lib/config.{cpp,hpp}` (RuleMatch gains optional `std::optional<xdpmf_cidr_v4> src_cidr` per Q3; validator accepts rule with mac-only, cidr-only, or both; rejects neither-axis-set with ConfigError exit 9); NEW `src/lib/cidr.{cpp,hpp}` (CIDR string → struct parser — accepts `A.B.C.D/N` where 0≤N≤32; rejects malformed input). EDIT `src/lib/yaml_subset.cpp` ONLY IF needed (already accepts string scalars; likely no edit needed).
+### Item 1 — systemd unit template (per Q1 + Q2 + Q4)
 
-**Action**: parse `src_cidr: "10.0.0.0/8"` strings into `{network: u32_be, prefix_len: u8}`; validator ensures `network & mask == network` (catches "10.0.0.5/8" operator mistake → ConfigError with `network bits set below prefix: 10.0.0.5/8 → did you mean 10.0.0.0/8?`).
+**Where**: NEW `systemd/xdpmacfilter@.service` (template unit file).
 
-### Item 3 — Apply orchestrator: populate CIDR inner (per Q1)
+**Action**: write the unit template per Q1-Q4 decisions. Key directives: `Type=oneshot RemainAfterExit=yes`, `ExecStart=/usr/bin/xdpmacfilter apply -f /etc/xdpfilter/%i.yaml --iface %i`, `ExecReload=/usr/bin/xdpmacfilter apply -f /etc/xdpfilter/%i.yaml --iface %i` (per R1), `ExecStop=/usr/bin/xdpmacfilter detach --iface %i`, `Restart=on-failure StartLimitBurst=5 StartLimitIntervalSec=300` (per RT2). Capability hardening: `AmbientCapabilities=CAP_BPF CAP_NET_ADMIN`. Document each directive's purpose inline.
 
-**Where**: EDIT `src/lib/loader.cpp` `internal::apply_request` flow (populate both `mac_allowlist_<inactive>` AND `cidr_allowlist_<inactive>` before flipping `active_idx`).
+CMakeLists.txt: project-local install via `install(FILES ...)` to a configurable prefix (default `${CMAKE_INSTALL_PREFIX}/lib/systemd/system/`). System install is operator's call, not the build.
 
-**Action**: extend the populate-inactive-then-flip sequence to cover both axes. Single `active_idx` u32-write is the atomic commit for BOTH axes per Q1 AS1.
+### Item 2 — Ansible example playbook (per HG-3.3-2)
 
-### Item 4 — STAT_PASS_CIDR counter
+**Where**: NEW `ansible/xdpmacfilter-deploy.yml` (playbook), `ansible/templates/xdpfilter-config.yaml.j2` (Jinja2 config template).
 
-**Where**: EDIT `src/common/mac_filter.h` (add `STAT_PASS_CIDR = 3` to stats enum — index 3 after existing STAT_PASS=0/STAT_DROP_DENY=1/STAT_DROP_MALFORMED=2); EDIT `src/bpf/mac_filter.bpf.c` (increment STAT_PASS_CIDR when CIDR axis matches); EDIT `tests/lib/read_stats.py` ONLY if it hardcodes the 3-counter sum (probably needs a 4th column).
+**Action**: minimal play that:
+- Copies `/usr/bin/xdpmacfilter` (assumes binary built externally; operator provides build pipeline).
+- Templates `/etc/xdpfilter/{{ iface }}.yaml` from `xdpfilter-config.yaml.j2` with operator-provided MAC list + CIDR list variables.
+- Drops `xdpmacfilter@.service` to `/etc/systemd/system/`.
+- `systemctl daemon-reload` (handler).
+- `systemctl enable --now xdpmacfilter@{{ iface }}.service` (handler).
+- On config change: `notify: reload xdpmacfilter` → `systemctl reload xdpmacfilter@{{ iface }}.service` (handler — uses our ExecReload).
 
-**Action**: differentiate "passed because MAC matched" from "passed because CIDR matched" in counters. Operators reading stats post-apply can see the split.
+Idempotent (mitigation per risk register row 1 — re-running with same vars yields no changes).
 
-### Tests (3-5 per `architecture-v2.md` line 222 + risk-register OR-compose mitigation)
+### Item 3 — Fleet-mode operator docs (per Q3 + Q5)
 
-- **`T_PASS_CIDR`** — apply config with single CIDR rule (`10.0.0.0/8`), inject packet with src_ip in range → PASS; STAT_PASS_CIDR incremented. Negation: inject packet with src_ip OUT of range → DROP_DENY; STAT_DROP_DENY incremented.
-- **`T_DROP_CIDR_NOT_IN_RANGE`** (may be merged into T_PASS_CIDR negation step) — explicit negation case if not folded above.
-- **`T_PASS_MAC_OR_CIDR`** — apply config with single rule `{mac: AA:BB:.., cidr: 10.0.0.0/8}` (OR-compose within rule). 3 sub-cases: (a) packet matches MAC only (different src_ip) → PASS + STAT_PASS; (b) packet matches CIDR only (different src_mac) → PASS + STAT_PASS_CIDR; (c) packet matches NEITHER → DROP_DENY. Negation control built-in (sub-case c).
-- **OPTIONAL `T_CIDR_ATOMIC_SWAP_NO_DROP`** — extension of MVP-3.1's T_APPLY_ATOMIC_SWAP_NO_DROP for CIDR axis (concurrent injector at AF_PACKET rate, apply A→B with overlapping-allowed src_ip across both rulesets, assert STAT_DROP_DENY delta == 0). Architect-recommended given the risk-register MVP-3.2 row 1 flagging; defer if Q1 AS1 makes the test theatrical (single `active_idx` flip = identical mechanism to MVP-3.1, already covered by T_APPLY_ATOMIC_SWAP_NO_DROP).
-- **OPTIONAL `T_CIDR_INVALID_REJECTED`** — config with `src_cidr: "not-a-cidr"` or `src_cidr: "10.0.0.5/8"` (network bits below prefix) → exit 9. May fold into existing T_APPLY_REJECTS_MALFORMED as new sub-case.
+**Where**: NEW `docs/FLEET_DEPLOYMENT.md` (~50-100 lines), EDIT `README.md` (add 1 pointer section per N1).
+
+**Action**: docs cover:
+- When to use `XDPMF_TRUST_MODEL=fleet` (decision matrix: trusted segment vs operator-managed-only).
+- Audit story: stderr emits `xdpmacfilter: trust_model=<mode>` at every attach (cite actual format from §5.26).
+- Recommended Prometheus alert semantic: fleet-wide trust_model distribution should be uniform; alert when divergence detected. Note that the alert IMPLEMENTATION requires the MVP-3.4 exporter (forward reference).
+- Example systemd Drop-In to set the env var via `Environment=XDPMF_TRUST_MODEL=fleet`.
+- Cite §5.4/§5.19/§5.22 invariants that fleet does/doesn't relax (per HG3: ONLY §5.4 relaxes; §5.19+§5.22 hold in both modes).
+
+### Item 4 — Integration tests (per HG-3.3-3)
+
+**Where**: NEW tests in `tests/` per architect's Q-decisions. Suggested 3-5 tests:
+
+- **`T_SYSTEMD_UNIT_SYNTAX.sh`** — `systemd-analyze verify systemd/xdpmacfilter@.service` → exit 0. No fixture needed.
+- **`T_SYSTEMD_LIFECYCLE.sh`** — install unit to `/etc/systemd/system/` per I1; create config at `/etc/xdpfilter/veth-test0.yaml`; `systemctl daemon-reload`; `systemctl start xdpmacfilter@veth-test0`; assert XDP attached + pin present; modify config; `systemctl reload xdpmacfilter@veth-test0`; assert active_idx flipped (or at least new ruleset active); `systemctl stop xdpmacfilter@veth-test0`; assert XDP detached. Aggressive trap cleanup.
+- **`T_SYSTEMD_RESTART_ON_FAILURE.sh`** (optional) — install malformed config; assert systemd attempts Restart and eventually hits StartLimit per RT2.
+- **`T_ANSIBLE_PLAYBOOK_SYNTAX.sh`** — `ansible-playbook --syntax-check ansible/xdpmacfilter-deploy.yml`; SKIP-77 if `ansible-playbook` not in PATH.
+- **`T_FLEET_DOCS_SUBSTRING.sh`** — `grep -qE 'trust_model=(strict|fleet)' docs/FLEET_DEPLOYMENT.md` — docs cite actual format. Additional substring checks per architect's decision.
 
 ## Out of scope (explicit)
 
-- **IPv6 CIDR matching** — fenced to MVP-3.2.5 (or integrated in 3.2 only on explicit human-gate override per HG-3.2-1). The schema MAY accept `src_cidr_v6` as a future sibling, but cycle 1 ships v4-only and rejects v6 strings (`::1/128` etc.) with `ConfigError` exit 9 + "IPv6 CIDR not supported until MVP-3.2.5".
-- **Destination CIDR matching (`dst_cidr`)** — naming chosen (Q3=K2) leaves space; not in cycle 1.
-- **L4 port matching** — MVP-3.5+ candidate, not in this slice.
-- **Per-rule counters with rule_id** — MVP-3.4 slice (per `architecture-v2.md` MVP-3.4 row). Cycle 2 keeps the 4-counter global PERCPU shape (STAT_PASS, STAT_DROP_DENY, STAT_DROP_MALFORMED, STAT_PASS_CIDR).
-- **Rule actions other than `pass`** — MVP-3.8+ (mirror, rate-limit, tag, redirect). All MVP-3.2 rules ship as `action: pass` with implicit drop-default.
-- **List-of-CIDRs per rule (Option L2)** — MVP-3.2.x candidate if operators ask; cycle 1 is L1 per Q4.
-- **Schema_version bump to 2** — V1 additive extension per Q5; bump deferred to first actual breaking change.
-- **CIDR set-arithmetic semantics** (e.g., "block 10.0.0.0/8 except 10.5.0.0/16") — not in schema; LPM_TRIE longest-prefix-match handles overlapping prefixes naturally but no explicit `deny` rule action for cycle 2.
-- **VLAN-aware CIDR matching** — MVP-3.x candidate (architect's lens B mentions VLAN as an axis); not here.
-- **Binary rename `xdpmacfilter` → `xdpfilter`** — still MVP-3.12.
-- **Public `libxdpmf.so.0` library extraction** — still MVP-3.6+ optional branch.
-- **Tackling MVP-3.1 OOT-deferred items 3 (cli.hpp ParsedAttach wrapper design-text fix) and 4 (§6.25 "replacing existing program" grep)** — these are pure design-text/test-strengthen items; if architect picks Q6=YES for housekeeping, only items 1 and 2 are in scope (3 and 4 stay deferred per their original disposition).
+- **Binary rename `xdpmacfilter` → `xdpfilter`** — still MVP-3.12. Unit file is `xdpmacfilter@.service` per HG-3.3-1; rename happens with transitional alias in MVP-3.12.
+- **Per-rule counters / `xdpmf-exporter` binary / Prometheus exporter** — MVP-3.4 slice. Fleet docs reference Prometheus alert semantically but do NOT implement.
+- **SIGHUP signal handler in loader** — explicitly fenced by Q2 (R1 chosen).
+- **Full Ansible role/collection** — minimal example only per HG-3.3-2. Production-grade Ansible is operator's responsibility.
+- **Multi-iface unit (single unit managing multiple ifaces)** — unit is template (one instance per iface); multi-iface = multiple instance names.
+- **Service hardening beyond AmbientCapabilities** — no `User=`/`Group=` non-root (BPF needs CAP_BPF; running as non-root with capabilities is operator's call); no seccomp filter; no `ProtectSystem=`. Architect MAY add basic hardening directives if low-risk.
+- **systemd `Type=notify`** — oneshot+RemainAfterExit per architecture-v2.md. Notify-style is daemon territory (MVP-3.6+ `xdpmfd` optional branch).
+- **System install of binary in this slice's CMakeLists.txt** — unit file install is in scope (configurable prefix); binary install untouched (architect's call if it changes).
+- **JSON structured logs** — MVP-3.5 slice.
+- **sFlow** — MVP-3.6 (conditional).
+- **Library extraction (libxdpmf.so.0)** — MVP-3.6+ optional.
+- **Daemon (xdpmfd)** — MVP-3.6+ optional.
+- **L4 ports / VLAN / IPv6 CIDR** — still fenced per MVP-3.2 §7 OOS.
+- **MVP-3.1/3.2 OOT-deferred housekeeping items** — per Q6 default DEFER.
 
 ## Definition of done
 
-- `§5.27 MVP-3.2: L3 src-CIDR rule type` amendment in `design.md` documenting Q1-Q6 decisions with rationale + HG-3.2-1 confirmation
-- New `§6.x TestStrategy` entries for the 3-5 new ctests
-- `§6.5 Preserved invariants` extended: PI-1..PI-14 from MVP-3.1 hold + new PIs for MVP-3.2 (CIDR axis additive; schema_version 1 still accepted; STAT_PASS_CIDR additive; 27 existing ctests pass byte-equivalent)
-- `§7 OOS`: MVP-3.2 components moved from deferred to shipped; MVP-3.3 (systemd) and MVP-3.4 (per-rule counters / exporter) become the next-natural slices
-- `loader.hpp` PUBLIC-API UNCHANGED (PI-7-style); enum stays at 9 values
-- 3-5 new ctests pass; OR-compose verification (`T_PASS_MAC_OR_CIDR`) is the load-bearing item for the architectural correctness of the OR-semantic
-- 27 existing ctests still pass (or legitimately SKIP per §6.5) — strict superset growth
+- `§5.28 MVP-3.3: systemd + Ansible + fleet docs` amendment in `design.md` documenting Q1-Q6 decisions with rationale + HG-3.3-1/2/3 confirmation
+- New `§6.x TestStrategy` entries for 3-5 new ctests
+- `§6.5 Preserved invariants` extended: PI-1..PI-18 hold + new PI-19+ for systemd/Ansible/docs
+- `§7 OOS`: MVP-3.3 components moved from deferred to shipped; MVP-3.4 (per-rule counters / exporter) surfaced as next slice
+- `loader.hpp` PUBLIC-API UNCHANGED (PI-7-3.3 strengthening — ZERO diff continues across 3 cycles)
+- `xdpmacfilter --version` reports `xdpmacfilter 0.5.0` (bump from 0.4.0)
+- `CHANGELOG.md` entry `[0.5.0] - 2026-05-NN`
+- 3-5 new ctests pass; 31 existing ctests still pass (PI-6-3.3 strict superset, only systemd lifecycle additions)
 - `XDPMF_SANITIZERS=ON` build clean
-- `xdpmacfilter --version` reports `xdpmacfilter 0.4.0` (bump from 0.3.0 to mark MVP-3.2 feature add; CMake `project(VERSION)` per MVP-2 Polish-2 V1 mechanism)
-- `CHANGELOG.md` entry `[0.4.0] - 2026-05-NN` (Keep-a-Changelog format)
+- `systemd-analyze verify systemd/xdpmacfilter@.service` → exit 0
 - `mint/review.md` round-1 verdict = `pass`
 - One git commit per phase boundary per workflow B
 
 ## Dependencies
 
-No new system dependencies. `BPF_MAP_TYPE_LPM_TRIE` is kernel ≥ 4.11 (well below floor 5.15). CIDR string parsing is in-tree (small custom parser; no libc dependency beyond `inet_pton` from `<arpa/inet.h>` if architect picks the standard route). No new C++ libraries.
+New system deps (test-time only, OPTIONAL with SKIP-77 paths):
+- `systemd` (`systemctl`, `systemd-analyze`) — present on any modern Linux dev VM; ctests assume availability.
+- `ansible-core` (`ansible-playbook`) — OPTIONAL; ctest SKIPs 77 if not in PATH.
+
+No new build dependencies. No new C++ libraries. No new BPF features.
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 

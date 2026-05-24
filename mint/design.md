@@ -5654,3 +5654,528 @@ foundation this slice extends); §5.4 / §5.19 / §5.20 / §5.22 /
 §4.1 (exit-code table, row 9 REUSED — no new row); §4.3
 (LoaderError enum, ZERO diff this slice); `mint/impl-notes.md`
 D-3.1-1..D-3.1-4 (MVP-3.1 deviations that STAND unchanged).
+
+---
+
+### §5.28 MVP-3.3: systemd + Ansible + fleet docs (brownfield amendment)
+
+**Purpose**: ship an ops-integration slice that makes the existing
+loader operator-deployable on a Linux host fleet. Four
+text-artifact additions (systemd template unit + Ansible example
+playbook + a Jinja2 config template + a fleet-deployment Markdown
+doc) + 3-5 ctests that exercise the systemd + Ansible surfaces
+end-to-end via real `sudo systemctl` and (optional) `ansible-playbook
+--syntax-check`.
+
+**Anchor sections**: §5.20 (attach/detach flow — ExecStart/ExecStop
+call into the unchanged loader CLI surface); §5.26 (config harness,
+`XDPMF_TRUST_MODEL` env-var, `apply -f` subcommand, `trust_model=<mode>`
+stderr-log format used by fleet docs); §5.27 (the immediate ancestor;
+adds CIDR axis but is otherwise byte-equivalent to §5.26 for the
+purposes of this OPS slice). §4.1 exit-code table UNCHANGED (no new
+exit code). §4.3 LoaderError enum UNCHANGED (PI-7-3.3 strengthening).
+
+**Scope contract (§5.28 short form)**:
+- NEW: `systemd/xdpmacfilter@.service` (template unit), `ansible/xdpmacfilter-deploy.yml` (playbook), `ansible/templates/xdpfilter-config.yaml.j2` (config template), `docs/FLEET_DEPLOYMENT.md` (operator docs), 5 NEW test scripts (`T_SYSTEMD_UNIT_SYNTAX.sh`, `T_SYSTEMD_LIFECYCLE.sh`, `T_SYSTEMD_RESTART_ON_FAILURE.sh`, `T_ANSIBLE_PLAYBOOK_SYNTAX.sh`, `T_FLEET_DOCS_SUBSTRING.sh`).
+- EDITED: `README.md` (1 new section, per Q5 N1), `CMakeLists.txt` (version bump 0.4.0 → 0.5.0; optional `install(FILES systemd/…)` rule), `CHANGELOG.md` (`[0.5.0]` entry + MVP-3.3 build-pace row), `tests/CMakeLists.txt` (5 new `add_test` entries).
+- UNCHANGED-BUT-AFFECTED (zero git-diff fence): ALL C++/BPF sources (`src/**/*.{cpp,hpp,h,bpf.c}`), `tests/lib/*` (existing helpers), `tests/T_*.sh` (the 31 pre-existing test bodies), `tests/fixtures/*`, `cmake/BpfBuild.cmake`, `include/version.h.in`, `tests/lib/pins.sh.in`.
+
+**Human-gate decisions (confirmed)**:
+- **HG-3.3-1**: Unit name = `xdpmacfilter@.service` (matches current binary; the architecture-v2 component-map name `xdpfilter@.service` defers to MVP-3.12). Reviewer asserts: unit file exists at `systemd/xdpmacfilter@.service`; NO `systemd/xdpfilter@.service` file in this slice.
+- **HG-3.3-2**: Ansible scope = single example playbook + 1 Jinja2 template + 1 handler block. NOT a role or collection. Reviewer asserts: `ansible/` contains exactly `xdpmacfilter-deploy.yml` + `templates/xdpfilter-config.yaml.j2`; NO `roles/`, NO `collections/`, NO `inventory/`, NO `group_vars/`.
+- **HG-3.3-3**: systemd test approach = real `sudo systemctl`. Tests install to `/etc/systemd/system/`, daemon-reload, start/reload/stop, aggressive trap-cleanup. Stub-only validation is forbidden.
+
+#### §5.28 Q-decisions (mechanism)
+
+##### Q1: systemd unit install path for ctest → **I1 (system path)**
+
+`/etc/systemd/system/xdpmacfilter@.service` per brief recommendation. Rationale:
+- Production-realistic path; the unit will live there in real deployments anyway.
+- BPF attach requires CAP_BPF (root) → user-systemd (I2) is awkward because ExecStart would need an inner `sudo`, defeating the unit-encapsulation intent.
+- Drop-in override (I3) adds complexity without clearer signal — a stale system-path install (test trap failure) is a single greppable artefact that's easy to spot and cleanup pattern is well-understood.
+
+Tests MUST use a unique-per-run unit filename or trap-on-EXIT cleanup; architect prescribes **trap-on-EXIT cleanup** (the unit file is template-instanced, not unique-per-run, since systemd-analyze verify wants the canonical name `xdpmacfilter@.service`).
+
+##### Q2: ExecReload mechanism → **R1 (re-exec `apply -f`)**
+
+`ExecReload=/usr/bin/xdpmacfilter apply -f /etc/xdpfilter/%i.yaml --iface %i` (literally the SAME line as `ExecStart`). Rationale:
+- §5.26 Composite-6 atomic-swap was BUILT to make re-exec-of-apply the natural reload semantic; the apply orchestrator detects an existing link pin and routes through `bpf_link__update_program` for an idempotent swap (D-3.1-4 state-(b) reattach path).
+- SIGHUP (R2) is explicitly fenced as OOS by MVP-3.1; introducing a signal handler now would invalidate PI-7-3.3 (loader.hpp ZERO diff) and the §5.26 atomic-swap promise.
+- Restart-as-reload (R3) introduces a brief drop window contrary to T_APPLY_ATOMIC_SWAP_NO_DROP (§6.23) and T_CIDR_ATOMIC_SWAP_NO_DROP (§6.31) invariants.
+
+ExecReload is therefore EQUAL to ExecStart at the byte level (this is intentional — a `diff <(grep ExecStart unit) <(grep ExecReload unit)` after stripping the directive name yields empty).
+
+##### Q3: Fleet-mode docs depth → **D1 (single MD file)**
+
+`docs/FLEET_DEPLOYMENT.md` ~50-100 lines. README pointer per N1. Covers:
+1. When to use `XDPMF_TRUST_MODEL=fleet` (decision matrix: trusted-segment-network vs operator-managed-only fleet; references PI-2/PI-3/PI-4/PI-5 fleet-mode invariants from §5.26).
+2. Audit story citing the EXACT stderr-log format from §5.26: `xdpmacfilter: trust_model=<strict|fleet>` emitted at every attach() entry. Mandatory verbatim citation (PI-23 — see §6.5 below).
+3. Example systemd Drop-In to set the env var: `/etc/systemd/system/xdpmacfilter@.service.d/trust-model.conf` containing `[Service]\nEnvironment=XDPMF_TRUST_MODEL=fleet`.
+4. Recommended Prometheus alert SEMANTIC (NOT implementation): fleet-wide `trust_model` literal distribution should be uniform; alert on divergence. Forward-references MVP-3.4 exporter scope.
+5. Fence callout: `XDPMF_TRUST_MODEL=fleet` relaxes ONLY §5.4 alien-program disposition (PI-1 strict-default). It does NOT relax §5.19 name-check (PI-2), §5.22 Item 1 tag-check (PI-3), §5.22 Item 2 O_PATH path-discipline (PI-4), or §5.24 kernel-version probe (PI-5). All four PI-2..PI-5 invariants hold in BOTH modes.
+
+D2 (multi-doc sprint) is explicit scope-creep; deferred.
+
+##### Q4: Restart=on-failure tuning → **RT2 (rate-limited)**
+
+```
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=300
+```
+
+Rationale: handles transient failures (boot races, brief config push blip) without infinite-loop on permanent failures (malformed YAML). Operator must `systemctl reset-failed xdpmacfilter@<iface>` after 5 retries in 5 min — alerting hook.
+
+Note: `StartLimitBurst` and `StartLimitIntervalSec` belong to the `[Unit]` section, NOT `[Service]`, on modern systemd (≥230). Impl MUST place them under `[Unit]`. Reviewer asserts via `systemd-analyze verify` (it warns on misplacement) AND substring-grep on the unit body.
+
+##### Q5: README integration → **N1 (1 new section)**
+
+README gains a "Production deployment" section (~10-15 lines) pointing to `docs/FLEET_DEPLOYMENT.md`, the systemd unit (`systemd/xdpmacfilter@.service`), and the Ansible playbook (`ansible/xdpmacfilter-deploy.yml`). Inserted BEFORE the existing test/dev sections; preserves existing README ordering.
+
+##### Q6: MVP-3.1/3.2 OOT-deferred housekeeping items → **DEFER**
+
+Per brief recommendation. 5 deferred items from MVP-3.1/3.2 retros (orphan map pins from T_ATTACH_TAG_MISMATCH; stale NOTE comment; cli.hpp ParsedAttach wrapper design-text; §6.25 "replacing existing program" grep; MVP-3.2 had 0) stay in their dispositions. Mixing them with an OPS slice dilutes review focus. Architect surfaces "MVP-3.3.5 housekeeping" as a candidate dedicated cycle if backlog accumulates further.
+
+#### §5.28 Interfaces additions
+
+##### systemd unit template (`systemd/xdpmacfilter@.service`)
+
+Template-instanced unit (`@` suffix). `%i` is the iface name (e.g. `eth0`, `veth-test0`). One unit instance per iface; multi-iface = multiple instance names (`xdpmacfilter@eth0.service`, `xdpmacfilter@eth1.service`, …). NOT a multi-iface single unit (OOS).
+
+**Directive catalogue** (architect-prescribed; impl MAY add comments inline but the directive set is fixed):
+
+```
+[Unit]
+Description=XDP MAC/CIDR filter on %i
+Documentation=file:///usr/share/doc/xdpmacfilter/FLEET_DEPLOYMENT.md
+After=network-pre.target
+Wants=network-pre.target
+ConditionPathExists=/etc/xdpfilter/%i.yaml
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/xdpmacfilter apply -f /etc/xdpfilter/%i.yaml --iface %i
+ExecReload=/usr/bin/xdpmacfilter apply -f /etc/xdpfilter/%i.yaml --iface %i
+ExecStop=/usr/bin/xdpmacfilter detach --iface %i
+Restart=on-failure
+RestartSec=5
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_SYS_RESOURCE
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_SYS_RESOURCE
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Rationale per directive (non-obvious only):
+- `ConditionPathExists=/etc/xdpfilter/%i.yaml`: unit silently skips (not "failed") if the per-iface config is absent. Avoids alert storm when the operator hasn't yet pushed config for a unit they enabled. Reviewer asserts presence.
+- `Type=oneshot` + `RemainAfterExit=yes`: the loader `apply -f` exits after pinning the BPF link; the kernel holds the XDP program. Without `RemainAfterExit`, systemd would consider the unit inactive immediately after ExecStart exits — `systemctl reload` would re-attach instead of update-program. **Load-bearing for Q2 R1 atomic-reload semantic.**
+- `AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_SYS_RESOURCE`: BPF map/prog load + XDP attach + rlimit-memlock. `CAP_SYS_RESOURCE` is required on kernels <5.11 (memlock rlimit); harmless on newer kernels. Architect leaves `User=root` as default (running as non-root with caps is an operator's hardening call; OOS for this slice).
+- `NoNewPrivileges=true`: prevents privilege escalation from within the unit. Compatible with AmbientCapabilities (caps are granted, not setuid'd).
+- `ExecStop=/usr/bin/xdpmacfilter detach --iface %i`: idempotent per §5.21 D4 (`detach` on clean iface → exit 0). Safe to call on already-detached unit.
+- `Documentation=`: points to the FLEET_DEPLOYMENT.md (path is operator-install location; the build does NOT install docs to `/usr/share/doc/` in this slice — docs path is for human discoverability via `systemctl status` only).
+
+**What the unit does NOT contain** (anti-creep guard):
+- NO `Type=notify` (daemon-style; OOS — MVP-3.6+).
+- NO `WatchdogSec=` (no daemon to watchdog).
+- NO `ProtectSystem=` / `ProtectHome=` / `PrivateTmp=` / seccomp filter (hardening is operator's call — OOS).
+- NO `User=` / `Group=` non-root (BPF needs CAP_BPF; non-root-with-caps is operator hardening — OOS).
+- NO multi-iface logic (template unit; one instance per iface).
+- NO `Environment=XDPMF_TRUST_MODEL=…` baked in (operator sets via Drop-In per Q3 fleet-docs example).
+
+##### Ansible playbook (`ansible/xdpmacfilter-deploy.yml`)
+
+Minimal example play with one host group, idempotent. Required variables (operator supplies via inventory or `-e`):
+- `xdpfilter_iface` (string, e.g. `eth0`)
+- `xdpfilter_default_action` (string, `pass` or `drop`)
+- `xdpfilter_rules` (list of dicts; each dict has `id`, optional `mac`, optional `src_cidr`)
+- `xdpfilter_trust_model` (string, `strict` or `fleet`; OPTIONAL; default `strict`)
+
+Play tasks (architect-prescribed order; impl uses standard Ansible modules):
+
+```yaml
+---
+- name: Deploy xdpmacfilter to fleet host
+  hosts: xdpfilter_hosts
+  become: true
+  vars:
+    xdpfilter_iface: eth0
+    xdpfilter_default_action: drop
+    xdpfilter_rules: []
+    xdpfilter_trust_model: strict
+  tasks:
+    - name: Ensure /etc/xdpfilter directory exists
+      ansible.builtin.file:
+        path: /etc/xdpfilter
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Render per-iface config
+      ansible.builtin.template:
+        src: xdpfilter-config.yaml.j2
+        dest: "/etc/xdpfilter/{{ xdpfilter_iface }}.yaml"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: reload xdpmacfilter
+
+    - name: Install systemd unit
+      ansible.builtin.copy:
+        src: ../systemd/xdpmacfilter@.service
+        dest: /etc/systemd/system/xdpmacfilter@.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify: daemon-reload systemd
+
+    - name: Enable + start xdpmacfilter@{{ xdpfilter_iface }}
+      ansible.builtin.systemd:
+        name: "xdpmacfilter@{{ xdpfilter_iface }}.service"
+        enabled: true
+        state: started
+        daemon_reload: true
+
+  handlers:
+    - name: daemon-reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: reload xdpmacfilter
+      ansible.builtin.systemd:
+        name: "xdpmacfilter@{{ xdpfilter_iface }}.service"
+        state: reloaded
+```
+
+**Idempotency contract**: re-running the play with identical variables MUST yield zero changes (`changed=0` in Ansible summary). Architect lists this as PI-21 (see §6.5 below). The `template:` module is content-based-idempotent; the `copy:` of unit file is byte-identical; `systemd: state=started` is idempotent.
+
+Note: the `ansible.builtin.copy: src: ../systemd/…` path assumes the playbook is invoked from the `ansible/` directory; impl MAY use `role_path` or absolute path conventions, but the test (T_ANSIBLE_PLAYBOOK_SYNTAX) just checks `--syntax-check`, not runtime correctness against a real host.
+
+##### Jinja2 config template (`ansible/templates/xdpfilter-config.yaml.j2`)
+
+```yaml
+# Generated by Ansible for {{ xdpfilter_iface }} — do not edit by hand.
+schema_version: 1
+interface: {{ xdpfilter_iface }}
+default_action: {{ xdpfilter_default_action }}
+rules:
+{% for rule in xdpfilter_rules %}
+  - id: {{ rule.id }}
+    action: pass
+    match:
+{% if rule.mac is defined %}
+      mac: "{{ rule.mac }}"
+{% endif %}
+{% if rule.src_cidr is defined %}
+      src_cidr: "{{ rule.src_cidr }}"
+{% endif %}
+{% endfor %}
+```
+
+The output of this template MUST be a valid §5.26+§5.27 schema_version-1 config that the loader's `apply -f` validator accepts. Architect does NOT prescribe a separate Jinja2-output ctest in this slice — `T_ANSIBLE_PLAYBOOK_SYNTAX` covers playbook validity; semantic round-trip is operator-runtime concern. (Folded-out test variant `T_ANSIBLE_TEMPLATE_RENDERS_VALID_CONFIG` is explicitly OOS.)
+
+##### Fleet deployment docs (`docs/FLEET_DEPLOYMENT.md`)
+
+Required substring set (load-bearing for T_FLEET_DOCS_SUBSTRING — see §6.34):
+1. `XDPMF_TRUST_MODEL` (variable name appears verbatim).
+2. `trust_model=strict` (exact stderr-log literal from §5.26 for strict mode).
+3. `trust_model=fleet` (exact stderr-log literal for fleet mode).
+4. The literal `xdpmacfilter: trust_model=` (the stderr prefix as audit-grep target).
+5. `XDPMF_TRUST_MODEL=fleet` in a code-block context showing a Drop-In `[Service]\nEnvironment=` snippet (anti-prose-drift: docs cite the operational mechanism, not just describe it).
+6. References to PI-1..PI-5 invariants (by §-number `§5.4`, `§5.19`, `§5.22`, `§5.24`) — the documented fence that fleet relaxes ONLY §5.4.
+
+Architect leaves prose style/length to impl (~50-100 lines target per brief Q3 D1) but the substring set is contractual. PI-23 (see §6.5) is checked by T_FLEET_DOCS_SUBSTRING and by reviewer's manual scan.
+
+##### CMakeLists.txt amendments
+
+- Version bump: `project(xdpmacfilter VERSION 0.4.0 …)` → `project(xdpmacfilter VERSION 0.5.0 …)`. This bump cascades to `--version` output (PI-22 below) and to `CHANGELOG.md` `[0.5.0]` entry.
+- OPTIONAL install rule (architect: include): `install(FILES systemd/xdpmacfilter@.service DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/systemd/system/)` — gated on a CMake option `XDPMF_INSTALL_SYSTEMD_UNIT` defaulting to `ON`. System install is operator's `cmake --install` call, not the build. NO install rule for the Ansible playbook or for `docs/` in this slice (OOS).
+
+NO new `find_package` / `pkg_check_modules` / build dependency. NO change to the `xdpmf_internal` STATIC target or to the `xdpmacfilter` binary target.
+
+##### tests/CMakeLists.txt amendments
+
+5 new `add_test` entries (T_SYSTEMD_UNIT_SYNTAX, T_SYSTEMD_LIFECYCLE, T_SYSTEMD_RESTART_ON_FAILURE, T_ANSIBLE_PLAYBOOK_SYNTAX, T_FLEET_DOCS_SUBSTRING). The 3 `T_SYSTEMD_*` tests get `RESOURCE_LOCK xdp_fixture` (they need exclusive use of the dev VM's systemd manager) AND `RESOURCE_LOCK systemd_unit_install` (a NEW lock label preventing two systemd tests from racing on `/etc/systemd/system/xdpmacfilter@.service`). `T_FLEET_DOCS_SUBSTRING` and `T_ANSIBLE_PLAYBOOK_SYNTAX` need NO lock (file-content / syntax checks).
+
+Test env: `SYSTEMD_UNIT_SRC=${CMAKE_SOURCE_DIR}/systemd/xdpmacfilter@.service`, `ANSIBLE_PLAYBOOK=${CMAKE_SOURCE_DIR}/ansible/xdpmacfilter-deploy.yml`, `FLEET_DOCS=${CMAKE_SOURCE_DIR}/docs/FLEET_DEPLOYMENT.md`.
+
+#### §5.28 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+##### NEW (created this slice)
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `systemd/xdpmacfilter@.service` | systemd template unit per Q1+Q2+Q4 directive catalogue above | systemd unit | 35 |
+| `ansible/xdpmacfilter-deploy.yml` | Minimal example playbook (HG-3.3-2): file dir + template config + copy unit + systemd enable+start; 2 handlers | YAML/Ansible | 65 |
+| `ansible/templates/xdpfilter-config.yaml.j2` | Jinja2 template emitting a §5.26+§5.27 schema_version-1 config | Jinja2/YAML | 15 |
+| `docs/FLEET_DEPLOYMENT.md` | Operator docs for `XDPMF_TRUST_MODEL=fleet` audit story + Drop-In example + Prometheus alert semantic + PI fence references (Q3 D1) | Markdown | 80 |
+| `tests/T_SYSTEMD_UNIT_SYNTAX.sh` | §6.32 test: `systemd-analyze verify systemd/xdpmacfilter@<iface>.service` after stage-copy → exit 0 | bash | 40 |
+| `tests/T_SYSTEMD_LIFECYCLE.sh` | §6.33 test: install unit + minimal config + `systemctl start` / `reload` / `stop` against veth fixture; assert XDP attach + active_idx flip + clean detach (HG-3.3-3) | bash | 160 |
+| `tests/T_SYSTEMD_RESTART_ON_FAILURE.sh` | §6.34 test (OPTIONAL — architect: INCLUDE): malformed config → systemd Restart attempts → eventually hits StartLimit per Q4 RT2 | bash | 110 |
+| `tests/T_ANSIBLE_PLAYBOOK_SYNTAX.sh` | §6.35 test: `ansible-playbook --syntax-check ansible/xdpmacfilter-deploy.yml` → exit 0; SKIP-77 if `ansible-playbook` not in PATH | bash | 35 |
+| `tests/T_FLEET_DOCS_SUBSTRING.sh` | §6.36 test: 6-substring grep over `docs/FLEET_DEPLOYMENT.md` per Q3 substring catalogue + PI-23 verbatim stderr-format citation | bash | 50 |
+
+**Note on test numbering**: this slice ships 5 new tests (§6.32..§6.36). The brief target was 3-5; architect INCLUDES T_SYSTEMD_RESTART_ON_FAILURE because Q4 RT2's rate-limit semantic is non-trivial and operator-facing (StartLimitBurst behaviour MUST be verified — easy to misplace under [Service] instead of [Unit]). Architect leaves it as the lowest-priority slot; if impl/tester finds it flaky and cannot stabilize within budget, it MAY be marked as SKIP-77 with a clear rationale in stderr (decision deferred to tester via PI-25 carve-out below).
+
+##### EDITED (existing files touched this slice)
+
+| Path | Role (one line) | What changes |
+|---|---|---|
+| `README.md` | Repo entry-point doc | INSERT 1 new section "Production deployment" (~10-15 lines) per Q5 N1, BEFORE the existing test/dev sections. Pointers to `docs/FLEET_DEPLOYMENT.md`, `systemd/xdpmacfilter@.service`, `ansible/xdpmacfilter-deploy.yml`. Existing README structure UNCHANGED outside the new section. |
+| `CMakeLists.txt` | Top-level build | (a) `project(xdpmacfilter VERSION 0.4.0 …)` → `project(xdpmacfilter VERSION 0.5.0 …)`; (b) NEW `option(XDPMF_INSTALL_SYSTEMD_UNIT "Install systemd unit template" ON)` and conditional `install(FILES systemd/xdpmacfilter@.service DESTINATION …/lib/systemd/system/)`. NO other CMake changes. |
+| `CHANGELOG.md` | Version history | NEW `## [0.5.0] - 2026-05-NN` section per Keep-a-Changelog (precedent: [0.4.0] from §5.27, [0.3.0] from §5.26, [0.1.x] from MVP-1.1C). Build-pace table gains a row for MVP-3.3. |
+| `tests/CMakeLists.txt` | ctest registration | (a) 5 new `add_test(…)` entries (§6.32..§6.36) with `RESOURCE_LOCK xdp_fixture` for systemd-lifecycle tests AND new `RESOURCE_LOCK systemd_unit_install`; (b) `TEST_ENV` carries `SYSTEMD_UNIT_SRC`, `ANSIBLE_PLAYBOOK`, `FLEET_DOCS` paths; (c) NO modification of the 31 existing `add_test` entries (PI-6-3.3 strict superset). |
+
+##### UNCHANGED-BUT-AFFECTED (zero git-diff; behaviour must hold)
+
+| Path | Why it matters |
+|---|---|
+| `src/lib/loader.hpp` | PI-7-3.3 strengthening: ZERO diff for the THIRD consecutive cycle (MVP-3.1 had +1 line; MVP-3.2 had 0; MVP-3.3 has 0). Reviewer asserts `git diff main -- src/lib/loader.hpp` shows zero output. |
+| `src/lib/loader.cpp` | UNCHANGED. ExecStart's `xdpmacfilter apply -f …` calls into the existing apply path; ExecStop's `xdpmacfilter detach …` calls into the existing detach path. NO loader behaviour change. |
+| `src/lib/config.{cpp,hpp}` | UNCHANGED. The Jinja2 template emits a §5.26+§5.27-compliant config; no schema change. |
+| `src/lib/yaml_subset.{cpp,hpp}` | UNCHANGED. |
+| `src/lib/cidr.{cpp,hpp}` | UNCHANGED. CIDR axis from §5.27 is operator-config concern, not OPS-slice concern. |
+| `src/lib/apply_internal.hpp` | UNCHANGED. |
+| `src/lib/raii.hpp` | UNCHANGED. |
+| `src/cli/cli.{cpp,hpp}`, `src/cli/apply.{cpp,hpp}`, `src/cli/main.cpp` | UNCHANGED. systemd unit ExecStart/Reload/Stop call into the EXISTING CLI grammar (`apply -f … --iface …` / `detach --iface …`). NO `--quiet`, NO `--syslog`, NO new flag (architect explicitly considered + rejected — see Decisions D-3.3-1). |
+| `src/common/mac_filter.h` | UNCHANGED. No new shared constants needed. |
+| `src/bpf/mac_filter.bpf.c` | UNCHANGED. OPS slice; zero BPF datapath change. |
+| `cmake/BpfBuild.cmake` | UNCHANGED. |
+| `include/version.h.in`, `tests/lib/pins.sh.in` | UNCHANGED (templates from §5.25 P2/P3 still authoritative; CMake reads new `VERSION 0.5.0` into `version.h.in`). |
+| Existing 31 ctests (T_*.sh under `tests/`) | Bodies UNCHANGED. Reviewer asserts `git diff --stat tests/T_*.sh` shows ZERO body changes; only NEW T_SYSTEMD_*, T_ANSIBLE_*, T_FLEET_* files. |
+| `tests/lib/common.sh`, `tests/lib/read_stats.py`, `tests/lib/pins.sh.in` | UNCHANGED. New tests MAY introduce a new `tests/lib/systemd_helpers.sh` (optional, tester's call); existing helper bodies UNCHANGED regardless. |
+| `tests/fixtures/*` (all existing YAML + BPF fixtures) | UNCHANGED. T_SYSTEMD_LIFECYCLE reuses `tests/fixtures/config_valid.yaml` (or `config_valid_cidr.yaml`) via stage-copy to `/etc/xdpfilter/<iface>.yaml`; no new fixture file required. |
+
+Any file NOT listed above is off-limits for impl. If impl needs to edit a file not listed, that's a design gap — SendMessage architect.
+
+#### §5.28 Decisions (additional, with rationale)
+
+- **D-3.3-1 — NO `--quiet` flag** — because journal noise from `apply -f` is one line (`trust_model=…`) + (potentially) a P0a reattach line. NOT a flood. Adding `--quiet` would breach PI-7-3.3 loader.hpp ZERO-diff for an aesthetic gain. Operators can `LogLevelMax=` in the unit if needed (impl does NOT prescribe it — Q-of-quietness left to operator hardening).
+- **D-3.3-2 — NO `Environment=XDPMF_TRUST_MODEL=` BAKED into the shipped unit** — because the default `strict` is the secure-by-default posture (PI-1). Operators opt INTO fleet via Drop-In per Q3 fleet-docs example. Baking it in would either (a) hard-default to strict (redundant — that's already the loader default per §5.26) or (b) hard-default to fleet (insecure-by-default — antithetical to PI-1).
+- **D-3.3-3 — `xdpmacfilter detach --iface %i` on ExecStop, NOT `xdpmacfilter detach --iface %i || true`** — because §5.21 D4 already made `detach` on a clean iface return exit 0 (idempotent). Adding `|| true` would mask actual detach failures (e.g. permission denied, kernel bug) from systemd's failure-state tracking. Trust the existing idempotency contract.
+- **D-3.3-4 — `After=network-pre.target Wants=network-pre.target`** (NOT `network-online.target`) — because XDP attach uses `if_nametoindex(%i)` on a netlink device; the iface needs to EXIST but NOT to be UP-with-IP. `network-pre.target` is the right ordering anchor. `network-online.target` would block until DHCP completes — wrong semantic (we want the filter UP BEFORE the address is configured, to filter the first frame).
+- **D-3.3-5 — `ConditionPathExists=/etc/xdpfilter/%i.yaml`** — because the unit is template-instanced and operators may `systemctl enable xdpmacfilter@eth1` BEFORE writing `/etc/xdpfilter/eth1.yaml`. Without ConditionPathExists, the unit goes into `failed` state at boot → alert storm. With it, the unit silently no-ops at boot and starts cleanly once the config arrives + `systemctl start` is invoked. Operator-pleasing default.
+- **D-3.3-6 — `CapabilityBoundingSet` mirrors `AmbientCapabilities`** — because the unit hands the loader EXACTLY the caps it needs (CAP_BPF + CAP_NET_ADMIN + CAP_SYS_RESOURCE on old kernels). Setting BoundingSet to the same value enforces that even if a CVE in the loader allowed cap-escalation, the bounding set caps the blast radius. Defense in depth without behavioural change.
+- **D-3.3-7 — Ansible playbook uses `become: true`, NOT per-task `become`** — because every task touches root-owned files (`/etc/xdpfilter/`, `/etc/systemd/system/`, `systemctl`); per-task `become` is noisier with no security gain. The systemd handler ALSO inherits the playbook-level `become`.
+- **D-3.3-8 — Ansible playbook `daemon-reload` is a HANDLER, not a task** — because Ansible's idiom: `daemon-reload` runs ONCE per play even if many units are dropped, AND only if SOMETHING changed (handler-fires-on-notify). Putting it as a task would run unconditionally — non-idempotent (no functional harm, but cosmetic `changed=1` on re-runs, violating PI-21). Handler form: idiomatic + idempotent.
+- **D-3.3-9 — `XDPMF_INSTALL_SYSTEMD_UNIT` CMake option DEFAULTS to ON, not OFF** — because the default `cmake --install` of a project that ships a systemd unit SHOULD install the unit. Operators who want pure-binary install (e.g. distro packagers who handle the unit separately) can set `-DXDPMF_INSTALL_SYSTEMD_UNIT=OFF`. Off-by-default would surprise the default packaging path.
+
+#### §5.28 TestStrategy entries
+
+##### §6.32 T_SYSTEMD_UNIT_SYNTAX — `systemd-analyze verify` accepts the unit
+
+- **Trigger**: stage `systemd/xdpmacfilter@.service` into a temporary directory (the canonical unit name MUST be preserved for template-instance verification: copy to `${TMPDIR}/xdpmacfilter@.service`); invoke `systemd-analyze verify ${TMPDIR}/xdpmacfilter@<arbitrary-iface>.service` (instance form per systemd-analyze convention). NO sudo needed (verify is read-only).
+- **Observable outcome**:
+  - Exit code 0.
+  - Stderr EMPTY (no warnings).
+  - Stdout MAY emit informational lines; assertion is "no warnings/errors", not "silent".
+- **Assertion mechanism**: bash `rc=0` check + `[[ -z "$(cat stderr.log)" ]]` (or `grep -vE '^(Loading|Created)' stderr.log | wc -l == 0` if systemd-analyze emits info lines on stderr in some versions; tester picks the robust form).
+- **Anti-theatricality control**: NEGATION sub-case — also run `systemd-analyze verify` against a deliberately-broken copy (e.g. with `Type=invalid` substituted in) and assert exit-nonzero. Proves the verifier is actually checking, not just exit-0-pass-through. NEGATION sub-case is REQUIRED.
+- **SKIP conditions**: SKIP-77 if `systemd-analyze` not in PATH (rare on modern Linux; brief notes systemd is assumed present).
+- **Cleanup**: `rm -rf ${TMPDIR}`.
+
+##### §6.33 T_SYSTEMD_LIFECYCLE — install + start + reload + stop end-to-end against veth fixture
+
+- **Load-bearing**: this is the OPS-slice canary. If this passes, the systemd integration is real; if it fails, the unit file's directives are wrong somewhere.
+- **Trigger**:
+  1. `setup_veth` (existing helper) → `${IFACE_A}` exists.
+  2. `sudo install -D -m 0644 ${SYSTEMD_UNIT_SRC} /etc/systemd/system/xdpmacfilter@.service`.
+  3. `sudo install -D -m 0644 ${CMAKE_SOURCE_DIR}/tests/fixtures/config_valid.yaml /etc/xdpfilter/${IFACE_A}.yaml`.
+  4. `sudo systemctl daemon-reload`.
+  5. `sudo systemctl start xdpmacfilter@${IFACE_A}.service`.
+- **Observable outcome (post-start)**:
+  - `systemctl is-active xdpmacfilter@${IFACE_A}.service` → `active` (exits 0).
+  - `xdp_prog_id ${IFACE_A}` (existing helper) → non-empty (XDP attached).
+  - Pin `${PIN_DIR}/link` exists (P0a link pin per §5.26).
+  - `bpftool map dump pinned ${PIN_DIR}/active_idx` → value `0` (first apply lands in slot 0 per §5.26 invariant).
+  - `journalctl -u xdpmacfilter@${IFACE_A}.service` contains `xdpmacfilter: trust_model=strict` (PI-23 verbatim format; the unit's `journal=` mode forwards stderr).
+- **Reload sub-step**:
+  6. Modify `/etc/xdpfilter/${IFACE_A}.yaml` (e.g. swap to a different valid fixture).
+  7. `sudo systemctl reload xdpmacfilter@${IFACE_A}.service`.
+- **Observable outcome (post-reload)**:
+  - `systemctl is-active` still `active`.
+  - `bpftool map dump pinned ${PIN_DIR}/active_idx` → value `1` (active_idx flipped — atomic swap occurred, Q2 R1 contract).
+  - `xdp_prog_id ${IFACE_A}` UNCHANGED (same prog id — `bpf_link__update_program` did NOT re-attach).
+- **Stop sub-step**:
+  8. `sudo systemctl stop xdpmacfilter@${IFACE_A}.service`.
+- **Observable outcome (post-stop)**:
+  - `systemctl is-active` → `inactive` (or `failed` only if stop itself errored — assert `inactive`).
+  - `xdp_prog_id ${IFACE_A}` → empty (XDP detached).
+  - Pin `${PIN_DIR}/link` absent.
+- **Assertion mechanism**: bash exit-code checks + `systemctl is-active` substring + existing helpers (`xdp_prog_id`, pin existence via `test -e`, `bpftool map dump … | jq`) + `journalctl` grep.
+- **Anti-theatricality controls**:
+  - The active_idx flip across reload is the differential — if `systemctl reload` were no-oping or restarting (R3 instead of R1), the flip would NOT occur (restart re-attaches from scratch → active_idx = 0 again).
+  - The prog-id UNCHANGED check across reload distinguishes R1 (bpf_link__update_program — same prog, new bytecode at the link) from R3 (detach + re-attach — new prog id).
+- **SKIP conditions**:
+  - SKIP-77 if `systemctl` not in PATH (extremely rare; treat as test infra bug otherwise).
+  - SKIP-77 if `require_passwordless_sudo` (existing helper) fails (project context says it's available).
+- **Cleanup**: aggressive trap-on-EXIT — `systemctl stop xdpmacfilter@${IFACE_A}.service || true; systemctl disable xdpmacfilter@${IFACE_A}.service || true; rm -f /etc/systemd/system/xdpmacfilter@.service /etc/xdpfilter/${IFACE_A}.yaml; systemctl daemon-reload; systemctl reset-failed xdpmacfilter@${IFACE_A}.service || true; cleanup_veth`.
+
+##### §6.34 T_SYSTEMD_RESTART_ON_FAILURE — Restart=on-failure + StartLimit per Q4 RT2
+
+- **Architect's INCLUDE rationale**: Q4 RT2's StartLimit directives are operator-visible (alert-pattern hinge). The misplacement risk (under `[Service]` vs `[Unit]`) is a real failure mode that `systemd-analyze verify` warns about but does not always reject. A behaviour-level ctest proves the rate-limit kicks in.
+- **Trigger**:
+  1. `setup_veth`.
+  2. Install unit + install DELIBERATELY MALFORMED config at `/etc/xdpfilter/${IFACE_A}.yaml` (e.g. `tests/fixtures/config_malformed_schema.yaml`).
+  3. `sudo systemctl daemon-reload`.
+  4. `sudo systemctl start xdpmacfilter@${IFACE_A}.service` → expect exit-nonzero from systemctl (start fails because apply exits 9 because config is malformed).
+  5. Wait ~RestartSec (5s) + observe systemd attempts restart automatically.
+  6. After ~30 seconds (5 restarts × ~5s each + a bit of slack), assert:
+- **Observable outcome**:
+  - `systemctl is-active xdpmacfilter@${IFACE_A}.service` → `failed`.
+  - `systemctl show xdpmacfilter@${IFACE_A}.service -p NRestarts` → `NRestarts` value is `>= 4 AND <= 5` (the rate-limit kicked in at 5 burst).
+  - `journalctl -u xdpmacfilter@${IFACE_A}.service` contains `start request repeated too quickly` OR `Start request repeated too quickly` (systemd's StartLimit message).
+  - `xdp_prog_id ${IFACE_A}` → empty (no successful attach).
+- **Assertion mechanism**: `systemctl show … -p NRestarts` parse + bash arithmetic + `journalctl … | grep -iE 'start request repeated too quickly'`.
+- **Anti-theatricality controls**:
+  - The NRestarts bound is `>= 4 AND <= 5` (NOT `== 5` exactly) — slack for systemd-version variations (some emit the message after 5 attempts, some after 4-then-give-up). Tester verifies the BAND, not the exact count.
+  - The negation: also assert NRestarts is NOT 0 (would mean Restart= directive is missing entirely) AND NOT 100+ (would mean StartLimit is misplaced and the rate-limit never kicks in).
+- **SKIP conditions**:
+  - SKIP-77 if `systemctl` not in PATH.
+  - SKIP-77 if `require_passwordless_sudo` fails.
+  - **OPTIONAL SKIP-77**: if tester finds this test flaky in the ctest harness (systemd timing variation across kernels), MAY SKIP-77 with a stderr message `T_SYSTEMD_RESTART_ON_FAILURE: timing-flaky on this kernel; see §5.28 PI-25 carve-out`. PI-25 enumerates this carve-out explicitly (NOT a free pass — tester MUST document the flakiness mode if invoking).
+- **Cleanup**: same aggressive trap as §6.33, plus `systemctl reset-failed xdpmacfilter@${IFACE_A}.service` to clear the failed state.
+
+##### §6.35 T_ANSIBLE_PLAYBOOK_SYNTAX — `ansible-playbook --syntax-check` passes
+
+- **Trigger**: `ansible-playbook --syntax-check ${ANSIBLE_PLAYBOOK}` (`${ANSIBLE_PLAYBOOK}` = `${CMAKE_SOURCE_DIR}/ansible/xdpmacfilter-deploy.yml`).
+- **Observable outcome**:
+  - Exit code 0.
+  - Stdout contains `playbook: ${ANSIBLE_PLAYBOOK}` (or a similar ansible-version-dependent confirmation line).
+  - Stderr EMPTY of warnings (some ansible versions emit deprecation noise — tester uses `grep -vE '\[WARNING\]'` if needed; the assertion is "no syntax errors", not "silent").
+- **Assertion mechanism**: `rc=0` + stdout substring.
+- **Anti-theatricality control**: NEGATION sub-case — also run `ansible-playbook --syntax-check` against a deliberately-broken copy (e.g. with the top-level `hosts:` key removed) and assert exit-nonzero. Same pattern as §6.32 negation control. **OPTIONAL** (architect leaves to tester per budget); the positive case is sufficient if negation tooling is awkward.
+- **SKIP conditions**: SKIP-77 if `ansible-playbook` not in PATH (per brief — ansible-core is OPTIONAL test-time dep). Stderr message `T_ANSIBLE_PLAYBOOK_SYNTAX: ansible-playbook not in PATH; skipping per OPTIONAL dep`.
+- **Cleanup**: nothing (read-only check).
+
+##### §6.36 T_FLEET_DOCS_SUBSTRING — `docs/FLEET_DEPLOYMENT.md` cites actual stderr format
+
+- **Load-bearing for PI-23**: docs MUST cite the live `trust_model=<mode>` format from §5.26, not a stale paraphrase. Mitigates risk-register MVP-3.3 row 2 (silent posture change escapes audit if docs say one thing and runtime emits another).
+- **Trigger**: a series of `grep -qE` invocations against `${FLEET_DOCS}` (= `${CMAKE_SOURCE_DIR}/docs/FLEET_DEPLOYMENT.md`).
+- **Observable outcome (all 6 substrings present)**:
+  1. `grep -qE '\bXDPMF_TRUST_MODEL\b' ${FLEET_DOCS}` → rc 0.
+  2. `grep -qE 'trust_model=strict\b' ${FLEET_DOCS}` → rc 0.
+  3. `grep -qE 'trust_model=fleet\b' ${FLEET_DOCS}` → rc 0.
+  4. `grep -qE 'xdpmacfilter: trust_model=' ${FLEET_DOCS}` → rc 0 (the exact stderr prefix from §5.26 sub-decision, audit-grep target).
+  5. `grep -qE 'XDPMF_TRUST_MODEL=fleet' ${FLEET_DOCS}` → rc 0 (Drop-In Environment= snippet target).
+  6. `grep -qE '§5\.(4|19|22|24)\b' ${FLEET_DOCS}` → rc 0 (PI-1..PI-5 fence references; one match suffices — Pythagoras-style "at least one of the four").
+- **Assertion mechanism**: 6 sequential `grep -qE … && echo PASS || echo FAIL`; test exits 0 iff all 6 PASS.
+- **Anti-theatricality control**: if ANY of the 6 substrings is missing, the test fails with a specific line indicating WHICH substring was missing (not a generic "docs broken"). Operators reading the failure log can fix the docs directly.
+- **SKIP conditions**: none (read-only file check; no dep).
+- **Cleanup**: nothing.
+
+#### §6.5 Preserved invariants (MVP-3.3 brownfield) — PI-1..PI-18 continue + PI-19..PI-26 NEW
+
+All MVP-3.1 + MVP-3.2 invariants (PI-1..PI-18 per §5.26 + §5.27 Preserved Invariants sub-sections) continue to hold post-§5.28. NEW invariants PI-19..PI-26 capture MVP-3.3-specific guarantees. Reviewer's 5th framework point walks the COMBINED list (PI-1..PI-26) and reports `[INVARIANT-VIOLATED]` per failed check.
+
+**Continuing invariants** (per §5.27; ALL still apply post-§5.28):
+
+| # | Invariant | §5.28 check mechanism |
+|---|---|---|
+| PI-1 | §5.4 alien-program identity-gate ENFORCED in strict mode | Re-run §6.14, §6.9, §6.26 sub-case 1; all pass. |
+| PI-2 | §5.19 name-identity gate ENFORCED in BOTH modes | §6.9 + §6.26 sub-case 3 — both compute name-check. |
+| PI-3 | §5.22 Item 1 tag-check ENFORCED in BOTH modes | §6.14 still passes. |
+| PI-4 | §5.22 Item 2 O_PATH path-discipline ENFORCED in BOTH modes | §6.15 still passes. |
+| PI-5 | §5.24 kernel-version probe ENFORCED in BOTH modes | §6.20 still passes. |
+| PI-6-3.3 | **31 pre-§5.28 ctests pass byte-equivalent OR legitimately SKIP-77 — STRICT SUPERSET, NO carve-outs this slice** | Re-run all 31 tests post-§5.28 → all pass; `git diff --stat tests/T_*.sh` shows ZERO body changes. PI-6-3.2's §6.22 sub-case carve-out is HISTORICAL (already shipped); the 31-ctest baseline this slice inherits is byte-equivalent. |
+| PI-7-3.3 | **`loader.hpp` ZERO diff** — THIRD consecutive slice with zero diff (MVP-3.2 had 0, MVP-3.3 has 0; MVP-3.1 was the only slice that added an enumerator). Strengthened: ENTIRE `src/lib/` AND `src/cli/` AND `src/bpf/` AND `src/common/` tree has ZERO diff this slice. | `git diff main -- src/lib/ src/cli/ src/bpf/ src/common/` shows ZERO lines changed. Any diff = `[INVARIANT-VIOLATED]`. |
+| PI-8-3.3 | `xdpmacfilter --version` reports `xdpmacfilter 0.5.0` | Run `${LOADER_BIN} --version`; output MUST be `xdpmacfilter 0.5.0` (single line, ends with newline). Bump from 0.4.0 → 0.5.0 per Done-Definition (MVP-3.3 minor release: ops integration, no functional binary change but operator-visible ship). |
+| PI-9 | `--version` / `--help` output FORMAT unchanged | §6.10 T_CLI_HELP_VERSION re-run passes (existing ERE forward-compatible). NO new flag added (per D-3.3-1); `--help` text BYTE-IDENTICAL except possibly the trailing version-number-in-banner. |
+| PI-10-3.2 | `src/common/mac_filter.h` existing constants + struct layout UNCHANGED | `git diff main -- src/common/mac_filter.h` shows ZERO lines changed (strengthens PI-10-3.2: this slice adds NO new constants). |
+| PI-11 | Internal directory layout = `src/lib/` + `src/cli/` + `src/common/` + `src/bpf/` | `find src -type d` shows EXACTLY 4 dirs (no new src dirs). NEW top-level dirs `systemd/`, `ansible/`, `docs/` are OUTSIDE `src/` — not a layout change. |
+| PI-12 | Pin paths host-global per `nsenter --net` | UNCHANGED by §5.28 (no new pin paths). |
+| PI-13-3.2 | `stats` map type UNCHANGED + read protocol unchanged | UNCHANGED by §5.28. |
+| PI-14 | `--mode {generic,native,offload}` flag UNCHANGED | UNCHANGED. Unit's ExecStart does NOT pass `--mode` (defaults to `generic` per §5.23 Q1). Operators MAY add `--mode native` via Drop-In or by editing the unit; OPS docs note this. |
+| PI-15 | CIDR axis purely additive | UNCHANGED by §5.28 (no CIDR change). |
+| PI-16 | STAT_PASS_CIDR additive enum slot | UNCHANGED. |
+| PI-17 | `schema_version: 1` accepted; Jinja2 template emits schema_version: 1 | The `xdpfilter-config.yaml.j2` template emits `schema_version: 1` at line 1 (verbatim, NOT templated — it's a literal in the .j2). Reviewer asserts via `grep '^schema_version: 1$' ansible/templates/xdpfilter-config.yaml.j2`. |
+| PI-18 | §6.23 MAC-axis atomic-swap continues | UNCHANGED by §5.28. Re-run §6.23 post-§5.28 → passes. |
+
+**NEW invariants** (MVP-3.3-specific):
+
+| # | Invariant | Check mechanism |
+|---|---|---|
+| **PI-19** | **`systemd-analyze verify systemd/xdpmacfilter@<iface>.service` exits 0 with zero warnings/errors on stderr**. | §6.32 T_SYSTEMD_UNIT_SYNTAX positive case + reviewer manual re-run during framework point 5 walk. Treats stderr WARNINGS as failures (some warning patterns like "Unknown key name" indicate typos in directives). |
+| **PI-20** | **systemd lifecycle correctness**: `systemctl start` → XDP attached + active_idx=0 + `trust_model=` in journal; `systemctl reload` → active_idx flipped + prog id UNCHANGED (NOT re-attached); `systemctl stop` → XDP detached + link pin removed. | §6.33 T_SYSTEMD_LIFECYCLE end-to-end; load-bearing OPS canary. Pin-existence + bpftool dump + xdp_prog_id constancy across reload are the three differential signals. |
+| **PI-21** | **Ansible playbook idempotent**: re-running `ansible-playbook xdpmacfilter-deploy.yml` against the same fleet host with identical variables MUST yield `changed=0` in the summary. | Mitigation for risk-register MVP-3.3 row 1 (Ansible idempotency drift). NOT enforced by a ctest this slice (would require a real host or molecule-style harness — OOS for the slice); reviewer asserts via DESIGN-LEVEL inspection of the playbook (handlers-on-notify pattern, idempotent modules `copy:`/`template:`/`systemd: state=started`). Tester MAY add a runtime check via `ansible-playbook … 2>&1 | grep -E 'changed=0'` against localhost if budget allows (architect leaves to tester; PI-21 stays a DESIGN-LEVEL invariant if not). |
+| **PI-22** | **`ansible-playbook --syntax-check` exits 0** | §6.35 T_ANSIBLE_PLAYBOOK_SYNTAX positive case (with SKIP-77 if ansible not present). |
+| **PI-23** | **`docs/FLEET_DEPLOYMENT.md` cites the EXACT stderr format `xdpmacfilter: trust_model=<strict|fleet>` from §5.26 sub-decision (verbatim, not paraphrased)** | §6.36 T_FLEET_DOCS_SUBSTRING grep set (substring 4: `xdpmacfilter: trust_model=` prefix; substrings 2+3: `trust_model=strict` and `trust_model=fleet` literals). Mitigation for risk-register MVP-3.3 row 2. |
+| **PI-24** | **Unit file directive set EXACTLY matches the §5.28 catalogue** — `Type=oneshot`, `RemainAfterExit=yes`, `ExecStart` = `ExecReload` (byte-identical command), `ExecStop=… detach …`, `Restart=on-failure`, `StartLimitBurst=5`, `StartLimitIntervalSec=300`, `AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_SYS_RESOURCE`, `ConditionPathExists=/etc/xdpfilter/%i.yaml` | Reviewer manual grep of `systemd/xdpmacfilter@.service` against the catalogue; failure modes: missing directive, misplaced StartLimit under `[Service]` (Q4 RT2 spec), divergent ExecStart vs ExecReload (Q2 R1 spec). T_SYSTEMD_UNIT_SYNTAX positive case + T_SYSTEMD_RESTART_ON_FAILURE NRestarts bound (Q4 RT2 enforcement signal). |
+| **PI-25** | **T_SYSTEMD_RESTART_ON_FAILURE flakiness carve-out**: if §6.34 SKIPs-77, the SKIP stderr MUST cite "PI-25 carve-out: timing-flaky on this kernel" verbatim. NO silent skip; NO skip without the carve-out citation. | Reviewer greps test output for the carve-out string on SKIP; absence = `[INVARIANT-VIOLATED]`. Default expectation: §6.34 PASSES; SKIP is the escape hatch, not the norm. |
+| **PI-26** | **NO C++/BPF source change**: `git diff main -- src/ include/ cmake/` shows ZERO changes EXCEPT (a) `CMakeLists.txt` version bump 0.4.0 → 0.5.0 + optional `install(FILES systemd/…)` rule + `option(XDPMF_INSTALL_SYSTEMD_UNIT …)` declaration. ALL other diff lines = `[INVARIANT-VIOLATED]`. | `git diff main -- src/` empty; `git diff main -- include/` empty; `git diff main -- cmake/` empty; `git diff main -- CMakeLists.txt` shows ONLY the version-bump line + the optional install-rule lines. |
+
+**No deletions/relaxations** of PI-1..PI-18 in this slice. PI-6-3.3 STRENGTHENS PI-6-3.2 (zero ctest body diff — strict superset, no carve-out). PI-7-3.3 STRENGTHENS PI-7-3.2 (zero diff across ALL of `src/`, not just `loader.hpp`). PI-10-3.2 STRENGTHENS implicitly (this slice adds no new constants).
+
+#### §5.28 verifiable invariants for reviewer
+
+In addition to PI-1..PI-26 above:
+
+- `git diff main -- src/lib/loader.hpp` shows ZERO output (PI-7-3.3 strengthened, third consecutive cycle).
+- `git diff main -- src/` shows ZERO output (PI-7-3.3 STRENGTHENED — entire src/ tree byte-identical).
+- `git diff main -- include/ cmake/` shows ZERO output (PI-26).
+- `git diff main -- CMakeLists.txt` shows ONLY the version-bump line `VERSION 0.5.0` and the optional install-rule + option declaration (PI-26).
+- `git diff main -- tests/T_*.sh` shows ZERO output for the 31 pre-existing test bodies; only 5 NEW test files (T_SYSTEMD_UNIT_SYNTAX, T_SYSTEMD_LIFECYCLE, T_SYSTEMD_RESTART_ON_FAILURE, T_ANSIBLE_PLAYBOOK_SYNTAX, T_FLEET_DOCS_SUBSTRING) appear (PI-6-3.3).
+- `git diff main -- tests/lib/` shows ZERO output (no helper change this slice; PI-6-3.3 implicit).
+- `git diff main -- tests/fixtures/` shows ZERO output (PI-6-3.3 implicit).
+- `git diff main -- tests/CMakeLists.txt` shows ONLY 5 NEW `add_test(…)` entries; the 31 existing entries are byte-identical.
+- New files exist: `systemd/xdpmacfilter@.service`, `ansible/xdpmacfilter-deploy.yml`, `ansible/templates/xdpfilter-config.yaml.j2`, `docs/FLEET_DEPLOYMENT.md`, plus 5 T_*.sh under `tests/`.
+- `systemd-analyze verify systemd/xdpmacfilter@<iface>.service` exits 0 with no warnings (PI-19).
+- `ansible-playbook --syntax-check ansible/xdpmacfilter-deploy.yml` exits 0, OR `ansible-playbook` absent and §6.35 SKIPs-77 (PI-22).
+- T_FLEET_DOCS_SUBSTRING 6-substring grep passes (PI-23).
+- `xdpmacfilter --version` reports `xdpmacfilter 0.5.0` (PI-8-3.3 + CMake `project(VERSION)` per §5.25 Q3 V1 mechanism).
+- `xdpmacfilter --help` output FORMAT UNCHANGED (PI-9; no new flag per D-3.3-1).
+- `CHANGELOG.md` entry `[0.5.0] - 2026-05-NN` (Keep-a-Changelog format).
+- Build-pace table in CHANGELOG gains a row for MVP-3.3.
+- 5 new ctests pass (§6.32..§6.36); §6.33 + §6.36 are the load-bearing pair (systemd lifecycle correctness + fleet-docs verbatim citation).
+- 31 pre-§5.28 ctests still pass (or legitimately SKIP-77 per §5.24 Q4 hybrid) — PI-6-3.3 STRICT SUPERSET, no carve-out.
+- `XDPMF_SANITIZERS=ON` build clean (no C++ change; build must continue to compile clean under sanitizers).
+
+#### §7 OOS — MVP-3.3 components SHIPPED + new fences
+
+##### Moved from deferred to SHIPPED (per MVP-3.3)
+
+- ~~**systemd `xdpfilter@.service` template** — MVP-3.3 slice (architecture-v2.md MVP-3.3 row).~~ **— SHIPPED in §5.28 (MVP-3.3, 2026-05-NN)** as `systemd/xdpmacfilter@.service` per HG-3.3-1 (the architecture-v2 name `xdpfilter@.service` defers to MVP-3.12 binary rename).
+- ~~**Ansible example playbook** — MVP-3.3 slice.~~ **— SHIPPED in §5.28** as `ansible/xdpmacfilter-deploy.yml` + `ansible/templates/xdpfilter-config.yaml.j2` per HG-3.3-2 (minimal example, not a role/collection).
+- ~~**Fleet-mode operator docs `XDPMF_TRUST_MODEL=fleet` audit story** — MVP-3.3 slice.~~ **— SHIPPED in §5.28** as `docs/FLEET_DEPLOYMENT.md` per Q3 D1 (single MD file) + README pointer per Q5 N1.
+
+##### NEW out-of-scope fences (per §5.28)
+
+- **Binary rename `xdpmacfilter` → `xdpfilter`** — explicitly fenced to MVP-3.12 per HG-3.3-1. Unit name in this slice is `xdpmacfilter@.service`; MVP-3.12 will ship `xdpfilter@.service` with a transitional alias.
+- **Per-rule counters / `xdpmf-exporter` binary / Prometheus exporter implementation** — MVP-3.4 slice. Fleet docs (§5.28 Q3 D1 item 4) describe the ALERT SEMANTIC only; the exporter implementation is OOS.
+- **SIGHUP signal handler in loader** — explicitly fenced by Q2 R1 (re-exec apply -f is the reload mechanism). Adding a SIGHUP handler would breach PI-7-3.3.
+- **Full Ansible role / collection** — fenced by HG-3.3-2. The shipped artifact is a single example playbook. Production-grade collections (with `roles/xdpfilter/{tasks,handlers,defaults,vars,templates}/`, `collections/`, `inventory/`, `group_vars/`) are operator scope.
+- **Multi-iface single unit** — fenced by §5.28 Interfaces (template unit, one instance per iface). Multi-iface = multiple instance names (`xdpmacfilter@eth0.service`, `xdpmacfilter@eth1.service`).
+- **systemd hardening beyond AmbientCapabilities + NoNewPrivileges + CapabilityBoundingSet** — explicitly OOS. NO `ProtectSystem=`, NO `PrivateTmp=`, NO `MemoryDenyWriteExecute=`, NO `RestrictAddressFamilies=`, NO seccomp filter. Operator hardening is operator's call.
+- **`User=`/`Group=` non-root with caps** — fenced. Running as non-root with `AmbientCapabilities=CAP_BPF …` works in principle but adds operator burden (kernel-version conditional, kernel.unprivileged_bpf_disabled sysctl interaction); architect leaves the existing default-root posture. Operators can override via Drop-In.
+- **`Type=notify` daemon-style unit** — fenced. Loader is `Type=oneshot RemainAfterExit=yes`; the daemon branch is MVP-3.6+ optional (`xdpmfd`).
+- **JSON structured logs** — MVP-3.5 slice. Fleet docs MAY (and DO, in `docs/FLEET_DEPLOYMENT.md`) describe `journalctl -u xdpmacfilter@<iface>.service` as the log query mechanism; the LOG FORMAT itself is plain stderr (per §5.26).
+- **sFlow / per-rule counters / library (`libxdpmf.so`) / daemon (`xdpmfd`)** — all later phases per architecture-v2.md.
+- **L4 ports / VLAN / IPv6 CIDR** — still fenced per MVP-3.2 §7 OOS (unchanged from §5.27).
+- **MVP-3.1/3.2 OOT-deferred housekeeping items** — per Q6 DEFER. The 5 deferred items (orphan map pins from T_ATTACH_TAG_MISMATCH; stale NOTE comment; cli.hpp ParsedAttach wrapper design-text; §6.25 "replacing existing program" grep) stay in their dispositions. Architect surfaces "MVP-3.3.5 housekeeping" as a candidate dedicated cycle.
+- **`--quiet` / `--syslog` / `--log-format=json` CLI flag** — fenced by D-3.3-1 (PI-7-3.3 ZERO-diff loader.hpp). Future log-shape changes land at MVP-3.5.
+- **Baked-in `Environment=XDPMF_TRUST_MODEL=…` in the shipped unit** — fenced by D-3.3-2 (secure-by-default = strict; operators opt INTO fleet via Drop-In).
+- **`ansible-playbook --check` (dry-run) ctest** — fenced. T_ANSIBLE_PLAYBOOK_SYNTAX is syntax-only; full --check requires a real or simulated target host (molecule-style harness — OOS).
+- **`T_ANSIBLE_TEMPLATE_RENDERS_VALID_CONFIG`** — fenced. The Jinja2 template emits a §5.26+§5.27-compliant config (PI-17 implicit); semantic verification is operator-runtime concern.
+- **Installing the playbook / docs via CMake `install(…)`** — fenced. Only the systemd unit MAY be installed via CMake (optional, default ON per D-3.3-9). The playbook is repo-relative (operators clone or copy); docs are repo-relative (and Documentation= path is for human discoverability via `systemctl status`, not a CMake-install target).
+- **Drop-In overlay shipped in the repo** — fenced. The fleet-docs example shows the Drop-In SNIPPET (`Environment=XDPMF_TRUST_MODEL=fleet`); the actual Drop-In file is operator's deployment artefact, not a shipped repo file.
+- **Systemd socket activation / path activation** — fenced. The unit is plain `Type=oneshot`; no socket / no path-unit companion.
+- **systemd `BindPaths=/etc/xdpfilter`** — fenced. Operators MAY add it via Drop-In; not in the shipped unit (would imply assumptions about the bpffs / netns layout).
+- **`xdpmacfilter-cli`-style local control socket** — fenced. There is no daemon; CLI talks directly to BPF via libbpf (the existing architecture).
+
+##### Surfaced as next-natural slice
+
+**MVP-3.4 — observability**:
+- per-rule counter map (B vs C type per architecture-v2.md Open Q #13; PERCPU_HASH vs PERCPU_ARRAY decision human-gated)
+- `rules` ARRAY + `action_table` (B.2 partial — wires rule_id → counter index)
+- `xdpmf-exporter` binary
+- Prometheus `/metrics` endpoint (consumes the fleet-mode alert semantic described in §5.28 Q3 D1 item 4)
+- manual bypass primitive (mitigates risk-register MVP-3.4 row 4 via `--unsafe` flag)
+
+Per architecture-v2.md per-phase scope summary line 312: 2-3 cycles, medium risk (Q13 B-vs-C decision is the load-bearing pre-cycle question).
+
+Evidence: `mint/task-brief.md` MVP-3.3 brief (Items 1-4 + Q1-Q6 + HG-3.3-1/2/3); `mint/architecture-v2.md` lines 226-231 (MVP-3.3 dependency-graph row) + line 311 (per-phase scope summary, 1 cycle low risk) + lines 335-336 (per-phase risk register MVP-3.3 rows) + line 24 component-map MVP-3.12 rename deferral; §5.20 attach/detach flow (ExecStart/ExecStop call site); §5.26 (config harness + `apply -f` subcommand + `trust_model=` stderr-log format Q3 fleet-docs cites verbatim); §5.27 (immediate ancestor — CIDR axis preserved unchanged); §4.1 exit-code table (UNCHANGED — no new exit code); §4.3 LoaderError enum (UNCHANGED — PI-7-3.3 ZERO diff); `mint/impl-notes.md` D-3.1-1..D-3.1-4 (MVP-3.1 deviations that STAND unchanged; MVP-3.2 had 0 deviations).
