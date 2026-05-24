@@ -3917,10 +3917,12 @@ rules:                             # optional; list (possibly empty)
    (`XX:XX:XX:XX:XX:XX`, hex case-insensitive, lowercased on parse).
    Same validation regex as MVP-1's `--allow` flag — reuse the
    existing MAC parser from `cli.cpp` (no duplicate impl).
+   **[SUPERSEDED BY §5.27 — see schema rule 7 — MAC is now OPTIONAL when `src_cidr` is set]**
 6. Schema-version 1 supports EXACTLY ONE match type per rule (`mac`);
    presence of any other match key (`cidr`, `port`, etc.) →
    `match type '<X>' not supported in schema_version 1`. Load-bearing
    forward-compat hinge for MVP-3.2.
+   **[SUPERSEDED BY §5.27 for `src_cidr` ONLY — `src_cidr` is accepted at schema_version 1; `cidr`/`port`/`vlan`/`dst_cidr`/etc. continue to be rejected]**
 
 **Apply-time computation of inner-map contents and default**:
 
@@ -4668,3 +4670,970 @@ spec) + lines 328-332 (per-phase risk register MVP-3.1 rows); §5.4 /
 §5.19 / §5.20 / §5.22 / §5.23 / §5.24 / §5.25 (the invariants this
 slice preserves); §4.1 (exit-code table, gains row 9); §4.3
 (LoaderError enum, gains `ConfigError = 9`).
+
+### 5.27 MVP-3.2: L3 src-CIDR rule type (Composite 6 cycle 2, 2026-05-24) — amendment block
+
+Append-only amendment landing **MVP-3.2 — L3 src-CIDR rule type**
+per `mint/architecture-v2.md` lines 215-223 (MVP-3.2 dependency-graph
+row) + line 310 (per-phase scope summary) + lines 333-334 (per-phase
+risk register MVP-3.2 rows). This is the **first extension WITHIN
+the config-driven path** built by §5.26 — not a CLI-flag bolt-on
+(that path was explicitly rejected at architecture round-2 to avoid
+throwaway surface).
+
+Estimated cost: **~120-180 LOC source + ~80 LOC test**, **3-5 new
+ctests**. Smaller than §5.26 (config harness is built; this slice
+extends it). MVP-3.1 deviations D-3.1-1..D-3.1-4 STAND unchanged:
+the `apply_internal.hpp` helper, the `${PIN_DIR}/allowlist` alias
+pin, `apply -f` file-IO → `CliError` exit 1, and the `bpf_map__reuse_fd`
+state-b reattach path are all the load-bearing scaffolding this
+slice extends.
+
+Four interlocking pieces land together (carving them apart creates
+half-applied state in the BPF datapath):
+
+| # | Where | One-line |
+|---|---|---|
+| 1 | EDIT `src/bpf/mac_filter.bpf.c` (LPM_TRIE inner maps + parallel ARRAY_OF_MAPS outer per Q1 AS1 + OR-compose datapath per Q2 OR1 + STAT_PASS_CIDR increment); EDIT `src/common/mac_filter.h` (new map names + LPM_TRIE key struct `xdpmf_cidr_v4` + `STAT_PASS_CIDR = 3` + `STAT_MAX = 4`) | BPF datapath learns the CIDR axis. Existing MAC-only datapath is preserved (OR1 short-circuits on MAC hit). |
+| 2 | NEW `src/lib/cidr.{cpp,hpp}` (CIDR string parser: `A.B.C.D/N` → `xdpmf_cidr_v4{prefixlen, addr}`); EDIT `src/lib/config.{cpp,hpp}` (`RuleMatch.src_cidr` field per Q3 K2 + validator extension: rule MUST have `mac` OR `src_cidr` OR both; v6 strings rejected with exit 9 per HG-3.2-1) | Schema gains optional `src_cidr` rule-match key. v4-only; v6 explicitly rejected. |
+| 3 | EDIT `src/lib/loader.cpp` `internal::apply_request` (populate inactive `cidr_allowlist_<a\|b>` LPM_TRIE alongside inactive `allowlist_<a\|b>` HASH BEFORE the active_idx flip per Q1 AS1) | Apply orchestrator populates BOTH axes' inactive inner before the single u32 flip commits the swap. |
+| 4 | STAT_PASS_CIDR counter (folded into Item 1's BPF + header edit). EDIT `tests/lib/read_stats.py` (new optional `--include-pass-cidr` flag emits 4-column output; default 3-column output unchanged for PI-6 back-compat) | Operators reading stats see the MAC-vs-CIDR split when they ask for it; existing tests' read protocol UNCHANGED. |
+
+#### Inherited human-gate decision (closed BEFORE architect — NOT re-opened)
+
+**HG-3.2-1 — IPv4 only for cycle 1, IPv6 fenced to MVP-3.2.5+**:
+LPM_TRIE with a 128-bit IPv6 key doubles ctest count and inflates
+validator complexity (operator-friendly auto-detect of v4 vs v6 in
+a single `src_cidr` string is a non-trivial axis on its own). The
+v4 LPM_TRIE shape (8-byte key: `__u32 prefixlen` + `__u32 addr_be`)
+establishes the pattern; v6 is mechanical repetition with a 20-byte
+key in a future slice. **v6 strings MUST be rejected at the validator
+with `ConfigError` exit 9 + recognizable stderr** (`xdpmacfilter:
+config error: IPv6 CIDR not supported until MVP-3.2.5: '<value>'`).
+Silent accept-and-ignore is explicitly forbidden — operators who
+write `src_cidr: "::1/128"` MUST hear about it.
+
+#### Q1 decision — ARRAY_OF_MAPS atomic-swap shape = **AS1 (parallel outer maps)** — because
+
+**Choice**: ADD a SECOND ARRAY_OF_MAPS outer
+`cidr_rulesets_outer = ARRAY_OF_MAPS[XDPMF_RULESET_COUNT]` pointing
+at two LPM_TRIE inner maps (`cidr_allowlist_a` slot 0,
+`cidr_allowlist_b` slot 1). The existing `rulesets_outer` (HASH
+inners, per §5.26 Q2 A1) is UNCHANGED. **Both outers share the same
+`active_idx` map** (one `BPF_MAP_TYPE_ARRAY[1]` of `__u32`). A
+single `bpf_map_update_elem(&active_idx_map, &zero, &new_idx,
+BPF_ANY)` userspace write is atomic for the `__u32` slot on all
+supported architectures — and it simultaneously commits the swap
+for BOTH the MAC HASH inner AND the CIDR LPM_TRIE inner because
+both outers index the same slot. **Composite-6 atomic-swap promise
+preserved byte-for-byte**: one u32 write = one commit point = one
+race-window (same benignity proof as §5.26 Q2 A1).
+
+**Rationale** (AS1 vs AS2 vs AS3):
+
+- AS2 (combined outer struct: one outer slot value = `{mac_inner_fd,
+  cidr_inner_fd}` pair) requires either a wider value type in
+  ARRAY_OF_MAPS (not supported by BPF — outer value is exactly one
+  fd) OR a kernel-side join structure (custom BTF type). Over-clever;
+  no kernel-builtin map type does this. Hard-rejected.
+- AS3 (independent maps, two-step swap) violates §5.26's load-bearing
+  atomic-swap invariant. Risk-register MVP-3.2 row 1 explicitly
+  flags this as the riskier path: a half-applied window where MAC
+  inner is swapped but CIDR inner isn't would cause asymmetric
+  drops on cross-axis traffic. Tester would have to write a
+  half-applied-tolerance test that proves no drops despite the
+  window — strictly more work AND strictly weaker invariant than
+  AS1. Hard-rejected.
+- AS1 is the smallest possible extension of §5.26 Q2 A1: the
+  mechanism is bit-for-bit identical (single u32 indexes a parallel
+  outer), just doubled. The BPF program reads `active_idx` ONCE
+  and uses the same value to index BOTH outers — guaranteeing
+  intra-packet axis consistency. The kernel verifier accepts the
+  pattern (Cilium-style chained inner-deref on ARRAY_OF_MAPS, well-
+  trodden on libbpf ≥ 1.0 / kernel ≥ 4.12, well below floor 5.15).
+
+**Race-window analysis** (per §5.26 Q2 A1 precedent): can the
+`active_idx` flip happen between the BPF program's MAC-axis lookup
+and its CIDR-axis lookup? Yes (userspace flip is not BPF-preemption-
+blocked on other CPUs). Consequence is benign by mandatory program
+structure — **the BPF program reads `active_idx` ONCE at the head
+of the datapath, captures it into a local variable, and uses that
+captured value for BOTH the MAC-outer-deref AND the CIDR-outer-
+deref**. Even if the userspace flip races in mid-program, the
+program operates on the snapshot it already read. The new inner is
+fully populated BEFORE the flip (steps 1+2 below); so even the
+post-flip read hits a complete CIDR ruleset.
+
+**Apply ordering** (extends §5.26 attach() flow step 12 / D-3.1-4
+state-b reattach):
+
+1. Compute `inactive_idx = 1 - current_active_idx` (read current
+   active_idx via the reused fd per D-3.1-4).
+2. Populate `cidr_allowlist_<inactive>` LPM_TRIE with all rules
+   that have `match.src_cidr` set (per Q4 L1: single CIDR per
+   rule). Key = `xdpmf_cidr_v4{prefixlen, addr_be}`; value = `__u8{1}`
+   (presence marker). Order-independent within the LPM_TRIE.
+3. Populate `allowlist_<inactive>` HASH with all rules that have
+   `match.mac` set (per existing §5.26 mechanism).
+4. Populate `defaults_map[inactive_idx]` (per existing §5.26
+   Q2-extension).
+5. **Atomic flip**: `active_idx_map[0] = inactive_idx`. Single u32
+   commit. The NEW MAC ruleset, NEW CIDR ruleset, and NEW
+   default_action all become live at the same kernel instruction.
+
+#### Q2 decision — OR-compose precedence + short-circuit order = **OR1 (MAC first, then CIDR)** — because
+
+**Choice**: BPF datapath checks the MAC HASH first. On hit
+(`STAT_PASS` + `XDP_PASS`, short-circuit). On miss, if the frame's
+EtherType is IPv4 (`htons(0x0800)`), parse the IPv4 header (verifier
+bounds-checked) and look up the source IP in the CIDR LPM_TRIE. On
+hit, `STAT_PASS_CIDR` + `XDP_PASS`. On miss (or non-IPv4 ethertype),
+fall through to the existing `defaults_map[active_idx]` evaluation
+(per §5.26 BPF program flow).
+
+**Rationale** (OR1 vs OR2 vs OR3):
+
+- OR2 (CIDR first) inverts the cost-benefit: LPM_TRIE is O(prefix-
+  length) per lookup; HASH is O(1). For a fleet where most packets
+  match by MAC (operator's typical "known device" scenario), OR2
+  costs LPM_TRIE work on every packet before the cheap HASH check.
+  Rejected.
+- OR3 (parallel, both checked, OR'd at the end) precludes short-
+  circuit; per-packet cost is `O(1) + O(prefix-length)` always. The
+  semantic gain (no precedence to remember) doesn't justify the
+  per-packet cost. Rejected.
+- OR1 short-circuits on the cheap axis. Cost profile: MAC-hit packets
+  cost O(1); CIDR-hit packets cost O(1) HASH miss + O(prefix-length)
+  LPM_TRIE hit. Miss-both packets cost O(1) + O(prefix-length) +
+  defaults lookup — the worst case stays bounded by tree depth.
+
+**Counter discipline**: a packet that hits the MAC axis ALWAYS
+increments STAT_PASS (not STAT_PASS_CIDR). A packet that misses
+MAC AND hits CIDR increments STAT_PASS_CIDR (the new counter).
+Operators reading the split see "how much traffic is matched by
+device identity vs network identity", which is the load-bearing
+ops signal for migrations (e.g. moving a fleet from MAC-allowlists
+to subnet-allowlists). **Per-rule counters that distinguish
+individual rules** are MVP-3.4 work, OOS here.
+
+**Datapath pseudocode** (replaces §5.26 BPF program flow; verifier-
+aware):
+
+```
+xdp_md *ctx → parse Eth header (malformed → STAT_DROP_MALFORMED + XDP_DROP, unchanged from §3-§4 / §5.26):
+
+__u32 zero = 0;
+__u32 *active_idx_p = bpf_map_lookup_elem(&active_idx_map, &zero);
+if (!active_idx_p) { STAT_DROP_DENY++; return XDP_DROP; }   /* verifier-required */
+__u32 active = *active_idx_p;                               /* snapshot — used for ALL subsequent lookups this pass */
+
+/* ── MAC axis (short-circuit per Q2 OR1) ─────────────────────────────────── */
+void *mac_inner = bpf_map_lookup_elem(&rulesets_outer, &active);
+if (!mac_inner) { STAT_DROP_DENY++; return XDP_DROP; }      /* verifier-required */
+__u8 *mac_hit = bpf_map_lookup_elem(mac_inner, &src_mac);
+if (mac_hit) { STAT_PASS++; return XDP_PASS; }              /* MAC axis matched */
+
+/* ── CIDR axis (only if MAC missed AND frame is IPv4) ───────────────────── */
+if (eth->h_proto == bpf_htons(ETH_P_IP)) {
+    if (data + sizeof(struct ethhdr) + sizeof(struct iphdr) > data_end) {
+        STAT_DROP_MALFORMED++; return XDP_DROP;             /* IP header truncated */
+    }
+    struct iphdr *ip = (struct iphdr*)(data + sizeof(struct ethhdr));
+    void *cidr_inner = bpf_map_lookup_elem(&cidr_rulesets_outer, &active);
+    if (!cidr_inner) { STAT_DROP_DENY++; return XDP_DROP; } /* verifier-required */
+    struct xdpmf_cidr_v4 key = { .prefixlen = 32u, .addr = ip->saddr };
+    __u8 *cidr_hit = bpf_map_lookup_elem(cidr_inner, &key);
+    if (cidr_hit) { STAT_PASS_CIDR++; return XDP_PASS; }    /* CIDR axis matched */
+}
+/* non-IPv4 ethertypes (ARP, IPv6, etc.) skip the CIDR axis entirely —
+ * preserves MVP-3.1 semantic for non-IP traffic per brief §1. */
+
+/* ── Fall through to defaults_map[active] (per §5.26 Q2-extension) ──────── */
+__u32 *default_p = bpf_map_lookup_elem(&defaults_map, &active);
+if (!default_p) { STAT_DROP_DENY++; return XDP_DROP; }
+if (*default_p == 1u) { STAT_PASS++; return XDP_PASS; }     /* default_action: pass */
+STAT_DROP_DENY++; return XDP_DROP;                          /* default_action: drop */
+```
+
+**Verifier interactions** (impl notes):
+
+- The IPv4-header bounds check (`data + sizeof(ethhdr) + sizeof(iphdr) > data_end`)
+  is MANDATORY before dereferencing `ip->saddr`. Impl MUST NOT elide
+  via `__builtin_assume`.
+- `ip->saddr` is in NETWORK BYTE ORDER (big-endian on wire). The
+  LPM_TRIE key's `addr` field MUST also be in network byte order —
+  see DataStructures §5.27 below. Userspace `inet_pton(AF_INET, ...)`
+  returns network-byte-order; no swap on impl side.
+- LPM_TRIE key MUST start with `__u32 prefixlen` per BPF kernel
+  convention (kernel-internal LPM_TRIE expects this layout); the
+  `addr` field follows. Total key size = 8 bytes (4 prefixlen + 4
+  addr).
+- Both `bpf_map_lookup_elem(&rulesets_outer, &active)` AND
+  `bpf_map_lookup_elem(&cidr_rulesets_outer, &active)` are verifier-
+  recognized chained-inner-deref patterns; both share the same
+  active_idx snapshot. Verified working on libbpf ≥ 1.0 / kernel ≥
+  4.12.
+
+#### Q3 decision — CIDR schema key naming = **K2 (`src_cidr`)** — because
+
+**Choice**: the YAML key for the CIDR matcher is `src_cidr`.
+Example minimal config:
+
+```
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      src_cidr: "10.0.0.0/8"
+```
+
+**Rationale** (K1 vs K2 vs K3):
+
+- K1 (`cidr`) is shortest but implicitly couples the schema to
+  "always src" — an unwritten assumption. The future `dst_cidr`
+  sibling can't be added without either: a breaking change (`cidr`
+  → `src_cidr` rename) or a confusing dual-meaning (`cidr` = src
+  but `dst_cidr` = dst). Rejected on schema-evolution grounds.
+- K3 (`cidr_v4`) over-commits to family-in-key naming. Per HG-3.2-1
+  cycle 1 is v4-only and v6 is rejected at the validator — there
+  is no `cidr_v6` sibling to disambiguate against. When MVP-3.2.5+
+  lands v6, the natural shape is auto-detect on a `src_cidr`
+  string (`10.0.0.0/8` → v4; `2001:db8::/32` → v6), NOT a
+  family-suffixed key. K3 paints us into the wrong corner.
+- K2 (`src_cidr`) makes "src" explicit, leaves space for `dst_cidr`
+  as a future sibling, and auto-detects family per HG-3.2-1's
+  forward path. Matches the brief's consistent "L3 src-CIDR"
+  language.
+
+**Validator behaviour** for sibling-name discipline: the future
+`dst_cidr` is NOT in cycle 1's accepted match-key set. Any rule
+with a `dst_cidr` (or `port`, etc.) match-key → `ConfigError` exit
+9 with `match type 'dst_cidr' not supported in schema_version 1`
+(reuses the §5.26 schema rule 6 forward-compat hinge).
+
+**MAC key naming UNCHANGED**: the existing `match.mac` from §5.26
+is NOT renamed to `src_mac` for symmetry. Rationale: PI-6 requires
+existing MVP-3.1 configs to keep working byte-equivalent (PI-15
+below). Renaming `mac` → `src_mac` would be a breaking schema
+change requiring a `schema_version: 2` bump (per §5.26 Q5 SV2
+policy) — out of cycle 2's additive-extension scope. Schema thus
+ships ASYMMETRIC names (`mac` is implicit-src; `src_cidr` is
+explicit-src); this is documented in the schema sub-section
+below as a known-and-accepted irregularity.
+
+#### Q4 decision — Single CIDR per rule vs list = **L1 (single CIDR per rule)** — because
+
+**Choice**: each rule's `match.src_cidr` is a SINGLE CIDR string
+(scalar), not a list. Operators wanting multiple CIDRs write
+multiple rules:
+
+```
+rules:
+  - id: 0
+    action: pass
+    match: { src_cidr: "10.0.0.0/8" }
+  - id: 1
+    action: pass
+    match: { src_cidr: "192.168.0.0/16" }
+```
+
+**Rationale** (L1 vs L2):
+
+- L2 (list of CIDRs per rule) is convenience sugar that can be
+  added in a later slice without breaking L1 configs (additive
+  schema extension — single-scalar still parsed as the
+  one-element-list shorthand). Reverse direction (L2 → L1) would
+  be a breaking schema change. Asymmetric reversibility favours
+  starting at L1.
+- L1 matches the existing MVP-3.1 `match.mac` pattern (single
+  string, not list). Schema-symmetry across match-keys is
+  pedagogically simpler for operators new to the config.
+- Rule-counting (and future MVP-3.4 per-rule counters keyed by
+  `id`) is unambiguous with L1: one rule = one match expression
+  on each axis. L2 would force a "which CIDR within the rule
+  matched" sub-axis that complicates the future per-rule counter
+  story.
+
+**Implication on max rules**: existing `XDPMF_ALLOWLIST_MAX = 64`
+(§5.1) was the MAC HASH inner's max_entries. The new CIDR
+LPM_TRIE inner uses the SAME constant for its `max_entries`
+(`XDPMF_ALLOWLIST_MAX = 64`). Total rule capacity is 64 rules,
+each contributing at most one MAC entry AND at most one CIDR
+entry — so 64 MACs + 64 CIDRs across the whole config. Operators
+asking for more capacity → MVP-3.4 (per-rule counters slice can
+re-evaluate the 64 cap).
+
+#### Q5 decision — Schema versioning = **V1 (additive at schema_version 1)** — because
+
+**Choice**: `schema_version: 1` continues to be the only supported
+value. `src_cidr` is an ADDITIVE extension to the cycle-1 schema
+(per §5.26 Q5 SV2 migration policy: "new rule-types in `match:`
+→ MUST be rejected by a `schema_version: 1` config" — superseded
+here for `src_cidr` SPECIFICALLY because it is the only new match-
+type landing in cycle 2; bumping to `schema_version: 2` solely
+for one match-key addition cheapens the version-signal). Existing
+MVP-3.1 configs (with `match.mac` only, no `src_cidr`) MUST
+continue to validate without change (PI-15 below).
+
+**§5.26 Q5 SV2 migration-policy refinement** (this amendment):
+the §5.26 rule "new rule-types in `match:` MUST be rejected by a
+`schema_version: 1` config" applies to FUTURE rule-types added
+AFTER MVP-3.2 (e.g. `port`, `dst_cidr`, `vlan` if any of those
+ship later). The MVP-3.2 `src_cidr` extension is grandfathered
+into `schema_version: 1` because:
+- It lands in the same cycle-2 slice as the §5.26 forward-compat
+  hinge documented "MVP-3.2 lands `cidr` as in-config rule type";
+  the hinge already named CIDR by intent.
+- The §5.26 Q-HG1 forward-compat reject of `match: {cidr: ...}`
+  (with `cidr` key) was the rejection for the UNKNOWN key name
+  at schema_version 1; the chosen Q3 K2 (`src_cidr`) is now the
+  KNOWN key name — additive at v1.
+- Bumping to v2 for the addition of one match-key would force
+  EVERY existing MVP-3.1 config writer to migrate just to use
+  CIDR. Too much friction for too little signal.
+
+The next genuine breaking change (e.g. semantic shift on
+`default_action`, removal of the `mac` key, etc.) will bump to
+`schema_version: 2` per §5.26 SV2 policy. Supported-set stays at
+`{1}` until then.
+
+#### Q6 decision — MVP-3.1 OOT-deferred housekeeping items = **DEFER** — because
+
+**Choice**: items OOT-1 (orphan map pins at bpffs root from
+T_ATTACH_TAG_MISMATCH) and OOT-2 (T_APPLY_ATOMIC_SWAP_NO_DROP
+stale NOTE comment) are **NOT** included in MVP-3.2. They are
+explicitly fenced to a dedicated housekeeping cycle (MVP-3.2.x or
+folded into MVP-3.3 prep work).
+
+**Rationale**:
+- MVP-3.2 scope is tight (~120-180 LOC source + ~80 LOC test; 4
+  load-bearing items with risk-register coverage on AS1 atomic-
+  swap AND OR-compose semantic). Adding even cheap unrelated
+  items risks anti-drift (architect's brief: "Out-of-scope is
+  the anti-drift fence — if tempted to 'while I'm here, also
+  add X', X belongs in section 7").
+- Both items are pure hygiene (test-fixture cleanup + comment
+  text); no operator-facing behaviour change. The cost-benefit
+  of bundling them into MVP-3.2 is negligible.
+- Brief's exact wording: "include if architect judges scope
+  budget allows; defer otherwise" — architect judges scope is
+  load-bearing on the AS1 atomic-swap test (T_CIDR_ATOMIC_SWAP_NO_DROP
+  per §6.31), which is itself non-trivial; deferring hygiene is
+  the conservative call.
+
+**Carve-out plan**: items OOT-1, OOT-2, OOT-3 (`cli.hpp ParsedAttach`
+wrapper design-text fix from MVP-3.1 review), and OOT-4 (§6.25
+"replacing existing program" grep tightening) remain in their
+original disposition — flagged in `mint/review.md` MVP-3.1
+deferral table; a future "MVP-3.x housekeeping" or "MVP-3.3 prep"
+cycle picks them up. If MVP-3.3 lands first, fold OOT-1/2 into
+the systemd-prep groundwork.
+
+#### §4.1 exit-code table — row 9 (`ConfigError`) REUSED, no new row added
+
+CIDR validation failures (malformed `A.B.C.D/N` string, prefix-
+length out of `[0, 32]`, network bits set below prefix, IPv6
+string per HG-3.2-1) ALL map to `LoaderError::ConfigError = 9`.
+The `LoaderError` enum gains **ZERO** new enumerators in this
+slice — PI-7-style invariant from §5.26 is preserved at strength
+(see PI-7-3.2 below).
+
+**Rationale**: CIDR is purely a config-layer rejection (the YAML
+content is the only source of the malformed input; no kernel
+call has happened yet). A new exit code would create an audit-
+grep distinction between "YAML schema wrong" and "CIDR value
+wrong", but operators reading exit 9 already learn the failure
+class via the stderr message (`config error: malformed CIDR:
+'<value>': ...` vs `config error: default_action must be 'drop'
+or 'pass'`). The stderr-message resolution is sufficient; another
+enum value cheapens the signal-per-code ratio.
+
+**Stderr message catalogue** for CIDR-validation failures (impl
+emits ONE of these, prefixed `xdpmacfilter: config error: `):
+
+| Trigger | Stderr message |
+|---|---|
+| `src_cidr: ""` (empty) | `malformed CIDR: empty string` |
+| `src_cidr: "10.0.0.0"` (no `/N`) | `malformed CIDR: missing prefix length: '10.0.0.0'` |
+| `src_cidr: "10.0.0.0/"` (empty N) | `malformed CIDR: empty prefix length: '10.0.0.0/'` |
+| `src_cidr: "10.0.0.0/33"` (prefix > 32) | `malformed CIDR: prefix length out of range [0,32]: '10.0.0.0/33'` |
+| `src_cidr: "10.0.0.0/-1"` (negative) | same as above (validator collapses negatives + overflow) |
+| `src_cidr: "999.0.0.0/8"` (octet > 255) | `malformed CIDR: invalid IPv4 address: '999.0.0.0/8'` |
+| `src_cidr: "10.0.0.5/8"` (net-bits set) | `malformed CIDR: host bits set below prefix: '10.0.0.5/8' (did you mean 10.0.0.0/8?)` |
+| `src_cidr: "::1/128"` (any IPv6) | `IPv6 CIDR not supported until MVP-3.2.5: '::1/128'` |
+| `src_cidr: "not-a-cidr"` (no `/`) | `malformed CIDR: missing prefix length: 'not-a-cidr'` |
+| `match: {}` (neither mac nor src_cidr) | `rule must specify 'mac' or 'src_cidr' (or both)` |
+
+Tester asserts only the LEADING substring per case (`xdpmacfilter:
+config error: malformed CIDR:` OR `xdpmacfilter: config error:
+IPv6 CIDR not supported`) — operator-facing text past the prefix
+is impl-shape-flexible.
+
+#### §5.27 schema extension (data on disk)
+
+The on-disk YAML at `/etc/xdpfilter/<iface>.yaml` gains the
+`src_cidr` match-key (post-§5.27 shape):
+
+```
+# schema_version: 1 (default 1; UNCHANGED from §5.26)
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      mac: "AA:BB:CC:DD:EE:FF"      # MAC-only rule (MVP-3.1 shape; still valid)
+  - id: 1
+    action: pass
+    match:
+      src_cidr: "10.0.0.0/8"        # CIDR-only rule (NEW MVP-3.2)
+  - id: 2
+    action: pass
+    match:
+      mac: "11:22:33:44:55:66"      # MAC + CIDR within one rule (OR-compose; NEW MVP-3.2)
+      src_cidr: "192.168.0.0/16"
+```
+
+**Cycle-2 schema rules** (validator enforces; ALL failures → exit 9):
+
+7. Each rule's `match` mapping MUST contain AT LEAST ONE of `mac`
+   or `src_cidr`. Empty `match: {}` → `rule must specify 'mac' or
+   'src_cidr' (or both)`. (Replaces §5.26 schema rule 5's
+   "REQUIRED in cycle 1" framing of `mac`; cycle 2 relaxes to
+   either axis.)
+8. `match.src_cidr` (when present) MUST be a string in the form
+   `A.B.C.D/N` where each `A.B.C.D` is a valid IPv4 dotted-decimal
+   (4 octets, each `[0, 255]`) and `N` is an integer `[0, 32]`.
+   The network address (`A.B.C.D`) MUST have all bits below
+   prefix `N` set to zero (host-bits-set rejected per the message
+   catalogue above). Both axes (`mac` AND `src_cidr`) may be set
+   on the same rule — interpretation is OR-compose (see Q2 OR1).
+9. IPv6 CIDR strings (any input containing `:` other than as a
+   schema-key separator, e.g. `::1/128`, `2001:db8::/32`) → reject
+   per HG-3.2-1 with the IPv6-specific stderr. Validator detects
+   v6 by scanning for `:` in the value; v4 has no colons.
+   (Edge case: an IPv4-mapped-IPv6 string like `::ffff:10.0.0.0/104`
+   is rejected as v6 — operators wanting that traffic write the
+   v4 CIDR `10.0.0.0/8`.)
+10. Schema rule 5 from §5.26 (cycle 1: `mac` REQUIRED in `match`)
+    is SUPERSEDED by rule 7 above. Add `[SUPERSEDED BY §5.27]`
+    inline at the §5.26 schema-rule-5 listing — see Edit-2 below.
+11. Schema rule 6 from §5.26 (cycle 1: ONE match type per rule)
+    is SUPERSEDED by rules 7+8 above. The new rule allows BOTH
+    `mac` AND `src_cidr` on the same rule (OR-compose). Other
+    match-keys (`port`, `vlan`, `dst_cidr`, etc.) STILL rejected
+    per §5.26 schema rule 6's forward-compat hinge — add
+    `[SUPERSEDED BY §5.27 for src_cidr ONLY]` inline at the
+    §5.26 schema-rule-6 listing.
+
+**Apply-time computation of inner-map contents** (extends §5.26):
+- For each rule with `action: pass` AND `match.mac` set → add the
+  MAC to the inactive `allowlist_<inactive>` HASH inner (presence-
+  marker value = 1). UNCHANGED from §5.26.
+- For each rule with `action: pass` AND `match.src_cidr` set →
+  add the `xdpmf_cidr_v4{prefixlen, addr_be}` key to the inactive
+  `cidr_allowlist_<inactive>` LPM_TRIE inner (presence-marker
+  value = 1). NEW.
+- A rule with BOTH `mac` AND `src_cidr` set populates BOTH inners
+  (the kernel-side OR-compose at lookup time is what makes it
+  "either axis matches → PASS"). The single `id` is shared across
+  axes — future MVP-3.4 per-rule counters will key by `id` for
+  the union.
+- Rules with `action: drop` populate NEITHER inner (drop is
+  default; accepted-but-no-op in cycle 2 per §5.26).
+
+#### §5.27 DataStructures additions
+
+##### BPF + userspace shared (`src/common/mac_filter.h`)
+
+Additions to the existing header (post-§5.27):
+
+```
+/* §5.27 (MVP-3.2): L3 src-CIDR axis — see design §5.27 Q1 + Q2. */
+
+/* LPM_TRIE key for IPv4 CIDR matching. Kernel BPF LPM_TRIE requires
+ * the key to begin with `__u32 prefixlen`; the trailing field holds
+ * the address in NETWORK BYTE ORDER (big-endian; matches `iphdr.saddr`
+ * on the wire — no swap needed in datapath). Total size = 8 bytes. */
+struct xdpmf_cidr_v4 {
+    __u32 prefixlen;    /* bits in network mask, range [0, 32] */
+    __u32 addr;         /* IPv4 address, big-endian (network order) */
+} __attribute__((packed));
+
+#define XDPMF_MAP_CIDR_RULESETS_OUTER_NAME  "cidr_rulesets"     /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] of LPM_TRIE fds */
+#define XDPMF_MAP_CIDR_INNER_A_NAME         "cidr_allowlist_a"  /* inner slot 0, LPM_TRIE */
+#define XDPMF_MAP_CIDR_INNER_B_NAME         "cidr_allowlist_b"  /* inner slot 1, LPM_TRIE */
+```
+
+And the existing `enum mac_filter_stat` gains ONE new value +
+STAT_MAX bumps:
+
+```
+enum mac_filter_stat {
+    STAT_PASS           = 0,   /* UNCHANGED */
+    STAT_DROP_DENY      = 1,   /* UNCHANGED */
+    STAT_DROP_MALFORMED = 2,   /* UNCHANGED */
+    STAT_PASS_CIDR      = 3,   /* §5.27 NEW: frame passed via CIDR-axis match */
+    STAT_MAX            = 4,   /* §5.27 BUMP: was 3; sentinel = stats map max_entries */
+};
+```
+
+**On STAT_MAX bumping** (PI-10 nuance, see PI-10-3.2 below): the
+existing PI-10 invariant ("existing constants UNCHANGED") fenced
+the **named map constants** and the **layout of `xdpmf_mac`**;
+STAT_MAX has always been an internally-derived sentinel
+(`STAT_MAX = max_entries of stats map`). Bumping STAT_MAX from
+3 → 4 in lockstep with the new STAT_PASS_CIDR slot is an
+ADDITIVE change to the enum, not a modification to existing
+slot values. STAT_PASS / STAT_DROP_DENY / STAT_DROP_MALFORMED
+keep their indices 0/1/2. Reviewer's PI-10 check accepts the
+diff pattern: new enum value `STAT_PASS_CIDR = 3` added + STAT_MAX
+incremented `3 → 4`; existing enum values byte-identical.
+
+##### Userspace (`src/lib/cidr.hpp`, namespace `xdpmf`)
+
+NEW file. Pure parser + struct converter (no I/O, no kernel touch):
+
+```
+/* CIDR string parsing. Accepts ONLY IPv4 (HG-3.2-1).
+ * Throws std::system_error{LoaderError::ConfigError, ...} on any
+ * malformed input per §5.27 §4.1 stderr message catalogue. */
+[[nodiscard]] xdpmf_cidr_v4 parse_cidr_v4(std::string_view  s,
+                                          std::string_view  file_path_for_diagnostics,
+                                          std::uint32_t     line,
+                                          std::uint32_t     col);
+```
+
+Returns `xdpmf_cidr_v4{prefixlen, addr}` where:
+- `prefixlen ∈ [0, 32]` validated against the input.
+- `addr` is in network byte order (`htonl` not needed: `inet_pton`
+  output already is). Validated to have ALL bits below `prefixlen`
+  set to zero (`addr & ~mask == 0` where `mask = (prefixlen == 0
+  ? 0 : htonl(0xFFFFFFFFu << (32 - prefixlen)))`).
+- v6 input detected by presence of `:` in the value before the
+  `/` boundary → throws with the IPv6-specific stderr.
+
+Impl uses `inet_pton(AF_INET, ...)` (POSIX, no new dep — already
+implicitly available via `<arpa/inet.h>`). No `inet_aton` fallback
+(brief permits either; `inet_pton` is the stricter modern API).
+
+##### Userspace (`src/lib/config.hpp`) — `RuleMatch` extension
+
+```
+struct RuleMatch {
+    std::optional<xdpmf_mac>      mac;       /* UNCHANGED from §5.26 */
+    std::optional<xdpmf_cidr_v4>  src_cidr;  /* §5.27 NEW (Q3 K2) */
+};
+```
+
+`Rule` and `Config` structs are UNCHANGED. The validator (in
+`config.cpp`) is extended to:
+1. Recognize `src_cidr` as a known match-key (per Q3 K2).
+2. Delegate `src_cidr` string parsing to `cidr::parse_cidr_v4()`.
+3. Enforce schema rule 7 (at-least-one-of-mac-or-src_cidr per
+   rule); previously enforced "mac REQUIRED" from §5.26 schema
+   rule 5 — supersession noted above.
+
+##### BPF map declarations (`src/bpf/mac_filter.bpf.c`)
+
+Added alongside existing maps:
+
+```
+/* Inner LPM_TRIE template — referenced by cidr_rulesets_outer.value.value. */
+struct {
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __type(key, struct xdpmf_cidr_v4);
+    __type(value, __u8);
+    __uint(max_entries, XDPMF_ALLOWLIST_MAX);
+    __uint(map_flags, BPF_F_NO_PREALLOC);     /* required for LPM_TRIE */
+} cidr_allowlist_inner SEC(".maps");          /* template; NOT pinned directly */
+
+/* Two pinned inner LPM_TRIE instances (slot 0 / slot 1). */
+struct {
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __type(key, struct xdpmf_cidr_v4);
+    __type(value, __u8);
+    __uint(max_entries, XDPMF_ALLOWLIST_MAX);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} cidr_allowlist_a SEC(".maps");              /* pinned at ${PIN_DIR}/cidr_allowlist_a */
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __type(key, struct xdpmf_cidr_v4);
+    __type(value, __u8);
+    __uint(max_entries, XDPMF_ALLOWLIST_MAX);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} cidr_allowlist_b SEC(".maps");              /* pinned at ${PIN_DIR}/cidr_allowlist_b */
+
+/* Outer ARRAY_OF_MAPS parallel to existing rulesets_outer. */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
+    __uint(max_entries, XDPMF_RULESET_COUNT);
+    __type(key, __u32);
+    __array(values, struct cidr_allowlist_inner);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} cidr_rulesets_outer SEC(".maps");           /* pinned at ${PIN_DIR}/cidr_rulesets */
+```
+
+Pinning paths (post-§5.27, per LIBBPF_PIN_BY_NAME):
+- `${PIN_DIR}/cidr_allowlist_a` (LPM_TRIE inner slot 0)
+- `${PIN_DIR}/cidr_allowlist_b` (LPM_TRIE inner slot 1)
+- `${PIN_DIR}/cidr_rulesets` (ARRAY_OF_MAPS outer)
+
+`stats` map's `max_entries` BUMPS 3 → 4 in `mac_filter.bpf.c`:
+```
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, STAT_MAX);     /* now 4 instead of 3 (header sentinel) */
+    ...
+} stats SEC(".maps");
+```
+
+The `stats` map's pin path is UNCHANGED (`${PIN_DIR}/stats`); the
+schema (PERCPU_ARRAY of u64) is UNCHANGED; only the slot count grows
+by 1 (additive). Existing readers (`read_stats.py` default mode)
+keep printing indices 0/1/2 unchanged (PI-13 preserved).
+
+#### §5.27 Interfaces additions
+
+##### Apply orchestrator routing — `internal::apply_request` (UNCHANGED signature)
+
+`xdpmf::internal::apply_request(const ApplyRequest& req)` in
+`src/lib/apply_internal.hpp` (per D-3.1-1) keeps its signature
+byte-identical. The IMPL inside `loader.cpp` is extended at step 8
+(populate inactive inner) to also populate the CIDR inner per
+Q1 AS1 + apply-ordering above.
+
+`ApplyRequest` carries the validated `Config` which now has rules
+with optional `src_cidr` — no struct shape change to `ApplyRequest`
+either (the new field is inside the nested `RuleMatch`).
+
+##### CLI surface — UNCHANGED
+
+`xdpmacfilter apply -f <file> --iface <iface>` / `attach --allow
+<MAC>` / `detach` / `--help` / `--version` — all UNCHANGED.
+`--help` text gains ONE line mentioning the new `src_cidr` match-
+key under the `apply` subcommand description (impl-flexible
+wording; tester asserts only that `src_cidr` substring appears
+in `--help` post-§5.27). The grammar block at the top of §4.1
+needs NO change (only operator-facing help-text expansion).
+
+##### Loader public API (`src/lib/loader.hpp`) — ZERO diff
+
+PI-7-3.2 (see §6.5 below): `git diff` on `src/lib/loader.hpp`
+shows ZERO lines changed. The `LoaderError` enum is UNCHANGED
+(`ConfigError = 9` already covers CIDR validation failures per
+§5.27 §4.1 sub-section). `AttachConfig` / `DetachConfig` /
+`attach()` / `detach()` signatures all UNCHANGED.
+
+#### §5.27 attach()/apply() flow update (CIDR inner population)
+
+Post-§5.27 `internal::apply_request()` body (incremental over
+§5.26 attach() flow step 12 / D-3.1-4 state-b reattach):
+
+```
+internal::apply_request(req):
+  1..7. UNCHANGED from §5.26 attach() flow (kernel probe,
+        trust_model parse + log, ifindex, skel load + self_tag,
+        BpffsRootFd, §5.4 state-machine, P0a link pin detect).
+  8.   populate inactive slot:
+         active_cur = read active_idx_map[0]
+         inactive   = 1 - active_cur
+
+         ── MAC axis (UNCHANGED from §5.26) ────────────────────
+         for each rule in req.config.rules with action==Pass AND match.mac.has_value():
+             bpf_map_update_elem(allowlist_<inactive>_fd, &rule.match.mac, &one, BPF_ANY)
+
+         ── CIDR axis (NEW §5.27) ──────────────────────────────
+         for each rule in req.config.rules with action==Pass AND match.src_cidr.has_value():
+             bpf_map_update_elem(cidr_allowlist_<inactive>_fd, &rule.match.src_cidr, &one, BPF_ANY)
+         (key is the validated xdpmf_cidr_v4{prefixlen, addr_be} — no further conversion.)
+
+         ── defaults (UNCHANGED from §5.26) ────────────────────
+         bpf_map_update_elem(defaults_map, &inactive, &(req.config.default_action == Pass ? 1u : 0u), BPF_ANY)
+
+  9.   atomic flip (UNCHANGED from §5.26):
+         bpf_map_update_elem(active_idx_map, &zero, &inactive, BPF_ANY)
+       ─ single u32 store ─ atomic commit point for BOTH axes ─
+
+ 10.   post-flip cleanup (UNCHANGED from §5.26): leave previous
+       slot populated (one-deep rollback history; overwritten
+       next apply). NO clear of the now-inactive CIDR inner —
+       same policy as MAC inner.
+
+ 11.   bpffs alias pin (D-3.1-2): `${PIN_DIR}/allowlist` legacy
+       alias UNCHANGED. NO `${PIN_DIR}/cidr_allowlist` alias
+       (the legacy alias was for PI-6 byte-equivalence of the
+       20 pre-§5.26 tests — they pre-date the CIDR axis, so no
+       CIDR alias is needed for back-compat).
+```
+
+State-b reattach path (D-3.1-4) extends symmetrically: the
+`bpf_map__reuse_fd` loop iterates over BOTH the existing 6 pinned
+maps (allowlist_a, allowlist_b, rulesets, active_idx, defaults,
+stats) AND the 3 new pinned maps (cidr_allowlist_a, cidr_allowlist_b,
+cidr_rulesets) — 9 reuse_fd calls total. Stats counters (including
+STAT_PASS_CIDR) survive across applies, same mechanism as MVP-3.1.
+
+#### §5.27 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+##### NEW (created this slice)
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `src/lib/cidr.hpp` | Header for IPv4 CIDR string parser: `parse_cidr_v4()` declaration | C++23 | 25 |
+| `src/lib/cidr.cpp` | IPv4 CIDR parser implementation (`A.B.C.D/N` → `xdpmf_cidr_v4{prefixlen, addr_be}`; v6 reject; host-bits-set reject; uses `inet_pton(AF_INET, ...)`) | C++23 | 80 |
+| `tests/T_PASS_CIDR.sh` | §6.28 test: in-range src_ip PASS + out-of-range src_ip DROP + STAT_PASS_CIDR counter assertion | bash | 80 |
+| `tests/T_DROP_CIDR_NOT_IN_RANGE.sh` | §6.29 test: explicit negation case (separate from §6.28 happy-path for clarity per brief) | bash | 60 |
+| `tests/T_PASS_MAC_OR_CIDR.sh` | §6.30 test (load-bearing for OR-compose risk register row 2): single rule with BOTH mac+src_cidr, 3 sub-cases (MAC-only match, CIDR-only match, neither match) | bash | 110 |
+| `tests/T_CIDR_ATOMIC_SWAP_NO_DROP.sh` | §6.31 test (recommended optional): atomic swap on CIDR axis under concurrent traffic; extends §6.23 pattern for CIDR inner — load-bearing for risk register row 1 (AS1 atomic swap correctness) | bash | 100 |
+| `tests/fixtures/config_valid_cidr.yaml` | Minimal valid YAML with single CIDR rule (`src_cidr: 10.0.0.0/8`); used by §6.28 + §6.29 + §6.31 | YAML | 6 |
+| `tests/fixtures/config_valid_mac_or_cidr.yaml` | Valid YAML with single rule containing BOTH `mac:` AND `src_cidr:` (OR-compose fixture); used by §6.30 | YAML | 8 |
+| `tests/fixtures/config_valid_cidr_swap_a.yaml` | CIDR-swap-A ruleset for §6.31 (single CIDR `10.0.0.0/8`) | YAML | 6 |
+| `tests/fixtures/config_valid_cidr_swap_b.yaml` | CIDR-swap-B ruleset for §6.31 (two CIDRs `10.0.0.0/8` + `192.168.0.0/16`) | YAML | 8 |
+| `tests/fixtures/config_malformed_cidr_v6.yaml` | Malformed: `src_cidr: "::1/128"` (IPv6 rejected per HG-3.2-1); used as new sub-case 6 in §6.22 (folded — see EDITED below) | YAML | 5 |
+| `tests/fixtures/config_malformed_cidr_bad.yaml` | Malformed: `src_cidr: "10.0.0.5/8"` (host-bits-set); used as new sub-case 7 in §6.22 (folded) | YAML | 5 |
+| `tests/fixtures/config_malformed_cidr_notcidr.yaml` | Malformed: `src_cidr: "not-a-cidr"` (no `/`); used as new sub-case 8 in §6.22 (folded) | YAML | 5 |
+
+`tests/T_CIDR_INVALID_REJECTED.sh` is **NOT** a separate file —
+the 3 CIDR-validation failure modes (v6 reject, host-bits-set
+reject, not-a-cidr reject) are FOLDED into the existing §6.22
+`T_APPLY_REJECTS_MALFORMED.sh` as sub-cases 6/7/8. Architect
+prefers folding (per brief: "May fold into existing
+T_APPLY_REJECTS_MALFORMED as new sub-case") — keeps test count
+tight (3-5 new ctests target per brief; folded approach = 4 new
+ctests: §6.28/§6.29/§6.30/§6.31 + sub-case additions to §6.22).
+
+##### EDITED (existing files touched this slice)
+
+| Path | Role (one line) | What changes |
+|---|---|---|
+| `src/bpf/mac_filter.bpf.c` | XDP program | (a) new BPF map declarations (`cidr_allowlist_inner` template, `cidr_allowlist_a`, `cidr_allowlist_b`, `cidr_rulesets_outer`); (b) `stats` map `max_entries` bumps from 3 → 4 (via `STAT_MAX` sentinel); (c) datapath extended per §5.27 BPF program flow pseudocode (OR-compose: MAC HASH first, then CIDR LPM_TRIE on IPv4, then defaults_map; STAT_PASS_CIDR increment on CIDR hit). `mac_filter_prog` function name + SEC name UNCHANGED (§5.19/§5.22 identity gates hold). |
+| `src/common/mac_filter.h` | Shared header | +~10 lines: `struct xdpmf_cidr_v4` (8-byte packed); `XDPMF_MAP_CIDR_RULESETS_OUTER_NAME`, `XDPMF_MAP_CIDR_INNER_A_NAME`, `XDPMF_MAP_CIDR_INNER_B_NAME` constants; `enum mac_filter_stat` gains `STAT_PASS_CIDR = 3` + `STAT_MAX` bumps from 3 → 4. Existing constants UNCHANGED (per PI-10-3.2). |
+| `src/lib/config.hpp` | Config schema header | `RuleMatch` gains `std::optional<xdpmf_cidr_v4> src_cidr`; `#include "cidr.hpp"` added. |
+| `src/lib/config.cpp` | Validator | (a) recognize `src_cidr` match-key in the rule-match validator; (b) delegate string parsing to `cidr::parse_cidr_v4()`; (c) enforce schema rule 7 (at-least-one-of-mac-or-src_cidr); (d) supersede §5.26 schema rule 5 ("mac REQUIRED" → "mac OR src_cidr REQUIRED"); (e) update §5.26 schema rule 6's forward-compat reject list (remove `src_cidr` from the rejected-keys set; keep `cidr`/`port`/`vlan`/`dst_cidr` rejected). |
+| `src/lib/loader.cpp` | Loader + apply orchestrator | `internal::apply_request` body extended at step 8 (populate inactive CIDR inner alongside inactive MAC inner per §5.27 flow); state-b reattach path's `bpf_map__reuse_fd` loop extended to cover 3 new pinned maps (`cidr_allowlist_a`, `cidr_allowlist_b`, `cidr_rulesets`) — 9 reuse_fd calls total. `loader.hpp` ZERO diff (PI-7-3.2). |
+| `src/lib/loader.hpp` | Public loader API | **ZERO diff** — PI-7-3.2 enforced. `LoaderError` enum UNCHANGED (ConfigError = 9 covers CIDR validation per §5.27 §4.1). |
+| `CMakeLists.txt` | Top-level build | (a) `xdpmf_internal` STATIC target gains `src/lib/cidr.cpp` in its source list; (b) version bump `VERSION 0.3.0 → 0.4.0` per Done-Definition (MVP-3.2 is a minor release: new match-type axis, backward-compatible CLI surface and schema). |
+| `tests/CMakeLists.txt` | ctest registration | (a) `add_test` entries for §6.28 T_PASS_CIDR, §6.29 T_DROP_CIDR_NOT_IN_RANGE, §6.30 T_PASS_MAC_OR_CIDR, §6.31 T_CIDR_ATOMIC_SWAP_NO_DROP (with `RESOURCE_LOCK xdp_fixture`); (b) NO new fixture-dir wiring beyond existing pattern. |
+| `tests/T_APPLY_REJECTS_MALFORMED.sh` | §6.22 test | Add 3 sub-cases (6/7/8) for CIDR validation failures: v6 reject, host-bits-set reject, not-a-cidr reject. Existing sub-cases 1-5 UNCHANGED. Total sub-case count: 5 → 8. This is the ONLY MVP-3.1-or-earlier ctest body that is edited; PI-6 invariant carve-out applies (see PI-6-3.2 below). |
+| `tests/lib/read_stats.py` | Stats reader | NEW optional `--include-pass-cidr` flag emits 4-column output (`<pass> <drop_deny> <drop_malformed> <pass_cidr>`). DEFAULT (no flag) output UNCHANGED (3 columns) — back-compat with existing 27 tests. Detects 4-slot stats map automatically (loops over `stats.get(0..3)` internally; only print logic varies on flag). |
+| `tests/lib/common.sh` | Shared helpers | NEW helpers: `read_stats_with_cidr <pin>` (4-column reader, prefixes `read_stats.py` with `--include-pass-cidr`); `wait_for_stats_sum_with_cidr <iface> <expected_sum> [timeout_ms] [poll_ms]` (sums all 4 counters). Existing `read_stats()` + `wait_for_stats_sum()` UNCHANGED (PI-6 preserved). |
+| `CHANGELOG.md` | Version history | New `## [0.4.0] - 2026-05-NN` section per Keep-a-Changelog (MVP-1.1C B4 + §5.25 Q3 V1 precedent + §5.26 [0.3.0] precedent). |
+
+##### UNCHANGED-BUT-AFFECTED (zero git-diff; behaviour must hold)
+
+| Path | Why it matters |
+|---|---|
+| `src/lib/loader.hpp` | PUBLIC API fenced UNCHANGED per PI-7-3.2 (zero diff, including the `LoaderError` enum). Reviewer asserts via `git diff main -- src/lib/loader.hpp` showing zero output. |
+| `src/cli/cli.cpp`, `src/cli/cli.hpp`, `src/cli/apply.cpp`, `src/cli/apply.hpp`, `src/cli/main.cpp` | CLI grammar UNCHANGED (`apply -f` + `attach --allow` + `detach` byte-equivalent). The `apply` orchestrator's CLI front delegates to `internal::apply_request` UNCHANGED (the CIDR-axis extension lives entirely behind the helper boundary). Help text MAY gain one line mentioning `src_cidr` (impl-flexible; tester asserts substring). |
+| `src/lib/apply_internal.hpp` | Header UNCHANGED (signature byte-equivalent per §5.26 D-3.1-1). Impl in `loader.cpp` extends; header surface is invariant. |
+| `src/lib/yaml_subset.{cpp,hpp}` | UNCHANGED. Q-HG1 subset already accepts string scalars like `"10.0.0.0/8"`; no parser change needed. (Same forward-compat hinge §5.26 documented for the future CIDR feature.) |
+| `src/lib/raii.hpp` | UNCHANGED. |
+| Existing 27 ctests except `tests/T_APPLY_REJECTS_MALFORMED.sh` | Bodies UNCHANGED. Reviewer asserts `git diff --stat tests/T_*.sh` shows ZERO body changes EXCEPT `T_APPLY_REJECTS_MALFORMED.sh` (per PI-6-3.2 carve-out). |
+| `tests/lib/common.sh` existing helpers (`setup_veth`, `cleanup_veth`, `NSEXEC`, `NETNS`, `inject_eth`, `inject_runt`, `xdp_prog_id`, `read_stats`, `wait_for_stats_sum`, `prog_count`, `require_passwordless_sudo`, `apply_config`, `wait_for_active_idx_flip`, `kill_loader_keep_link`) | UNCHANGED. NEW helpers (`read_stats_with_cidr`, `wait_for_stats_sum_with_cidr`) layer ON TOP without modifying existing helper bodies. |
+| `tests/fixtures/xdp_pass.bpf.c`, `tests/fixtures/mac_filter_alt.bpf.c`, `tests/fixtures/mac_filter_bad.bpf.c` | UNCHANGED. Used by alien-fixture / tag-mismatch / verifier-reject tests; §5.27 does not interact. |
+| `tests/fixtures/config_valid.yaml`, `config_valid_blanket_pass.yaml`, `config_malformed_*.yaml`, `config_apply_swap_*.yaml` | UNCHANGED. The pre-existing fixtures (used by §6.21–§6.27) continue to validate post-§5.27 (PI-15 below). |
+| `tests/inject/inject_eth.py`, `inject_runt.py`, `read_stats.py` (default mode) | `read_stats.py` is EDITED (per EDITED above) but its default-mode 3-column output is UNCHANGED; the new `--include-pass-cidr` flag is purely additive. `inject_eth.py` is UNCHANGED — for §6.28/§6.29/§6.31 tests that need to inject IPv4 packets with a specific src_ip, the existing `inject_eth.py` is extended in-place if needed for IPv4 payload (impl-flexible: tester may add `inject_ipv4.py` as a NEW file if cleaner — architect leaves to tester per TestStrategy below). |
+| `include/version.h.in`, `tests/lib/pins.sh.in` | UNCHANGED (templates from §5.25 P2/P3 still authoritative; CMake reads new `VERSION 0.4.0`). |
+| `cmake/BpfBuild.cmake` | UNCHANGED. New BPF maps are declared inside `mac_filter.bpf.c`; no build-system contract change. |
+| `src/common/mac_filter.h` existing constants/struct (`xdpmf_mac`, `XDPMF_BPFFS_ROOT`, `XDPMF_ALLOWLIST_MAX`, `XDPMF_MAP_ALLOWLIST_NAME`, `XDPMF_MAP_STATS_NAME`, `XDPMF_RULESET_COUNT`, `XDPMF_MAP_ACTIVE_IDX_NAME`, `XDPMF_MAP_RULESETS_OUTER_NAME`, `XDPMF_MAP_INNER_A_NAME`, `XDPMF_MAP_INNER_B_NAME`, `XDPMF_MAP_DEFAULTS_NAME`, `XDPMF_LINK_PIN_BASENAME`, existing `enum mac_filter_stat` values 0/1/2) | UNCHANGED. New constants are ADDITIVE; STAT_MAX sentinel bump is additive accounting (per PI-10-3.2). Reviewer asserts `git diff` shows ONLY additions to the constants block + one-line edits to the enum (`STAT_PASS_CIDR = 3,` added + `STAT_MAX = 4,` bumped). |
+
+**Note on inject helper extension** (architect deferred to tester
+per TestStrategy below): the existing `inject_eth.py` injects raw
+Ethernet frames with a configurable src/dst MAC but a fixed minimal
+payload. CIDR tests need to inject IPv4 packets with a CONFIGURABLE
+src_ip. Tester may either (a) extend `inject_eth.py` to accept an
+optional `--src-ip` flag (preserving back-compat for callers that
+don't pass it), OR (b) introduce a new `inject_ipv4.py` adjacent
+helper. Either approach is acceptable; architect commits only to
+"the test must inject an IPv4 frame with attacker-chosen src_ip
+and verify the CIDR LPM_TRIE matches". TestStrategy §6.28 specifies
+the contract; impl-shape flexibility on the inject helper.
+
+Any file NOT listed above is off-limits for impl. If impl needs to
+edit a file not listed, that's a design gap — SendMessage architect.
+
+#### §5.27 TestStrategy entries
+
+##### §6.28 T_PASS_CIDR — CIDR rule applied; in-range src_ip PASSES with STAT_PASS_CIDR counter increment
+
+- **Trigger**: `setup_veth`; `apply_config tests/fixtures/config_valid_cidr.yaml ${IFACE_A}` (config = `default_action: drop` + single rule `pass {src_cidr: "10.0.0.0/8"}`). Standard veth fixture + `RESOURCE_LOCK xdp_fixture` + root sudo.
+- **Observable outcome (all)**:
+  - `apply` exits 0.
+  - Pin `${PIN_DIR}/cidr_rulesets` exists; pin `${PIN_DIR}/cidr_allowlist_a` OR `${PIN_DIR}/cidr_allowlist_b` (whichever active_idx selects) contains exactly one entry with `prefixlen=8, addr=0x0A000000_be` (`10.0.0.0/8`).
+  - Inject IPv4 packet with `src_ip = 10.5.6.7` (in `10.0.0.0/8`) and arbitrary src MAC (e.g. `99:99:99:99:99:99`, NOT in any MAC allowlist) → STAT_PASS_CIDR delta == 1; STAT_PASS / STAT_DROP_DENY deltas == 0 within ~2 seconds.
+  - Inject IPv4 packet with `src_ip = 192.168.1.1` (NOT in `10.0.0.0/8`) and arbitrary src MAC → STAT_DROP_DENY delta == 1; STAT_PASS_CIDR delta == 0.
+- **Assertion mechanism**: `apply_config` helper + `bpftool map dump pinned ${PIN_DIR}/cidr_allowlist_<a|b> --json | jq` for inner-map contents + `read_stats_with_cidr` (4-column) + `wait_for_stats_sum_with_cidr` polling helper + bash `[[ pass_cidr_delta -eq 1 ]]` assertions.
+- **Anti-theatricality control**: BOTH sub-cases use the same fixture; the only differential is src_ip. If src_ip-based dispatch were broken (e.g. CIDR axis ignored), the out-of-range packet would PASS via the wrong path or both packets would behave identically.
+- **SKIP conditions**: none.
+- **Cleanup**: `cleanup_veth`.
+
+##### §6.29 T_DROP_CIDR_NOT_IN_RANGE — explicit negation case (separate test from §6.28's happy-path step)
+
+- **Trigger**: `setup_veth`; `apply_config tests/fixtures/config_valid_cidr.yaml ${IFACE_A}` (same fixture as §6.28).
+- **Observable outcome (all)**:
+  - `apply` exits 0.
+  - Inject IPv4 packet with `src_ip = 8.8.8.8` (NOT in any rule's CIDR range) and arbitrary src MAC (NOT in any MAC allowlist) → STAT_DROP_DENY delta == 1; STAT_PASS delta == 0; STAT_PASS_CIDR delta == 0.
+  - Inject second packet `src_ip = 100.64.0.1` → same outcome (idempotent denial).
+- **Assertion mechanism**: same as §6.28 (`read_stats_with_cidr` + delta assertions).
+- **Rationale for separate test from §6.28**: §6.28 has 2 sub-cases (in-range pass + out-of-range drop). §6.29 is the focused negation: drops with NO matching rule on either axis, exit-code-and-stats-only assertion. Operator-facing audit grep "did the drop happen because CIDR missed" is unambiguous via §6.29 alone.
+- **SKIP conditions**: none.
+- **Cleanup**: `cleanup_veth`.
+
+##### §6.30 T_PASS_MAC_OR_CIDR — OR-compose verification (load-bearing for risk register MVP-3.2 row 2)
+
+- **Load-bearing for the architectural correctness of the OR-semantic** per `architecture-v2.md` line 334 risk register MVP-3.2 row 2 mitigation. Architect explicitly fences against making it theatrical.
+- **Trigger**: `setup_veth`; `apply_config tests/fixtures/config_valid_mac_or_cidr.yaml ${IFACE_A}` (config = `default_action: drop` + single rule `pass {mac: "AA:BB:CC:DD:EE:FF", src_cidr: "10.0.0.0/8"}`). Three sub-cases in sequence (one apply, three injections):
+  1. **MAC-only match**: inject packet with src MAC = `AA:BB:CC:DD:EE:FF` (matches MAC axis) AND src_ip = `192.168.1.1` (does NOT match CIDR axis) → expect STAT_PASS delta == 1 (per Q2 OR1 short-circuit: MAC hit fires first); STAT_PASS_CIDR delta == 0.
+  2. **CIDR-only match**: inject packet with src MAC = `11:22:33:44:55:66` (does NOT match MAC axis) AND src_ip = `10.5.6.7` (matches CIDR axis) → expect STAT_PASS_CIDR delta == 1; STAT_PASS delta == 0.
+  3. **Neither match (negation)**: inject packet with src MAC = `11:22:33:44:55:66` AND src_ip = `192.168.1.1` (neither axis matches) → expect STAT_DROP_DENY delta == 1; STAT_PASS + STAT_PASS_CIDR deltas == 0.
+- **Observable outcome (all 3 sub-cases)**: the counter deltas above; `apply` exits 0; pin `${PIN_DIR}/allowlist_<a|b>` contains the MAC; pin `${PIN_DIR}/cidr_allowlist_<a|b>` contains the CIDR; both populated by the single OR-compose rule.
+- **Assertion mechanism**: `read_stats_with_cidr` + delta assertions per sub-case + `bpftool map dump` for inner-map content inspection.
+- **Anti-theatricality controls**:
+  - Sub-case 3 is the negation control (neither axis matches → drop); if OR-compose were broken to "always-pass-when-either-axis-set", sub-case 3 would PASS. The differential is critical.
+  - Sub-cases 1 and 2 use DIFFERENT counters (STAT_PASS vs STAT_PASS_CIDR) — the test asserts the SPLIT, not just "passed". A broken OR-compose that always incremented STAT_PASS would fail sub-case 2's STAT_PASS_CIDR delta assertion.
+  - Sub-case ordering: 1 (MAC-only), 2 (CIDR-only), 3 (neither). Architect commits to the ORDER (stats deltas are cumulative across sub-cases; tester reads + asserts after EACH injection, not at end).
+- **SKIP conditions**: none.
+- **Cleanup**: `cleanup_veth`.
+
+##### §6.31 T_CIDR_ATOMIC_SWAP_NO_DROP — atomic swap on CIDR axis under concurrent traffic (RECOMMENDED OPTIONAL)
+
+- **Recommended-OPTIONAL** per brief — architect's call: **INCLUDE**. Per Q1 AS1 the swap mechanism is byte-identical to §6.23 (single `active_idx` u32 flip), but the CIDR-axis lookup path is a different code path in the BPF datapath (LPM_TRIE chained-deref instead of HASH chained-deref). A focused CIDR-axis test that proves no-drop-under-load on the CIDR path is NON-theatrical — verifies risk-register MVP-3.2 row 1 mitigation specifically for the CIDR axis.
+- **Trigger**:
+  1. `setup_veth` + initial `apply_config tests/fixtures/config_valid_cidr_swap_a.yaml ${IFACE_A}` (config A = `default_action: drop`, rules: `pass {src_cidr: "10.0.0.0/8"}` only).
+  2. Start background traffic injector on the peer veth: continuous IPv4 packets with `src_ip = 10.5.6.7` (overlap-allowed CIDR), arbitrary src MAC, ~100 Hz (same pattern as §6.23; `XDPMF_INJECT_RATE_HZ` env-tunable).
+  3. After ~2 seconds (baseline established): snapshot `STAT_DROP_DENY_baseline = read_stats(${IFACE_A}, STAT_DROP_DENY)` AND `STAT_PASS_CIDR_baseline = read_stats_with_cidr(${IFACE_A}, STAT_PASS_CIDR)`.
+  4. Invoke `apply_config tests/fixtures/config_valid_cidr_swap_b.yaml ${IFACE_A}` (config B = `default_action: drop`, rules: `pass {src_cidr: "10.0.0.0/8"}` + `pass {src_cidr: "192.168.0.0/16"}` — `10.0.0.0/8` is the load-bearing overlap that proves the swap doesn't drop in-range traffic).
+  5. Continue traffic ~2 more seconds.
+  6. Stop the injector; let stats quiesce; snapshot `STAT_DROP_DENY_final` and `STAT_PASS_CIDR_final`.
+- **Observable outcome (all)**:
+  - Both apply invocations exit 0.
+  - `STAT_DROP_DENY_final - STAT_DROP_DENY_baseline == 0` (overlapping `10.0.0.0/8` traffic NEVER dropped during the CIDR-axis swap).
+  - `STAT_PASS_CIDR_final - STAT_PASS_CIDR_baseline >= 150` (conservative lower-bound for 2s × 100Hz × 0.75 fudge; mirrors §6.23 pattern).
+  - `active_idx_map[0]` value changed across the apply (read before/after; assert inequality).
+- **Assertion mechanism**: `read_stats_with_cidr` for STAT_PASS_CIDR (4-column reader required) + bash arithmetic on deltas + `bpftool map dump pinned ${PIN_DIR}/active_idx`.
+- **Anti-theatricality controls**:
+  - Background injection MUST be concurrent with the apply (`&` in bash, not sequential).
+  - Overlap of `10.0.0.0/8` across configs A and B is the load-bearing element — any half-applied state would manifest as STAT_DROP_DENY increments on the overlapping CIDR.
+  - Negation/contrast: the test verifies the CIDR axis (different from §6.23's MAC axis). Both must pass for full Composite-6 atomic-swap coverage.
+- **SKIP conditions**: same as §6.23 — if `XDPMF_INJECT_RATE_HZ` baseline falls below 150 (2s × 100Hz × 0.75), SKIP with rc 77 + stderr `runner too slow for CIDR-axis swap test`.
+- **Cleanup**: stop background injector via `kill ${INJECT_PID}`; `cleanup_veth`.
+
+##### §6.22 T_APPLY_REJECTS_MALFORMED — EXTENDED with CIDR-validation sub-cases (PI-6-3.2 carve-out)
+
+- **Existing 5 sub-cases UNCHANGED**: flow-form / default_action wrong / duplicate id / iface mismatch / unsupported match-type.
+- **3 new sub-cases ADDED** (architect-mandated FOLD per brief; preferred over a separate `T_CIDR_INVALID_REJECTED.sh`):
+  - **Sub-case 6** (`config_malformed_cidr_v6.yaml`: `src_cidr: "::1/128"`): exit 9 + stderr matches `xdpmacfilter: config error: IPv6 CIDR not supported until MVP-3.2.5`.
+  - **Sub-case 7** (`config_malformed_cidr_bad.yaml`: `src_cidr: "10.0.0.5/8"`): exit 9 + stderr matches `xdpmacfilter: config error: malformed CIDR: host bits set below prefix`.
+  - **Sub-case 8** (`config_malformed_cidr_notcidr.yaml`: `src_cidr: "not-a-cidr"`): exit 9 + stderr matches `xdpmacfilter: config error: malformed CIDR: missing prefix length`.
+- **PI-6 carve-out rationale**: PI-6 invariant ("20 pre-existing ctests pass byte-equivalent") is preserved at strength for the 20 pre-§5.26 tests. The 7 §5.26 ctests are the natural extension targets for additive validator coverage; adding sub-cases to §6.22 IS the design-intended extension mechanism (the §6.22 spec literally says "5 sub-cases" — extending the count IS the contract, not a regression). Reviewer's PI-6-3.2 check distinguishes "20 pre-§5.26" (zero diff) from "7 §5.26" (§6.22 ONLY may gain sub-cases additively).
+- **Assertion mechanism**: same as existing §6.22 (bash `[[ rc -eq 9 ]]` + `grep -qE` on stderr prefix + `xdp_prog_id` empty assertion). Each sub-case asserts its OWN stderr substring (case-by-case).
+- **SKIP conditions**: none.
+- **Cleanup**: `cleanup_veth` per existing pattern.
+
+#### §6.5 Preserved invariants (MVP-3.2 brownfield) — PI-1..PI-14 continue + PI-15..PI-18 NEW
+
+All MVP-3.1 invariants (PI-1..PI-14 per §5.26 Preserved Invariants
+sub-section) continue to hold post-§5.27. NEW invariants
+PI-15..PI-18 capture MVP-3.2-specific guarantees. Reviewer's 5th
+framework point walks the COMBINED list (PI-1..PI-18) and reports
+`[INVARIANT-VIOLATED]` per failed check.
+
+**Continuing invariants** (per §5.26; ALL still apply post-§5.27):
+
+| # | Invariant | §5.27 check mechanism |
+|---|---|---|
+| PI-1 | §5.4 alien-program identity-gate ENFORCED in strict mode | Re-run §6.14 T_ATTACH_TAG_MISMATCH + §6.9 T_ATTACH_ALIEN_REFUSAL + §6.26 sub-case 1; all still pass exit 4 in strict. |
+| PI-2 | §5.19 name-identity gate ENFORCED in BOTH modes | §6.9 in strict + §6.26 sub-case 3 in fleet — both compute the name-check. |
+| PI-3 | §5.22 Item 1 tag-check ENFORCED in BOTH modes | §6.14 still passes in strict. |
+| PI-4 | §5.22 Item 2 O_PATH path-discipline ENFORCED in BOTH modes | §6.15 still passes in strict. |
+| PI-5 | §5.24 kernel-version probe ENFORCED in BOTH modes | §6.20 T_VERIFIER_REJECT gates on kernel version. |
+| PI-6-3.2 | **27 pre-§5.27 ctests pass byte-equivalent OR legitimately SKIP-77 — WITH ONE EXPLICIT CARVE-OUT for §6.22 (allowed additive sub-case growth: 5 → 8)**. | Re-run all 27 tests post-§5.27 → all pass; `git diff --stat tests/T_*.sh` shows zero changes EXCEPT `tests/T_APPLY_REJECTS_MALFORMED.sh` (additive sub-cases 6/7/8 per §5.27 EDITED). All 20 pre-§5.26 test bodies BYTE-EQUIVALENT. |
+| PI-7-3.2 | **`loader.hpp` ZERO diff** in §5.27 (strengthened from PI-7's "one new enumerator" — this slice adds NO new `LoaderError` enumerator; `ConfigError = 9` is reused for CIDR-layer errors per §5.27 §4.1). | `git diff main -- src/lib/loader.hpp` shows ZERO lines changed. Any diff = `[INVARIANT-VIOLATED]`. |
+| PI-8-3.2 | `xdpmacfilter --version` reports `xdpmacfilter 0.4.0` | Run `${LOADER_BIN} --version`; output MUST be `xdpmacfilter 0.4.0` (single line, ends with newline). Bump from 0.3.0 → 0.4.0 per Done-Definition (MVP-3.2 minor release: new feature, backward-compatible CLI surface AND backward-compatible YAML schema). |
+| PI-9 | `--version` / `--help` output FORMAT unchanged (just version-number bump + optional one-line `src_cidr` mention in --help) | §6.10 T_CLI_HELP_VERSION re-run passes (existing ERE forward-compatible). The `--help` MAY gain a line mentioning `src_cidr`; ERE does NOT pin help-text length. |
+| PI-10-3.2 | `src/common/mac_filter.h` existing constants and `struct xdpmf_mac` layout UNCHANGED; enum `mac_filter_stat` slots 0/1/2 unchanged (STAT_PASS=0, STAT_DROP_DENY=1, STAT_DROP_MALFORMED=2); STAT_MAX sentinel-only bump from 3 → 4 (additive accounting per §5.27 DataStructures) IS allowed and explicitly excluded from PI-10's "unchanged" set (sentinel is a derived value, not a public constant). | `git diff src/common/mac_filter.h` shows: NEW `struct xdpmf_cidr_v4`, NEW `XDPMF_MAP_CIDR_*` macros, NEW `STAT_PASS_CIDR = 3` enum value, BUMP `STAT_MAX = 3 → 4`. Existing constants/struct/enum-values 0/1/2 byte-identical. |
+| PI-11 | Internal directory layout = `src/lib/` + `src/cli/` + `src/common/` + `src/bpf/` (no new top-level dirs) | `find src -type d` shows the same 4 dirs as MVP-3.1 + the existing structure. New files `src/lib/cidr.{cpp,hpp}` are added to `src/lib/` per Q1 R1's "library code lives in `src/lib/`" rule. |
+| PI-12 | Pin paths host-global per `nsenter --net` (§5.25 EDIT-15) | New pins `${PIN_DIR}/cidr_rulesets`, `${PIN_DIR}/cidr_allowlist_a`, `${PIN_DIR}/cidr_allowlist_b` visible from `nsenter --net` test invocations. Same mechanism as MVP-3.1; no new path-discipline machinery. |
+| PI-13-3.2 | `stats` map type UNCHANGED (`BPF_MAP_TYPE_PERCPU_ARRAY`); read protocol BACKWARD-COMPATIBLE (default `read_stats.py` 3-column output unchanged); STAT_PASS / STAT_DROP_DENY / STAT_DROP_MALFORMED semantics unchanged; STAT_MAX bumps 3 → 4 (additive). | `read_stats.py` without `--include-pass-cidr` flag → 3 columns (binary-identical to MVP-3.1 output for the same trigger). With flag → 4 columns. Existing 27 ctests' callers UNCHANGED. |
+| PI-14 | `--mode {generic,native,offload}` flag UNCHANGED | §6.16 + §6.17 + §6.19 all still pass. `apply` still accepts `--mode` per §5.26 forwarding. |
+
+**NEW invariants** (MVP-3.2-specific):
+
+| # | Invariant | Check mechanism |
+|---|---|---|
+| **PI-15** | **CIDR axis is purely additive**: existing MVP-3.1 configs (with `match.mac` only, no `src_cidr`) MUST continue to validate AND produce byte-equivalent runtime behaviour. No MAC-only path regression. | Re-run §6.21 T_APPLY_VALID_CONFIG (uses MAC-only fixture `config_valid.yaml`) → passes byte-equivalent. Re-run §6.23 T_APPLY_ATOMIC_SWAP_NO_DROP (MAC-only swap fixtures) → passes byte-equivalent (the CIDR-inner population step is a no-op when no rule has `src_cidr`). |
+| **PI-16** | **STAT_PASS_CIDR is an ADDITIVE enum slot**; existing STAT_PASS=0, STAT_DROP_DENY=1, STAT_DROP_MALFORMED=2 indices UNCHANGED; the 4-slot PERCPU_ARRAY's slots 0/1/2 fire under identical triggers as the pre-§5.27 3-slot map. | `read_stats.py` (default mode) prints same 3 values pre/post-§5.27 for the same workload. §6.21 (which already triggers STAT_PASS + STAT_DROP_DENY via MAC-only fixture) passes byte-equivalent. |
+| **PI-17** | **`schema_version: 1` STILL accepted** post-§5.27 with the additive `src_cidr` extension. Existing MVP-3.1 configs at `schema_version: 1` (no `src_cidr`) validate without change. `schema_version: 2+` configs still rejected (supported-set `{1}`). | Re-run §6.21 (existing config with `schema_version` defaulted/absent → validates). Re-run §6.22 sub-case 5 (`unsupported_match.yaml` with `cidr` key — NOT `src_cidr`) → still rejected as unknown match-key. ADD §6.22 sub-case 6 (v6 CIDR) → rejected as IPv6 CIDR (not as unsupported match-key — the validation message catalogue distinguishes). |
+| **PI-18** | **The §5.26 §6.23 T_APPLY_ATOMIC_SWAP_NO_DROP (MAC-axis swap) continues to pass byte-equivalent**. The MVP-3.2 atomic-swap mechanism (Q1 AS1 parallel outers + single active_idx) MUST NOT regress MAC-axis swap correctness. | Re-run §6.23 with its original MAC-only fixtures → drop_delta == 0 across the swap (the CIDR-inner population path runs as a no-op for MAC-only rules; the single `active_idx` flip still commits the MAC swap atomically). |
+
+**No deletions/relaxations** of PI-1..PI-14 in this slice. PI-6 is
+RENAMED to PI-6-3.2 to reflect the explicit §6.22 sub-case-growth
+carve-out (5 → 8); this is a transparent extension, not a relaxation
+— reviewer's `git diff --stat` check explicitly enumerates the
+ONE allowed test-body diff (`T_APPLY_REJECTS_MALFORMED.sh`).
+
+#### §7 OOS — MVP-3.2 components SHIPPED + new fences
+
+##### Moved from deferred to SHIPPED (per MVP-3.2)
+
+- ~~**No L3 src-CIDR axis** — MVP-3.2 slice (lands as in-config rule type, NOT as new CLI flag).~~ **— SHIPPED in §5.27 (MVP-3.2, 2026-05-24)** via Items 1-4. `src_cidr` match-key per Q3 K2; IPv4 only per HG-3.2-1; OR-compose with MAC per Q2 OR1; parallel ARRAY_OF_MAPS outer per Q1 AS1 with shared `active_idx` (single u32 flip = atomic for both axes). New STAT_PASS_CIDR counter. 4 new ctests + 3 new sub-cases on §6.22.
+
+##### NEW out-of-scope fences (per §5.27)
+
+- **No IPv6 src-CIDR matching** — fenced to MVP-3.2.5+ per HG-3.2-1. v6 strings (anything containing `:` in the `src_cidr` value) rejected at the validator with exit 9 + recognizable stderr (`IPv6 CIDR not supported until MVP-3.2.5: '<value>'`). Reviewer's PI-17 check verifies the explicit-rejection behaviour (no silent accept-and-ignore).
+- **No `dst_cidr` matching** — Q3 K2 naming leaves space for the future sibling, but cycle 2 does NOT ship it. The validator MUST still reject `match: {dst_cidr: ...}` with `match type 'dst_cidr' not supported in schema_version 1` (per §5.26 schema rule 6 forward-compat hinge, unchanged here).
+- **No L4 port matching** — MVP-3.5+ candidate, not in this slice. Validator rejects `match: {port: ...}` (and `src_port` / `dst_port`) the same way as `dst_cidr`.
+- **No VLAN-aware CIDR matching** — architect lens B mentions VLAN as a future axis; not in cycle 2.
+- **No list-of-CIDRs per rule (Option L2)** — Q4 L1; MVP-3.2.x candidate if operator demand emerges. Additive forward path.
+- **No schema_version bump to 2** — Q5 V1 additive; `src_cidr` extension does NOT trigger version bump per the migration-policy refinement in Q5. Bump deferred to first genuine breaking change.
+- **No new exit code for CIDR validation failures** — §5.27 §4.1: `ConfigError = 9` covers all CIDR validation failures; PI-7-3.2 strengthens the §5.26 `loader.hpp` invariant to ZERO diff.
+- **No CIDR set-arithmetic semantics** (e.g. "allow 10.0.0.0/8 except 10.5.0.0/16") — LPM_TRIE longest-prefix-match handles overlapping prefixes naturally but no explicit `deny` action for cycle 2. MVP-3.8+ action-set growth.
+- **No rename of `mac` match-key to `src_mac` for symmetry with `src_cidr`** — explicit Q3 K2 sub-decision: schema ships ASYMMETRIC names to preserve MVP-3.1 config byte-equivalence (PI-15). Renaming `mac` would be a breaking schema change requiring `schema_version: 2`.
+- **No per-rule counters keyed by rule_id** — MVP-3.4 slice (architecture-v2.md MVP-3.4 row). Cycle 2 keeps the 4-counter GLOBAL PERCPU shape (STAT_PASS, STAT_DROP_DENY, STAT_DROP_MALFORMED, STAT_PASS_CIDR — only adds STAT_PASS_CIDR).
+- **No tackling of MVP-3.1 OOT-deferred items (OOT-1..OOT-4)** — Q6 DEFER; dedicated housekeeping cycle or fold into MVP-3.3 prep. The 4 OOT items stay in their §5.26 review.md disposition.
+- **No `T_CIDR_INVALID_REJECTED.sh` as a separate file** — architect-chosen FOLD of CIDR-validation failure modes into §6.22 sub-cases 6/7/8 per brief's "May fold" hint. Keeps ctest count tight (4 new ctests instead of 5).
+- **No `inject_ipv4.py` mandate** — architect leaves to tester whether to extend existing `inject_eth.py` (adding optional `--src-ip` flag) OR introduce a new `inject_ipv4.py`. Either is acceptable; the contract is "inject IPv4 packet with chosen src_ip + src_mac on the test veth". TestStrategy §6.28 specifies the WHAT; tester chooses the HOW.
+- **No `read_stats.py` schema-version field** — the new `--include-pass-cidr` flag is the entire surface change; no version negotiation, no JSON-mode toggle. Future expansion lands flag-by-flag the same way.
+- **No backward-compat alias pin for CIDR maps** (`${PIN_DIR}/cidr_allowlist` legacy single-pin) — the §5.26 `${PIN_DIR}/allowlist` alias (D-3.1-2) existed to keep 4 pre-§5.26 tests passing (PI-6). No pre-§5.27 test checks for `${PIN_DIR}/cidr_*` paths (the entire CIDR axis is new in §5.27), so no alias is needed.
+- **No CIDR-axis support in `--allow <MAC>` shorthand** — Q3 BC1 (synthesized config) per §5.26 stays MAC-only. Operators wanting CIDR rules write a YAML config and use `apply -f`. Synthesizing a CIDR rule from a CLI flag would require new CLI surface; explicitly OOS.
+- **No automatic-detect of v6 vs v4 via family-detection in `src_cidr`** — strict v4-only per HG-3.2-1; MVP-3.2.5+ refactors the validator to auto-detect via family heuristic (`:` → v6; otherwise v4). Cycle 2's validator just rejects v6 with the clear stderr.
+- **No CIDR-axis trust_model interaction** — `XDPMF_TRUST_MODEL` continues to gate ONLY the §5.4 alien-program disposition (per HG3); the new CIDR axis runs at the BPF datapath layer, post-attach, with no trust_model interaction. No `XDPMF_CIDR_TRUST_MODEL` env var; no axis multiplication of the trust-model state.
+- **No CIDR-axis interaction with `default_action: pass` other than via the existing fall-through** — the new `cidr_rulesets_outer` lookup happens BEFORE `defaults_map` evaluation per the §5.27 BPF datapath pseudocode. `default_action: pass` with empty `rules: []` continues to mean blanket-pass per §5.26; `default_action: pass` with CIDR-only rules means "CIDR-matched → STAT_PASS_CIDR + PASS; non-match → STAT_PASS via defaults (NOT STAT_PASS_CIDR)". The counter discipline distinguishes the path.
+- **No expansion of allow-list max beyond 64** — Q4 footnote: `XDPMF_ALLOWLIST_MAX = 64` continues to bound BOTH the MAC HASH and the CIDR LPM_TRIE. Operators needing > 64 rules → MVP-3.4 capacity revisit.
+- **No `STAT_DROP_MALFORMED_IP` separate counter for IPv4-header-truncation drops** — IP-header truncation in the new CIDR branch increments the EXISTING `STAT_DROP_MALFORMED` counter (consistent with §5.5's separate-malformed-counter policy; the new branch is "still malformed, just a deeper parse"). No new sentinel value.
+- **No `bpftool prog show` JIT-size assertion** in §6.28-§6.31 — the new datapath grows BPF program byte-count; no explicit upper-bound is asserted (impl shape might shift; tester verifies behaviour, not size).
+- **No `XDPMF_TEST_CIDR_RATE_HZ` separate env var** — §6.31 reuses the §6.23 `XDPMF_INJECT_RATE_HZ` env var for the SKIP threshold. One knob; consistent across MAC + CIDR swap tests.
+
+#### §5.27 verifiable invariants for reviewer
+
+In addition to PI-1..PI-18 above:
+
+- `git diff main -- src/lib/loader.hpp` shows ZERO output (PI-7-3.2 strengthened from §5.26).
+- `git diff main -- src/common/mac_filter.h` shows ONLY additions (new `xdpmf_cidr_v4` struct + 3 new map-name macros + new enum value `STAT_PASS_CIDR = 3` + sentinel `STAT_MAX` bump 3 → 4); zero modifications to existing constants or to enum values 0/1/2.
+- `git diff main -- src/bpf/mac_filter.bpf.c` shows: new map declarations (CIDR template + 2 pinned inners + outer); new datapath branch (OR-compose MAC-first then CIDR-on-IPv4); `stats` map `max_entries` change `3 → 4` via the bumped `STAT_MAX`. NO change to existing MAC-axis or malformed-frame branches beyond the IPv4-ethertype branch addition.
+- `git diff main -- src/lib/config.{cpp,hpp}` shows: `RuleMatch.src_cidr` field added; validator extension for `src_cidr` key; schema-rule-5/6 superseded inline.
+- `git diff main -- src/lib/loader.cpp` shows: `internal::apply_request` step-8 extension (populate CIDR inner alongside MAC inner); D-3.1-4 state-b `bpf_map__reuse_fd` loop extension to 9 maps; ZERO change to §5.4/§5.19/§5.22/§5.26 identity-gate or trust-model paths.
+- `git diff main -- tests/T_*.sh` shows: 4 NEW test files (T_PASS_CIDR.sh, T_DROP_CIDR_NOT_IN_RANGE.sh, T_PASS_MAC_OR_CIDR.sh, T_CIDR_ATOMIC_SWAP_NO_DROP.sh) + ONE modified existing test (T_APPLY_REJECTS_MALFORMED.sh — sub-cases 6/7/8 added). NO other existing test bodies modified.
+- `git diff main -- tests/lib/read_stats.py` shows: NEW `--include-pass-cidr` flag handling; default-mode output BYTE-IDENTICAL.
+- `git diff main -- tests/lib/common.sh` shows: NEW helpers `read_stats_with_cidr`, `wait_for_stats_sum_with_cidr`; existing helpers UNCHANGED.
+- 4 new ctests pass (§6.28..§6.31); §6.30 + §6.31 are the load-bearing pair (OR-compose correctness + CIDR atomic-swap correctness).
+- 27 pre-§5.27 ctests still pass (or legitimately SKIP-77 per §5.24 Q4 hybrid) — PI-6-3.2 carve-out for §6.22's additive sub-cases respected.
+- `XDPMF_SANITIZERS=ON` build clean.
+- `xdpmacfilter --version` reports `xdpmacfilter 0.4.0` (bump from 0.3.0 to mark MVP-3.2 feature add; CMake `project(VERSION)` per §5.25 Q3 V1 mechanism).
+- `xdpmacfilter --help` MAY list `src_cidr` (impl-flexible; tester asserts substring presence in §6.30 setup if applicable, otherwise no assertion).
+- `CHANGELOG.md` entry `[0.4.0] - 2026-05-NN` (Keep-a-Changelog format per §5.26 [0.3.0] precedent).
+- Build-pace table in CHANGELOG gains a row for MVP-3.2.
+
+Evidence: `mint/task-brief.md` MVP-3.2 brief (Items 1-4 + Q1-Q6 +
+HG-3.2-1); `mint/architecture-v2.md` lines 215-223 (MVP-3.2
+dependency-graph row) + line 310 (per-phase scope summary) + lines
+333-334 (per-phase risk register MVP-3.2 rows); §5.26 (the
+foundation this slice extends); §5.4 / §5.19 / §5.20 / §5.22 /
+§5.23 / §5.24 / §5.25 (the invariants this slice preserves);
+§4.1 (exit-code table, row 9 REUSED — no new row); §4.3
+(LoaderError enum, ZERO diff this slice); `mint/impl-notes.md`
+D-3.1-1..D-3.1-4 (MVP-3.1 deviations that STAND unchanged).
