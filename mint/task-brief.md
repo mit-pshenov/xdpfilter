@@ -1,139 +1,224 @@
-# Task brief — MVP-2 Polish-2: netns isolation + CMake-gen + version-sync + inject_runt:37 (refactor mode)
+# Task brief — MVP-3.1: config-first foundation (brownfield)
 
 ## Goal
 
-Knock down the four remaining janitorial items deferred to MVP-2 Polish-2 throughout MVP-1.1C and MVP-2 Sec/Perf/Robust. This is **the final MVP-2 slice** — after this, the MVP-2 sequence is fully shipped and the project enters MVP-3 territory.
+Ship **Composite 6 — "Config-first foundation"** per `mint/architecture-v2.md` (round-2 rework) as the first MVP-3 slice. This is the **architectural foundation** for the long-horizon system described in the v2 architecture: every byte of cycle-1 surface must remain load-bearing through MVP-3.N (zero deprecation work allowed).
 
-All four items are non-behavioural (no exit codes, no public API touches, no CLI surface changes) — pure hardening/cleanup. Similar in shape to MVP-1.1C polish batch but with only 4 items instead of 12, each item more substantive (the netns refactor and CMake-gen items each touch real infrastructure).
+Six interlocking pieces land together:
+
+1. **Internal code reorg** — `src/loader/` splits into `src/lib/` (loader + raii + identity) + `src/cli/` (argv parsing + apply orchestrator); internal `xdpmf_internal` CMake target (no SONAME, no installed headers). Mechanical refactor — no behaviour change.
+2. **YAML config schema** — `/etc/xdpfilter/<iface>.yaml` describes the interface ruleset. MAC-only matching for cycle 1 (CIDR / ports / etc. land in MVP-3.2+ as in-config rule-type extensions, NOT as new CLI flags).
+3. **Parser + validator + `LoaderError::ConfigError = 9`** — custom ~150-LOC subset YAML parser (human gate decision — see "Human-gate decisions" below); structured error reporting; exit code 9 reserved for any config-layer failure.
+4. **Atomic apply via `ARRAY_OF_MAPS`** — outer `BPF_MAP_TYPE_ARRAY_OF_MAPS[2]` containing two inner `mac_allowlist` HASH maps; userspace writes new ruleset to inactive inner, flips `active_idx`. Single-syscall atomic swap. One-deep rollback history (old ruleset alive until next apply).
+5. **`bpf_link__pin()` + idempotent reattach (P0a)** — pin at `/sys/fs/bpf/xdpmacfilter/<iface>/link`; loader detects existing pin on attach, uses `BPF_F_REPLACE` for hot reattach. Validates the "filter continues across loader exit" semantics that `architecture-v2.md` relies on for the bypass-on-failure story.
+6. **`XDPMF_TRUST_MODEL=strict|fleet` env var** — single switch (human gate decision). `strict` is default and preserves all MVP-2 identity-gate behaviour (§5.4 / §5.19 / §5.22 untouched); `fleet` relaxes §5.4 alien-program check only; §5.19 O_PATH bpffs ops and §5.22 tag-check stay enforced in both modes.
+
+Estimated budget per `architecture-v2.md`: ~250-300 LOC source + ~120 LOC test, 5-7 ctests. This is the **largest mint slice to date** (~3× MVP-2 Sec/Perf/Robust) — scope is deliberately bundled because the six pieces are interlocking (atomic apply needs ARRAY_OF_MAPS; ARRAY_OF_MAPS needs config harness to write to; config harness needs parser; reorg makes the apply orchestrator's home obvious; P0a is the survival contract atomic apply assumes; trust model is the env-var on the new code path). Carving them apart would create the throwaway surface Composite 6 was selected to avoid.
 
 ## Context: prior work
 
-- **All prior briefs**: `mint/task-brief-mvp1{,.1a,.1b,.1c}.md` + `mint/task-brief-mvp2-{sec,perf,robust}.md`.
-- **Existing design**: `mint/design.md` — ~3260 lines through §5.24 + §6.20 + §7 MVP-2 Sec/Perf/Robust additions. Each Polish-2 item has explicit OOS fence pointing here.
-- **MVP-2 Robust review**: `mint/review.md` (round-1 pass, 1 negotiated minor resolved via EDIT-12).
-- **Hybrid review source**: `mint/hybrid-review.md` — items M3/M5/M6 (most of these) + the architect-fenced deferral entries during MVP-1.1C and MVP-2 Sec/Perf decisions.
-- **Origin trail per item**:
-  - **netns Path A** — MVP-1.1C §5.21 C3 Decision 1: "Path A is recorded as MVP-2 hardening" (§7 line 1428-1433).
-  - **CMake-gen `PIN_ROOT`** — MVP-1.1C §5.21 B3 Decision: "CMake-generation of `tests/lib/common.sh:PIN_ROOT` … MVP-2 hardening" (§7 line 1434-1438).
-  - **Version-string sync** — MVP-1.1C §5.21 B4 Decision: "no version-string sync between CHANGELOG.md and the loader binary's `--version` output" (§7 line 1439-1444).
-  - **inject_runt.py:37 inline comment** — MVP-1.1C reviewer OUT-OF-TRIANGULATION advisory in `mint/review.md` (the latest one before MVP-2 series).
+- **All prior briefs**: `mint/task-brief-mvp1{,.1a,.1b,.1c}.md` + `mint/task-brief-mvp2-{sec,perf,robust,polish2}.md`.
+- **Existing design**: `mint/design.md` — ~3410 lines through §5.25 + §6.20 + §7 OOS (MVP-2 fully shipped).
+- **MVP-2 Polish-2 review**: `mint/review.md` (round-1 pass, 0 findings).
+- **Architecture brief**: `mint/design-brief.md` — the mint-hld brief that drove the v2 round.
+- **Architecture document (load-bearing for this brief)**: `mint/architecture-v2.md` (round-2 rework, ~419 lines).
+  - **Composite 6 spec**: lines 147–168 — read this section verbatim before architect Phase A.
+  - **Per-phase risk register MVP-3.1 rows**: lines 328–332 — five risks identified, mitigations sketched.
+  - **Open Questions answered at human gate** (NOT for architect to re-open): Q #1 (Composite 6 chosen), Q #8 (single trust-model switch), Q #10 (custom ~150-LOC YAML subset parser), Q #12 (P0a folded into MVP-3.1).
+  - **Open Questions remaining for architect to decide in §5.26**: Q #11 (binary rename — keep `xdpmacfilter` for MVP-3.1; do NOT rename to `xdpfilter` in this slice).
+- **Round-1 brainstorm** (datapath/UX/migration): `/tmp/mvp3-brainstorm/architect-{A,B,C}.md` + `synthesis.md` — reference material.
+- **Round-2 config-design brainstorm**: `/tmp/mvp3-config-design/architect-{T1,T2,T3}.md` + `synthesis.md` — schema-shape thinking already explored; T1 in particular pre-thought the parsing problem.
 
-## Workflow rules (refactor mode — same as all prior slices)
+## Workflow rules (brownfield mode)
 
-- **Architect**: read existing `design.md` (focus the four deferred entries cited above + §6.x test-fixture invariants the netns refactor touches) + this brief. EDIT design.md in place. Append `§5.25 MVP-2 Polish-2 batch` after §5.24. Update §7 OOS — move all four items from deferred to shipped. Each item warrants explicit decision documentation since the mechanism choice has real ripple (netns affects every veth-fixture test).
-- **Impl**: EDIT relevant files. **Probable** loader.cpp touch for version-string (if architect's Q3 picks runtime constant injection vs compile-time `configure_file`). loader.hpp probably untouched (version is in cli.cpp / generated header). New CMake codegen files in `cmake/` or `include/` per architect's choice.
-- **Tester**: HEAVY EDIT to `tests/lib/common.sh` for netns infrastructure (this is the bulk of the work). Existing 20 tests must still pass — netns is transparent to test bodies if the helper API stays the same (`setup_veth`/`cleanup_veth` semantics preserved). May add small fixture-test for the CMake-gen `PIN_ROOT` correctness (~optional per architect Q2).
-- **Reviewer**: 4-point triangulation. Special attention: (1) netns refactor must not break any existing test — 20/20 pass is the regression floor; (2) `PIN_ROOT` codegen must produce byte-identical value to current hardcoded string (otherwise loader+tests diverge); (3) version-string sync must not break smoke-test `--version` assertions (T_CLI_HELP_VERSION).
+- **Architect**: read existing `design.md` (focus §4.1 exit-code table — new row 9 `ConfigError` slots in; §5.4 / §5.19 / §5.22 identity-gate sections — the trust-model env var fences which checks the `fleet` mode relaxes; §5.20 attach() flow — P0a slots in as pin-after-attach + idempotent-detach-on-pin-present; §6.x TestStrategy invariants the apply-flow ctests extend) + `architecture-v2.md` Composite 6 spec verbatim + this brief. EDIT `design.md` in place. Append `§5.26 MVP-3.1: config-first foundation` after §5.25. Add new row 9 `ConfigError` to §4.1. Append new §6.x TestStrategy entries per the new ctests. Update §7 OOS — move the relevant deferred entries (Composite 6 components) from deferred-to-MVP-3 to shipped. Append new §6.5 invariants for the post-reorg directory layout (`src/lib/` + `src/cli/`) so reviewer can flag any future regression. Update §6.5 `Preserved invariants` section explicitly: MVP-2 §5.4/§5.19/§5.22 identity gates remain enforced in `strict` mode (the default); 20 existing ctests pass unchanged.
+- **Impl**: HEAVY EDIT across multiple files (largest impl scope to date). NEW files: `src/cli/apply.{cpp,hpp}`, `src/cli/config.{cpp,hpp}` (or per architect's reorg layout), `include/xdpmf/config.h` or similar for the parsed-config types, `src/bpf/mac_filter.bpf.c` (extend with ARRAY_OF_MAPS outer + inner-deref read pattern). EDITED files: `src/loader/loader.{cpp,hpp}` → relocate to `src/lib/` per Q1; `src/loader/cli.{cpp,hpp}` → relocate to `src/cli/` per Q1; `CMakeLists.txt` for new target + new source files; `tests/CMakeLists.txt` for new ctest entries. `src/loader/main.cpp` becomes the `xdpmacfilter` binary entry shim. `src/common/mac_filter.h` likely extended with new map definitions (`active_idx_map`, `rulesets_outer` per Q4 — see below). loader.hpp public-API: ONE new `LoaderError::ConfigError = 9` enumerator line (precedent: MVP-2 Sec `PathRefused = 8`, MVP-2 Robust `KernelUnsupported = 7`).
+- **Tester**: ADD 5-7 ctests per `architecture-v2.md` line 158 list: `T_APPLY_VALID_CONFIG`, `T_APPLY_REJECTS_MALFORMED`, `T_APPLY_ATOMIC_SWAP_NO_DROP`, `T_APPLY_REPLACES_RULESET`, `T_LINK_PERSIST_ACROSS_LOADER_EXIT`, `T_TRUST_MODEL_FLEET_RELAXES_GATE`, `T_EXIT_CODE_9_ON_CONFIG_ERROR`. NEW fixture files: `tests/fixtures/config_valid.yaml`, `tests/fixtures/config_malformed.yaml`, possibly more per architect's schema choices. EDIT `tests/lib/common.sh` if new helpers needed (`apply_config()`, `wait_for_active_idx_flip()`). DO NOT edit existing 20 tests' bodies — they must still pass byte-equivalent invocations of `--allow <mac>` per the backward-compat contract.
+- **Reviewer**: 4-point triangulation + the brownfield 5th point `Existing behaviour preserved`. Special attention:
+  - **(1) MVP-2 invariants preserved**: §5.4 / §5.19 / §5.22 untouched in `strict` mode (default) — `[REGRESSION]` tag mandatory if ANY existing identity-gate check is bypassed when `XDPMF_TRUST_MODEL` is unset or set to `strict`.
+  - **(2) 20 existing ctests pass**: refactor moved files but didn't change behaviour. `[REGRESSION]` if any existing ctest fails or requires modification beyond path updates.
+  - **(3) Atomic apply ctest is real**: `T_APPLY_ATOMIC_SWAP_NO_DROP` must demonstrate concurrent traffic + reload without packet drop (not just "apply succeeded"). `[INVARIANT-VIOLATED]` if the test is theatrical (e.g., sequential apply-then-traffic).
+  - **(4) `LoaderError::ConfigError = 9`**: exactly one new enumerator line in loader.hpp (mirror MVP-2 Sec/Robust precedent). `[UNRELATED-EDIT]` if other lines in the enum body changed.
+  - **(5) `bpf_link__pin()` survival**: `T_LINK_PERSIST_ACROSS_LOADER_EXIT` must actually kill the loader and verify the filter is still enforcing on a fresh packet — not just "pin file exists on bpffs".
 
-## Open mechanism questions (architect decides; document in §5.25)
+## Human-gate decisions (NOT open for architect re-opening)
 
-### Q1: netns isolation mechanism
+These three were resolved at human gate based on `architecture-v2.md` open questions + project context. Architect documents the decision in §5.26 but does NOT re-explore the option space.
 
-**Option N1 (per-test netns)**: each `T_*.sh` test creates its own netns (`ip netns add xdpmf-test-${$}_${test_name}`), spins veth pair INSIDE the netns, runs loader + injects inside the netns, teardown nukes the netns. Strongest isolation; ~+0.5s per test for netns create/destroy.
+### HG1: YAML parser → custom ~150-LOC subset (Open Q #10 resolved)
 
-**Option N2 (shared-namespace pool)**: one netns per ctest invocation (created at suite start, destroyed at suite end); all tests use it. Lighter overhead; less isolation between tests (each test still has to clean its own veth pair).
+**Decision**: implement a custom subset YAML parser in `src/lib/yaml_subset.{cpp,hpp}` (or per architect's directory layout). Architect declares the accepted grammar in §5.26 and a §6.x TestStrategy entry; anything outside the subset → `ConfigError` exit 9 with a clear `unsupported YAML feature: <feature>` message.
 
-**Option N3 (setup_veth-level wrap)**: `tests/lib/common.sh setup_veth` transparently runs the veth-pair lifecycle inside a netns; test bodies stay byte-identical. The netns is per-`setup_veth` call. Architect-recommended path: keeps test bodies untouched, centralizes the netns logic in one place.
+**Rationale**: `cli.cpp:1-3` documents "zero non-standard deps" as a load-bearing project value (held across MVP-1 → MVP-2). yaml-cpp tags ~70KB .so + transitive libstdc++ dependency; vendored single-header alternatives (rapidyaml etc.) add ~5-10K LOC to the repo. Composite 6's schema is small — top-level map + `rules:` list of rule-maps + scalar values — and architect-controlled subset grammar IS a feature (validator can be sharper than full YAML). Synthesis recommendation (architecture-v2.md line 328) defaults to this option for the same reason.
 
-**Option N4 (keep PID-suffix)**: don't actually do netns; close the §7 item as "Path B was sufficient, Path A explicitly declined as overkill". Honest if architect determines netns isolation is theoretical-only on a single-user dev host.
+**What's left for architect to decide**: the exact accepted subset (must support top-level mapping, list-of-mappings, double-quoted string scalars, integer scalars, `null` for default values; MAY support comments, anchors, block scalars — architect picks YES/NO per construct and documents in §5.26 + §6.x).
 
-Architect picks. **N3** is the recommended default — minimum blast radius across existing tests. If architect picks N4, document why netns is unnecessary in practice (and update the §7 line 1428-1433 entry accordingly).
+### HG2: P0a (`bpf_link__pin()`) folded into MVP-3.1 (Open Q #12 resolved)
 
-### Q2: CMake-gen mechanism for `PIN_ROOT`
+**Decision**: implement P0a as part of this slice. Verification of the libbpf API behaviour across (loader exit → loader restart → `BPF_F_REPLACE` reattach) is covered by ctest `T_LINK_PERSIST_ACROSS_LOADER_EXIT`. If the API misbehaves at Phase B, escalate via the standard mint inline-merge / architect-amendment pattern (MVP-2 Sec/Robust precedent); do not carve out a separate preliminary cycle.
 
-The header `src/common/mac_filter.h:41` defines `#define XDPMF_BPFFS_ROOT "/sys/fs/bpf/xdpmacfilter"`. `tests/lib/common.sh:34` mirrors this as `PIN_ROOT=/sys/fs/bpf/xdpmacfilter`. The MVP-1.1C B3 fix added a comment marker; this slice replaces the manual mirror with codegen.
+**Rationale**: `bpf_link__pin()` is standard libbpf 1.x API actively used in production by Cilium and Katran; ABI stable since 5.7. Hidden assumption #4 in `architecture-v2.md` flags it as never-verified-on-our-code, but the ctest IS the verification. Carving a separate MVP-3.0.5 cycle for one API call + two ctests is ceremony without ROI; mint's Phase B peer-dialog + inline-merge has handled comparable surprises in 3 of 4 MVP-2 slices.
 
-**Option C1 (sed/awk extraction in CMake)**: CMake runs `execute_process(COMMAND sed -nE 's/.*XDPMF_BPFFS_ROOT[ \t]+"([^"]+)".*/\1/p' src/common/mac_filter.h)` at configure time, exports the value to a generated `tests/lib/pins.sh` companion (which `common.sh` sources). Simple, no extra build target.
+### HG3: `XDPMF_TRUST_MODEL` → single switch `strict|fleet` (Open Q #8 resolved)
 
-**Option C2 (C preprocessor extraction)**: `cpp -E -dD -I src/common src/common/mac_filter.h | grep XDPMF_BPFFS_ROOT`. More robust against header reformat but requires `cpp` invocation at configure time.
+**Decision**: one env var, two literal values. `XDPMF_TRUST_MODEL=strict` (or unset → default strict) preserves all MVP-2 identity-gate behaviour (§5.4 alien-program check + §5.19 O_PATH bpffs ops + §5.22 tag-check all enforced). `XDPMF_TRUST_MODEL=fleet` relaxes ONLY §5.4 alien-program check; §5.19 + §5.22 stay enforced in both modes. Unknown values → `ConfigError` exit 9 at startup with `unknown trust model: <value>` (fail-closed).
 
-**Option C3 (companion `.h.in` + `configure_file`)**: split the macro into a `mac_filter.h.in` template + `configure_file()` driven by a CMake variable; the variable is the source of truth, both the header AND the shell mirror are generated from it. Most "correct" but reorganizes the source-of-truth.
+**Rationale**: audit story is critical — one env var → one state, greppable in logs and Prometheus-alertable as `xdpmf_trust_model_label`. Per-axis (3 independent env vars → 2³=8 combinations) is over-engineered for the actual use-case (fleet operators think binary: "this VM is in trusted segment / not"). A+C architects converged on env-var; T narrowed to env-var-only. Asymmetric reversibility: single → multi is cheap to add later (additional override env vars on top); multi → single is breaking env-var surface change.
 
-**Option C4 (decline, keep manual mirror + comment marker)**: deem the MVP-1.1C B3 comment-marker sufficient; codegen is overkill for a single constant.
+**What's left for architect to decide**: stderr-logging policy on attach (suggested: always emit `xdpmacfilter: trust_model=<strict|fleet>` to stderr at attach so the operator + audit trail see the active mode); whether `T_TRUST_MODEL_FLEET_RELAXES_GATE` exercises the relax-path with a real alien-program fixture (Y/N).
 
-Architect picks. **C1** is the recommended pragmatic choice — solves the actual problem (silent drift if header is renamed) with minimum new infrastructure.
+## Open mechanism questions (architect decides; document in §5.26)
 
-### Q3: Version-string sync mechanism
+### Q1: Internal code reorg layout
 
-Currently:
-- `CMakeLists.txt:13` says `VERSION 0.1.0` (project version).
-- `src/loader/cli.cpp:21` says `constexpr std::string_view kVersion = "0.1.0";` (hardcoded in source).
-- `CHANGELOG.md` has entries `[0.1.0]`..`[0.2.2]`.
-- Loader's `--version` output: `xdpmacfilter 0.1.0` (stuck at the initial value across all subsequent MVP releases).
+`architecture-v2.md` line 155 specifies `src/loader/` → `src/lib/` + `src/cli/` with internal `xdpmf_internal` STATIC target. Architect picks the precise layout:
 
-The MVP-1.1C B4 OOS rationale was "CHANGELOG versions are documentary only; loader's compiled-in --version is independent and unchanged". Polish-2 closes the loop.
+- **Option R1 (minimum split)**: `src/lib/{loader.cpp,loader.hpp,raii.hpp}` (the BPF-facing code) + `src/cli/{cli.cpp,cli.hpp,main.cpp,apply.cpp,config.cpp}` (the user-facing code) + new `src/lib/config.cpp` for the parser. One static lib target `xdpmf_internal` from `src/lib/*`; CLI binary links it.
+- **Option R2 (three-way split)**: `src/lib/` (loader + raii) + `src/config/` (parser, validator, schema types) + `src/cli/` (argv + apply orchestrator). Two static targets (`xdpmf_internal` + `xdpmf_config`). Cleaner separation; one extra CMake target.
+- **Option R3 (object lib)**: `OBJECT` library target instead of `STATIC` — objects relinked into each binary at link time. Equivalent until MVP-3.4 exporter binary lands; defer-the-decision option.
 
-**Option V1 (project(VERSION) as source-of-truth)**: bump `CMakeLists.txt:13 VERSION 0.1.0` → `VERSION 0.2.3` (post-Polish-2). Generate a `version.h` (via `configure_file`) from `${PROJECT_VERSION}`. cli.cpp `#include "version.h"` and uses the generated constant. CHANGELOG entries (kept manually) document changes; CMake version is the binary-shipped truth.
+**Recommendation**: **R1** for cycle 1 (smallest disruption to existing ctest paths); promote to R2 if MVP-3.4 exporter binary needs it. `STATIC` over `OBJECT` (R3) — `STATIC` is conventional and exposes link-time correctness immediately.
 
-**Option V2 (CHANGELOG as source-of-truth)**: parse the latest `[X.Y.Z]` heading from CHANGELOG.md at CMake configure time (sed/awk), feed into `project(VERSION)`, propagate via `configure_file`. CHANGELOG becomes load-bearing for build.
+### Q2: Atomic apply mechanism — `ARRAY_OF_MAPS[2]` vs alternatives
 
-**Option V3 (decline, document the disconnect)**: keep the manual disconnect, update §5.21 B4 deferral entry to "permanent — versions stay split". Honest only if architect judges the sync not worth the build pipeline complexity.
+`architecture-v2.md` line 153 specifies outer `BPF_MAP_TYPE_ARRAY_OF_MAPS[2]` + inner `mac_allowlist` HASH × 2 + `active_idx` flip. Architect picks how the BPF program reads the active inner:
 
-Architect picks. **V1** is the recommended path — `project(VERSION)` is the canonical CMake idiom; `configure_file` is one new file; cli.cpp gains one `#include` swap.
+- **Option A1 (active_idx in separate ARRAY[1])**: dedicated `BPF_MAP_TYPE_ARRAY` of size 1 holds the current active index; BPF program reads it, then `bpf_map_lookup_elem(&rulesets_outer, &active_idx)` to get the inner FD, then looks up the MAC in the inner. Atomic swap = single userspace update to the active_idx ARRAY[0].
+- **Option A2 (active_idx as flag in inner)**: each inner map has a sentinel key holding "I am active"; BPF program iterates outer slots and picks the active one. More complex on hot-path; rejected unless A1 has a verifier issue.
+- **Option A3 (`BPF_F_REPLACE` direct on inner map FD)**: userspace replaces the entire inner map's contents via `bpf_map_update_batch`; no outer map needed. **Pro**: simpler structure. **Con**: not actually atomic across multiple keys (interleaved with concurrent reads on hot-path); fails `T_APPLY_ATOMIC_SWAP_NO_DROP` if traffic hits the half-applied state.
 
-### Q4: T_CLI_HELP_VERSION test interaction
+**Recommendation**: **A1**. A2 is too clever; A3 is not atomic across keys (defeats Composite 6's promise).
 
-`tests/T_CLI_HELP_VERSION.sh` currently asserts `--version` matches ERE `xdpmacfilter.*[0-9]+\.[0-9]+\.[0-9]+`. This is loose enough to survive the version change (still passes for `xdpmacfilter 0.2.3`). But: should the test also assert version-monotonicity (e.g., reject `0.1.0` as too-old after Polish-2)?
+### Q3: `--allow <mac>` backward-compatibility semantics
 
-**Option T1 (no test edit)**: regex is forward-compatible; the test passes as-is. Polish-2 doesn't touch the test.
+`architecture-v2.md` line 154 says "existing `--allow <mac>` flag kept for backward compatibility (one-rule shorthand that synthesizes a single-rule config in-memory)". Architect picks:
 
-**Option T2 (strict assertion)**: test asserts `--version` equals a specific value (e.g., `xdpmacfilter 0.2.3`). Forces tester to update the test every release — couples test maintenance to version bumps. Probably overkill.
+- **Option BC1 (silent shorthand)**: `--allow AA:BB:CC:DD:EE:FF` synthesizes an in-memory single-rule YAML `{interface: <inferred>, default_action: drop, rules: [{id: 0, action: pass, match: {mac: AA:BB:CC:DD:EE:FF}}]}` and feeds it through the same apply path. No warning. Operator UX unchanged from MVP-2.
+- **Option BC2 (deprecation warning)**: same as BC1 + `stderr` warning `--allow is deprecated; use 'apply -f <file>'; will be removed in MVP-3.5`. Honest about the path forward; slight noise in MVP-2 ops scripts.
+- **Option BC3 (drop)**: refuse `--allow` with `error: --allow removed; use 'apply -f <file>'` + exit 1. Breaks every existing ctest invocation; only acceptable if every existing ctest is rewritten to use the new surface (huge scope creep).
 
-Architect picks. **T1** is the floor; **T2** only if architect wants version-regression protection.
+**Recommendation**: **BC1** through MVP-3.4. Existing 20 ctests pass byte-identically; the `apply -f` surface gets exercised separately by the new MVP-3.1 ctests. Promote to BC2 at MVP-3.4 once exporter binary lands and operator docs converge on apply-only.
 
-## Scope (4 items — anything else is OOS)
+### Q4: Apply subcommand grammar
 
-### Item 1 — netns isolation (per architect Q1)
+`architecture-v2.md` line 154 sketches `xdpmacfilter apply -f /etc/xdpfilter/<iface>.yaml --iface <iface>`. Architect picks the exact CLI surface:
 
-**Where**: `tests/lib/common.sh` (the heavy edit — `setup_veth`/`cleanup_veth` and any helper functions involved); possibly `tests/T_BPFFS_ROOT_SYMLINK.sh` and `tests/T_MODE_NATIVE_UNSUPPORTED.sh` (the two tests that don't use the standard veth fixture — netns may or may not apply).
+- **Option G1 (subcommand)**: `xdpmacfilter apply -f <file> --iface <iface>` (verb-first); MVP-2 invocations stay verb-less (`xdpmacfilter --allow ...`, `xdpmacfilter bypass`, `xdpmacfilter detach`). Subcommand `apply` is the first one; `bypass` and `detach` become subcommands too in a future cycle for consistency.
+- **Option G2 (flag form)**: `xdpmacfilter --apply -f <file> --iface <iface>`; all MVP-2 flag-form invocations stay flag-form. No subcommand syntax introduced.
+- **Option G3 (full subcommand from day 1)**: rename `bypass` / `detach` to subcommands now (`xdpmacfilter bypass --iface ...` instead of `xdpmacfilter bypass ...` — already subcommand-ish). Consistent UX from MVP-3.1; minor surface churn for the two existing MVP-2 subcommands.
 
-**Action**: per architect's Q1 mechanism choice. If Q1 = N3, `setup_veth` becomes a thin wrapper that creates a netns + spawns the veth pair inside it; test bodies stay byte-identical. If Q1 = N4 (decline), update design.md §7 line 1428-1433 to "permanent decline" and skip this item.
+**Recommendation**: **G1**. Pragmatic — `apply` is naturally a subcommand (it has its own flags `-f` / `--iface`); leaving the existing MVP-2 surface alone preserves backward compat (HG-aligned). G3 is the "right" long-term shape but costs MVP-2 ops-script breakage for a cosmetic win.
 
-### Item 2 — CMake-gen `PIN_ROOT` (per architect Q2)
+### Q5: Schema versioning
 
-**Where**: `CMakeLists.txt` (configure-time codegen step), `tests/lib/common.sh:33-34` (replace hardcoded mirror with sourced value), possibly `tests/CMakeLists.txt` for wiring.
+`architecture-v2.md` line 332 recommends `schema_version: 1` from day 1. Architect confirms or revises:
 
-**Action**: per Q2 mechanism choice. If Q2 = C1, add a `configure_file` or `file(GENERATE)` step that emits `tests/lib/pins.sh` with `PIN_ROOT="<extracted value>"`; common.sh sources it. Verify the generated value byte-equals the current hardcoded `/sys/fs/bpf/xdpmacfilter`.
+- **Option SV1 (mandatory top-level field)**: every config file MUST start with `schema_version: 1`; absent or unknown → `ConfigError` exit 9. Locks in evolvability from cycle 1.
+- **Option SV2 (optional, default 1)**: `schema_version` is optional; if absent, treated as `1`; if present, must match supported list. Friendlier to early adopters writing minimal configs.
+- **Option SV3 (defer)**: no schema versioning in cycle 1; introduce when first breaking change happens (MVP-3.3+). Risk: breaking change has no clean migration path.
 
-### Item 3 — Version-string sync (per architect Q3)
+**Recommendation**: **SV2**. Best of both — supports minimal configs in docs and tests, but mandatory once a `schema_version` is present means the field is real (not advisory). Future breaking change at MVP-3.3+ ships as `schema_version: 2` with `1` still accepted.
 
-**Where**: `CMakeLists.txt:13` (bump VERSION), `src/loader/cli.cpp:21` (replace hardcoded constant), new `include/version.h.in` or similar template per Q3.
+### Q6: BPF map definitions placement
 
-**Action**: per Q3 mechanism choice. If Q3 = V1, bump `project(VERSION)` to `0.2.3`, add `configure_file(include/version.h.in include/version.h)`, cli.cpp includes the generated header. Verify `--version` output now reads `xdpmacfilter 0.2.3`.
+`src/common/mac_filter.h` will gain new map definitions. Architect picks:
 
-### Item 4 — `inject_runt.py:37` inline comment fix (MVP-1.1C reviewer advisory)
+- **Option M1 (extend `mac_filter.h`)**: all new maps (`rulesets_outer`, `active_idx_map`, two inner `mac_allowlist` slots) declared in the same header. Single source of truth; header gets larger.
+- **Option M2 (new `config_maps.h`)**: split config-layer map declarations into a sibling header. Separation of concerns; one new file.
 
-**Where**: `tests/inject/inject_runt.py:37` (a single inline comment line).
+**Recommendation**: **M1** for cycle 1; promote to M2 at MVP-3.4 when `rules` / `action_table` maps add more surface.
 
-**Action**: rewrite the comment to match the corrected docstring + actual bytes. The docstring (lines 14-19) says "13 bytes — full 6-byte dst MAC + full 6-byte src MAC + 1 ethertype byte"; the inline comment at :37 currently says "13 bytes: complete 6-byte dst MAC + partial src MAC" (wrong — src is complete, ethertype is partial). One-line edit.
+## Scope (6 items — anything else is OOS)
+
+### Item 1 — Internal code reorg (per Q1)
+
+**Where**: `src/loader/` → `src/lib/` + `src/cli/` per architect's Q1 layout. `CMakeLists.txt` rewires source paths. `tests/lib/common.sh` may need binary-path updates (the `xdpmacfilter` binary path doesn't move — output stays `build/src/cli/xdpmacfilter` or wherever; just CMake source paths change).
+
+**Action**: file-move commit first (Phase B git hygiene if possible), then logic additions. New `xdpmf_internal` CMake static target. Zero behaviour change in this item; the existing 20 ctests must pass after this item alone.
+
+### Item 2 — YAML schema + custom parser + validator (per Q5 + HG1)
+
+**Where**: NEW `src/lib/yaml_subset.{cpp,hpp}` (parser) + `src/lib/config.{cpp,hpp}` (schema types + validator) per Q1 layout. NEW `tests/fixtures/config_valid.yaml` + `tests/fixtures/config_malformed.yaml` + 1-2 more variants per architect.
+
+**Action**: implement the subset YAML parser + the typed config schema (struct `xdpmf_config { string iface; default_action; vector<rule>; }`); validator catches schema mismatches with structured error reporting. New `LoaderError::ConfigError = 9` enum addition to `loader.hpp`. Architect documents accepted subset + schema in §5.26 + §6.x.
+
+### Item 3 — Atomic apply via `ARRAY_OF_MAPS` (per Q2 + Q6)
+
+**Where**: EDIT `src/bpf/mac_filter.bpf.c` (extend with outer `rulesets_outer` ARRAY_OF_MAPS + inner-deref read pattern); EDIT or extend `src/common/mac_filter.h` per Q6.
+
+**Action**: BPF program reads `active_idx`, then dereferences `rulesets_outer[active_idx]` for the inner MAC map, then looks up the source MAC. Userspace `apply` orchestrator writes the new ruleset to the inactive inner slot, then flips `active_idx` atomically. One-deep rollback history (old inactive inner stays populated until next apply overwrites it).
+
+### Item 4 — Apply subcommand + `--allow` backward-compat (per Q3 + Q4)
+
+**Where**: NEW `src/cli/apply.{cpp,hpp}` (apply orchestrator); EDIT `src/cli/cli.cpp` (argv parser gains the subcommand grammar); existing `--allow` handler synthesizes an in-memory config and feeds it through the apply path per BC1.
+
+**Action**: argv parser dispatches `apply` subcommand to apply orchestrator; orchestrator parses config, validates, applies via Item 3 mechanism. `--allow <mac>` invokes the same code path with a synthesized config.
+
+### Item 5 — `bpf_link__pin()` + idempotent reattach (P0a per HG2)
+
+**Where**: EDIT `src/lib/loader.cpp` (post-attach: pin the link at `${XDPMF_BPFFS_ROOT}/<iface>/link`; on attach entry: detect existing pin via `bpf_obj_get` and use `BPF_F_REPLACE` for the new program load). EDIT `src/lib/loader.cpp` detach() to unpin before detach. New helper `pin_link()` / `is_pin_present()` in anon namespace.
+
+**Action**: implement pin lifecycle + idempotent reattach. Stderr discipline: on idempotent reattach, log `xdpmacfilter: replacing existing program on <iface>` so the operator sees the path. `T_LINK_PERSIST_ACROSS_LOADER_EXIT` exercises the survival contract.
+
+### Item 6 — `XDPMF_TRUST_MODEL` env var (per HG3)
+
+**Where**: EDIT `src/lib/loader.cpp` (parse env var at attach entry; gate the §5.4 alien-program check on `trust_model == strict`). EDIT `src/lib/identity.cpp` if §5.4 check lives there. Stderr-log active trust-model at attach (per Q3 sub-decision).
+
+**Action**: parse env var at start of `attach()`; default `strict` if unset; reject unknown values with `ConfigError` exit 9 + clear message. Gate §5.4 alien-program check on `strict`. §5.19 + §5.22 unconditional (both modes). New ctest `T_TRUST_MODEL_FLEET_RELAXES_GATE` exercises the relax-path.
+
+### Tests (5-7 per `architecture-v2.md` line 158)
+
+- **`T_APPLY_VALID_CONFIG`** — parse + apply a valid YAML; assert MAC filtering matches the rule.
+- **`T_APPLY_REJECTS_MALFORMED`** — malformed YAML → exit 9 + clear stderr.
+- **`T_APPLY_ATOMIC_SWAP_NO_DROP`** — concurrent traffic + apply; assert no packet drop during swap. **Load-bearing for Composite 6 promise** — this test makes or breaks the architectural story.
+- **`T_APPLY_REPLACES_RULESET`** — second apply with different rules replaces first; old rules no longer match.
+- **`T_LINK_PERSIST_ACROSS_LOADER_EXIT`** — apply → kill loader → send traffic → assert filter still enforces (P0a survival per HG2).
+- **`T_TRUST_MODEL_FLEET_RELAXES_GATE`** — alien-program fixture + `XDPMF_TRUST_MODEL=fleet`; assert §5.4 check is bypassed; same fixture + `strict`; assert §5.4 fires.
+- **`T_EXIT_CODE_9_ON_CONFIG_ERROR`** — bad `XDPMF_TRUST_MODEL=garbage` OR bad config → exit 9.
 
 ## Out of scope (explicit)
 
-- **Any behaviour change to loader CLI surface** — `--help` / `--version` semantics + exit codes unchanged.
-- **Any new CLI flag** (e.g., `--no-version-probe`, `--bpf-object-path`) — explicitly fenced from MVP-2 Robust additions; stays MVP-3+.
-- **CHANGELOG version-policy change** — Polish-2 syncs the loader binary version with CHANGELOG; the policy of "manual CHANGELOG editing per slice" is unchanged.
-- **MVP-3 feature work** — no new features. Polish-2 is pure cleanup.
-- **README updates** — README's kernel-floor + dependency list is current per MVP-2 Robust; no need to touch unless Q1 netns choice affects test-run instructions.
-- **`tests/inject/inject_runt.py` body rewrite** — Item 4 is comment-only; do NOT touch the bytes themselves.
+- **L3 src-CIDR axis** — MVP-3.2 slice (lands as in-config rule type, NOT as new CLI flag). `architecture-v2.md` dependency graph line 217.
+- **`systemd xdpfilter@.service` template + Ansible playbook** — MVP-3.3 slice. `architecture-v2.md` line 226.
+- **Per-rule counters + `xdpmf-exporter` binary + Prometheus** — MVP-3.4 slice. Composite 6 cycle 1 keeps existing global PERCPU_ARRAY stats untouched (`STAT_PASS` / `STAT_DROP` per §5.23).
+- **Public `libxdpmf.so.0` SONAME-committed library** — MVP-3.6+ optional branch. The MVP-3.1 internal reorg makes this future promotion mechanical but does NOT ship it.
+- **`xdpmfd` daemon** — MVP-3.6+ optional branch (only if measured reload cadence demands sub-second).
+- **AF_XDP / mirror / rate-limit / redirect actions** — MVP-3.8+ deferred.
+- **JSON structured logs** — MVP-3.5 slice.
+- **sFlow ringbuf emitter** — MVP-3.6 (conditional on hw-sFlow absence).
+- **Binary rename `xdpmacfilter` → `xdpfilter`** — MVP-3.12 slice. Keep `xdpmacfilter` name throughout MVP-3.1.
+- **Automatic kernel tripwire (C.5)** — **KILLED** (not deferred). `architecture-v2.md` line 297 — fail-open inverts allowlist policy; manual bypass primitive in MVP-3.4 covers ops need.
+- **Per-axis trust model env vars** — explicitly fenced by HG3. Single switch only.
+- **Full YAML parser (yaml-cpp, rapidyaml)** — explicitly fenced by HG1. Custom subset only.
+- **Schema versions other than `1`** — Q5: `1` only in cycle 1; `schema_version: 2` is for future breaking changes.
+- **Multi-interface config in one file** — out of scope; one file = one interface (`/etc/xdpfilter/<iface>.yaml` per `architecture-v2.md` line 43).
+- **Hot-reload signal handler** (e.g., `SIGHUP` triggers re-read of config) — apply happens via re-invoking `xdpmacfilter apply -f`, not via signals. Daemon-style reload is the MVP-3.6+ daemon branch.
 
 ## Definition of done
 
-- §5.25 amendment in `design.md` documenting Q1/Q2/Q3/Q4 decisions with rationale
-- §7 OOS — all four Polish-2 items moved from deferred to shipped (or explicitly declined per architect's Q-options)
-- Per-item file changes per scope above
-- 20 ctest entries still pass (or legitimately SKIP per §6.5); the netns refactor is the main regression risk
+- `§5.26 MVP-3.1: config-first foundation` amendment in `design.md` documenting Q1-Q6 decisions with rationale + HG1/HG2/HG3 captured as inherited human-gate decisions
+- `§4.1` exit-code table: new row 9 `ConfigError` (active, not reserved)
+- New `§6.x TestStrategy` entries for the 5-7 new ctests
+- `§6.5 Preserved invariants` updated: MVP-2 §5.4/§5.19/§5.22 identity gates remain enforced in `strict` mode (default); 20 existing ctests pass byte-equivalent invocations
+- `§7 OOS`: Composite 6 components moved from deferred to shipped
+- `src/loader/` reorg complete per Q1 (paths under `src/lib/` + `src/cli/`); existing 20 ctests pass after reorg alone (verify before adding logic)
+- `loader.hpp` gains exactly one new line: `ConfigError = 9,` — verifiable via `git diff`
+- 5-7 new ctests pass; **`T_APPLY_ATOMIC_SWAP_NO_DROP` and `T_LINK_PERSIST_ACROSS_LOADER_EXIT` are the load-bearing pair** (Composite 6 promise + P0a verification)
+- 20 existing ctests still pass (or legitimately SKIP per §6.5)
 - `XDPMF_SANITIZERS=ON` build clean
-- Loader's `--version` reflects the new version (per Q3)
+- `xdpmacfilter --version` reports `xdpmacfilter 0.3.0` (bump from 0.2.3 to mark MVP-3.1; CMake `project(VERSION)` per MVP-2 Polish-2 V1 mechanism)
+- `CHANGELOG.md` entry `[0.3.0] - 2026-05-NN` (Keep-a-Changelog format per MVP-1.1C precedent)
 - `mint/review.md` round-1 verdict = `pass`
 - One git commit per phase boundary per workflow B
 
 ## Dependencies
 
-No new system dependencies. `ip netns` is `iproute2` (already required for `ip link`). `sed`/`awk` POSIX. `configure_file` is core CMake. No new C++ libraries.
+No new system dependencies. `bpf_link__pin` is libbpf 1.0+ (kernel ≥ 5.7; well below floor 5.15). `ARRAY_OF_MAPS` is kernel ≥ 4.12 (well below floor). YAML parsing is in-tree (custom subset per HG1). No new C++ libraries.
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 
 ```yaml
+mode: brownfield
 packs:
   architect:  []
   impl:       [lang/cpp.md, lang/cmake.md]

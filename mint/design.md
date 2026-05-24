@@ -179,6 +179,7 @@ Exit codes (definitive):
 | 6 | Permission denied (need CAP_BPF / CAP_NET_ADMIN — typically run as root) |
 | 7 | Kernel too old: `uname()`-reported kernel version is below the supported floor (5.15) — fast-fail at the head of `attach()`/`detach()` BEFORE any libbpf BPF_PROG_LOAD (added §5.24 Q1 = Option U + Q3 = Option B — `LoaderError::KernelUnsupported`) |
 | 8 | Path refused: bpffs root or per-iface entry exists as a symlink (`ELOOP` on `O_PATH|O_DIRECTORY|O_NOFOLLOW` open) — refusing to operate on attacker-controllable path (added §5.22 Q3 — `LoaderError::PathRefused`) |
+| 9 | Config error: YAML parse failure, schema validation failure, or invalid `XDPMF_TRUST_MODEL` value — any config-layer rejection at startup or apply time (added §5.26 — `LoaderError::ConfigError`, MVP-3.1) |
 
 **MVP-1.1B note**: the 4-state §5.4 probe does NOT introduce any new
 exit codes. The new state (d) — "no XDP attached AND pin_dir present"
@@ -207,6 +208,25 @@ now active (was reserved in MVP-2 Sec). Mechanism: `uname(2)` + parse
 on fail, throw `LoaderError::KernelUnsupported`. Probe fires at the
 head of both `attach()` and `detach()` (Q3 Option B symmetry). See §5.24
 for full rationale.
+
+**MVP-3.1 note** (per §5.26 — Composite 6 config-first foundation): row
+**9 = `ConfigError`** is added (was free; previously reserved by §5.23
+Q2 commentary as "stays free unless audit-signal value clearly beats
+EOPNOTSUPP false-positive risk" — that condition is now met by the
+config-layer use case). Two trigger paths: (a) `XDPMF_TRUST_MODEL` env
+var set to anything other than `strict` / `fleet` (unset → defaults to
+`strict`); fires at the head of `attach()` BEFORE any kernel call so
+the failure is fast and unambiguous. (b) YAML parse / schema validation
+failure during `apply -f <file>`; fires inside the new apply
+orchestrator. Both paths set `LoaderError::ConfigError` (exit 9) and
+emit a one-line stderr starting with `xdpmacfilter: config error:`.
+See §5.26 for full rationale and the per-trigger error message
+catalogue. The exit-code table is contiguous-from-2 (`{2,3,4,5,6,7,8,9}`).
+
+**MVP-3.1 CLI grammar note** (per §5.26 Q4 = G1): the grammar block at
+the top of §4.1 gains a third subcommand `apply -f <file> --iface
+<iface>`. `attach` and `detach` are unchanged. The full post-§5.26
+grammar is documented in §5.26 Interfaces sub-section.
 
 Stdout: human-readable status on success ("attached prog id N to <iface>",
 "detached prog id N from <iface>"). Stderr: errors. No JSON, no machine
@@ -254,6 +274,7 @@ enum class LoaderError : int {
     Permission         = 6,
     KernelUnsupported  = 7,   // §5.24 Q1: uname-based kernel-version probe failed
     PathRefused        = 8,   // §5.22 Q3: bpffs root or per-iface entry is a symlink
+    ConfigError        = 9,   // §5.26: invalid XDPMF_TRUST_MODEL OR YAML parse/schema failure (MVP-3.1)
 };
 
 }  // namespace xdpmf
@@ -295,6 +316,31 @@ uname-based (Q1 Option U); fires at the head of both `attach()` and
 rationale. After this addition the `LoaderError` enum is
 contiguous-from-2 (`{2,3,4,5,6,7,8}`), so the exit-code table is
 fully populated through code 8.
+
+**MVP-3.1 note** (per §5.26 — Composite 6): the `LoaderError` enum
+gains exactly **one** more enumerator — `ConfigError = 9`. Same
+controlled relaxation pattern as `PathRefused = 8` / `KernelUnsupported
+= 7` (single-line `loader.hpp` diff confined to the enum body; no new
+functions, no new types, no new top-level symbols, no ABI break for
+existing call sites). Reviewer's `loader.hpp`-invariant check accepts a
+single-line `git diff` confined to the enum body; any other diff to
+`loader.hpp` outside this line IS a constraint violation. The
+`attach()`/`detach()` signatures above remain byte-identical. The new
+`apply()` orchestrator entry-point in `src/cli/apply.{hpp,cpp}` is CLI-side,
+NOT loader.hpp surface — see §5.26 Interfaces sub-section. After this
+addition the `LoaderError` enum is contiguous-from-2 (`{2,3,4,5,6,7,8,9}`),
+exit-code table fully populated through code 9.
+
+**MVP-3.1 file relocation note** (per §5.26 Q1 = R1): `loader.hpp` and
+`loader.cpp` physically move from `src/loader/` to `src/lib/`. This is a
+mechanical relocation — content of `loader.hpp` (excluding the one new
+enumerator line above) is byte-identical pre/post move. The
+`#include "loader.hpp"` resolution from cli.cpp / main.cpp is preserved
+via CMake `target_include_directories` rewiring; no `#include` line
+changes in dependents. Reviewer's `loader.hpp`-invariant check
+considers a file-rename (`git diff -M`) with body-diff exactly one line
+(the new enumerator) as compliant; any body diff beyond that line is a
+constraint violation.
 
 ### 4.4 Observability (no API, just contract)
 
@@ -3431,3 +3477,1094 @@ Evidence: `mint/task-brief.md` MVP-2 Polish-2 brief (Items 1-4 + Q1-Q4); §7 OOS
 - **No `inject_runt.py` body / bytes rewrite** — brief explicit OOS for Item 4; only the inline comment at `:37` touched. Byte sequence + `socket.send()` + Python imports all UNCHANGED.
 - **No `cpp -E` / `string(REGEX MATCH)` / `.h.in` codegen alternatives** (Q2 C2/C3 rejected) — sed extraction is chosen; impl MAY swap to `file(READ)` + `string(REGEX MATCH)` for portability, externally-observable result invariant.
 - **No `CHANGELOG.md`-as-source-of-truth (Q3 V2 rejected)** — CHANGELOG documents the build, not gates it. `project(VERSION)` stays canonical CMake source-of-truth.
+
+### 5.26 MVP-3.1: config-first foundation (Composite 6 cycle 1, 2026-05-24) — amendment block
+
+Append-only amendment landing **Composite 6 — Config-first foundation**
+per `mint/architecture-v2.md` lines 147–168 (round-2 rework). This is
+the **first MVP-3 slice**, the **largest mint slice to date**
+(~250-300 LOC source + ~120 LOC test, 5-7 ctests; ~3× MVP-2 Sec / Perf /
+Robust), and the **architectural foundation** for the long-horizon
+system: every byte of cycle-1 surface is load-bearing through MVP-3.N
+(zero deprecation work allowed). With §5.26 shipped, MVP-2 is fully
+closed and the project enters MVP-3 territory.
+
+Six interlocking pieces land together (deliberately bundled — carving
+them apart creates the throwaway surface Composite 6 was selected to
+avoid):
+
+| # | Where | One-line |
+|---|---|---|
+| 1 | `src/loader/` → `src/lib/` + `src/cli/` (per Q1 R1 minimum split + STATIC `xdpmf_internal`) | Mechanical relocation; zero behaviour change. Existing 20 ctests pass after this item alone (commit-1 boundary). |
+| 2 | NEW `src/lib/yaml_subset.{cpp,hpp}` + NEW `src/lib/config.{cpp,hpp}` (per HG1 custom subset + Q5 SV2 + Q-HG1 accepted grammar) | Custom ~150-LOC YAML parser + typed config validator. `LoaderError::ConfigError = 9` new enumerator. |
+| 3 | EDIT `src/bpf/mac_filter.bpf.c` (extend with `ARRAY_OF_MAPS[2]` outer + `active_idx` ARRAY[1] + per-slot `defaults` ARRAY[2] + inner-deref read pattern); EDIT `src/common/mac_filter.h` (per Q6 M1: new map name constants + ruleset count) | Atomic apply via Q2 A1 mechanism. Single u32 `active_idx` write = atomic ruleset+default swap. |
+| 4 | NEW `src/cli/apply.{cpp,hpp}` (apply orchestrator); EDIT `src/cli/cli.cpp` (Q4 G1 subcommand grammar) | `xdpmacfilter apply -f <file> --iface <iface>` subcommand. `--allow <mac>` per Q3 BC1 synthesizes in-memory config and feeds the same orchestrator. |
+| 5 | EDIT `src/lib/loader.cpp` (post-attach: pin link at `${XDPMF_BPFFS_ROOT}/<iface>/link`; on attach entry: detect existing pin → idempotent reattach; on detach: unpin before detach) | P0a per HG2. `T_LINK_PERSIST_ACROSS_LOADER_EXIT` is the survival contract. |
+| 6 | EDIT `src/lib/loader.cpp` (parse `XDPMF_TRUST_MODEL` env var at attach entry; gate §5.4 alien-program check on `strict`; stderr-log active mode unconditionally) | Per HG3. `strict` (default) preserves all MVP-2 identity-gate behaviour; `fleet` relaxes §5.4 ONLY. §5.19 + §5.22 stay enforced in both modes. |
+
+#### Inherited human-gate decisions (closed BEFORE architect — NOT re-opened)
+
+**HG1 — YAML parser = custom ~150-LOC subset** (Open Q #10 resolved):
+the project's "zero non-standard deps" load-bearing value (per
+`cli.cpp:1-3`) rules out yaml-cpp (70KB .so + transitive libstdc++) and
+vendored single-header alternatives (rapidyaml etc., +5-10K LOC). The
+accepted subset grammar is architect-controlled (see §5.26 Q-HG1
+sub-section below); anything outside the subset → `ConfigError` (exit 9)
+with `unsupported YAML feature: <feature>` stderr.
+
+**HG2 — P0a (`bpf_link__pin()`) folded into MVP-3.1** (Open Q #12
+resolved): `bpf_link__pin()` is standard libbpf 1.x API (Cilium /
+Katran production use; ABI stable since 5.7). `T_LINK_PERSIST_ACROSS_LOADER_EXIT`
+IS the verification of the libbpf API behaviour. If the API misbehaves
+at Phase B, the standard mint inline-merge / architect-amendment
+pattern (MVP-2 Sec/Robust precedent) handles it; no separate
+preliminary cycle is carved.
+
+**HG3 — `XDPMF_TRUST_MODEL` = single switch `strict|fleet`** (Open Q
+#8 resolved): one env var, two literal values. `strict` (unset →
+default `strict`) preserves all MVP-2 identity-gate behaviour
+(§5.4 alien-program check + §5.19 O_PATH bpffs ops + §5.22 tag-check
+all enforced). `fleet` relaxes ONLY the §5.4 alien-program check;
+§5.19 + §5.22 stay enforced in both modes. Unknown values →
+`ConfigError` exit 9 at startup with `unknown trust model: <value>`
+(fail-closed). Audit story: one env var → one state, greppable in
+logs / Prometheus-alertable as `xdpmf_trust_model_label`. Asymmetric
+reversibility: single → multi is cheap to add later (additional
+override env vars on top); multi → single is a breaking surface
+change.
+
+#### Q1 decision — Internal code reorg = **R1 (minimum split) + STATIC** — because
+
+**Choice**: `src/loader/*` relocates to two directories:
+- `src/lib/`  — `loader.{cpp,hpp}`, `raii.hpp`, `yaml_subset.{cpp,hpp}` (NEW), `config.{cpp,hpp}` (NEW)
+- `src/cli/`  — `cli.{cpp,hpp}`, `main.cpp`, `apply.{cpp,hpp}` (NEW)
+- `src/common/` and `src/bpf/` UNCHANGED locations.
+
+One new CMake STATIC library target `xdpmf_internal` aggregates all
+`src/lib/*.cpp` (loader + config + yaml). The `xdpmacfilter` binary
+target moves to `src/cli/CMakeLists.txt` and links `xdpmf_internal`.
+No installed headers; no SONAME; no public ABI surface.
+
+**Rationale** (R1 vs R2 vs R3):
+
+- R2 (three-way split: `src/lib/` + `src/config/` + `src/cli/`, two
+  static targets) is cleaner separation but adds a CMake target with
+  zero current consumer benefit; promotion R1 → R2 is a `git mv` +
+  one CMake line when MVP-3.4's exporter binary lands. Defer the cost
+  to when the value materializes.
+- R3 (OBJECT lib) is equivalent until a second binary appears; STATIC
+  exposes link-time correctness immediately (unresolved symbol → link
+  fail at lib-build time, not at first consumer link). STATIC is the
+  conventional choice and matches the brief recommendation.
+- `yaml_subset` + `config` live under `src/lib/` (not `src/cli/`)
+  because their consumer is `apply.cpp` (in `src/cli/`) — inverting
+  the dependency would re-create the M1 backwards-layer that §5.21 A1
+  closed in MVP-1.1C.
+
+**Identity helpers** (§5.19 + §5.22 anon-namespace code) STAY inside
+`loader.cpp`'s anon namespace; no separate `identity.{cpp,hpp}` is
+introduced in this cycle. Brief Item 6 said "EDIT `src/lib/identity.cpp`
+IF §5.4 check lives there" — by Q1 R1 minimum-split discipline, it
+doesn't. Promotion to an `identity` sub-module is MVP-3.4+ work (when
+per-rule counter machinery may pressure the anon namespace).
+
+**`xdpmacfilter` binary placement**: build artifact at
+`${CMAKE_BINARY_DIR}/src/cli/xdpmacfilter` (was `build/src/loader/xdpmacfilter`).
+`tests/lib/common.sh:LOADER_BIN` updates to the new path; this is
+the only test-infrastructure path change. The binary NAME stays
+`xdpmacfilter` (per brief §1 explicit OOS: `xdpmacfilter → xdpfilter`
+rename is MVP-3.12; architecture-v2.md Open Q #11 resolved at
+human-gate-pre-architect to KEEP `xdpmacfilter`).
+
+#### Q2 decision — Atomic apply mechanism = **A1 (active_idx in separate `ARRAY[1]`)** — because
+
+**Choice**: BPF program reads a dedicated `BPF_MAP_TYPE_ARRAY` of size
+1 holding the current active inner-map index (`__u32`, values {0, 1}),
+then performs `bpf_map_lookup_elem(&rulesets_outer, active_idx_ptr)` to
+obtain the inner-map fd, then performs `bpf_map_lookup_elem(inner,
+&src_mac)` for the actual MAC check. Userspace atomic-swap = single
+`bpf_map_update_elem(active_idx_map, &zero, &new_idx, BPF_ANY)` —
+atomicity of the `__u32` write is kernel-guaranteed for aligned word
+stores on all supported architectures.
+
+**Rationale** (A1 vs A2 vs A3):
+
+- A2 (active-flag-as-sentinel-key in each inner map): BPF program
+  would iterate outer slots and pick the active one. Adds branch +
+  lookup on every hot-path packet; A1 has one extra `bpf_map_lookup_elem`
+  AND lets the verifier optimize the inner-deref pattern
+  (well-trodden Cilium-style). A2 is "too clever".
+- A3 (`BPF_F_REPLACE` direct on inner via `bpf_map_update_batch`): NOT
+  atomic across multiple keys. `bpf_map_update_batch` issues per-key
+  syscalls (or kernel-internal per-key updates with libbpf 1.1+ batch
+  ops); a concurrent BPF read between two key-update transactions
+  sees a half-applied state. Defeats T_APPLY_ATOMIC_SWAP_NO_DROP's
+  promise. Hard-rejected.
+- A1 has one correctness gotcha: the BPF program MUST handle the case
+  where `bpf_map_lookup_elem(&rulesets_outer, &active_idx)` returns
+  NULL (verifier-required NULL check on map-of-maps lookup). Treat
+  NULL as "drop with STAT_DROP_DENY" (defensive; never reachable in
+  practice because userspace populates both outer slots at first
+  attach). See "BPF program flow" sub-section below.
+
+**Race window analysis** (architecture-v2.md line 330 risk row,
+mitigated): can the `active_idx` flip happen BETWEEN the BPF
+program's `bpf_map_lookup_elem(&active_idx_map, &zero)` and the
+subsequent `bpf_map_lookup_elem(&rulesets_outer, &active_idx)`? Yes
+(BPF program is preemption-disabled on its CPU but userspace
+`bpf_map_update_elem` is not blocked by it on other CPUs). Consequence
+is benign: the program reads `active_idx == 0`, looks up
+`rulesets_outer[0]` (OLD inner — valid pre-swap ruleset). OR reads
+`active_idx == 1` POST-flip, looks up `rulesets_outer[1]` (NEW inner —
+valid post-swap ruleset). Either way the program sees a consistent
+ruleset; no half-applied state is visible. The new inner is FULLY
+populated BEFORE the flip (userspace writes inactive slot then flips),
+so even the post-flip read hits a complete ruleset.
+
+#### Q2-extension — `default_action` participates in atomic swap
+
+The schema's `default_action` field (drop / pass) MUST swap atomically
+with the inner ruleset. A naive single `defaults_map = ARRAY[1]` written
+BEFORE the `active_idx` flip would expose a gap where the NEW default
+applies to the OLD inner (between defaults-write and flip), potentially
+allowing OR dropping traffic the OLD ruleset would have decided
+oppositely.
+
+**Mechanism**: `defaults_map` is `BPF_MAP_TYPE_ARRAY` of size **2** (not
+1), indexed by `active_idx` — same indexing key as the outer map of
+maps. BPF program reads `defaults_map[active_idx]` AFTER inner-map miss.
+Userspace apply ordering:
+
+1. Write `defaults_map[inactive_idx] = new_default` (`__u32`, 0=drop, 1=pass).
+2. Populate `inner[inactive_idx]` with the new rules.
+3. Atomic flip: `active_idx_map[0] = inactive_idx`.
+4. Old defaults slot and old inner remain populated (one-deep
+   rollback history; overwritten on next apply).
+
+Same race-window benignity as Q2: the program reads `active_idx` once,
+uses the SAME value for both the inner lookup and the defaults lookup;
+swap atomicity is single-u32 = guaranteed.
+
+This adds **one** `BPF_MAP_TYPE_ARRAY` (size 2, key u32, value u32) +
+one map-name constant in `src/common/mac_filter.h`. Acceptable cost.
+
+#### Q3 decision — `--allow <mac>` backward-compat = **BC1 (silent shorthand)** — because
+
+**Choice**: `xdpmacfilter attach --iface <iface> --allow MAC[,MAC...]`
+keeps working byte-identically. The CLI parser synthesizes an in-memory
+`xdpmf::Config { default_action: Drop, rules: [ {id: 0, action: Pass,
+match: {mac: MAC_0}}, {id: 1, action: Pass, match: {mac: MAC_1}}, ... ] }`
+and feeds it through the same apply orchestrator that `apply -f`
+invokes. NO stderr deprecation warning; NO exit-code change; NO
+machine-format change.
+
+**Rationale** (BC1 vs BC2 vs BC3):
+
+- BC2 (deprecation warning) is the "honest about path forward" choice
+  but pollutes MVP-2 ops scripts' stderr with noise the operator can't
+  act on until MVP-3.3+ ships the systemd/Ansible story. Cost-benefit
+  unfavourable in MVP-3.1 — promote to BC2 at MVP-3.4 when exporter
+  binary lands and operator docs converge on apply-only.
+- BC3 (drop) breaks every existing ctest invocation; would require
+  rewriting all 20 existing ctests to use the new surface. Massive
+  scope creep against brief's "20 existing ctests pass byte-equivalent
+  invocations" Done-Definition item. Hard-rejected.
+- BC1 satisfies the "20 ctests pass byte-identically" invariant AND
+  exercises the new apply orchestrator on every `--allow` invocation
+  — meaning every MVP-2 test indirectly regression-tests the apply
+  path. Free coverage.
+
+**Synthesis details**:
+
+- `attach --allow A,B,C` (or `--allow A --allow B --allow C`) →
+  synthesized config:
+  ```
+  default_action: drop
+  rules:
+    - {id: 0, action: pass, match: {mac: A}}
+    - {id: 1, action: pass, match: {mac: B}}
+    - {id: 2, action: pass, match: {mac: C}}
+  ```
+  (rule IDs assigned by the CLI synthesizer in the order MACs appear
+  on the command line; deduplication eliminates duplicate MACs BEFORE
+  ID assignment).
+- `attach --iface <X>` with NO `--allow` (per §5.7 "empty allow-list =
+  drop-all") → synthesized config:
+  ```
+  default_action: drop
+  rules: []
+  ```
+- The synthesized config is never written to disk; it lives in memory
+  as `xdpmf::Config` and feeds directly into
+  `xdpmf::apply_config(ifindex, config)` (see Interfaces below).
+
+#### Q4 decision — Apply subcommand grammar = **G1 (subcommand, verb-first)** — because
+
+**Choice**: `xdpmacfilter apply -f <file> --iface <iface>` is the
+canonical new invocation. Existing MVP-2 invocations (`attach`,
+`detach`, `--help`, `--version`) are UNCHANGED. `apply` is a third
+subcommand alongside `attach` / `detach`.
+
+**Rationale** (G1 vs G2 vs G3):
+
+- G2 (flag form `--apply -f <file>`) is grammatically awkward for a
+  subcommand that has its own dedicated flags (`-f`, `--iface`); flag-form
+  encoding makes dispatch ambiguous (which flags belong to which
+  "verb"?). Rejected.
+- G3 (rename `bypass`/`detach` to subcommands now): `bypass` doesn't
+  exist in MVP-2 (it's MVP-3.4 manual-bypass-primitive scope). `detach`
+  is ALREADY a subcommand. G3 reduces to "no change needed for MVP-3.1",
+  which is what we're picking. The cosmetic future-rename of
+  `detach`-as-flag (it isn't a flag) is a no-op.
+- G1 satisfies the "20 existing ctests pass byte-identical invocations"
+  invariant cleanly; `apply -f` joins the subcommand set as a peer.
+
+**Subcommand-dispatch contract** in `cli.cpp`:
+
+- `attach` → existing parser; emits `ParsedCommand::Attach{AttachConfig}` (now wrapping the new `Config` per Q3 BC1).
+- `detach` → existing parser; emits `ParsedCommand::Detach{DetachConfig}`.
+- `apply` → NEW parser branch; emits `ParsedCommand::Apply{ApplyConfig}`.
+- `--help` / `--version` → as before (`--help` text updated to LIST `apply` alongside `attach`/`detach`).
+- Unknown subcommand → exit 1 with `unknown subcommand: '<arg>'` (existing pattern, see `cli.cpp:245`).
+
+**Apply parser grammar** (in `cli.cpp`):
+
+- Required: `-f <path>` (config file path; relative paths resolved
+  against CWD; non-existent / unreadable → exit **1** `apply: config
+  file '<path>' does not exist`-style usage error, NOT exit 9 — file-IO
+  failure is a CLI usage error, not a config-content failure; this
+  distinction matters for ops-script error handling).
+- Required: `--iface <iface>` (per architecture-v2.md line 154 sketch;
+  even though the config file MAY contain `interface: <name>`, the
+  CLI `--iface` is authoritative — closes any ambiguity if the
+  operator mistypes the filename → wrong interface).
+- Validation: if config file contains `interface:` field AND its value
+  differs from `--iface <X>`, the apply orchestrator throws `ConfigError`
+  exit **9** with stderr `config error: interface mismatch (file
+  declares '<Y>', --iface is '<X>')`. Strict equality check;
+  case-sensitive.
+- No additional flags in cycle 1 (no `--dry-run`, no `--validate-only`,
+  no `--diff-against-current` — all explicitly OOS per §7 additions).
+
+#### Q5 decision — Schema versioning = **SV2 (optional, default 1)** — because
+
+**Choice**: `schema_version` is an OPTIONAL top-level field. If absent
+→ treated as `1`. If present → MUST be in the supported-versions
+set (currently `{1}`). Unsupported value → `ConfigError` exit 9 with
+stderr `config error: unsupported schema_version: <n> (supported: 1)`.
+
+**Rationale** (SV1 vs SV2 vs SV3):
+
+- SV1 (mandatory) forces every minimal test fixture + every doc
+  example to carry the boilerplate; raises the floor for "minimal
+  valid config" unnecessarily. Reject.
+- SV3 (defer until first breaking change) leaves no clean migration
+  path at MVP-3.3+ when YAML semantics might evolve (new top-level
+  fields, semantic clarifications on `default_action`, etc.). Reject.
+- SV2 has both: minimal configs work without ceremony (smallest valid
+  fixture: `default_action: drop` on one line); and once an operator
+  opts into `schema_version:` the field is REAL (validator enforces
+  the supported-set rather than treating the field as a comment).
+  Future breaking change at MVP-3.3+ ships as `schema_version: 2`
+  with `1` still accepted; supported-set becomes `{1, 2}`.
+
+**Migration policy** for future cycles:
+
+- New top-level fields → MUST stay backward-compatible with
+  `schema_version: 1` parsers (i.e. new fields ignored if `schema_version: 1`).
+- New rule-types in `match:` (e.g. CIDR at MVP-3.2) → MUST be
+  rejected by a `schema_version: 1` config; documented via
+  `unsupported match type 'cidr' for schema_version 1` stderr.
+- Change EXISTING field semantics → REQUIRES bumping to
+  `schema_version: 2` (or wider); old semantics stay accessible via
+  `schema_version: 1` configs as long as the supported-set includes 1.
+
+#### Q6 decision — BPF map definitions placement = **M1 (extend `src/common/mac_filter.h`)** — because
+
+**Choice**: all new map name constants
+(`XDPMF_MAP_ACTIVE_IDX_NAME = "active_idx"`,
+`XDPMF_MAP_RULESETS_OUTER_NAME = "rulesets"`,
+`XDPMF_MAP_INNER_A_NAME = "allowlist_a"`,
+`XDPMF_MAP_INNER_B_NAME = "allowlist_b"`,
+`XDPMF_MAP_DEFAULTS_NAME = "defaults"`)
++ the new ruleset-count constant (`XDPMF_RULESET_COUNT = 2`)
++ the link pin filename constant (`XDPMF_LINK_PIN_BASENAME = "link"`)
+added to `src/common/mac_filter.h` alongside the existing
+`XDPMF_MAP_ALLOWLIST_NAME` / `XDPMF_MAP_STATS_NAME`. Single source of
+truth; header gains ~12 lines.
+
+**Existing constant fate**: `XDPMF_MAP_ALLOWLIST_NAME = "allowlist"`
+is KEPT (used by the BPF `__inner_map` template definition; the
+verifier-time inner-map declaration uses this name so libbpf wires
+the inner-map prototype to the two ARRAY_OF_MAPS slots). The
+SHIPPED pin at `/sys/fs/bpf/xdpmacfilter/<iface>/allowlist` is
+REPLACED by:
+- `/sys/fs/bpf/xdpmacfilter/<iface>/allowlist_a` (inner slot 0)
+- `/sys/fs/bpf/xdpmacfilter/<iface>/allowlist_b` (inner slot 1)
+- `/sys/fs/bpf/xdpmacfilter/<iface>/rulesets` (outer ARRAY_OF_MAPS)
+- `/sys/fs/bpf/xdpmacfilter/<iface>/active_idx` (ARRAY[1])
+- `/sys/fs/bpf/xdpmacfilter/<iface>/defaults` (ARRAY[2])
+- `/sys/fs/bpf/xdpmacfilter/<iface>/stats` (UNCHANGED from §5.23)
+- `/sys/fs/bpf/xdpmacfilter/<iface>/link` (NEW per HG2 P0a)
+
+The existing 20 ctests do NOT poke `allowlist` pin path directly
+(grep-confirmed against `tests/lib/common.sh` and `tests/T_*.sh` —
+only `stats` is read via `bpftool map dump pinned ${PIN_DIR}/stats`);
+they observe behaviour through `stats` (UNCHANGED) and via traffic
+injection. Therefore the pin-name change is invisible to the existing
+test surface.
+
+**Rationale** (M1 vs M2):
+
+- M2 (new `src/common/config_maps.h` sibling) adds a file with one
+  declaration block; doesn't simplify anything in cycle 1 (the BPF
+  `.bpf.c` includes both, the userspace orchestrator includes both).
+  Promote M1 → M2 at MVP-3.4 if `rules` + `action_table` maps add
+  enough surface to make the unified header noisy. Defer the cost.
+
+#### Q-HG1 — Accepted YAML subset grammar (architect decision under HG1)
+
+The custom parser in `src/lib/yaml_subset.{cpp,hpp}` accepts EXACTLY
+this subset of YAML 1.2 (anything else → `ConfigError` exit 9 with
+stderr starting `xdpmacfilter: config error: <feature>` + 1-based
+line:col + `<file>` path):
+
+| Construct | Accepted? | Notes |
+|---|---|---|
+| Top-level: block mapping | YES | Only allowed top-level form. Flow-form `{a: 1, b: 2}` at top-level → reject. |
+| Block mapping (nested) | YES | `key: value` per line. Keys MUST be bareword strings (no quoting; no `:`/`#`/whitespace in key). |
+| Block sequence | YES | `- item` per line. Used for `rules:` list. |
+| Flow mapping `{...}` | NO | Reject: `flow-style mapping not supported`. |
+| Flow sequence `[...]` | NO | Reject: `flow-style sequence not supported`. |
+| String — double-quoted `"..."` | YES | Escape sequences: `\\`, `\"`. Other escapes (`\n`, `\u`, etc.) → reject `unsupported escape sequence`. Multi-line quoted → reject. |
+| String — single-quoted `'...'` | YES | Only `''` (escaped single-quote) accepted as escape. |
+| String — bareword (plain) | YES | Non-empty sequence of `[A-Za-z0-9._\-:]`. `:` allowed in value (e.g. MAC `AA:BB:CC:DD:EE:FF`) but NEVER in a key. No leading/trailing whitespace. |
+| Integer scalar | YES | Signed decimal `-?[0-9]+`. No `0x`/`0o`/`0b`/`_` separators. Range `[INT32_MIN, INT32_MAX]`; out-of-range → reject `integer out of range`. |
+| `null` / `~` | YES | Both spellings accepted. Bare empty value (`key:` with nothing after EOL) ALSO null. |
+| Boolean `true` / `false` | NO (cycle 1) | Schema has no boolean field yet. Bareword `true`/`false` → reject `boolean scalars not supported`. |
+| Comments | YES | `#` to end-of-line. Inline comments after a value accepted (`key: value  # comment`). |
+| Anchors (`&anchor`) / aliases (`*alias`) | NO | Reject `anchors/aliases not supported`. |
+| Tags (`!type`) | NO | Reject `explicit tags not supported`. |
+| Block scalars (`\|`, `>`) | NO | Reject `block scalar not supported`. |
+| Multi-document (`---`) | LIMITED | Leading `---` (no following content) OPTIONALLY accepted as a no-op marker (YAML convention); a SECOND `---` mid-stream → reject `multi-document streams not supported`. |
+| BOM | NO | UTF-8 BOM at file start → reject `BOM not supported`. |
+| Tabs in indentation | NO | Reject `tab in indentation`. Spaces only. |
+| Indentation width | flexible | First nested block sets the width (MUST be ≥ 1 space); subsequent lines at the same nesting MUST match exactly. Inconsistent indent → reject `inconsistent indentation`. |
+| Trailing whitespace | accepted | Stripped silently. |
+| File size cap | enforced | > 1 MiB → reject `config file exceeds 1 MiB limit`. DoS guard. |
+| Scalar length cap | enforced | > 4096 bytes per scalar → reject `scalar exceeds 4 KiB limit`. DoS guard. |
+| Nesting depth cap | enforced | > 8 levels → reject `nesting depth exceeds 8`. DoS guard. |
+| Duplicate map keys | NO | Repeated key in same mapping → reject `duplicate key: <name>`. Strict (YAML 1.2 says "should fail" — we say "must"). |
+| Trailing newline | optional | File may or may not end with `\n`. |
+
+**Stderr discipline for rejections**: every rejection emits a
+single-line stderr `xdpmacfilter: config error: <feature>: <file>:<line>:<col>`
+where `<line>:<col>` is the 1-based position in the YAML source. The
+parser MUST track line/col across reads (single-pass cursor). Assertion
+in §6.22.
+
+**Why this subset and not larger / smaller**:
+
+- Larger (full YAML 1.2) requires ~5-10K LOC. Custom parser stays
+  ~150-250 LOC. Brief HG1 explicit fence.
+- Smaller (e.g. KEY=VALUE-with-list-extension per architecture-v2.md
+  T-architect's E.4) doesn't express `rules:` list-of-mappings
+  cleanly. Block-mapping + block-sequence + scalars is the MINIMUM
+  that expresses the schema (see §5.26 schema sub-section below)
+  without cosmetic compromise.
+- Anchors / aliases / tags are the highest-LOC features per "yes"
+  with the least operator-visible value for a config of this size.
+  Always reject — operators who need them are using full YAML tooling
+  elsewhere and can pre-render to flat form before feeding us.
+
+#### §5.26 schema (data on disk)
+
+The on-disk YAML at `/etc/xdpfilter/<iface>.yaml` has the following
+shape (cycle 1):
+
+```
+# All fields optional EXCEPT default_action; rules defaults to empty.
+schema_version: 1                  # optional; default 1; supported set {1}
+interface: eth0                    # optional; if present MUST equal CLI --iface or exit 9
+default_action: drop               # REQUIRED; values: "drop" | "pass" (no other)
+rules:                             # optional; list (possibly empty)
+  - id: 0                          # REQUIRED u32; unique within rules; range [0, 63]
+    action: pass                   # REQUIRED; values: "pass" | "drop" (no other)
+    match:                         # REQUIRED mapping
+      mac: "AA:BB:CC:DD:EE:FF"     # REQUIRED in cycle 1 (only match type allowed)
+  - id: 1
+    action: pass
+    match:
+      mac: "11:22:33:44:55:66"
+```
+
+**Cycle-1 schema rules** (validator enforces; all → exit 9 on failure):
+
+1. `default_action` REQUIRED; ∈ {`drop`, `pass`}; any other value
+   (including `null`) → `default_action must be 'drop' or 'pass'`.
+2. `rules` MAY be absent (treat as empty list). Empty `rules:` (key
+   present, no `- ` entries) is equivalent. `rules: []` is REJECTED
+   (flow-form not in subset; use omission instead).
+3. Each rule's `id` MUST be ∈ [0, `XDPMF_ALLOWLIST_MAX - 1`] = [0, 63];
+   IDs MUST be unique within the rules list. Duplicate →
+   `duplicate rule id: <n>`.
+4. Each rule's `action` MUST be ∈ {`pass`, `drop`}; in cycle 1 ONLY
+   `pass` is meaningful (the inner-map presence-marker semantic) and
+   `drop` rules are accepted-but-no-op (operator may explicitly mark
+   drop rules for documentation; they do not populate the inner map).
+   Future MVP-3.4+ counters distinguish action types at apply time.
+5. Each rule's `match.mac` MUST be a 17-char canonical-MAC string
+   (`XX:XX:XX:XX:XX:XX`, hex case-insensitive, lowercased on parse).
+   Same validation regex as MVP-1's `--allow` flag — reuse the
+   existing MAC parser from `cli.cpp` (no duplicate impl).
+6. Schema-version 1 supports EXACTLY ONE match type per rule (`mac`);
+   presence of any other match key (`cidr`, `port`, etc.) →
+   `match type '<X>' not supported in schema_version 1`. Load-bearing
+   forward-compat hinge for MVP-3.2.
+
+**Apply-time computation of inner-map contents and default**:
+
+- For each rule with `action: pass` AND `mac` match → add the MAC to
+  the inactive-inner-slot's contents (presence-marker value = 1).
+- Rules with `action: drop` → no inner-map entry (drop is the default
+  for non-matching MACs given `default_action: drop`; accepted-but-no-op
+  in cycle 1).
+- `default_action: pass` with empty `rules` == "blanket pass" mode.
+  Accepted (operator may want it for staging). Inner map is empty;
+  BPF program falls through to `defaults_map[active_idx]` evaluation.
+- `default_action: pass` with non-empty `rules` (all `action: pass`):
+  rules are semantically redundant but accepted (defensive documentation).
+  Validator emits NO warning.
+
+#### §5.26 DataStructures additions
+
+(NEW types live in `src/lib/config.hpp`; one BPF-side struct lives in
+`src/common/mac_filter.h`.)
+
+##### Userspace (`src/lib/config.hpp`, namespace `xdpmf`)
+
+```
+enum class DefaultAction : std::uint8_t { Drop = 0, Pass = 1 };
+enum class RuleAction    : std::uint8_t { Drop = 0, Pass = 1 };
+
+struct RuleMatch {
+    std::optional<xdpmf_mac> mac;  // cycle 1: MAC-only. Future: cidr, ports, etc.
+};
+
+struct Rule {
+    std::uint32_t id;       // unique within rules; range [0, 63]
+    RuleAction    action;
+    RuleMatch     match;
+};
+
+struct Config {
+    std::uint32_t              schema_version = 1;  // SV2 default
+    std::optional<std::string> iface;               // empty if not declared; CLI --iface authoritative
+    DefaultAction              default_action = DefaultAction::Drop;
+    std::vector<Rule>          rules;               // empty allowed
+};
+```
+
+`sizeof(Config) ≈ 64-96 bytes` depending on STL impl; trivially
+movable. Used both by `apply.cpp` (parsed) and by the `--allow`
+synthesizer in `cli.cpp` (no I/O involved). NO public constructor
+contracts beyond default-construct + member-init; impl free to add
+helpers.
+
+##### Userspace (`src/lib/yaml_subset.hpp`, namespace `xdpmf::yaml`)
+
+```
+struct ParseError {
+    std::string feature;   // human-readable category, matches Q-HG1 table
+    std::string file;      // path supplied by caller
+    std::uint32_t line;    // 1-based
+    std::uint32_t col;     // 1-based
+    std::string message;   // optional additional context
+};
+
+// Minimal value-tree (suitable for the cycle-1 schema; not a full YAML AST).
+struct Node {
+    enum class Kind { Null, Scalar, Mapping, Sequence };
+    Kind kind = Kind::Null;
+    std::string scalar;                                     // valid when Kind::Scalar
+    std::vector<std::pair<std::string, Node>> mapping;      // valid when Kind::Mapping (preserves insertion order; duplicates rejected at parse time)
+    std::vector<Node> sequence;                             // valid when Kind::Sequence
+    std::uint32_t line = 0, col = 0;                        // 1-based; populated for diagnostic provenance
+};
+
+// Throws std::system_error{LoaderError::ConfigError, ...} on parse failure.
+// On success returns the root Node (always Kind::Mapping at top-level).
+[[nodiscard]] Node parse(std::string_view source, std::string_view file_path_for_diagnostics);
+```
+
+##### BPF + userspace shared (`src/common/mac_filter.h`)
+
+Additions to the existing header (post-§5.26):
+
+```
+/* §5.26 (MVP-3.1): atomic apply via ARRAY_OF_MAPS[2] — see design §5.26 Q2. */
+#define XDPMF_RULESET_COUNT            2                 /* outer map_of_maps max_entries */
+#define XDPMF_MAP_ACTIVE_IDX_NAME      "active_idx"     /* ARRAY[1] of __u32 */
+#define XDPMF_MAP_RULESETS_OUTER_NAME  "rulesets"       /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] */
+#define XDPMF_MAP_INNER_A_NAME         "allowlist_a"    /* inner slot 0 */
+#define XDPMF_MAP_INNER_B_NAME         "allowlist_b"    /* inner slot 1 */
+#define XDPMF_MAP_DEFAULTS_NAME        "defaults"       /* ARRAY[XDPMF_RULESET_COUNT] of __u32 */
+
+/* §5.26 P0a: bpf_link pin basename under the per-iface bpffs dir. */
+#define XDPMF_LINK_PIN_BASENAME        "link"
+```
+
+The legacy `XDPMF_MAP_ALLOWLIST_NAME` constant STAYS (used as the BPF
+`__inner_map` template name — libbpf consumes the symbol for outer-map
+wiring). The legacy single-pin `${PIN_DIR}/allowlist` is GONE; the two
+new pins `allowlist_a` / `allowlist_b` take its place. Tests' grep
+scope on `allowlist` is empty (verified) so no test edits required for
+this rename.
+
+#### §5.26 Interfaces additions
+
+##### CLI (post-§5.26 full grammar — supersedes §4.1 grammar block headline)
+
+```
+xdpmacfilter attach --iface <IFNAME> --allow <MAC>[,<MAC>...]   # unchanged
+xdpmacfilter detach --iface <IFNAME>                            # unchanged
+xdpmacfilter apply  --iface <IFNAME> -f <PATH>                  # NEW (Q4 G1)
+xdpmacfilter --help                                             # unchanged (text updated to list apply)
+xdpmacfilter --version                                          # unchanged (still reports project version)
+```
+
+Rules for `apply`:
+- `--iface <IFNAME>` REQUIRED; same `if_nametoindex` validation as
+  `attach`.
+- `-f <PATH>` REQUIRED; file MUST exist and be readable as UTF-8; size
+  cap 1 MiB (per Q-HG1). I/O failures → exit **1** (CLI usage error);
+  parse / schema failures → exit **9** (`ConfigError`).
+- `--mode` accepted iff specified (per §5.23 Q1); defaults to
+  `generic` if absent. Forwarded to the underlying loader attach.
+  (Rationale: `apply -f` may auto-attach if not already attached, in
+  which case the mode choice matters; if the link pin is already
+  present, the existing mode is retained and `--mode` is silently
+  ignored — see "P0a flow" below.)
+
+Env vars consumed at startup (in `attach()` / `apply()` orchestrator
+entry; both paths inherit):
+
+- `XDPMF_TRUST_MODEL` (NEW per HG3): `strict` (default, unset →
+  default) or `fleet`. Any other value → `ConfigError` exit 9 with
+  stderr `xdpmacfilter: config error: unknown trust model: '<value>'
+  (expected: strict|fleet)`.
+- `XDPMF_BPF_OBJECT_PATH` (testing-only, per §5.24 Q4): UNCHANGED.
+
+##### Loader (`src/lib/loader.hpp`)
+
+ONE new enumerator (`ConfigError = 9`) added to existing `LoaderError`
+enum (per §4.3 MVP-3.1 note). No new functions; no new types in
+`loader.hpp`. `AttachConfig` / `DetachConfig` UNCHANGED (the apply
+orchestrator lives in CLI-side `src/cli/apply.hpp`, NOT in
+`loader.hpp` — public-API surface of the loader is the same).
+
+The `attach()` function's runtime behaviour gains the
+`XDPMF_TRUST_MODEL` gating + P0a pin lifecycle (impl detail in
+`loader.cpp` anon namespace; no signature change).
+
+##### Apply orchestrator (`src/cli/apply.hpp`, namespace `xdpmf`)
+
+```
+struct ApplyConfig {
+    std::string iface;          // from CLI --iface
+    std::string config_path;    // from CLI -f
+    XdpMode     mode = XdpMode::Generic;  // from CLI --mode (forwarded)
+};
+
+// Parses the YAML at cfg.config_path, validates against schema_version 1,
+// reconciles with cfg.iface (interface-mismatch → ConfigError), then
+// applies via the atomic-swap mechanism (Q2 A1 + Q2-extension).
+// On first invocation: behaves like attach() (loads skel, attaches XDP,
+// pins link). On subsequent invocations against an already-pinned link:
+// re-uses the existing link (no re-attach), writes new ruleset to
+// inactive inner slot + inactive defaults slot, flips active_idx.
+// Throws std::system_error with LoaderError codes on failure.
+// Returns the prog id of the (possibly pre-existing) attached program.
+[[nodiscard]] std::uint32_t apply_config(const ApplyConfig& cfg);
+
+// Same atomic-swap semantics, but accepts an already-parsed Config
+// (used by the --allow shorthand path in cli.cpp per Q3 BC1).
+[[nodiscard]] std::uint32_t apply_config_inmemory(const std::string& iface,
+                                                  const Config& parsed,
+                                                  XdpMode mode);
+```
+
+Both functions internally route through ONE helper (impl detail) that
+implements the active_idx-flip-based atomic swap. The CLI dispatcher
+calls `apply_config(ApplyConfig{...})` for `apply -f`; the
+`attach --allow` path calls `apply_config_inmemory(iface,
+synthesized_config, mode)`.
+
+##### CLI variants (`src/cli/cli.hpp`)
+
+```
+struct ParsedAttach { AttachConfig cfg; };       // unchanged
+struct ParsedDetach { DetachConfig cfg; };       // unchanged
+struct ParsedApply  { ApplyConfig cfg; };        // NEW
+
+using ParsedCommand = std::variant<ParsedAttach, ParsedDetach, ParsedApply, /* existing --help/--version variants */>;
+```
+
+`main.cpp` dispatch gains a `[](const ParsedApply& p) {
+return apply_config(p.cfg); }` arm. Exit-code mapping unchanged: each
+`apply_config` failure throws `std::system_error` with a
+`LoaderError` value, `main()` translates to the integer exit code via
+the existing `loader_error_category()` mechanism.
+
+#### §5.26 BPF program flow (`mac_filter.bpf.c` post-amendment)
+
+Datapath pseudocode (verifier-aware; replaces existing
+single-`allowlist`-lookup path):
+
+```
+xdp_md *ctx → src_mac (parse Ethernet header, malformed → STAT_DROP_MALFORMED + XDP_DROP, unchanged from §3-§4):
+
+__u32 zero = 0;
+__u32 *active_idx_p = bpf_map_lookup_elem(&active_idx_map, &zero);
+if (!active_idx_p) {                       // verifier-required NULL check (never hits in practice)
+    STAT_DROP_DENY++; return XDP_DROP;
+}
+__u32 active = *active_idx_p;
+
+void *inner = bpf_map_lookup_elem(&rulesets_outer, &active);
+if (!inner) {                              // verifier-required NULL check (never hits in practice)
+    STAT_DROP_DENY++; return XDP_DROP;
+}
+
+__u8 *present = bpf_map_lookup_elem(inner, &src_mac);
+if (present) {
+    STAT_PASS++; return XDP_PASS;          // explicit allow-rule hit
+}
+
+__u32 *default_p = bpf_map_lookup_elem(&defaults_map, &active);
+if (!default_p) {                          // verifier-required NULL check (never hits in practice)
+    STAT_DROP_DENY++; return XDP_DROP;
+}
+if (*default_p == 1u) {
+    STAT_PASS++; return XDP_PASS;          // default_action: pass — blanket allow
+}
+STAT_DROP_DENY++; return XDP_DROP;         // default_action: drop — the MVP-1 default
+```
+
+**Verifier interactions** (impl notes):
+
+- `bpf_map_lookup_elem(&rulesets_outer, &active)` returns an `void *`
+  that the verifier treats as a "map_value" of the inner-map FD; the
+  subsequent `bpf_map_lookup_elem(inner, &src_mac)` is a verifier
+  builtin recognising the chained pattern. Verified working on libbpf
+  ≥ 1.0 / kernel ≥ 4.12 (well below floor 5.15).
+- Both NULL checks are MANDATORY per verifier; impl MUST NOT elide
+  them via `__builtin_assume` etc. (the verifier doesn't trust user
+  hints on map lookup return values).
+- `defaults_map` lookup return type is `__u32 *` (the map's value
+  type); deref with explicit NULL check.
+
+#### §5.26 attach() flow update (P0a + trust_model gating)
+
+Post-§5.26 `attach()` flow (incremental over §5.22 attach() flow):
+
+```
+attach(cfg):
+  1.  kernel_version_probe()                                            [§5.24 — unchanged]
+  2.  trust_model = parse_xdpmf_trust_model_env()                       [§5.26 NEW]
+       — unset|"strict" → Strict (default)
+       — "fleet"        → Fleet
+       — other          → throw ConfigError (exit 9) "unknown trust model: '<v>'"
+  3.  stderr: "xdpmacfilter: trust_model=<strict|fleet>"                [§5.26 NEW; ALWAYS emitted]
+  4.  ifindex = resolve_ifindex(cfg.iface, AttachFailed)                [unchanged]
+  5.  BpfSkeleton skel = open_and_load()                                [§5.22 Q1 early-load]
+  6.  self_tag = capture_self_tag(skel)                                 [§5.22 Q1]
+  7.  BpffsRootFd root{}                                                [§5.22 Q2]
+  8.  probe = probe_attached_xdp(ifindex, self_tag)                     [§5.4 / §5.19 / §5.20]
+  9.  branch on §5.4 state (with trust_model gating on state (c)):
+        (a) clean attach              — proceed to step 10 (fresh attach + new link)
+        (b) "ours" (name+tag match)   — detect existing link pin (step 10) → IDEMPOTENT REATTACH path
+        (c) alien (name OR tag fail):
+              IF trust_model == Strict → throw AttachRefusedAlien exit 4         [§5.4 + §5.22 unchanged]
+              IF trust_model == Fleet  → stderr log
+                                          "xdpmacfilter: trust_model=fleet — bypassing alien-program check; \
+                                            replacing prog id <N> (mode=<M>, name='<n>')"
+                                          + bpf_xdp_detach(ifindex, probe.mode_flags, 0)
+                                          + bpffs_remove_iface (if pin_dir present, per §5.4 cleanup)
+                                          + fall through to step 10 (fresh attach)
+                                          NOTE: §5.19 + §5.22 hardening (path discipline, BpffsRootFd ELOOP,
+                                                 etc.) ALREADY fired BEFORE this branch; fleet relaxes ONLY
+                                                 §5.4 (alien-program refusal), NOT path discipline.
+        (d) stale-pin               — bpffs_remove_iface + step 10 (fresh attach)
+ 10.  P0a link pin detection + attach branching:
+        link_pin_path = "${XDPMF_BPFFS_ROOT}/<iface>/link"
+        IF state == (b) AND link pin exists:
+          link = bpf_link__open(link_pin_path)
+          bpf_link__update_program(link, skel.progs.mac_filter_prog)              [hot-swap atomic]
+          (NO bpf_xdp_attach call; NO bpf_link__pin call)
+        ELSE:
+          link = bpf_program__attach_xdp_opts(skel.progs.mac_filter_prog, ifindex, {.flags = mode_to_flags(cfg.mode)})
+                                                                                  [returns bpf_link*]
+          bpf_link__pin(link, link_pin_path)                                      [persists across loader exit]
+ 11.  ensure_bpffs_dir(*at-based, root.fd())                                       [§5.22 Item 2]
+ 12.  populate active_idx slot:
+        — if first attach: write defaults_map[0] = (cfg.default_action == Pass)
+                          + populate inner[0] with rules
+                          + active_idx_map[0] = 0
+        — if reattach (state b): write defaults_map[1 - active_idx]
+                                + populate inner[1 - active_idx]
+                                + active_idx_map[0] = 1 - active_idx   (atomic flip)
+       (impl reads CURRENT active_idx_map[0] to compute inactive slot.)
+ 13.  commit; return after-probe's prog_id
+```
+
+`detach(iface)` flow update (incremental over §5.22 detach() flow):
+- Same trust_model env parse (step 2) + stderr log (step 3) at entry.
+  (Trust_model affects ONLY state-(c) refusal disposition; detach's
+  state-(c) still throws DetachFailed exit 5 regardless of mode — the
+  alien is not "ours" so we have nothing to detach. fleet does NOT
+  override this; the operator can manually `ip link set <X> xdp off`
+  to remove the alien if they really want to.)
+- After §5.22 detach state-(b) branch: BEFORE `bpf_xdp_detach(ifindex,
+  probe.mode_flags, 0)`, call `unlinkat(iface_fd, "link", 0)` to remove
+  the pinned link — this drops the kernel-side refcount that was
+  keeping the XDP slot occupied after our loader exited. THEN
+  `bpf_xdp_detach` cleans up the slot itself (or fails idempotently if
+  the unlink already triggered teardown — both outcomes treated as
+  success in detach context). Then the existing `bpffs_remove_iface`
+  walk cleans the remaining pins.
+
+#### §5.26 §5.4 trust_model gating (specific to alien-refusal disposition)
+
+**Scope of relaxation under `XDPMF_TRUST_MODEL=fleet`**:
+
+- §5.4 alien-program refusal (state (c) → exit 4) → RELAXED in fleet:
+  alien is detached, fresh attach proceeds, exit 0.
+- §5.19 identity-verification mechanism (`bpf_prog_info.name` match)
+  → ENFORCED in both modes. Still runs to compute `is_ours`; in fleet
+  the false result merely changes the disposition (detach-alien-and-attach
+  instead of refuse), not the predicate.
+- §5.22 Item 1 tag-check → ENFORCED in both modes. Same as §5.19:
+  still computed; only the state-(c) disposition is affected.
+- §5.22 Item 2 path-discipline (`BpffsRootFd`, O_PATH, `*at()`-relative
+  ops, symlink → exit 8) → ENFORCED in both modes UNCONDITIONALLY.
+  The path-symlink threat vector is orthogonal to the
+  trusted-vs-fleet axis; an operator who wants to replace an alien
+  program does NOT want to do so via attacker-controlled bpffs paths.
+
+The audit story is sharp: stderr's `trust_model=<X>` log line at
+attach entry is the single greppable signal that distinguishes the
+two modes. Combined with exit-code monitoring (exit 4 absent in fleet
+mode under same-alien-traffic condition), operators can verify the
+mode took effect.
+
+**Sub-decision — `T_TRUST_MODEL_FLEET_RELAXES_GATE` uses REAL alien-program fixture**:
+YES. Reuse `tests/fixtures/xdp_pass.bpf.c` (already exists per §6.9 —
+the alien fixture for `T_ATTACH_ALIEN_REFUSAL`). Test runs same
+scenario:
+- Strict (or unset): pre-attach alien → invoke our loader → exit 4
+  (re-confirms MVP-1.1B behaviour; this is the negation control for
+  the relaxation).
+- Fleet: pre-attach alien → invoke our loader with
+  `XDPMF_TRUST_MODEL=fleet` → exit 0 + our prog is now attached + alien
+  is gone. Stderr contains both `trust_model=fleet` AND
+  `bypassing alien-program check`.
+
+This makes T_TRUST_MODEL_FLEET_RELAXES_GATE a true differential test
+of the §5.4 gate behaviour, not a synthetic exercise.
+
+**Sub-decision — stderr-logging policy on attach for trust_model**:
+ALWAYS emit `xdpmacfilter: trust_model=<strict|fleet>` to stderr at
+attach() entry (AFTER env parse, BEFORE identity probe). One line,
+fixed format. Audit-grep-friendly. Applies to `attach` AND `apply -f`
+(both route through `attach()` internally). Does NOT apply to
+`detach` (the trust-model relaxation is attach-specific). Does NOT
+apply to `--help` / `--version` (no kernel touch). Tester asserts the
+log line presence + format in §6.26 + §6.25.
+
+#### §5.26 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+##### NEW (created this slice)
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `src/lib/yaml_subset.hpp` | Header for custom YAML subset parser per Q-HG1: `parse()` + `Node` + `ParseError` types | C++23 | 40 |
+| `src/lib/yaml_subset.cpp` | Custom ~150-LOC YAML subset parser implementation per Q-HG1 (single-pass cursor, line/col tracking, DoS guards) | C++23 | 200 |
+| `src/lib/config.hpp` | Header for typed config schema per §5.26 schema: `Config`, `Rule`, `RuleMatch`, `DefaultAction`, `RuleAction` | C++23 | 30 |
+| `src/lib/config.cpp` | Schema validator: takes `yaml::Node` root → produces `Config` or throws `ConfigError` (rules 1-6 per §5.26 schema) | C++23 | 100 |
+| `src/cli/apply.hpp` | Header for apply orchestrator: `ApplyConfig`, `apply_config()`, `apply_config_inmemory()` declarations | C++23 | 25 |
+| `src/cli/apply.cpp` | Apply orchestrator: parse → validate → reconcile-with-iface → atomic-swap via active_idx flip; calls into loader's attach helpers for first-attach path | C++23 | 130 |
+| `tests/T_APPLY_VALID_CONFIG.sh` | §6.21 test | bash | tester |
+| `tests/T_APPLY_REJECTS_MALFORMED.sh` | §6.22 test | bash | tester |
+| `tests/T_APPLY_ATOMIC_SWAP_NO_DROP.sh` | §6.23 test (load-bearing for Composite 6 promise) | bash | tester |
+| `tests/T_APPLY_REPLACES_RULESET.sh` | §6.24 test | bash | tester |
+| `tests/T_LINK_PERSIST_ACROSS_LOADER_EXIT.sh` | §6.25 test (load-bearing for P0a per HG2) | bash | tester |
+| `tests/T_TRUST_MODEL_FLEET_RELAXES_GATE.sh` | §6.26 test | bash | tester |
+| `tests/T_EXIT_CODE_9_ON_CONFIG_ERROR.sh` | §6.27 test | bash | tester |
+| `tests/fixtures/config_valid.yaml` | Minimal valid YAML: `default_action: drop` + `rules:` with 2-3 `pass`-MAC entries (used by §6.21 + §6.23 + §6.24) | YAML | 12 |
+| `tests/fixtures/config_valid_blanket_pass.yaml` | Valid YAML with `default_action: pass` + empty rules (used by §6.21 sanity sub-case) | YAML | 4 |
+| `tests/fixtures/config_malformed_yaml.yaml` | Malformed: flow-form `{a: 1}` at top-level (used by §6.22 sub-case 1) | YAML | 1 |
+| `tests/fixtures/config_malformed_schema.yaml` | Malformed: `default_action: maybe` (used by §6.22 sub-case 2) | YAML | 2 |
+| `tests/fixtures/config_malformed_dup_id.yaml` | Malformed: two rules with same `id` (used by §6.22 sub-case 3) | YAML | 8 |
+| `tests/fixtures/config_malformed_iface_mismatch.yaml` | Valid YAML with `interface: not-the-iface-we-pass` (used by §6.22 sub-case 4) | YAML | 6 |
+| `tests/fixtures/config_malformed_unsupported_match.yaml` | Malformed: `match: {cidr: 10.0.0.0/8}` (used by §6.22 sub-case 5; forward-compat hinge for MVP-3.2) | YAML | 7 |
+| `tests/fixtures/config_apply_swap_a.yaml` | Apply-A ruleset for §6.23 + §6.24 (`pass` MAC_X only) | YAML | 5 |
+| `tests/fixtures/config_apply_swap_b.yaml` | Apply-B ruleset for §6.23 + §6.24 (`pass` MAC_X + MAC_Y) | YAML | 6 |
+
+##### EDITED (existing files touched this slice)
+
+| Path | Role (one line) | What changes |
+|---|---|---|
+| `src/loader/loader.hpp` | → relocated to `src/lib/loader.hpp` per Q1 R1 | `git mv` + EXACTLY ONE line added: `ConfigError = 9,` inside `enum class LoaderError`. Body otherwise byte-identical. |
+| `src/loader/loader.cpp` | → relocated to `src/lib/loader.cpp` per Q1 R1 | `git mv` + (a) early-attach `parse_xdpmf_trust_model_env()` + stderr log; (b) state-(c) disposition gated on trust_model; (c) attach: replace `bpf_xdp_attach` with `bpf_program__attach_xdp_opts` + `bpf_link__pin`; on state-(b) idempotent reattach via `bpf_link__open` + `bpf_link__update_program`; (d) detach: `unlinkat("link",0)` before `bpf_xdp_detach`; (e) new BPF map names handled (active_idx / rulesets / inner_a / inner_b / defaults / link pin via skeleton). |
+| `src/loader/raii.hpp` | → relocated to `src/lib/raii.hpp` per Q1 R1 | `git mv` only; body unchanged. |
+| `src/loader/cli.hpp` | → relocated to `src/cli/cli.hpp` per Q1 R1 | `git mv` + (a) `ParsedApply` variant added; (b) `apply`-parser declarations added. Existing types UNCHANGED. |
+| `src/loader/cli.cpp` | → relocated to `src/cli/cli.cpp` per Q1 R1 | `git mv` + (a) `apply` subcommand branch added per Q4 G1; (b) `--allow` handler synthesizes `Config` per Q3 BC1 (instead of building `AttachConfig.allow` vector directly — the synthesized Config feeds the same internal apply path); (c) `--help` text gains `apply` line. |
+| `src/loader/main.cpp` | → relocated to `src/cli/main.cpp` per Q1 R1 | `git mv` + dispatch arm for `ParsedApply` added. |
+| `src/bpf/mac_filter.bpf.c` | XDP program | (a) new map declarations (`active_idx_map`, `rulesets_outer` with `__inner_map = allowlist_inner` template, `allowlist_a`, `allowlist_b`, `defaults_map`); (b) datapath rewritten per §5.26 BPF program flow above. The `mac_filter_prog` function name + SEC name UNCHANGED (§5.19 / §5.22 identity-gate contract holds). |
+| `src/common/mac_filter.h` | Shared header | +~12 lines: `XDPMF_RULESET_COUNT`, `XDPMF_MAP_ACTIVE_IDX_NAME`, `XDPMF_MAP_RULESETS_OUTER_NAME`, `XDPMF_MAP_INNER_A_NAME`, `XDPMF_MAP_INNER_B_NAME`, `XDPMF_MAP_DEFAULTS_NAME`, `XDPMF_LINK_PIN_BASENAME`. Existing constants UNCHANGED. |
+| `CMakeLists.txt` | Top-level build | (a) new STATIC target `xdpmf_internal` aggregating `src/lib/*.cpp`; (b) `xdpmacfilter` binary moves to `src/cli/` and links `xdpmf_internal`; (c) `target_include_directories` updates for the relocated headers; (d) version bump `VERSION 0.2.3 → 0.3.0` per Done-Definition. |
+| `tests/CMakeLists.txt` | ctest registration | (a) `LOADER_BIN` path bumped to `${CMAKE_BINARY_DIR}/src/cli/xdpmacfilter`; (b) `add_test` entries for the 7 new T_APPLY_* / T_LINK_* / T_TRUST_* / T_EXIT_CODE_9 tests; (c) `TEST_ENV` carries fixture-dir path for the YAML fixtures. |
+| `tests/lib/common.sh` | Shared helpers | New helpers: `apply_config <path> <iface>` (wraps the loader invocation); `wait_for_active_idx_flip <iface> <expected>` (polls `bpftool map dump pinned ${PIN_DIR}/active_idx` until value matches or timeout); `kill_loader_keep_link <iface>` (sends SIGKILL — link pin survives). Existing helpers UNCHANGED. |
+| `CHANGELOG.md` | Version history | New `## [0.3.0] - 2026-05-NN` section per Keep-a-Changelog (MVP-1.1C B4 + §5.25 Q3 V1 precedent). |
+
+##### UNCHANGED-BUT-AFFECTED (zero git-diff; behaviour must hold)
+
+| Path | Why it matters |
+|---|---|
+| `src/loader/main.cpp`'s dispatch logic for `attach` / `detach` | After file-move to `src/cli/main.cpp`, the BEHAVIOUR of the `attach` and `detach` arms MUST remain identical (only the `apply` arm is added). Reviewer asserts via re-running existing 20 ctests. |
+| `tests/lib/common.sh` existing functions (setup_veth, cleanup_veth, NSEXEC, NETNS, inject_eth, inject_runt, xdp_prog_id, read_stats, wait_for_stats_sum, prog_count, require_passwordless_sudo, ...) | The §5.25 EDIT-13 / EDIT-14 / EDIT-15 contracts (mount-ns preservation via `nsenter --net`, env-carrying loader invocations via `${NSEXEC} env VAR=...`, etc.) MUST hold. NEW helpers (`apply_config`, `wait_for_active_idx_flip`, `kill_loader_keep_link`) layer ON TOP without modifying existing helper bodies. |
+| `tests/T_*.sh` (all 20 existing tests) | Bodies UNCHANGED. The ONLY consequence of §5.26 reaching them is `LOADER_BIN` path bump in common.sh (which is sourced; tests don't reference the path directly). Reviewer asserts via 20/20 ctest pass post-§5.26 with `git diff --stat tests/T_*.sh` showing zero changes. |
+| `tests/fixtures/xdp_pass.bpf.c` | Reused as the alien fixture for §6.26 T_TRUST_MODEL_FLEET_RELAXES_GATE; CONTENT unchanged from §6.9. |
+| `tests/fixtures/mac_filter_alt.bpf.c` | UNCHANGED. Still used by §6.14 T_ATTACH_TAG_MISMATCH; §5.26 does not interact with the tag-mismatch fixture. |
+| `tests/fixtures/mac_filter_bad.bpf.c` | UNCHANGED. Still used by §6.20 T_VERIFIER_REJECT. |
+| `include/version.h.in` + `tests/lib/pins.sh.in` | UNCHANGED (templates from §5.25 P2/P3 still authoritative; CMake just reads the new `VERSION 0.3.0` into the `version.h.in` substitution). |
+| `cmake/BpfBuild.cmake` | UNCHANGED. The new BPF maps are declared inside `mac_filter.bpf.c`; no build-system contract change. |
+| `tests/inject/inject_runt.py`, `tests/inject/inject_eth.py`, `tests/inject/read_stats.py` | UNCHANGED. `read_stats.py` still reads `stats` pin (per §5.23 PERCPU sum). Apply-time atomicity is observed via STAT_DROP_DENY counter delta (no new reader). |
+| `src/common/mac_filter.h` existing constants (`xdpmf_mac`, `mac_filter_stat`, `XDPMF_BPFFS_ROOT`, `XDPMF_ALLOWLIST_MAX`, `XDPMF_MAP_ALLOWLIST_NAME`, `XDPMF_MAP_STATS_NAME`) | UNCHANGED. New constants are ADDITIVE; reviewer asserts `git diff` shows ONLY additions (no removals or modifications to existing lines). |
+
+Any file NOT listed above is off-limits for impl. If impl needs to edit
+a file not listed, that's a design gap — SendMessage architect.
+
+#### §5.26 TestStrategy entries
+
+##### §6.21 T_APPLY_VALID_CONFIG — minimal valid YAML parsed + applied; MAC filtering matches the rule
+
+- **Trigger**: `apply_config tests/fixtures/config_valid.yaml ${IFACE_A}` (via the new common.sh helper that wraps `${NSEXEC} ${LOADER_BIN} apply -f <path> --iface <iface>`). Standard veth fixture (`setup_veth`/`cleanup_veth`); `RESOURCE_LOCK xdp_fixture`; root sudo required.
+- **Observable outcome (all)**:
+  - Exit code 0 (`apply` invocation).
+  - Stderr contains `xdpmacfilter: trust_model=strict` (one-line audit log per §5.26 sub-decision).
+  - Stderr DOES NOT contain `config error:` or `unsupported`.
+  - Pin `${PIN_DIR}/link` exists.
+  - Pin `${PIN_DIR}/active_idx` exists; value (via `bpftool map dump`) is one of {0, 1}.
+  - Pin `${PIN_DIR}/allowlist_a` OR `${PIN_DIR}/allowlist_b` (whichever active_idx selects) contains exactly the MACs from the fixture.
+  - Inject a packet from a MAC in the fixture → STAT_PASS increments by 1.
+  - Inject a packet from a MAC NOT in the fixture → STAT_DROP_DENY increments by 1.
+  - Sanity sub-case: re-run apply with `config_valid_blanket_pass.yaml` (`default_action: pass`, empty rules); inject from a random MAC → STAT_PASS increments (blanket-pass works).
+- **Assertion mechanism**: bash `[[ rc == 0 ]]`, `grep -q`, `bpftool map dump pinned ... -j | jq`, `wait_for_stats_sum`, `inject_eth`.
+- **SKIP conditions**: none.
+- **Cleanup**: `cleanup_veth` removes the netns and the bpffs per-iface dir (PID-suffixed).
+
+##### §6.22 T_APPLY_REJECTS_MALFORMED — every malformed YAML / schema-violation sub-case → exit 9 + recognizable stderr
+
+- **Trigger**: 5 sub-cases, all invoking `${NSEXEC} ${LOADER_BIN} apply -f <fixture_path> --iface ${IFACE_A}`:
+  1. `config_malformed_yaml.yaml`         (flow-form top-level)
+  2. `config_malformed_schema.yaml`       (`default_action: maybe`)
+  3. `config_malformed_dup_id.yaml`       (two rules, same `id`)
+  4. `config_malformed_iface_mismatch.yaml` (file `interface:` differs from `--iface`)
+  5. `config_malformed_unsupported_match.yaml` (`match: {cidr: ...}` — flow-form AND unsupported match-type; ASSERT the parser rejects it before reaching schema validator OR the validator catches it — either path produces exit 9, so test allows either error message)
+- **Observable outcome (each sub-case)**:
+  - Exit code EXACTLY 9.
+  - Stderr matches `xdpmacfilter: config error:`.
+  - For sub-cases 1-3, 5: stderr contains the fixture path AND a `<line>:<col>` position.
+  - For sub-case 4: stderr contains BOTH the file's declared interface name AND the `--iface` arg value (case-sensitive substring match).
+  - No XDP attached afterwards: `[[ -z "$(xdp_prog_id ${IFACE_A})" ]]`.
+  - No bpffs per-iface dir created: `sudo -n test ! -e "${PIN_DIR}"`.
+- **Assertion mechanism**: bash `[[ rc -eq 9 ]]`, `grep -qE`, `xdp_prog_id`, `test ! -e`.
+- **SKIP conditions**: none.
+- **Cleanup**: `cleanup_veth`.
+
+##### §6.23 T_APPLY_ATOMIC_SWAP_NO_DROP — concurrent traffic + apply; zero packet drop for overlapping-allowed MAC
+
+- **Load-bearing for Composite 6 promise** — this test makes or breaks the architectural story. Architect explicitly fences against making it theatrical.
+- **Trigger**:
+  1. `setup_veth` + initial `apply config_apply_swap_a.yaml --iface ${IFACE_A}` (config A = `default_action: drop`, rules: pass MAC_X only).
+  2. Start background traffic injector on the peer veth: continuous `inject_eth ${IFACE_B} MAC_X` at ~100 Hz (bash loop calling the Python injector with a short sleep; configurable via env `XDPMF_INJECT_RATE_HZ` defaulting to 100).
+  3. After ~2 seconds (sustained traffic baseline established): snapshot `STAT_DROP_DENY_baseline = read_stats(${IFACE_A}, STAT_DROP_DENY)`.
+  4. Invoke `apply config_apply_swap_b.yaml --iface ${IFACE_A}` (config B = `default_action: drop`, rules: pass MAC_X + MAC_Y — MAC_X overlap is the load-bearing element).
+  5. Continue traffic for ~2 more seconds.
+  6. Stop the injector; let stats quiesce; snapshot `STAT_DROP_DENY_final = read_stats(${IFACE_A}, STAT_DROP_DENY)`.
+- **Observable outcome (all)**:
+  - Both apply invocations exit 0.
+  - `STAT_DROP_DENY_final - STAT_DROP_DENY_baseline == 0` (MAC_X traffic NEVER dropped during the swap).
+  - `STAT_PASS_final > STAT_PASS_baseline + N_packets_lower_bound` (where lower-bound is conservatively ~150 = 2s × 100Hz × 0.75 fudge for injection scheduling jitter).
+  - `active_idx_map[0]` value changed (was 0 initially; is 1 after — or vice versa; test reads both endpoints and asserts inequality).
+- **Assertion mechanism**: bash `[[ "$drop_delta" -eq 0 ]]`, `[[ "$pass_delta" -ge $lower_bound ]]`, `bpftool map dump pinned ${PIN_DIR}/active_idx -j | jq -r '.[0].value'`, two snapshots compared.
+- **Anti-theatricality controls**:
+  - Background injection MUST be concurrent with the apply (`&` in bash, NOT sequential apply-then-traffic).
+  - The 100-Hz rate gives ~200 packets crossing the swap boundary; even a microsecond half-applied state would manifest as a ≥ 1 drop on the load-bearing MAC.
+  - Negation control: if the test is run with a synthetic non-atomic apply path (impl-level switch — OOS for this slice but architect documents the mechanism for future spike testing), drop_delta becomes non-zero. Cycle 1 ships without the synthetic toggle.
+- **SKIP conditions**: if `setup_veth` reports veth load < lower_bound packets/s (very slow CI runner), SKIP with rc 77 + stderr `XDPMF_INJECT_RATE_HZ too low for swap test on this runner`. Threshold check after step 2 baseline.
+- **Cleanup**: stop background injector via `kill ${INJECT_PID}`; `cleanup_veth`.
+
+##### §6.24 T_APPLY_REPLACES_RULESET — second apply with different rules replaces the first
+
+- **Trigger**:
+  1. `setup_veth`; `apply config_apply_swap_a.yaml --iface ${IFACE_A}` (pass MAC_X only).
+  2. Inject 1 packet from MAC_Y → expect STAT_DROP_DENY += 1.
+  3. `apply config_apply_swap_b.yaml --iface ${IFACE_A}` (pass MAC_X + MAC_Y).
+  4. Inject 1 packet from MAC_Y → expect STAT_PASS += 1.
+  5. `apply config_apply_swap_a.yaml --iface ${IFACE_A}` again (back to MAC_X-only; verifies bidirectional swap).
+  6. Inject 1 packet from MAC_Y → expect STAT_DROP_DENY += 1.
+- **Observable outcome (each apply)**: exit 0; active_idx flipped between successive applies (read before/after via `bpftool map dump`); inner-map contents (read via `bpftool map dump pinned ${PIN_DIR}/allowlist_{a,b}`) reflect the new ruleset on the now-active slot.
+- **Assertion mechanism**: bash `[[ rc -eq 0 ]]`, `wait_for_stats_sum`, `bpftool map dump`.
+- **SKIP conditions**: none.
+- **Cleanup**: `cleanup_veth`.
+
+##### §6.25 T_LINK_PERSIST_ACROSS_LOADER_EXIT — kill loader; filter still enforces on fresh traffic (P0a survival)
+
+- **Load-bearing for P0a per HG2.** Reviewer's 5th framework point ASSERTS this test actually kills the loader process and verifies enforcement on subsequent traffic — not just "pin file exists on bpffs".
+- **Trigger**:
+  1. `setup_veth`; `apply config_apply_swap_a.yaml --iface ${IFACE_A}` (pass MAC_X only). Foreground apply exits 0 (this is the post-MVP-3.1 normal-exit pattern; the loader process exits after pinning the link).
+  2. Confirm pin exists: `sudo -n test -e ${PIN_DIR}/link`.
+  3. Confirm XDP slot occupied: `[[ -n "$(xdp_prog_id ${IFACE_A})" ]]`.
+  4. (No loader process to kill — `apply` already exited. P0a's contract is the LINK persists across loader exit; the apply invocation IS the loader-exit event.)
+  5. Wait 1 second (defensive — gives kernel any async settle).
+  6. Inject 1 packet from MAC_X → expect STAT_PASS += 1.
+  7. Inject 1 packet from MAC_Y → expect STAT_DROP_DENY += 1.
+  8. Re-invoke `apply config_apply_swap_b.yaml --iface ${IFACE_A}` (this exercises the idempotent-reattach via `bpf_link__update_program`).
+  9. Inject 1 packet from MAC_Y → expect STAT_PASS += 1 (now allowed under config B).
+  10. (Optional belt-and-suspenders): `pkill -9 -f xdpmacfilter || true` between steps 5 and 6 to assert no zombie loader.
+- **Observable outcome (all)**:
+  - Step 2 succeeds (link pin present after loader exit).
+  - Step 3 succeeds (XDP attached after loader exit).
+  - Step 6's STAT_PASS delta == 1 (filter active, allow-rule enforced).
+  - Step 7's STAT_DROP_DENY delta == 1 (filter active, default drop enforced).
+  - Step 8 exits 0 with stderr containing `replacing existing program on ${IFACE_A}` OR equivalent operator-readable signal (impl-shape flexibility; architect commits to "stderr names the idempotent-reattach path took").
+  - Step 9's STAT_PASS delta == 1 (new ruleset took effect).
+- **Assertion mechanism**: bash `test -e`, `xdp_prog_id`, `inject_eth`, `wait_for_stats_sum`, `grep -qE`.
+- **SKIP conditions**: if `bpf_link__pin` fails at attach with `ENOSYS` (kernel ≥ 5.7 floor breached — should not happen given §5.24 sets 5.15 floor), test exits 77 with stderr `bpf_link__pin unsupported on this kernel`. Otherwise no skip.
+- **Cleanup**: `pkill -9 -f xdpmacfilter || true`; `sudo -n rm -f ${PIN_DIR}/link`; `cleanup_veth`. (The pin removal triggers kernel-side XDP detach since the link's last reference is dropped — verifies the unpin contract on teardown.)
+
+##### §6.26 T_TRUST_MODEL_FLEET_RELAXES_GATE — fleet bypasses §5.4 alien refusal; strict re-confirms refusal
+
+- **Differential test** (per §5.26 sub-decision): uses REAL alien-program fixture `tests/fixtures/xdp_pass.bpf.c` (already built per §6.9 / §6.14 `add_bpf_object` infrastructure).
+- **Trigger** (4 sub-cases for full coverage):
+  1. **Strict-default refuses alien**: `setup_veth`; pre-attach `xdp_pass.bpf.o` to ${IFACE_A}; invoke loader (NO env var set); assert exit 4 + `trust_model=strict` in stderr + alien still attached.
+  2. **Strict-explicit refuses alien**: same setup; invoke loader with `XDPMF_TRUST_MODEL=strict`; same assertions as sub-case 1.
+  3. **Fleet bypasses + replaces alien**: same setup; invoke loader with `XDPMF_TRUST_MODEL=fleet`; assert exit 0 + `trust_model=fleet` in stderr + `bypassing alien-program check` in stderr + our program is now attached (verified via §5.19 name-check helper `xdp_prog_id` + `bpftool prog show id <N>`).
+  4. **Garbage value fails closed**: clean iface (no pre-attached alien); invoke loader with `XDPMF_TRUST_MODEL=garbage`; assert exit 9 + `config error: unknown trust model: 'garbage'` in stderr + no XDP attached + no bpffs dir.
+- **Observable outcome (per sub-case)**: as above (exit code + stderr substring + XDP slot state).
+- **Assertion mechanism**: bash `[[ rc -eq <N> ]]`, `grep -qE`, `xdp_prog_id`, `bpftool prog show id`.
+- **Negation control**: sub-case 1+2 IS the negation of sub-case 3 (same fixture, different env → different outcome). The differential makes this NOT theatrical.
+- **Env-var carrying loader invocations**: MUST use the `${NSEXEC} env XDPMF_TRUST_MODEL=<value> ${LOADER_BIN} ...` form per §5.25 EDIT-14 (since `setup_veth` is called, the test enters the netns; the §5.25 mount-ns/sudo idiom applies).
+- **SKIP conditions**: none.
+- **Cleanup**: `sudo -n ip link set ${IFACE_A} xdpgeneric off 2>/dev/null || true`; `sudo -n rm -rf ${PIN_DIR}`; `cleanup_veth`.
+
+##### §6.27 T_EXIT_CODE_9_ON_CONFIG_ERROR — exit-code-9 reachable end-to-end via at least one minimal trigger
+
+- **Trigger**: bad `XDPMF_TRUST_MODEL=garbage` invocation (smallest reachable trigger; also covered as sub-case 4 in §6.26 — this test is the bare-bones exit-code-9 audit-grep that doesn't require veth fixture). NO `setup_veth`. NO `--iface` validation matters (loader rejects env-parse before resolving iface).
+- **Observable outcome**:
+  - Exit code EXACTLY 9.
+  - Stderr starts with `xdpmacfilter: config error:`.
+  - Stderr contains `unknown trust model` (specific error message).
+  - No XDP touched (no iface change).
+  - No bpffs dir created.
+- **Assertion mechanism**: bash `[[ rc -eq 9 ]]`, `grep -qE`.
+- **SKIP conditions**: none.
+- **Cleanup**: none required (test does not touch netns or bpffs).
+- **Rationale for separate test from §6.26**: §6.26 requires veth + alien-fixture infrastructure; §6.27 is the smoke-test that exit 9 is wired through `main()` → `loader_error_category()` correctly with ZERO fixture dependencies. If §6.26 fails for fixture-infrastructure reasons, §6.27 still proves the exit-code path. Ops-script writers grep for "exit 9" — §6.27 is the canonical reference.
+
+#### §5.26 Preserved invariants (MVP-3.1 brownfield)
+
+Per architect spec section 6.5 (brownfield mode), the following MVP-2-and-earlier
+invariants MUST hold post-§5.26. The reviewer's 5th framework point
+walks this list and reports `[INVARIANT-VIOLATED]` per failed check.
+
+| # | Invariant | Check mechanism |
+|---|---|---|
+| PI-1 | §5.4 alien-program identity-gate ENFORCED in strict mode (default) | Re-run §6.14 T_ATTACH_TAG_MISMATCH + §6.9 T_ATTACH_ALIEN_REFUSAL with `XDPMF_TRUST_MODEL` unset → both still pass exit 4. Cross-check with §6.26 sub-case 1 (strict-default refuses alien). |
+| PI-2 | §5.19 `bpf_prog_info.name` identity-gate ENFORCED in BOTH modes (strict + fleet) | §6.9 still passes in strict; §6.26 sub-case 3 verifies fleet detaches-and-replaces (which means the name check still RAN to compute `is_ours = false`, then disposition changed). If name-check were SKIPPED in fleet, the alien would be treated as ours and the existing pin/cleanup flow would diverge. |
+| PI-3 | §5.22 Item 1 tag-check ENFORCED in BOTH modes | §6.14 T_ATTACH_TAG_MISMATCH passes in strict; ENVISIONED Phase-B addition: re-run the same fixture with `XDPMF_TRUST_MODEL=fleet` (NOT a separate ctest per §7 OOS — fold into §6.14's existing negation-control if appropriate) and assert exit 0 + `bypassing alien-program check` (tag-mismatch is one trigger of the §5.4 state-(c) disposition that fleet relaxes). If §6.14 starts failing in strict mode, PI-3 is violated. |
+| PI-4 | §5.22 Item 2 O_PATH bpffs path-discipline ENFORCED in BOTH modes (UNCONDITIONALLY) | §6.15 T_BPFFS_ROOT_SYMLINK passes in strict; ENVISIONED Phase-B addition: re-run same with `XDPMF_TRUST_MODEL=fleet` and assert EXIT 8 (still refused — fleet does NOT relax path discipline). If §6.15 starts failing OR if the fleet-mode variant starts EXITING 0 instead of 8, PI-4 is violated. |
+| PI-5 | §5.24 kernel-version probe ENFORCED in BOTH modes | §6.20 T_VERIFIER_REJECT continues to gate on kernel version per §5.24; no change. |
+| PI-6 | 20 pre-existing ctests pass byte-equivalent invocations OR legitimately SKIP-77 | Re-run all 20 tests post-§5.26 → all pass (or skip with rc 77 per §5.24 Q4 hybrid). Diff `tests/T_*.sh` shows zero body changes (only `tests/lib/common.sh` and `tests/CMakeLists.txt` may diff per §5.26 EDITED list above). |
+| PI-7 | `loader.hpp` diff scope EXACTLY one new enumerator line (`ConfigError = 9`) + file relocation | `git diff -M src/loader/loader.hpp src/lib/loader.hpp` shows: rename + body diff equal to one line added (`    ConfigError        = 9,`) inside the existing `LoaderError` enum body. ANY other line diff (including reformatting, whitespace, comment changes) is `[INVARIANT-VIOLATED]`. Same precedent as §5.22 `PathRefused = 8` and §5.24 `KernelUnsupported = 7`. |
+| PI-8 | `xdpmacfilter --version` reports `xdpmacfilter 0.3.0` | Run `${LOADER_BIN} --version`; output MUST be `xdpmacfilter 0.3.0` (single line, ending newline). Version bump from 0.2.3 → 0.3.0 per Done-Definition (MVP-3.1 is a minor release: new feature, backward-compatible CLI surface). |
+| PI-9 | `xdpmacfilter --version` / `--help` output FORMAT unchanged (just version number bumps + `apply` line in --help) | `T_CLI_HELP_VERSION` re-run passes (existing ERE in §6.10 is forward-compatible per §5.25 Q4 T1). The `--help` text gains one line listing `apply`; ERE in T_CLI_HELP_VERSION does NOT pin help-text length, so this passes. |
+| PI-10 | Existing constants in `src/common/mac_filter.h` UNCHANGED | `git diff src/common/mac_filter.h` shows ONLY additions (the new §5.26 Q6 constants); zero modifications/removals on existing lines (`xdpmf_mac`, `mac_filter_stat`, `XDPMF_BPFFS_ROOT`, `XDPMF_ALLOWLIST_MAX`, `XDPMF_MAP_ALLOWLIST_NAME`, `XDPMF_MAP_STATS_NAME`). |
+| PI-11 | Internal directory layout = `src/lib/` + `src/cli/` + `src/common/` + `src/bpf/` (no `src/loader/` after this slice) | `test -d src/loader` returns false (or directory exists empty post `git rm`); CMake target `xdpmf_internal` exists per Q1 R1 + STATIC; reviewer asserts `find src -type d` matches exactly the four-directory layout. |
+| PI-12 | Pin paths under `${XDPMF_BPFFS_ROOT}/<iface>/` are host-global (visible from any netns under `nsenter --net` per §5.25 EDIT-15) | `nsenter --net=/var/run/netns/xdpmf_ns_$$ ls /sys/fs/bpf/xdpmacfilter/<iface>/` shows all new pins (`link`, `active_idx`, `rulesets`, `allowlist_a`, `allowlist_b`, `defaults`, `stats`). Same test infrastructure as §5.25 used; no new mechanism. |
+| PI-13 | `stats` map type + read protocol UNCHANGED from §5.23 (`BPF_MAP_TYPE_PERCPU_ARRAY` + `read_stats.py` sum-across-CPUs) | `read_stats` helper still works on the post-§5.26 build; PERCPU schema unchanged; STAT_PASS / STAT_DROP_DENY / STAT_DROP_MALFORMED semantics unchanged. |
+| PI-14 | `--mode {generic,native,offload}` flag on `attach` UNCHANGED from §5.23 (and forwarded by `apply`) | §6.16 T_MODE_GENERIC_DEFAULT + §6.17 T_MODE_NATIVE_UNSUPPORTED + §6.19 T_MODE_DETACH_REJECTS all pass. `apply` accepts the same flag with the same semantics. |
+
+#### §5.26 OOS — Composite 6 components SHIPPED + new fences
+
+##### Moved from deferred to SHIPPED (per Composite 6)
+
+- ~~**No YAML config file** — config is CLI-only.~~ **— SHIPPED in §5.26 (MVP-3.1, 2026-05-24)** via Items 2 + 4 (custom YAML subset parser per HG1 + Q-HG1 grammar; `apply -f <file>` subcommand per Q4 G1). MAC-only matching in cycle 1 (CIDR / ports etc. lands in MVP-3.2+ as in-config rule-type extensions, NOT as new CLI flags).
+- ~~**No `--allow` post-attach mutation** — to change the list, detach and re-attach. MVP-3 may add a `set-allowlist` subcommand.~~ **— SHIPPED in §5.26 (MVP-3.1, 2026-05-24)** via Item 3 atomic apply (ARRAY_OF_MAPS[2] + active_idx flip per Q2 A1). `xdpmacfilter apply -f <new-config>` is the hot-reload primitive; the existing `--allow` remains as a one-rule shorthand per Q3 BC1.
+- ~~**No `bpf_link__pin()` survival across loader exit** (P0a — Open Q #12 in architecture-v2.md)~~ **— SHIPPED in §5.26 (MVP-3.1, 2026-05-24)** via Item 5 (HG2). Filter persists at `${XDPMF_BPFFS_ROOT}/<iface>/link` across loader-process termination; verified by §6.25 T_LINK_PERSIST_ACROSS_LOADER_EXIT.
+- ~~**No internal code reorg** — `src/loader/` is a single dir.~~ **— SHIPPED in §5.26 (MVP-3.1, 2026-05-24)** via Item 1 + Q1 R1 minimum split. `src/loader/` → `src/lib/` (BPF-facing) + `src/cli/` (user-facing). Internal STATIC target `xdpmf_internal`. No SONAME; no installed headers; this is a refactor, not a library promotion (library promotion remains MVP-3.6+ optional branch per architecture-v2.md line 261).
+- ~~**No `XDPMF_TRUST_MODEL` env var** — single-mode loader (strict-only).~~ **— SHIPPED in §5.26 (MVP-3.1, 2026-05-24)** via Item 6 + HG3. `strict|fleet`; strict default; relaxes §5.4 ONLY. Audit story via mandatory stderr log at attach.
+
+##### NEW out-of-scope fences (per §5.26)
+
+- **No L3 src-CIDR axis** — MVP-3.2 slice (lands as in-config rule type, NOT as new CLI flag). `architecture-v2.md` dependency graph line 217 + brief §1.
+- **No per-rule counters + `xdpmf-exporter` binary + Prometheus** — MVP-3.4 slice. Composite 6 cycle 1 keeps existing global PERCPU_ARRAY stats untouched (`STAT_PASS` / `STAT_DROP_DENY` / `STAT_DROP_MALFORMED` per §5.23).
+- **No `systemd xdpfilter@.service` template + Ansible playbook** — MVP-3.3 slice.
+- **No public `libxdpmf.so.0` SONAME-committed library** — MVP-3.6+ optional branch. The internal STATIC target `xdpmf_internal` per Q1 R1 makes future promotion mechanical but does NOT ship it now (no installed headers; no SONAME; no pkg-config).
+- **No `xdpmfd` daemon** — MVP-3.6+ optional branch (only if measured reload cadence demands sub-second).
+- **No AF_XDP / mirror / rate-limit / redirect actions** — MVP-3.8+ deferred.
+- **No JSON structured logs** — MVP-3.5 slice. `--version` / `--help` / error stderrs stay plain text per MVP-1.
+- **No sFlow ringbuf emitter** — MVP-3.6 (conditional on hw-sFlow absence).
+- **No binary rename `xdpmacfilter` → `xdpfilter`** — MVP-3.12 slice. The on-disk YAML path `/etc/xdpfilter/<iface>.yaml` (with `xdpfilter` in the path) is the FUTURE name; the binary stays `xdpmacfilter` for now. Operator docs MAY note the path-vs-binary asymmetry as a known forward-rename hint.
+- **No automatic kernel tripwire (C.5)** — **KILLED** (not deferred). `architecture-v2.md` line 297 — fail-open inverts allowlist policy; manual bypass primitive in MVP-3.4 covers ops need.
+- **No per-axis trust model env vars** — explicitly fenced by HG3. Single switch `XDPMF_TRUST_MODEL=strict|fleet` only. Future MVP-3.3+ MAY add additive override env vars on top, but the base axis stays single.
+- **No full YAML parser (yaml-cpp, rapidyaml)** — explicitly fenced by HG1. Custom subset per Q-HG1 only.
+- **No schema versions other than `1`** — Q5: `1` only in cycle 1; `schema_version: 2` is for future breaking changes at MVP-3.3+.
+- **No multi-interface config in one file** — one file = one interface (`/etc/xdpfilter/<iface>.yaml` per `architecture-v2.md` line 43). The `interface:` field in YAML is a redundant declaration that MUST match `--iface`; multi-iface fan-out via Ansible/systemd template per MVP-3.3.
+- **No hot-reload signal handler** (e.g. `SIGHUP` triggers re-read of config) — apply happens via re-invoking `xdpmacfilter apply -f`, not via signals. Daemon-style reload is the MVP-3.6+ daemon branch.
+- **No `--dry-run` / `--validate-only` / `--diff-against-current` flags on `apply`** — cycle 1 is verb-only (Q4 G1). Future MVP-3.3+ MAY add `--dry-run` (validate + report would-apply changes, no kernel touch) if operator demand emerges; out of cycle 1.
+- **No fleet-mode relaxation of §5.19 OR §5.22 (path discipline / tag-check)** — HG3 fences this hard. Fleet relaxes ONLY §5.4 alien-program disposition; PI-3 + PI-4 + PI-5 in Preserved invariants enforce this. Reviewer's 5th framework point checks PI-3/PI-4/PI-5 explicitly.
+- **No identity helper extraction to `src/lib/identity.{cpp,hpp}`** (Q1 R1 carve-out) — identity helpers stay in `loader.cpp` anon namespace; promotion to a sub-module is MVP-3.4+ if per-rule counter machinery pressures the anon namespace.
+- **No `XDPMF_BPFFS_ROOT` rename to `XDPMF_CONFIG_ROOT` or similar** — the bpffs root constant stays `XDPMF_BPFFS_ROOT` (the YAML config root `/etc/xdpfilter/` is OPERATOR-side, not loader-coded; the loader takes `-f <path>` and does not search a default location in cycle 1).
+- **No CHANGELOG auto-generation** — `[0.3.0]` entry manually authored per §5.25 V1 precedent.
+- **No T2-strict version assertion in T_CLI_HELP_VERSION** — §5.25 Q4 T1 ERE remains forward-compatible across 0.2.3 → 0.3.0 bump; no test edit required.
+- **No `bpf_link__update_program` fallback for kernels that don't support hot-swap** — assumed-supported per libbpf 1.x + kernel 5.7+; floor 5.15 enforces this. If a future kernel regresses, impl falls back to unpin + fresh-attach (one extra packet-window) and emits stderr `link update unsupported on this kernel; falling back to detach+attach` — but this fallback path is OOS for cycle 1 (no test, no contract; if observed in Phase B, fold via standard inline-merge per HG2).
+- **No background-injector framework abstraction** — §6.23 ships with a one-off bash `&` loop; if MVP-3.2+ tests need more concurrent traffic patterns, a generic `inject_continuous` helper lands then.
+- **No `XDPMF_INJECT_RATE_HZ` documentation in `--help`** — env var is test-only infrastructure (per §6.23 SKIP-rate threshold mechanism); intentionally undocumented in public CLI surface.
+
+#### §5.26 verifiable invariants for reviewer
+
+In addition to §5.26 Preserved invariants (PI-1..PI-14) above:
+
+- `git diff main -- src/lib/loader.hpp` (post file-move) shows: rename
+  from `src/loader/loader.hpp` + ONE added line (`    ConfigError        = 9,`).
+  NO other line diff. Reviewer's `loader.hpp`-invariant check accepts
+  this exact pattern.
+- `git diff main -- src/common/mac_filter.h` shows: ONLY additions (the
+  new §5.26 Q6 constants); zero modifications to existing lines.
+- `git diff main -- src/cli/main.cpp` (post file-move) shows: rename +
+  ONE added dispatch arm (`ParsedApply` handling). NO other line diff.
+- `git diff main -- tests/T_*.sh` (existing 20) shows ZERO body
+  changes.
+- 7 new ctests pass (§6.21..§6.27); §6.23 + §6.25 are the load-bearing
+  pair (Composite 6 promise + P0a verification).
+- 20 existing ctests still pass (or legitimately SKIP-77 per §5.24
+  Q4 hybrid).
+- `XDPMF_SANITIZERS=ON` build clean.
+- `xdpmacfilter --version` reports `xdpmacfilter 0.3.0` (bump from
+  0.2.3 to mark MVP-3.1; CMake `project(VERSION)` per MVP-2 Polish-2
+  V1 mechanism).
+- `xdpmacfilter --help` lists `apply` alongside `attach` / `detach`.
+- `CHANGELOG.md` entry `[0.3.0] - 2026-05-NN` (Keep-a-Changelog
+  format per MVP-1.1C precedent).
+- Build-pace table in CHANGELOG gains a row for MVP-3.1.
+
+Evidence: `mint/task-brief.md` MVP-3.1 brief (Items 1-6 + Q1-Q6
++ HG1-HG3); `mint/architecture-v2.md` lines 147-168 (Composite 6
+spec) + lines 328-332 (per-phase risk register MVP-3.1 rows); §5.4 /
+§5.19 / §5.20 / §5.22 / §5.23 / §5.24 / §5.25 (the invariants this
+slice preserves); §4.1 (exit-code table, gains row 9); §4.3
+(LoaderError enum, gains `ConfigError = 9`).
