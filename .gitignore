@@ -27,3 +27,4 @@ mint/test-run.log
 
 # Failsafe paths (out-of-tree by orchestrator)
 /tmp/mint-*
+.cache/
