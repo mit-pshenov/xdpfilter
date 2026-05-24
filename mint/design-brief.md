@@ -1,159 +1,185 @@
-# Design Brief — `xdpmacfilter` v2 architecture (MVP-3 roadmap)
+# Design Brief — Per-rule counter map shape (PERCPU_HASH vs PERCPU_ARRAY)
 
 ## Topic
 
-Map the full requirements for a production-grade line-rate L2/L3 packet filter (deployed on 40 Gbps GGSN-Gi interfaces) onto a concrete component decomposition + phased mint roadmap. Current `xdpmacfilter` (MVP-2 closed) is one foundation stone of the destination — this round defines what the full system looks like and how we get there from MVP-3.1 through MVP-3.N.
+Resolve `architecture-v2.md` Open Question #13: choose between `BPF_MAP_TYPE_PERCPU_HASH` (architect B's preference, sparse `rule_id` keys) and `BPF_MAP_TYPE_PERCPU_ARRAY` (architect C's preference, dense `rule_id` 0..N-1 indices, capped at 64 rules) for the per-rule counter map landing in MVP-3.4. This is a narrow technical fork with substantive downstream consequences (BPF datapath layout, rule_id allocation policy, verifier path complexity, exporter binary's read protocol) — small mini-hld round (2 architects + optional contrarian) before writing the MVP-3.4 task-brief.
 
-## Motivating requirements (from product owner)
+## Motivating context
 
-> We need to deploy a line-rate L2 traffic filtering layer on all 40 Gbps GGSN–Gi interfaces to gain fine-grained control, visibility, and protection at the packet level without introducing noticeable latency or impacting throughput.
+`architecture-v2.md` MVP-3.4 row (line 312) ships per-rule counter map + `rules`+`action_table` (B.2 partial) + `xdpmf-exporter` binary + Prometheus `/metrics` + manual bypass primitive. The exporter binary reads per-rule counters and serves them on `/metrics`. The choice between HASH and ARRAY shapes the BPF program's per-packet rule-counter increment path, the userspace rule-id allocation policy, and the exporter's read loop.
 
-**Purpose**: control + monitor raw network traffic on Gi side, before higher layers; clean separation between trusted and untrusted segments; compliance with routing policy; early mitigation of anomalous traffic.
+Per `architecture-v2.md` Divergence #7 (lines 96-97):
+> **(B vs C): per-rule counter map type — `PERCPU_HASH` vs `PERCPU_ARRAY`.** B (architect-B.md:24, 136) proposes `BPF_MAP_TYPE_PERCPU_HASH` keyed by `rule_id`. C (architect-C.md:560) explicitly asks B to "use PERCPU_ARRAY indexed by rule-id; cap at 64 rules for now". This is a substantive technical disagreement: PERCPU_ARRAY = pre-allocated dense slots, O(1) lookup, requires contiguous rule_id allocation 0..N-1; PERCPU_HASH = sparse dynamic keys, supports rule_id gaps (e.g., operator deletes rule 5, rule_ids 1..4, 6..N stay valid).
 
-**Scope**:
-- L2/L3 only (Ethernet, VLAN, IPv4/IPv6) + optional L4 port for flow classification
-- No DPI, no protocol dissection, no L7
-- Inline or mirror mode (depends on site)
-- Compatible with both DPDK and AF_XDP paths
+Per `architecture-v2.md` Open Question #13 (lines 391):
+> **Per-rule counter map type — `PERCPU_HASH` (B) vs `PERCPU_ARRAY` (C)?** Substantive technical disagreement promoted from Convergence after round-1 review. Why architects couldn't resolve: cross-lens — depends on rule_id allocation policy (dense 0..N-1 vs sparse / operator-assigned) which neither has fully specified. What answer unlocks: gates MVP-3.4 BPF map layout — wrong choice is moderately expensive to undo (verifier paths differ).
 
-**Performance & reliability**:
-- 40 Gbps per site (bidirectional, sustained)
-- ≤ 500 µs added latency per packet
-- < 0.01 % drop under peak load
-- HA: hot-standby OR bypass mode on failure
+Per `architecture-v2.md` MVP-3.4 risk register row (line 338):
+> **Per-rule counter map type choice (PERCPU_HASH vs PERCPU_ARRAY) commits BPF layout — wrong choice is expensive to undo.** Mitigation: Open Question #13 — human-gate decision based on rule_id allocation policy (dense 0..63 → ARRAY; sparse/UUID → HASH).
 
-**Functional**:
-- Hierarchical rule config:
-  - L2: interface, VLAN ID, MAC, EtherType
-  - L3: src/dst IP, subnet, routing domain
-  - L4: optional port matching (no payload parsing)
-- Actions: allow, drop, mirror, rate-limit, tag, redirect
-- Config: central YAML/JSON, hot-reloadable (no restart)
-- Sync: per-site sync via control plane; optional push from NOC
-- Observability: per-rule counters (pps/bps/drops), Prometheus, sFlow, structured logs
-- Safety: worker watchdog, auto-restart, alert on failure
+## Scope
 
-**Initial tasks per product owner**:
-1. Architecture: per-core worker model pinned to NIC queues; zero-copy packet flow (DPDK or AF_XDP)
-2. Config engine: hierarchical schema (interface → IP range → action)
-3. Control plane: lightweight management service for rule updates + telemetry
-4. Metrics & logging: per-rule + per-interface; integrate Prometheus + Grafana
-5. Fail-safe: bypass or mirror mode on worker failure; watchdog recovery
-6. Testing: synthetic 40 Gbps load (IXIA / TRex)
+- **In scope**: choose ONE of {PERCPU_HASH, PERCPU_ARRAY}; specify rule_id allocation policy (dense vs sparse); cardinality bound; BPF datapath increment shape; userspace read protocol shape; exporter binary read-loop shape; impact on MVP-3.4 schema (does YAML expose explicit `id:` per rule, or is id implicit-sequential?); migration path if the choice turns out wrong.
+- **Out of scope**: per-rule counter SEMANTICS (what gets counted — pass-hits per rule? drop-hits per rule? bytes?); Prometheus label set; sFlow integration; CIDR-axis counters (orthogonal to MAC-axis counters; question applies symmetrically); exporter binary's full architecture (covered by MVP-3.4 brief proper).
 
-## Current state (MVP-2 closed, 2026-05-23)
+## Current state (MVP-3.3 shipped, 2026-05-24 ~20:41)
 
-- `xdpmacfilter` binary — XDP loader + L2 MAC allow-list (HASH map, pass/drop, default SKB-generic mode)
-- C++23 loader + BPF C program; libbpf 1.1+; kernel ≥ 5.15
-- Hardened identity gate (name+tag), O_PATH fd-relative bpffs ops, kernel-version probe, PERCPU stats, --mode {generic,native,offload}, netns-isolated test fixture
-- 20 ctest entries pass (+ sanitizer build clean)
-- See `mint/design.md` for full accumulated history (~3433 lines, §5.x through §5.25 amendments)
+- 11 mint-dev cycles complete; MVP-3.1+3.2+3.3 (Composite 6 architecture) shipped
+- Config schema currently:
+  - YAML `rules:` list at `/etc/xdpfilter/<iface>.yaml`
+  - Each rule has `id: <integer>` field (per §5.26 design — operator-assigned)
+  - `mac:` and `src_cidr:` match axes
+- BPF maps currently: `mac_allowlist_a`/`mac_allowlist_b` (HASH), `cidr_allowlist_a`/`cidr_allowlist_b` (LPM_TRIE), `stats` (PERCPU_ARRAY with 4 indices: STAT_PASS, STAT_DROP_DENY, STAT_DROP_MALFORMED, STAT_PASS_CIDR)
+- Per-rule counters do NOT exist yet — global aggregates only
 
-## Decisions already made (product owner Q&A, 2026-05-24)
+The rule_id allocation question is partially constrained by existing schema:
+- `id: <integer>` is operator-assigned per existing schema
+- Schema does NOT enforce id contiguity (operator could write `id: 1`, `id: 5`, `id: 100`)
+- T_APPLY_REJECTS_MALFORMED sub-case 3 already rejects duplicate id within same config
 
-1. **Datapath focus**: XDP/AF_XDP (testable on dev VM). DPDK off immediate critical path — can be added later or never. Bonus: separate **rules module** from **filter module** as natural architecture (rules in userspace lib, filter in BPF) — implies library shape.
-2. **HA needed, type TBD** — to be decided in this round
-3. **Identity gates**: tool sits inside trusted network. §5.4/§5.19/§5.22 hardening can be **relaxed** for fleet deployment (not removed) — likely via build flag or runtime mode (`XDPMF_TRUST_MODEL=fleet|strict`)
-4. **Mirror**: per-rule action (mirror specific packets), NOT global mode
-5. **Mirror + rate-limit**: late phases (in mind, not first phases)
-6. **Config**: per-VM (per-site). No multi-tenant control plane.
+So the existing schema is **sparse-id-permissive**: operator-assigned, can be non-contiguous. This is a load-bearing constraint for the choice.
+
+## Decisions to make in this round
+
+1. **PERCPU_HASH or PERCPU_ARRAY** — the core question.
+2. **rule_id allocation policy** — operator-assigned-sparse (current) OR auto-allocated-dense (would require schema change) OR hybrid (operator-supplies-name, loader-auto-allocates-internal-id).
+3. **Cardinality bound** — current schema accepts arbitrary id range; should there be a hard cap? (Architect C's 64-rule cap was conditional on PERCPU_ARRAY choice.)
+4. **Schema impact** — if any (probably none if HASH; possibly a `max_rules: <N>` field if ARRAY).
+5. **Migration path** — if cycle-2 choice (e.g., HASH) turns out wrong in MVP-3.5+, what's the cost to flip? (Spec a 1-paragraph migration sketch.)
 
 ## Reference materials
 
-- **Round 1 brainstorm** (datapath/UX/migration lenses): `/tmp/mvp3-brainstorm/architect-{A,B,C}.md` + `synthesis.md`
-- **Round 2 brainstorm** (config-design specifically: semantics/format/contrarian): `/tmp/mvp3-config-design/architect-{T1,T2,T3}.md` + `synthesis.md`
-- **Project design.md**: `/home/user/mint-l2-mac-filter/mint/design.md` (full history)
-- **External (telecom-context references for new questions)**:
-  - GGSN-Gi interface semantics (3GPP TS 23.060)
-  - Katran architecture (40 Gbps XDP load balancer at Meta)
-  - Cilium daemon model + control plane
+- `mint/architecture-v2.md` — Divergence #7 (line 96), Open Question #13 (line 391), MVP-3.4 row + risk register row 338
+- `mint/design.md` §5.26 (config harness — schema), §5.27 (CIDR rule type extending), §5.28 (systemd OPS slice — references trust_model stderr format which exporter docs cite)
+- `/tmp/mvp3-brainstorm/architect-B.md` and `architect-C.md` from architecture round-1 — original proposals for HASH vs ARRAY
+- Kernel BPF map docs:
+  - `Documentation/bpf/map_hash.rst` (PERCPU_HASH semantics)
+  - `Documentation/bpf/map_array.rst` (PERCPU_ARRAY semantics)
+  - LWN coverage of PERCPU map types — verifier complexity, atomicity guarantees
+- Production references:
+  - Cilium's per-policy counter implementation (uses PERCPU_HASH keyed by policy_id) — `pkg/maps/policymap/` and `bpf/lib/policy.h`
+  - Katran's per-VIP stats (uses PERCPU_ARRAY with dense vip-index) — `katran/lib/bpf/balancer_consts.h`
+- Project's existing `stats` PERCPU_ARRAY pattern (`src/common/mac_filter.h:54-60`, `tests/lib/read_stats.py`) — the read protocol we'd extend or parallel
 
 ## Non-goals (explicit OOS for this round)
 
-- DPDK datapath design (deferred — can be future addition, not MVP-3 critical path)
-- Multi-tenant control plane (per-VM is decision)
-- DPI / L7 filtering (out of product scope)
-- Concrete code for ANY component (this round is architecture, not implementation)
-- TRex/IXIA test harness specifics (acknowledged needed; implementation is Phase F-ish)
+- **MVP-3.4 task-brief itself** — this round produces ONE technical decision + supporting context; the broader MVP-3.4 brief (per-rule counter + rules ARRAY + action_table + exporter + Prometheus + manual bypass) writes AFTER this question is answered.
+- **Prometheus label cardinality** — orthogonal to map-type choice; covered by MVP-3.4 brief.
+- **sFlow / JSON logs** — MVP-3.5+/3.6+ slices.
+- **AF_XDP / per-action growth** — MVP-3.8+/3.10+.
+- **CIDR-axis per-rule counters** — applies symmetrically once MAC-axis choice is made (or earlier if architect surfaces a reason to diverge — probably won't).
+- **Sub-architecting the exporter binary** — read-loop SHAPE only ("hot-path read pattern" — full vs delta, polled vs streamed), not full binary architecture.
 
 ## What success looks like for this round
 
-`mint/architecture-v2.md` answers:
-- Component decomposition (what binaries/libraries/processes exist, their interfaces and lifecycle)
-- Phase breakdown (MVP-3.1 through MVP-3.N) with dependency graph and per-phase scope
-- Concrete first-slice scope (what `/mint .` cycle would ship as MVP-3.1)
-- Critical decisions formalized: HA model, identity-gate relax mechanism, AF_XDP integration timing, kernel-floor policy
-- Risk register: what can go wrong per phase
-- Open questions surfaced for human gate
+`mint/design.md` gets a new amendment `§5.29 MVP-3.4 pre-decision: per-rule counter map shape` (or written into the MVP-3.4 task-brief.md once written) answering:
+
+- Chosen map type (HASH or ARRAY) + 1-paragraph rationale
+- Chosen rule_id allocation policy (sparse-operator-assigned / dense-auto / hybrid)
+- Cardinality bound (if any) + how enforced (schema validator / runtime check / both)
+- Schema impact (none / new field / breaking change)
+- Migration path sketch if cycle-2 choice turns out wrong (≤3 sentences)
+- Open questions surfaced for human gate (if any remain after architect rounds)
+
+The decision becomes the controlling input for the MVP-3.4 task-brief.
 
 ---
 
 ```yaml
 architects:
   parallel:
-    - name: A
+    - name: HASH
       lens: |
-        System architecture / component decomposition. What binaries, libraries, and processes exist; their public interfaces; their lifecycle; how they compose into a deployable system. Library boundaries (libxdpmf), CLI binary, future daemon process, BPF object structure. Identity-gate relax mechanism (XDPMF_TRUST_MODEL=fleet|strict). How "rules module separated from filter module" expresses concretely in C++/BPF.
+        BPF datapath / map mechanics. Argue FOR PERCPU_HASH. Cover: sparse-id-allows
+        non-contiguous operator ids (existing schema permits this — load-bearing
+        constraint); deletion handles cleanly (key removed, no hole); cardinality
+        is dynamic (operator can have 1 rule or 500 without pre-allocation);
+        BPF verifier paths for HASH lookup; per-CPU atomicity guarantees;
+        sync semantics with `bpf_map_update_elem(MAP_TYPE_PERCPU_HASH, key, val, BPF_ANY)`;
+        Cilium's prior art with policy-id keyed PERCPU_HASH. Address the cost-side
+        honestly: hash-collision risk, slightly more verifier complexity, slight
+        per-packet overhead vs ARRAY's O(1) deref.
       scope: |
-        COVER: process model, library/binary split, public C++ API design, BPF object packaging, identity-gate parameterization, build modes.
-        DO NOT COVER: rule grammar (that's how operators write rules — out of this lens), datapath internals (BPF prog structure — that's architect B), operational tooling (Prometheus/sFlow — that's architect C).
+        COVER: PERCPU_HASH semantics, atomicity, lookup latency, deletion semantics,
+        rule_id allocation policy (sparse-operator-assigned default; argue why this
+        fits), cardinality (none / soft cap / hard cap), schema impact (likely
+        zero — existing id:<int> works as-is), BPF program increment pattern,
+        userspace read protocol for exporter, migration to ARRAY if needed.
+        DO NOT COVER: ARRAY shape (steel-man it briefly only to compare); broader
+        MVP-3.4 scope (exporter binary architecture, Prometheus labels — out).
       sources:
-        - "Katran (facebookincubator/katran): C++ library + BPF program shape — repo + Engineering blog"
-        - "Cilium agent architecture (docs.cilium.io/en/stable/architecture)"
-        - "systemd service + library separation patterns"
-        - "C++ shared library design: ABI versioning, SONAME, header layout best practices"
-        - "BPF object lifecycle: libbpf skeleton vs hand-loaded, pin/reuse semantics (kernel.org/doc/html/latest/bpf/libbpf/)"
-        - "/tmp/mvp3-brainstorm/architect-A.md (round 1 datapath lens — for context, what kernel-side already constrains)"
-    - name: B
+        - "Linux kernel BPF docs: Documentation/bpf/map_hash.rst — PERCPU_HASH semantics"
+        - "Cilium policymap (pkg/maps/policymap + bpf/lib/policy.h) — production prior art"
+        - "LWN coverage of BPF percpu maps + verifier complexity"
+        - "mint/architecture-v2.md Divergence #7 line 96-97 (your starting position)"
+        - "mint/architecture-v2.md Open Q #13 line 391 (gating question)"
+        - "Project's existing src/bpf/mac_filter.bpf.c map layout (the maps you'd join)"
+    - name: ARRAY
       lens: |
-        Datapath strategy / BPF design for the full action set. How the BPF program changes from current single-rule-allowlist to multi-rule multi-axis with actions {allow, drop, mirror, rate-limit, tag, redirect}. XDP modes (generic/native/offload) for 40 Gbps target. AF_XDP integration shape and timing. Per-rule counter infrastructure. Kernel-floor strategy (5.15 stays vs bump to 5.17 for bpf_loop, vs higher).
+        BPF datapath / map mechanics. Argue FOR PERCPU_ARRAY. Cover: O(1) dense-index
+        lookup (faster per-packet, simpler verifier path); pre-allocated slots
+        (no map_create overhead at apply-time); architect C's 64-rule cap proposal
+        — argue it's a reasonable hard cap (no production deployment of a per-VM
+        L2/L3 filter needs > 64 rules; if it does, the rules layer is the wrong
+        abstraction). REQUIRES dense rule_id 0..N-1 — which means EITHER (a)
+        loader auto-allocates internal rule_id from operator's symbolic name AND
+        the operator's `id:` becomes a label not a direct map key, OR (b) schema
+        change to enforce contiguity. Pick one and defend. Address the cost-side
+        honestly: schema change might break MVP-3.1/3.2 fixtures (PI-17 hinge);
+        dense-realloc on rule delete is awkward; cardinality hard-cap can surprise
+        operators.
       scope: |
-        COVER: BPF program structure (single-prog vs tail-call vs subprograms), map types per axis (HASH for MAC, LPM_TRIE for CIDR, ARRAY for port ranges), action implementations (mirror via bpf_clone_redirect/AF_XDP, rate-limit via token bucket, tag via VLAN push/meta, redirect via bpf_redirect_map), per-rule counter design, 40 Gbps strategy.
-        DO NOT COVER: rule grammar/format (that's how operators describe rules — architect C touches it lightly through config), library/binary decomposition (architect A), operational concerns like Prometheus (architect C).
+        COVER: PERCPU_ARRAY semantics, O(1) lookup advantage, dense-allocation
+        requirement and how to satisfy it (auto-allocate vs schema enforce),
+        64-rule cap defense, BPF program increment pattern (lookup_elem + atomic
+        increment), userspace read protocol for exporter, migration to HASH if
+        cap turns out too low.
+        DO NOT COVER: HASH shape (steel-man it briefly only to compare); broader
+        MVP-3.4 scope.
       sources:
-        - "kernel.org Documentation/networking/xdp.rst + Documentation/networking/af_xdp.rst"
-        - "AF_XDP socket integration: bpf_redirect_map XSKMAP usage"
-        - "LWN.net BPF/XDP coverage 2024-2025 — kfuncs, struct_ops, dynptr"
-        - "Cloudflare XDP performance writeups (blog.cloudflare.com — xdp, l4drop posts)"
-        - "Katran XDP datapath (github.com/facebookincubator/katran/blob/main/katran/lib/bpf/)"
-        - "BPF rate limiting patterns (cilium-style token bucket in BPF)"
-        - "Round 1 architect-A output (/tmp/mvp3-brainstorm/architect-A.md) — read for context but go deeper on actions + AF_XDP"
-    - name: C
-      lens: |
-        Operations / config / roadmap. How YAML config gets pushed/applied/reloaded per-VM. Observability stack (Prometheus exporter, sFlow exporter, structured logs). HA architecture (hot-standby vs bypass — make the decision). Watchdog + auto-restart mechanism. Phase breakdown (MVP-3.1 through MVP-3.N): what ships when, what depends on what, what's the concrete first-slice scope for MVP-3.1.
-      scope: |
-        COVER: YAML config schema shape (hierarchical interface→IP→action — what does it actually look like), hot-reload protocol (atomic map swap mechanism), per-VM NOC push (Ansible/Salt-style or custom RPC), Prometheus exporter (text format or pull endpoint), sFlow exporter (protocol mechanics), structured logs (JSON format), HA decision (recommend one of: hot-standby active+passive, bypass-on-failure with XDP_PASS injection, dual-instance round-robin), watchdog (systemd Notify, custom heartbeat, etc.), phase breakdown with dependencies and concrete first-slice scope.
-        DO NOT COVER: rule grammar inside YAML (focus on shape/hierarchy, not field semantics — that's largely settled by round 2 T1 work), datapath BPF details (architect B), library API design (architect A).
-      sources:
-        - "Cilium NetworkPolicy YAML schema (docs.cilium.io/en/stable/security/policy/language)"
-        - "Calico NetworkPolicy schema (docs.tigera.io/calico/latest/reference/resources/networkpolicy)"
-        - "Prometheus exposition format (prometheus.io/docs/instrumenting/exposition_formats)"
-        - "sFlow protocol overview (sflow.org) — specifically sFlow v5 datagram structure"
-        - "Linux HA patterns: keepalived (active+passive), VRRP — when each fits"
-        - "systemd Type=notify + WatchdogSec= patterns"
-        - "Ansible Network Automation patterns for per-host config push"
-        - "Round 2 T1 + T2 outputs (/tmp/mvp3-config-design/architect-T{1,2}.md) — config model is half-decided already; reference but go deeper on operations + phasing"
+        - "Linux kernel BPF docs: Documentation/bpf/map_array.rst — PERCPU_ARRAY semantics"
+        - "Katran balancer_consts.h + per-VIP stats (production prior art for dense-array per-entity counters)"
+        - "Project's existing src/common/mac_filter.h:54-60 + tests/lib/read_stats.py (the existing PERCPU_ARRAY read pattern you'd extend)"
+        - "mint/architecture-v2.md Divergence #7 line 96-97 (your starting position)"
+        - "mint/architecture-v2.md Open Q #13 line 391"
+        - "mint/design.md §5.26 rule schema (line refs for the id: field as-currently-spec'd)"
   sequential:
     - name: T
       lens: |
-        Skeptical engineer / productive grouch (T3 pattern from round 2 — proven effective). Read A+B+C outputs. Attack their selections for hidden assumptions, premise weaknesses, scope creep, over-engineering. Reference prior brainstorm rounds — are A/B/C ignoring lessons learned from round 1+2? Specifically watch for: bpfilter-shaped failure (premature unification), Cilium-style scope creep, "yet another control plane" syndrome, 40 Gbps hand-waving (does the proposed datapath actually hit it on commodity NICs?), HA over-design (do we actually need active+passive or is bypass-on-fail enough?).
+        Skeptical engineer / productive grouch (T3 pattern from architecture-v2
+        round 2 — proven effective). Read HASH + ARRAY architects. Attack their
+        selections for hidden assumptions, premise weaknesses, false dichotomies.
+        Specifically: (a) is the question even the right one? Should the answer
+        be "neither — defer per-rule counters to MVP-3.5+ and ship MVP-3.4 with
+        just the exporter for global counters + manual bypass"? (b) Is there a
+        third option the architects missed (e.g., per-rule counters in a SHARED
+        PERCPU_ARRAY indexed by `rule_id mod 64` with hash-style collision
+        handling — Cuckoo-style)? (c) Is the 64-rule cap a real constraint or
+        architect-C bias? (d) Does the migration path from one to the other
+        actually exist in 1 cycle, or is it 3+? (e) Is the question better-posed
+        as "what's the right rule_id allocation policy" with map type falling
+        out as a consequence?
       scope: |
-        COVER: steel-manned attacks on each A/B/C selection, hidden assumptions across all three, counter-proposals where you see better paths, "if you do anyway" risk mitigations.
-        DO NOT COVER: your own designs from scratch (you build on architects' work; if a counter-proposal is needed, sketch but don't fully design).
-      inputs: [A, B, C]
+        COVER: steel-manned attacks on each of HASH and ARRAY selections;
+        hidden assumptions across both; counter-proposals where you see better
+        paths; honest "if you do anyway" risk mitigations. CAN propose deferral
+        of the whole question to MVP-3.5+ if you genuinely think the per-rule
+        counter feature isn't ready to ship.
+        DO NOT COVER: your own deep design from scratch (you build on architects'
+        work; if a counter-proposal is needed, sketch but don't fully design).
+      inputs: [HASH, ARRAY]
       sources:
-        - "bpfilter post-mortem (LWN 1017705) — premature unification failure"
-        - "iptables-extensions wisdom: what gets used vs nobody touches"
-        - "Helm / Terraform complexity case studies — control planes that became their own products"
-        - "/tmp/mvp3-brainstorm/synthesis.md — round 1 conclusions"
-        - "/tmp/mvp3-config-design/architect-T3.md — your own prior contrarian work (continuity)"
-        - "/tmp/mvp3-config-design/synthesis.md — round 2 conclusions"
+        - "All HASH + ARRAY architect outputs from this round"
+        - "mint/architecture-v2.md MVP-3.4 row (line 312) + risk register (line 338) — your sanity-check"
+        - "mint/RETROSPECTIVES.md (~/.claude/agents/mint-dev/) — pattern history (e.g., scope-explosion heuristic, deferral discipline)"
+        - "mint/design.md §5.28 (most recent slice) — gauge current code complexity ceiling"
 
 output:
   path: "mint/architecture-v2.md"
-  mode: create
+  mode: amend
+  amend_section: "§MVP-3.4 Open Question #13 RESOLUTION"
 
 options:
   skip_design_reviewer: false
-  max_rework_rounds: 2
+  max_rework_rounds: 1
 ```
