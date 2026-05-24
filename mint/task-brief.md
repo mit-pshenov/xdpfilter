@@ -1,196 +1,225 @@
-# Task brief — MVP-3.3: systemd + Ansible + fleet docs (brownfield)
+# Task brief — MVP-3.4: observability exporter + manual bypass + rules/action_table skeleton (brownfield, defer posture)
 
 ## Goal
 
-Make the loader **operator-deployable** by adding systemd integration + an example Ansible playbook + identity-gate-relax `fleet` mode operator docs. Per `mint/architecture-v2.md` MVP-3.3 row: ops/integration slice, low BPF/C++ surface area, mostly unit file + playbook + docs.
+Per `mint/architecture-v2.md` MVP-3.4 row, under Open Q #13 RESOLUTION (committed 2d4b31a, 2026-05-24): **per-rule counters are DEFERRED to MVP-3.4b** — this slice ships observability surface for what's already on the kernel (global `stats`) + a manual bypass operator primitive + the `rules`+`action_table` BPF map skeleton (B.2 partial), WITHOUT wiring rules into the datapath and WITHOUT extending the inner-allowlist value beyond `__u8 present`.
 
-The slice ships 4 pieces:
+The slice ships 3 pieces:
 
-1. **systemd unit template** `xdpmacfilter@.service` — one instance per iface, `Type=oneshot RemainAfterExit=yes`, ExecStart re-runs `xdpmacfilter apply -f /etc/xdpfilter/%i.yaml --iface %i`, ExecReload re-runs the same (idempotent reattach via MVP-3.1's bpf_link__update_program), ExecStop runs `xdpmacfilter detach --iface %i`. `Restart=on-failure` for the apply (oneshot exit-nonzero retry).
-2. **Ansible example playbook** at `ansible/xdpmacfilter-deploy.yml` — installs binary + systemd unit + `/etc/xdpfilter/<iface>.yaml` config (Jinja2 template) + handler `notify: reload xdpmacfilter` driving `systemctl reload`. Reference example only — not a full collection/role; operator adapts to fleet specifics.
-3. **Fleet-mode operator docs** at `docs/FLEET_DEPLOYMENT.md` — when to set `XDPMF_TRUST_MODEL=fleet`, the audit story (stderr emits `trust_model=<mode>` at attach per MVP-3.1 HG3), recommended Prometheus alert pattern (fleet-wide trust-model distribution divergence — implementation is MVP-3.4 exporter scope; this slice just specifies the alert semantic). README pointer added.
-4. **Integration tests** — systemd unit install + daemon-reload + start/reload/stop lifecycle exercised via real `sudo systemctl` on dev VM (user has passwordless root per project context). Ansible playbook gets `ansible-playbook --syntax-check` validation (skipped if ansible not installed). 3-5 ctests.
+1. **`xdpmf-exporter` binary** — long-running Prometheus `/metrics` HTTP server reading the existing global `stats` `BPF_MAP_TYPE_PERCPU_ARRAY[STAT_MAX=4]` (STAT_PASS / STAT_DROP_DENY / STAT_DROP_MALFORMED / STAT_PASS_CIDR). Wires against `xdpmf_internal` static lib (MVP-3.1 prep pays off). Project's first NEW binary since MVP-2.
+2. **Manual bypass primitive** — new `xdpmacfilter bypass --iface <X>` CLI subcommand. Audit-logged, `--unsafe` required in non-tty contexts. Mechanism = invoke existing `detach` path with a warning banner; NO new BPF map flag, NO datapath touch.
+3. **`rules`+`action_table` BPF skeleton** — declare two new BPF maps (`rules` ARRAY[64], `action_table` ARRAY[N]) + populate from config on apply. **NOT WIRED into datapath.** Datapath stays MVP-3.2 shape (MAC HASH → CIDR LPM_TRIE → PASS/DROP). Loader emits stderr WARN if config has `rules:` section. Forward compatibility for MVP-3.4b wiring.
 
-Estimated budget per `architecture-v2.md` per-phase scope summary: ~1 cycle, low risk. Smallest LOC delta of MVP-3.x to date — mostly text files (unit + YAML playbook + Markdown docs) + a thin ctest shim around systemctl.
+Estimated budget per `architecture-v2.md` MVP-3.4 row under defer posture: **~1.5 cycles, low-medium risk**. Slimmer than the ship-everything baseline (2-3 cycles, medium risk) because inner-allowlist-value extension + PI-13 adjudication + per-rule counter wiring are all deferred.
 
 ## Context: prior work
 
-- **All prior briefs**: archived in `mint/task-brief-mvp{1,1.1*,2-*,3.1,3.2}.md`.
-- **Existing design**: `mint/design.md` — §5.26 (config harness) + §5.27 (L3 src-CIDR) are the immediate ancestors. PI-1..PI-18 must continue to hold; this slice adds PI-19+ for systemd/Ansible/docs invariants.
+- **All prior briefs**: archived in `mint/task-brief-mvp{1,1.1*,2-*,3.1,3.2,3.3}.md`.
+- **Existing design**: `mint/design.md` — §5.28 (systemd + Ansible + fleet docs) is the immediate ancestor (MVP-3.3 round-2 pass). PI-1..PI-26 must continue to hold; this slice adds PI-27+ for exporter/bypass/skeleton invariants.
 - **Architecture document**: `mint/architecture-v2.md` —
-  - **MVP-3.3 dependency graph row**: lines 226-231.
-  - **MVP-3.3 per-phase scope summary**: line 311 (1 cycle, low risk).
-  - **MVP-3.3 risk register**: lines 335-336 — 2 risks: (a) Ansible idempotency drift across heterogeneous fleet; (b) `XDPMF_TRUST_MODEL` mis-set escapes audit (silent posture change).
-  - **Component map** row 6: `xdpfilter@.service` (systemd unit template) — note the name uses `xdpfilter`; this slice ships under `xdpmacfilter@.service` (HG-3.3-1 below) and the rename is deferred to MVP-3.12.
-- **MVP-3.2 review**: `mint/review.md` — round-1 pass with 3 inline-merged design-text OOTs; clean baseline.
-- **MVP-3.1/3.2 deviations**: `mint/impl-notes.md` D-3.1-1..D-3.1-4 stand; MVP-3.2 had 0 deviations. Do NOT undo any.
-- **User permission context**: dev VM has passwordless `sudo` available (per project context). `systemctl daemon-reload`, `systemctl start xdpmacfilter@veth-test0`, etc. can run directly.
+  - **MVP-3.4 dependency graph row**: lines 234-243.
+  - **MVP-3.4 per-phase scope summary**: line 312 (was 2-3 cycles medium risk; ~1.5 cycles low-medium under defer).
+  - **MVP-3.4 risk register**: lines 337-340 — 4 risks: (a) per-rule counter cardinality blow-up [MOOT under defer]; (b) Q13 map type choice [RESOLVED — defer]; (c) exporter version-skew vs loader [active]; (d) manual bypass misused as automatic fail-open [active].
+  - **§MVP-3.4 Open Question #13 RESOLUTION** (newly appended section, ~line 421+): defer rationale, 5 composite options laid out, Option 2 standing default if MVP-3.4b re-asks. Architect MUST read this section for the defer posture context.
+- **MVP-3.3 review**: `mint/review.md` — round-2 pass + 1 OOT-deferred (T_SYSTEMD_RESTART_ON_FAILURE flake) — addendum in `mint/impl-notes.md`.
+- **MVP-3.1/3.2/3.3 deviations**: `mint/impl-notes.md` D-3.1-1..D-3.3-10 stand. Do NOT undo any.
+- **`/mint-hld` HLD artifacts (ephemeral, /tmp only — NOT committed)**: `/tmp/mint-hld-mint-l2-mac-filter-202605242116/{architect-HASH,architect-ARRAY,architect-T,synthesis,review}.md` — round outputs, will be wiped on /tmp cleanup. Synthesis content is the committed amendment.
 
 ## Workflow rules (brownfield mode)
 
-- **Architect**: read existing `design.md` (focus §5.26+§5.27 — your immediate ancestors; §6.5 PI-1..PI-18 — invariants you extend; §4.1 — exit codes through 9; §5.20 attach/detach flow — systemd ExecStart/ExecStop call into this; §5.26 trust_model env var — fleet-mode docs describe this) + `architecture-v2.md` MVP-3.3 rows + this brief. EDIT `design.md` in place. Append `§5.28 MVP-3.3: systemd + Ansible + fleet docs` after §5.27. Add new §6.x TestStrategy entries for the 3-5 new ctests. Update §6.5 Preserved invariants — PI-1..PI-18 continue + add PI-19+ for systemd/Ansible/docs invariants (e.g., "unit file syntax accepted by `systemd-analyze verify`"; "ansible playbook passes --syntax-check"; "fleet-mode docs cite the actual stderr log format from §5.26"). Update §7 OOS — move MVP-3.3 components from deferred to shipped; surface MVP-3.4 (per-rule counters / exporter) as the next-natural slice.
-- **Impl**: NEW files: `systemd/xdpmacfilter@.service` (unit template), `ansible/xdpmacfilter-deploy.yml` (example playbook), `ansible/templates/xdpfilter-config.yaml.j2` (config template), `docs/FLEET_DEPLOYMENT.md` (operator docs). EDIT: `README.md` (add pointer to FLEET_DEPLOYMENT.md), `CMakeLists.txt` (version bump 0.4.0 → 0.5.0; install rules if architect picks them — install the unit file to a project-relative path for ctest; system install is OOS), `CHANGELOG.md` (new [0.5.0] entry). loader.hpp/loader.cpp/cli.cpp/apply.cpp/bpf/* probably UNCHANGED — this slice is pure ops integration unless architect surfaces a need (e.g., new `--quiet` flag for cleaner systemd journal output, which would be a Q decision). PI-7-3.2 ZERO diff on loader.hpp continues — strengthen to PI-7-3.3.
-- **Tester**: NEW ctests in `tests/` (3-5). Suggested naming: `T_SYSTEMD_UNIT_SYNTAX.sh`, `T_SYSTEMD_LIFECYCLE.sh` (install + start + reload + stop end-to-end against veth fixture), `T_SYSTEMD_RESTART_ON_FAILURE.sh` (force apply exit-nonzero, verify Restart=on-failure kicks in), `T_ANSIBLE_PLAYBOOK_SYNTAX.sh` (SKIP-77 if `ansible-playbook` not in PATH), `T_FLEET_DOCS_SUBSTRING.sh` (regex-check that FLEET_DEPLOYMENT.md cites the actual stderr `trust_model=<mode>` format and not stale prose). New helpers in `tests/lib/common.sh` ONLY IF needed (e.g., `setup_systemd_unit_in_test_path()`); existing helpers UNCHANGED. DO NOT modify existing 31 tests (PI-6-3.3 = PI-6-3.2 strict superset).
+- **Architect**: read existing `design.md` (focus §5.26 config harness — schema you extend with `rules:` block and `action:` field; §5.27 CIDR — second-axis precedent; §5.28 systemd — exporter unit will mirror this template idiom; §6.5 PI table 1..26; §4.1 exit codes through 9; §5.4/§5.19/§5.22 trust+identity invariants — bypass primitive must NOT silently bypass these) + `architecture-v2.md` MVP-3.4 row + **§MVP-3.4 Open Question #13 RESOLUTION** (just-amended section) + this brief. EDIT `design.md` in place. Append `§5.29 MVP-3.4: observability exporter + manual bypass + rules/action_table skeleton` after §5.28. Add new §6.x TestStrategy entries for the 4-6 new ctests. Update §6.5 Preserved invariants — PI-1..PI-26 continue + add PI-27+ for exporter/bypass/skeleton invariants. Update §7 OOS — move MVP-3.4 components from deferred to shipped; surface MVP-3.4b (per-rule counter + inner-value extension) as the next slice WITH explicit reference to the open Q #3 (PI-13-3.1 adjudication) that gates it.
+- **Impl**: NEW files: `src/exporter/main.cpp` (entry), `src/exporter/http.{cpp,hpp}` (embedded minimal HTTP/1.0 server per HG-3.4-3), `src/exporter/prom_format.{cpp,hpp}` (Prometheus text format emitter), `src/exporter/stats_reader.{cpp,hpp}` (PERCPU_ARRAY scan + sum), `src/cli/bypass.{cpp,hpp}` (CLI subcommand). EDIT: `src/bpf/mac_filter.bpf.c` (add `rules` ARRAY + `action_table` ARRAY declarations; datapath UNCHANGED), `src/common/mac_filter.h` (new map name constants + action enum stubs), `src/lib/apply_internal.{cpp,hpp}` (populate rules+action_table from config; emit WARN if rules: block non-empty), `src/lib/config.{cpp,hpp}` (schema accepts `rules:` block with `id/match/action` fields per Q3), `src/lib/yaml_subset.cpp` (parser extension if needed for rules block — likely already handles it), `src/cli/cli.cpp` (register `bypass` subcommand), `CMakeLists.txt` (add xdpmf-exporter target, version 0.5.0 → 0.6.0; install both binaries to /usr/bin under CMAKE_INSTALL_PREFIX), `CHANGELOG.md` (new [0.6.0] entry), NEW `systemd/xdpmf-exporter.service` (single-instance unit per Q5 recommendation N3), NEW `ansible/templates/xdpfilter-config.yaml.j2` (extend with `rules:` block forward-fit if architect picks). `loader.hpp` PUBLIC-API UNCHANGED (PI-7-3.4 strengthening — ZERO diff on src/loader.hpp continues across 4 cycles).
+- **Tester**: NEW ctests in `tests/` (4-6). Suggested:
+  - `T_EXPORTER_METRICS_FORMAT.sh` — `curl localhost:9417/metrics` + regex Prometheus text format compliance; SKIP-77 if curl absent (shouldn't be on dev VM)
+  - `T_EXPORTER_VALUES_MATCH_STATS.sh` — generate known traffic via persistent AF_PACKET socket (MVP-3.1 idiom), query exporter, query bpftool stats, assert sum equal
+  - `T_EXPORTER_NO_ATTACHED_IFACE.sh` — exporter starts/serves on system with no attached XDP; `/metrics` returns no `xdpfilter_*` lines (graceful empty)
+  - `T_BYPASS_CMD_DETACHES.sh` — `xdpmacfilter bypass --iface veth-test0 --unsafe --reason test` → XDP detached + stderr audit line matches `BYPASS activated.*uid=`
+  - `T_BYPASS_REQUIRES_UNSAFE_NONINTERACTIVE.sh` — bypass under nohup without `--unsafe` → exit 1, stderr message instructs to use --unsafe
+  - `T_RULES_SKELETON_NOT_WIRED.sh` — apply config with `rules:` section, generate traffic that would match a rule "if wired", verify datapath behavior IDENTICAL to MVP-3.2 (no rule_id-driven differentiation; counter values match expected MVP-3.2 distribution)
+  - New helpers in `tests/lib/common.sh` ONLY IF needed (e.g., `start_exporter_in_background()` + cleanup). DO NOT modify existing 36 tests (PI-6-3.4 = PI-6-3.3 strict superset).
 - **Reviewer**: 5-point brownfield framework. Special attention:
-  - **(1) PI-1..PI-18 preserved**: nothing in MVP-3.3 should touch identity gates, trust_model semantics, atomic apply, or counter behaviour.
-  - **(2) systemd ExecStart/ExecReload/ExecStop verify against actual loader CLI**: ExecStart calls `xdpmacfilter apply -f ... --iface %i`; assert this is the ACTUAL exit-0 path (T_APPLY_VALID_CONFIG already verifies that).
-  - **(3) Ansible playbook idempotency**: per risk register row 1 — playbook should be idempotent (re-running yields no changes if config unchanged). `ansible-playbook --check` validates dry-run path.
-  - **(4) Fleet-mode docs must cite ACTUAL stderr format**: per MVP-3.1 HG3 the format is literally `xdpmacfilter: trust_model=<strict|fleet>`. Docs must match grep-able reality (mitigation for risk register row 2).
-  - **(5) No CLI surface change**: PI-7-3.3 ZERO diff on loader.hpp. New `--quiet` or similar must be explicitly negotiated.
+  - **(1) PI-1..PI-26 preserved**: inner-allowlist-value PI (whichever # — verify in design.md §6.5) is the load-bearing one to NOT touch this slice. `__u8 present` stays `__u8 present`. This is what defer was about.
+  - **(2) `rules`+`action_table` are SKELETON ONLY**: datapath does NOT consult them on the per-packet path. Read `src/bpf/mac_filter.bpf.c` xdp_filter() function and verify byte-equivalent lookup chain to MVP-3.2 modulo new map *declarations*.
+  - **(3) Bypass primitive WARNS every invocation and requires `--unsafe` in non-tty**: per risk register row 340 — re-introducing C.5 fail-open via ops-script human error is the named risk.
+  - **(4) Exporter is READ-ONLY by design**: no map mutations, no attach/detach calls. Exporter holds RO file descriptors to pinned maps.
+  - **(5) PI-7-3.4 ZERO diff on `src/loader.hpp` public API**: the public attach/detach surface must remain byte-equivalent. New binary lives in `src/exporter/`, new CLI subcommand in `src/cli/`; neither leaks into loader.hpp.
 
 ## Human-gate decisions (defaults applied — override at architect Phase A if you disagree)
 
-### HG-3.3-1: Unit name = `xdpmacfilter@.service`
+### HG-3.4-1: `rules`+`action_table` = STRUCTURAL-ONLY (not wired in datapath)
 
-Match the current binary name (`xdpmacfilter`). Architecture-v2.md component map calls it `xdpfilter@.service` but explicitly defers the binary rename to MVP-3.12. Shipping `xdpfilter@.service` now would create a rename transition burden NOW instead of in MVP-3.12.
+**Resolves Open Q #4 from /mint-hld round.** Declare and populate the maps; do NOT touch the datapath function body. Inner-allowlist value STAYS `__u8 present`. Loader emits stderr WARN if config has non-empty `rules:` block: `xdpmacfilter: rules: section parsed (N entries) but per-rule action dispatch deferred to MVP-3.4b — datapath uses MAC/CIDR-only matching this cycle`.
 
-**Default**: `xdpmacfilter@.service`. MVP-3.12 will rename + ship transitional `xdpfilter@.service → xdpmacfilter@.service` alias.
+**Rationale**: this is the interpretation that genuinely realizes the defer's PI-13 savings. Wiring would force inner-value extension → defeats defer. Skeleton-only buys forward compatibility (operator can author `rules:` blocks now; MVP-3.4b is a pure wiring slice not a schema+wiring slice).
 
-### HG-3.3-2: Ansible scope = single example playbook + handler
+**Default**: STRUCTURAL-ONLY. Architect picks the precise stub shape of `action_table` value at Q3.
 
-Not a full Ansible collection or role. One working example playbook + one Jinja2 template + one handler (`reload xdpmacfilter` → `systemctl reload xdpmacfilter@<iface>`). Operator adapts to fleet specifics (inventory, secrets, multi-iface variations).
+### HG-3.4-2: bypass primitive = CLI subcommand wrapping existing `detach` + audit warning
 
-**Default**: minimal example only. Production-grade collection is OOS.
+`xdpmacfilter bypass --iface <X> [--unsafe] [--reason "<text>"]` subcommand. Interactive tty: y/N prompt. Non-tty: require `--unsafe` flag (exit 1 with audit-trail stderr message if missing). Always logs to stderr in audit format: `xdpmacfilter: BYPASS activated on <iface> by uid=<UID> reason=<text|UNSPECIFIED>`. Implementation: calls existing `loader::detach` codepath. NO new BPF map flag, NO datapath touch.
 
-### HG-3.3-3: systemd test approach = real `sudo systemctl`
+**Rationale**: cleanest path. A new BPF map flag for "bypass mode" would touch the datapath, defeating defer's complexity savings. Detach IS bypass at the BPF level; the CLI subcommand adds the audit/safety layer.
 
-User confirmed passwordless sudo available on dev VM. Tests run real `systemctl daemon-reload`, `systemctl start xdpmacfilter@veth-test0`, etc. Avoid stub-validation-only approach — it doesn't catch unit file semantic bugs.
+**Default**: detach-alias + audit + `--unsafe` gate. Architect MAY propose alternate Q decision (e.g., bypass via in-map flag) if there's a strong reason.
 
-**Default**: real systemctl. Install unit to a ctest-controlled path (e.g., `/etc/systemd/system/` if architect picks system install for the test, OR `~/.config/systemd/user/` for user-mode). Cleanup in trap.
+### HG-3.4-3: exporter HTTP = embedded minimal C++23 HTTP/1.0 server, `/metrics` over TCP
 
-## Open mechanism questions (architect decides; document in §5.28)
+~150-200 LOC plain-socket HTTP/1.0 server. Listens on configurable port (default `9417` — checked against the prometheus_exporter_default_ports registry as of 2026 to avoid collision). NO HTTP routing library, NO third-party dep. Aligns with `cli.cpp:1-3` "zero non-standard deps" project value.
 
-### Q1: systemd unit install path for ctest
+**Rationale**: alternatives evaluated:
+- prometheus-cpp: adds dep, violates project value
+- node_exporter textfile-collector: requires `node_exporter` on every operator host, file rotation, extra cron — net cost > embedded server cost
+- microhttpd / cpp-httplib: smaller deps but still deps
 
-- **Option I1 (system path)**: `/etc/systemd/system/xdpmacfilter@.service`. Requires sudo (have it). Standard production path. Risk: stale install if cleanup fails.
-- **Option I2 (user path)**: `~/.config/systemd/user/xdpmacfilter@.service` + `--user` systemctl. No sudo for the install. **But**: BPF attach needs CAP_BPF — user systemd can't grant that. ExecStart would need to `sudo xdpmacfilter ...` from within user-mode unit, which is awkward.
-- **Option I3 (ctest-local path + DropInDirectory override)**: install to `/tmp/xdpmf-systemd-test-$$/system/` and pass `SYSTEMD_UNIT_PATH=...` to a child systemctl invocation. Most isolated but most complex.
+**Default**: embedded minimal server. Architect MAY pick textfile-collector pattern if a strong reason emerges.
 
-**Recommendation**: **I1** (system path) with aggressive cleanup in test trap (`systemctl stop xdpmacfilter@... ; rm /etc/systemd/system/xdpmacfilter@.service ; systemctl daemon-reload`). Production-realistic and simplest. Single data point of stale install (test trap failure) is easy to spot.
+## Open mechanism questions (architect decides; document in §5.29)
 
-### Q2: ExecReload mechanism
+### Q1: exporter runtime model
 
-- **Option R1 (re-exec `apply -f`)**: ExecReload re-runs `xdpmacfilter apply -f /etc/xdpfilter/%i.yaml --iface %i`. Idempotent reattach via MVP-3.1's bpf_link__update_program. Same as ExecStart.
-- **Option R2 (SIGHUP)**: loader gets a signal handler that re-reads the config file. Currently no SIGHUP handler exists; MVP-3.1 OOS explicitly fenced SIGHUP. Would require new code.
-- **Option R3 (no ExecReload, force restart)**: `systemctl reload` falls back to restart. Slower (full detach+reattach, brief drop window) but simpler.
+- **D1 (long-running daemon)**: starts at boot via systemd, listens on TCP, serves `/metrics` on every Prometheus scrape. State-resident process.
+- **D2 (oneshot per scrape)**: invoked per Prometheus scrape (xinetd-style or systemd socket-activated), reads stats, prints, exits.
 
-**Recommendation**: **R1**. SIGHUP is explicitly OOS per MVP-3.1; restart-as-reload (R3) breaks the atomic-swap promise that Composite 6 was built for. R1 is the natural answer (ExecReload = ExecStart in this design).
+**Recommendation**: **D1**. Simpler ops, lower per-scrape latency, standard observability pattern. Aligns with single-instance `xdpmf-exporter.service` per Q5 N3.
 
-### Q3: Fleet-mode docs depth
+### Q2: exporter binary install path
 
-- **Option D1 (single MD file)**: `docs/FLEET_DEPLOYMENT.md` ~50-100 lines. README pointer. Covers: when fleet mode, audit story, recommended alert pattern (described semantically — exporter is MVP-3.4 scope).
-- **Option D2 (extended)**: D1 + `docs/SECURITY.md` + `docs/AUDIT.md`. Comprehensive docs sprint within this slice.
+- `/usr/bin/xdpmf-exporter` (consistent with `xdpmacfilter`)
+- `/usr/libexec/xdpmf/exporter` (libexec convention)
 
-**Recommendation**: **D1**. D2 is scope creep — this slice's brief explicitly fences exporter / Prometheus implementation to MVP-3.4. Docs grow as features land.
+**Recommendation**: **`/usr/bin/xdpmf-exporter`**.
 
-### Q4: Restart=on-failure tuning
+### Q3: `rules` map value shape (for skeleton-only purposes)
 
-systemd defaults: no restart limit. Could runaway-loop if config is permanently broken.
+For SKELETON-ONLY, we still need to define what an entry looks like for forward compatibility with MVP-3.4b wiring. Proposed:
 
-- **Option RT1 (default no limit)**: `Restart=on-failure`. Apply failure (e.g., bad YAML) → systemd loops forever.
-- **Option RT2 (rate-limited)**: `Restart=on-failure` + `StartLimitBurst=5 StartLimitIntervalSec=300`. After 5 failures in 5 min, systemd gives up. Operator must reset via `systemctl reset-failed`.
-- **Option RT3 (no restart)**: `Restart=no`. Apply failure → unit stays dead. Operator must manually `systemctl start`.
+```c
+struct rule_entry {
+    __u8 present;      /* 0 = empty slot; 1 = occupied */
+    __u8 action_id;    /* index into action_table */
+    __u8 _pad[2];
+};
+struct action_entry {
+    __u8 action_type;  /* 0 = PASS, 1 = DROP (MVP-3.4 only); future: MIRROR/RL/TAG */
+    __u8 _pad[3];
+};
+```
 
-**Recommendation**: **RT2**. Production-sensible — handles transient failures (race condition on boot, brief network blip during config push) but doesn't infinite-loop on permanent failures (bad config syntax).
+**Recommendation**: minimal — only `present + action_id` per rule, `action_type` per action. Forward-fit hooks (named rules, action params) land later. The maps exist; their inner shapes are committed but their use is deferred.
 
-### Q5: README integration
+### Q4: stats map exposure — direct read vs cached snapshot
 
-- **Option N1 (add 1 section)**: README gains a "Production deployment" section pointing to FLEET_DEPLOYMENT.md and the systemd unit. ~10-15 lines.
-- **Option N2 (rewrite)**: README restructured to lead with deployment.
-- **Option N3 (no README change)**: docs/FLEET_DEPLOYMENT.md discoverable only via file browsing.
+- **E1 (direct read on scrape)**: exporter reads `/sys/fs/bpf/.../<iface>/stats` on every `/metrics` request; PERCPU sum is fast (<1ms typical).
+- **E2 (cached snapshot)**: exporter polls every N seconds, `/metrics` returns last snapshot. Bounded staleness.
 
-**Recommendation**: **N1**. Minimal disturbance; preserves existing README structure.
+**Recommendation**: **E1**. PERCPU sum on a 32-CPU box reading 4 u64 slots × 32 = 128 u64 reads is microseconds; no caching layer needed.
 
-### Q6 (optional): tackle MVP-3.1/3.2 OOT-deferred housekeeping items?
+### Q5: exporter systemd integration
 
-5 items still deferred from prior cycles (orphan map pins from T_ATTACH_TAG_MISMATCH; stale NOTE comment; cli.hpp ParsedAttach wrapper design-text; §6.25 "replacing existing program" grep; MVP-3.2 had 0 deferred). Architect picks: include if scope budget allows; defer otherwise.
+- **N1 (no systemd this slice)**: ship binary only; operator wires up systemd.
+- **N2 (per-iface template unit)**: `xdpmf-exporter@.service` template, one instance per iface.
+- **N3 (single-instance unit)**: `xdpmf-exporter.service` listens on one port, scans ALL attached interfaces under `XDPMF_BPFFS_ROOT`, emits per-iface labels.
 
-**Recommendation**: **DEFER**. This slice's scope is already 4 piece-types (unit + playbook + docs + tests), and ops integration tests are new territory. Housekeeping in a dedicated cycle is cleaner than mixing.
+**Recommendation**: **N3**. Prometheus scrape pattern is one endpoint per node, multi-iface inside via `iface` label. Matches `node_exporter` and similar.
 
-## Scope (4 items + 3-5 tests — anything else is OOS)
+### Q6 (optional): tackle MVP-3.1/3.2/3.3 OOT-deferred housekeeping items?
 
-### Item 1 — systemd unit template (per Q1 + Q2 + Q4)
+5+ items still deferred:
+- T_SYSTEMD_RESTART_ON_FAILURE flake (MVP-3.3 OOT-1)
+- Orphan map pins from T_ATTACH_TAG_MISMATCH (MVP-3.1)
+- T_APPLY_ATOMIC_SWAP_NO_DROP stale NOTE (MVP-3.1)
+- §6.25 "replacing existing program" grep (MVP-3.1)
+- ParsedAttach/Detach/Apply wrapper design-text inaccuracy (MVP-3.1)
 
-**Where**: NEW `systemd/xdpmacfilter@.service` (template unit file).
+**Recommendation**: **DEFER**. This slice already has new-binary territory (first since MVP-2) + 3 distinct piece-types. Housekeeping in a dedicated cycle is cleaner. T_SYSTEMD_RESTART_ON_FAILURE flake may auto-resolve if ctest stress profile changes between slices.
 
-**Action**: write the unit template per Q1-Q4 decisions. Key directives: `Type=oneshot RemainAfterExit=yes`, `ExecStart=/usr/bin/xdpmacfilter apply -f /etc/xdpfilter/%i.yaml --iface %i`, `ExecReload=/usr/bin/xdpmacfilter apply -f /etc/xdpfilter/%i.yaml --iface %i` (per R1), `ExecStop=/usr/bin/xdpmacfilter detach --iface %i`, `Restart=on-failure StartLimitBurst=5 StartLimitIntervalSec=300` (per RT2). Capability hardening: `AmbientCapabilities=CAP_BPF CAP_NET_ADMIN`. Document each directive's purpose inline.
+## Scope (3 items + 4-6 tests — anything else is OOS)
 
-CMakeLists.txt: project-local install via `install(FILES ...)` to a configurable prefix (default `${CMAKE_INSTALL_PREFIX}/lib/systemd/system/`). System install is operator's call, not the build.
+### Item 1 — `xdpmf-exporter` binary (per HG-3.4-3, Q1, Q2, Q4, Q5)
 
-### Item 2 — Ansible example playbook (per HG-3.3-2)
+**Where**: NEW `src/exporter/{main.cpp, http.{cpp,hpp}, prom_format.{cpp,hpp}, stats_reader.{cpp,hpp}}`, NEW `systemd/xdpmf-exporter.service`.
 
-**Where**: NEW `ansible/xdpmacfilter-deploy.yml` (playbook), `ansible/templates/xdpfilter-config.yaml.j2` (Jinja2 config template).
+**Action**:
+- main.cpp: parse args (`--port <N>` default 9417, `--bind <addr>` default `127.0.0.1`, `--bpffs-root <path>` default `XDPMF_BPFFS_ROOT`), set signal handlers, start HTTP server.
+- http.{cpp,hpp}: minimal HTTP/1.0 server — accept TCP conn, read request line, route `/metrics` (200 OK, Content-Type: text/plain; version=0.0.4) vs `/healthz` (200 OK liveness) vs other (404). Single-threaded acceptor + per-conn synchronous handle. ~150-200 LOC.
+- stats_reader.{cpp,hpp}: scan `XDPMF_BPFFS_ROOT/*/stats` for pinned stats maps (one per attached iface), open RO, read PERCPU_ARRAY[STAT_MAX=4] via libbpf, sum across CPUs. Returns vector<{iface_name, stats[4]}>. Wires against `xdpmf_internal` static lib for the map-name constants.
+- prom_format.{cpp,hpp}: format Prometheus text output:
+  - HELP/TYPE lines for `xdpfilter_packets_total`
+  - One sample per (iface, verdict) tuple. Verdicts: `pass`, `drop_deny`, `drop_malformed`, `pass_cidr`
+  - Counter semantic (`# TYPE xdpfilter_packets_total counter`)
+- systemd/xdpmf-exporter.service: Type=simple ExecStart=/usr/bin/xdpmf-exporter, AmbientCapabilities=CAP_BPF (read-only map access via fd-relative bpffs ops per MVP-2 Sec idiom), Restart=on-failure with same StartLimit pattern as MVP-3.3's xdpmacfilter@.service.
 
-**Action**: minimal play that:
-- Copies `/usr/bin/xdpmacfilter` (assumes binary built externally; operator provides build pipeline).
-- Templates `/etc/xdpfilter/{{ iface }}.yaml` from `xdpfilter-config.yaml.j2` with operator-provided MAC list + CIDR list variables.
-- Drops `xdpmacfilter@.service` to `/etc/systemd/system/`.
-- `systemctl daemon-reload` (handler).
-- `systemctl enable --now xdpmacfilter@{{ iface }}.service` (handler).
-- On config change: `notify: reload xdpmacfilter` → `systemctl reload xdpmacfilter@{{ iface }}.service` (handler — uses our ExecReload).
+**CMakeLists.txt**: add `xdpmf-exporter` target linking `xdpmf_internal` + libbpf; install both binaries to `${CMAKE_INSTALL_PREFIX}/bin/` (project-relative install, OS-level install is operator's call).
 
-Idempotent (mitigation per risk register row 1 — re-running with same vars yields no changes).
+### Item 2 — Manual bypass primitive (per HG-3.4-2)
 
-### Item 3 — Fleet-mode operator docs (per Q3 + Q5)
+**Where**: NEW `src/cli/bypass.{cpp,hpp}`, EDIT `src/cli/cli.cpp` (register subcommand), EDIT `src/cli/main.cpp` (dispatch).
 
-**Where**: NEW `docs/FLEET_DEPLOYMENT.md` (~50-100 lines), EDIT `README.md` (add 1 pointer section per N1).
+**Action**:
+- New subcommand parser: `xdpmacfilter bypass --iface <X> [--unsafe] [--reason "<text>"]`.
+- TTY check: `isatty(STDIN_FILENO) && isatty(STDERR_FILENO)`. If interactive: prompt `BYPASS will detach XDP filter on <iface>. Continue? [y/N]:` — non-y answer → exit 0 (no-op).
+- If non-interactive: require `--unsafe` flag. If absent: exit 1 with `xdpmacfilter: refusing to bypass in non-interactive context without --unsafe flag (audit safety)`.
+- Always log to stderr BEFORE detach: `xdpmacfilter: BYPASS activated on <iface> by uid=$(getuid()) reason="<text or UNSPECIFIED>"`.
+- Implementation: construct `loader::DetachConfig`, call existing `loader::detach()` path. Exit code: 0 on success, propagate loader::detach errors otherwise.
 
-**Action**: docs cover:
-- When to use `XDPMF_TRUST_MODEL=fleet` (decision matrix: trusted segment vs operator-managed-only).
-- Audit story: stderr emits `xdpmacfilter: trust_model=<mode>` at every attach (cite actual format from §5.26).
-- Recommended Prometheus alert semantic: fleet-wide trust_model distribution should be uniform; alert when divergence detected. Note that the alert IMPLEMENTATION requires the MVP-3.4 exporter (forward reference).
-- Example systemd Drop-In to set the env var via `Environment=XDPMF_TRUST_MODEL=fleet`.
-- Cite §5.4/§5.19/§5.22 invariants that fleet does/doesn't relax (per HG3: ONLY §5.4 relaxes; §5.19+§5.22 hold in both modes).
+### Item 3 — `rules` + `action_table` BPF skeleton (per HG-3.4-1, Q3)
 
-### Item 4 — Integration tests (per HG-3.3-3)
+**Where**: EDIT `src/bpf/mac_filter.bpf.c`, EDIT `src/common/mac_filter.h`, EDIT `src/lib/apply_internal.cpp`, EDIT `src/lib/config.{cpp,hpp}`.
 
-**Where**: NEW tests in `tests/` per architect's Q-decisions. Suggested 3-5 tests:
+**Action**:
+- `src/common/mac_filter.h`: add map name constants `XDPMF_MAP_RULES_NAME = "rules"`, `XDPMF_MAP_ACTION_TABLE_NAME = "action_table"`; define `struct rule_entry { __u8 present; __u8 action_id; __u8 _pad[2]; };` and `struct action_entry { __u8 action_type; __u8 _pad[3]; };` per Q3 recommendation; enum `xdpmf_action_type { ACTION_PASS = 0, ACTION_DROP = 1, ACTION_MAX = 2 };`
+- `src/bpf/mac_filter.bpf.c`: declare two new maps:
+  ```c
+  struct { __uint(type, BPF_MAP_TYPE_ARRAY); __uint(max_entries, XDPMF_ALLOWLIST_MAX); __type(key, __u32); __type(value, struct rule_entry); } rules SEC(".maps");
+  struct { __uint(type, BPF_MAP_TYPE_ARRAY); __uint(max_entries, ACTION_MAX); __type(key, __u32); __type(value, struct action_entry); } action_table SEC(".maps");
+  ```
+  **xdp_filter() function body UNCHANGED**. Verify byte-equivalent disassembly to MVP-3.2 (architect MAY ask reviewer for confirmation).
+- `src/lib/config.{cpp,hpp}`: schema extension — accept `rules:` block in YAML with per-entry `id: <int>`, `match: { mac: <addr>, src_cidr: <net> }`, `action: { type: pass | drop }`. Validator: id ∈ [0, XDPMF_ALLOWLIST_MAX-1] (re-use §5.26 rule 3); action.type ∈ {pass, drop}.
+- `src/lib/apply_internal.cpp`: on apply, populate `rules` and `action_table` maps from config. If `Config.rules` non-empty: emit stderr WARN `xdpmacfilter: rules: section parsed (N entries) but per-rule action dispatch deferred to MVP-3.4b — datapath uses MAC/CIDR-only matching this cycle`.
 
-- **`T_SYSTEMD_UNIT_SYNTAX.sh`** — `systemd-analyze verify systemd/xdpmacfilter@.service` → exit 0. No fixture needed.
-- **`T_SYSTEMD_LIFECYCLE.sh`** — install unit to `/etc/systemd/system/` per I1; create config at `/etc/xdpfilter/veth-test0.yaml`; `systemctl daemon-reload`; `systemctl start xdpmacfilter@veth-test0`; assert XDP attached + pin present; modify config; `systemctl reload xdpmacfilter@veth-test0`; assert active_idx flipped (or at least new ruleset active); `systemctl stop xdpmacfilter@veth-test0`; assert XDP detached. Aggressive trap cleanup.
-- **`T_SYSTEMD_RESTART_ON_FAILURE.sh`** (optional) — install malformed config; assert systemd attempts Restart and eventually hits StartLimit per RT2.
-- **`T_ANSIBLE_PLAYBOOK_SYNTAX.sh`** — `ansible-playbook --syntax-check ansible/xdpmacfilter-deploy.yml`; SKIP-77 if `ansible-playbook` not in PATH.
-- **`T_FLEET_DOCS_SUBSTRING.sh`** — `grep -qE 'trust_model=(strict|fleet)' docs/FLEET_DEPLOYMENT.md` — docs cite actual format. Additional substring checks per architect's decision.
+### Item 4 — Integration tests (per HG-3.4-3 + Items 1-3)
+
+**Where**: NEW tests per architect's Q-decisions. 4-6 suggested (T_EXPORTER_METRICS_FORMAT, T_EXPORTER_VALUES_MATCH_STATS, T_EXPORTER_NO_ATTACHED_IFACE, T_BYPASS_CMD_DETACHES, T_BYPASS_REQUIRES_UNSAFE_NONINTERACTIVE, T_RULES_SKELETON_NOT_WIRED — full descriptions in Workflow rules → Tester section above).
 
 ## Out of scope (explicit)
 
-- **Binary rename `xdpmacfilter` → `xdpfilter`** — still MVP-3.12. Unit file is `xdpmacfilter@.service` per HG-3.3-1; rename happens with transitional alias in MVP-3.12.
-- **Per-rule counters / `xdpmf-exporter` binary / Prometheus exporter** — MVP-3.4 slice. Fleet docs reference Prometheus alert semantically but do NOT implement.
-- **SIGHUP signal handler in loader** — explicitly fenced by Q2 (R1 chosen).
-- **Full Ansible role/collection** — minimal example only per HG-3.3-2. Production-grade Ansible is operator's responsibility.
-- **Multi-iface unit (single unit managing multiple ifaces)** — unit is template (one instance per iface); multi-iface = multiple instance names.
-- **Service hardening beyond AmbientCapabilities** — no `User=`/`Group=` non-root (BPF needs CAP_BPF; running as non-root with capabilities is operator's call); no seccomp filter; no `ProtectSystem=`. Architect MAY add basic hardening directives if low-risk.
-- **systemd `Type=notify`** — oneshot+RemainAfterExit per architecture-v2.md. Notify-style is daemon territory (MVP-3.6+ `xdpmfd` optional branch).
-- **System install of binary in this slice's CMakeLists.txt** — unit file install is in scope (configurable prefix); binary install untouched (architect's call if it changes).
-- **JSON structured logs** — MVP-3.5 slice.
+- **Per-rule counter map** (`per_rule_counters` BPF_MAP_TYPE_PERCPU_*) — MVP-3.4b slice (Open Q #13 resolved → defer). DO NOT add this map.
+- **Inner-allowlist-value extension** (`__u8 → struct { __u8 present; __u32 rule_id; }`) — MVP-3.4b. PI-13-3.1 adjudication needed before then. DO NOT touch inner-value shape of `allowlist` HASH or `cidr_allowlist` LPM_TRIE.
+- **Datapath wiring of `rules` or `action_table`** — explicit fence per HG-3.4-1. xdp_filter() body must remain byte-equivalent to MVP-3.2.
+- **Action types beyond {pass, drop}** — MIRROR/RATE_LIMIT/TAG/REDIRECT all MVP-3.8+.
+- **JSON structured logs from exporter** — MVP-3.5.
 - **sFlow** — MVP-3.6 (conditional).
-- **Library extraction (libxdpmf.so.0)** — MVP-3.6+ optional.
-- **Daemon (xdpmfd)** — MVP-3.6+ optional.
+- **`xdpmf-exporter` HTTPS/TLS** — operator wraps with stunnel/nginx if needed.
+- **`xdpmf-exporter` authentication** — Prometheus scrape is unauthenticated by convention.
+- **Exporter histograms / summary / labels beyond `{iface, verdict}`** — kept minimal.
+- **Bypass via BPF map flag** (versus detach-alias) — explicitly fenced by HG-3.4-2 unless architect overrides with strong reason.
+- **Library extraction `libxdpmf.so.0`** — MVP-3.6+ optional.
+- **Daemon `xdpmfd`** — MVP-3.6+ optional.
 - **L4 ports / VLAN / IPv6 CIDR** — still fenced per MVP-3.2 §7 OOS.
-- **MVP-3.1/3.2 OOT-deferred housekeeping items** — per Q6 default DEFER.
+- **Binary rename `xdpmacfilter` → `xdpfilter`** — still MVP-3.12.
+- **MVP-3.1/3.2/3.3 OOT-deferred housekeeping items** — per Q6 default DEFER.
 
 ## Definition of done
 
-- `§5.28 MVP-3.3: systemd + Ansible + fleet docs` amendment in `design.md` documenting Q1-Q6 decisions with rationale + HG-3.3-1/2/3 confirmation
-- New `§6.x TestStrategy` entries for 3-5 new ctests
-- `§6.5 Preserved invariants` extended: PI-1..PI-18 hold + new PI-19+ for systemd/Ansible/docs
-- `§7 OOS`: MVP-3.3 components moved from deferred to shipped; MVP-3.4 (per-rule counters / exporter) surfaced as next slice
-- `loader.hpp` PUBLIC-API UNCHANGED (PI-7-3.3 strengthening — ZERO diff continues across 3 cycles)
-- `xdpmacfilter --version` reports `xdpmacfilter 0.5.0` (bump from 0.4.0)
-- `CHANGELOG.md` entry `[0.5.0] - 2026-05-NN`
-- 3-5 new ctests pass; 31 existing ctests still pass (PI-6-3.3 strict superset, only systemd lifecycle additions)
-- `XDPMF_SANITIZERS=ON` build clean
-- `systemd-analyze verify systemd/xdpmacfilter@.service` → exit 0
-- `mint/review.md` round-1 verdict = `pass`
-- One git commit per phase boundary per workflow B
+- `§5.29 MVP-3.4: observability exporter + manual bypass + rules/action_table skeleton` amendment in `design.md` documenting Q1-Q6 decisions + HG-3.4-1/2/3 confirmation + cross-reference to `architecture-v2.md` §"§MVP-3.4 Open Question #13 RESOLUTION" for defer rationale.
+- New `§6.x TestStrategy` entries for 4-6 new ctests.
+- `§6.5 Preserved invariants` extended: PI-1..PI-26 hold + new PI-27+ for exporter/bypass/skeleton. **Inner-allowlist-value PI explicitly preserved** (the load-bearing one this cycle).
+- `loader.hpp` PUBLIC-API UNCHANGED (PI-7-3.4 strengthening — ZERO diff continues across 4 cycles).
+- `xdpmacfilter --version` reports `xdpmacfilter 0.6.0` (bump from 0.5.0).
+- `xdpmf-exporter --version` reports `xdpmf-exporter 0.6.0` (same version-stamp across binaries — shared `version.h`).
+- `CHANGELOG.md` entry `[0.6.0] - 2026-05-NN`.
+- 4-6 new ctests pass; 36 existing ctests still pass (PI-6-3.4 strict superset, only exporter/bypass/skeleton additions).
+- `XDPMF_SANITIZERS=ON` build clean (both binaries).
+- `systemd-analyze verify systemd/xdpmf-exporter.service` → exit 0.
+- `mint/review.md` round-1 verdict = `pass`.
+- One git commit per phase boundary per workflow B.
 
 ## Dependencies
 
-New system deps (test-time only, OPTIONAL with SKIP-77 paths):
-- `systemd` (`systemctl`, `systemd-analyze`) — present on any modern Linux dev VM; ctests assume availability.
-- `ansible-core` (`ansible-playbook`) — OPTIONAL; ctest SKIPs 77 if not in PATH.
-
-No new build dependencies. No new C++ libraries. No new BPF features.
+- libbpf (existing); no new build deps.
+- HTTP libraries: NONE — embedded minimal HTTP/1.0 server in C++23.
+- Test-time: `curl` for scraping (likely on dev VM); `bpftool` (existing); persistent AF_PACKET socket idiom (MVP-3.1+).
+- No new C++ libraries. No new BPF features. No new kernel-version dependencies.
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 
@@ -198,7 +227,7 @@ No new build dependencies. No new C++ libraries. No new BPF features.
 mode: brownfield
 packs:
   architect:  []
-  impl:       [lang/cpp.md, lang/cmake.md]
+  impl:       [lang/cpp.md, lang/cmake.md, lang/bpf.md]
   tester:     [test/bpf-xdp.md]
   reviewer:   []
 ```
