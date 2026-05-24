@@ -280,17 +280,35 @@ if [[ "${active_after_reload}" != "1" ]]; then
     fail=1
 fi
 
-# (7c) prog_id UNCHANGED across reload (in-place bpf_link__update_program).
-# This is the load-bearing P0a contract.
+# (7c) XDP STILL attached after reload (link persisted, no detach window).
+#
+# CORRECTION (rework round 2, post-impl-evidence): Architect's §6.33 spec
+# previously asserted "prog_id UNCHANGED across reload" as the R1 vs R3
+# differential. Impl source (src/lib/loader.cpp:1466-1473) explicitly
+# documents the OPPOSITE contract: every apply() invocation loads a FRESH
+# skeleton (different prog_id) and then calls bpf_link__update_program to
+# rebind the persistent LINK to the new prog. The CORRECT contract is:
+#   - LINK persists (same kernel link object; pin file unchanged).
+#   - MAPS are reused (stats counts preserved through the swap).
+#   - active_idx flips (atomic inner-map slot swap — assertion 7b above).
+#   - prog_id NECESSARILY CHANGES (fresh skel → new BPF_PROG_LOAD).
+#
+# The load-bearing R1-vs-R3 differential is the active_idx flip (7b): R3
+# (restart-as-reload) would re-attach from scratch and land in slot 0,
+# NOT flip 0→1. The flip-to-1 already PROVES R1 was used.
+#
+# We additionally assert (i) XDP is still attached post-reload, AND (ii)
+# the pin file ${SYSD_PIN_DIR}/link still exists (R3 would unlink it on
+# detach). These two together cover the "link persisted" side of R1.
 PROG_ID_AFTER_RELOAD=$(host_xdp_prog_id "${SYSD_IFACE_A}")
-echo "PROG_ID_AFTER_RELOAD=${PROG_ID_AFTER_RELOAD:-<empty>}"
+echo "PROG_ID_AFTER_RELOAD=${PROG_ID_AFTER_RELOAD:-<empty>} (note: may legitimately differ from PROG_ID_START=${PROG_ID_START} per loader.cpp:1466-1473)"
 if [[ -z "${PROG_ID_AFTER_RELOAD}" ]]; then
-    echo "FAIL[7c]: no XDP attached on ${SYSD_IFACE_A} after reload" >&2
+    echo "FAIL[7c-i]: no XDP attached on ${SYSD_IFACE_A} after reload" >&2
     fail=1
-elif [[ "${PROG_ID_AFTER_RELOAD}" != "${PROG_ID_START}" ]]; then
-    echo "FAIL[7c]: prog_id CHANGED across reload (start=${PROG_ID_START} → reload=${PROG_ID_AFTER_RELOAD})" >&2
-    echo "          this means reload did detach+reattach NOT bpf_link__update_program" >&2
-    echo "          (the load-bearing P0a contract MVP-3.3 systemd reload depends on)" >&2
+fi
+if ! sudo -n test -e "${SYSD_PIN_DIR}/link"; then
+    echo "FAIL[7c-ii]: link pin ${SYSD_PIN_DIR}/link MISSING after reload" \
+         "(R3 detach+reattach would unlink it; R1 bpf_link__update_program preserves it)" >&2
     fail=1
 fi
 

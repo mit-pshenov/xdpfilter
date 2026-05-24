@@ -49,12 +49,24 @@ ExecReload=/usr/bin/xdpmacfilter apply -f /etc/xdpfilter/%i.yaml --iface %i
 ExecStop=/usr/bin/xdpmacfilter detach --iface %i
 Restart=on-failure
 RestartSec=5
-# CAP_BPF: BPF map/prog load. CAP_NET_ADMIN: XDP attach. CAP_SYS_RESOURCE:
-# rlimit-memlock on kernels <5.11 (harmless on newer kernels).
-AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_SYS_RESOURCE
-# D-3.3-6: mirror BoundingSet to AmbientCapabilities — defense in depth
-# (even a hypothetical loader CVE that tried cap-escalation is bounded).
-CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_SYS_RESOURCE
+# Capability set (D-3.3-6, amended rework round 1 — 5 caps total):
+#   CAP_BPF         — BPF map/prog load (bpf() syscall family).
+#   CAP_NET_ADMIN   — XDP attach to the iface.
+#   CAP_SYS_RESOURCE — rlimit-memlock on kernels <5.11 (harmless on newer).
+#   CAP_SYS_ADMIN   — kernel BPF verifier trusted-mode gate (≥5.8): without
+#                     it the verifier refuses pointer arithmetic our datapath
+#                     uses (skb metadata reads, packet-bounds math). The
+#                     existing 31 ctests don't catch the omission because
+#                     they run under nsenter with full root cap mask;
+#                     systemd-managed launch strips to exactly the declared
+#                     AmbientCapabilities, surfacing the gap.
+#   CAP_PERFMON     — paired with CAP_SYS_ADMIN for the verifier
+#                     trusted-mode path on modern kernels (post split-cap
+#                     refactor); harmless on older kernels.
+# Defense-in-depth: CapabilityBoundingSet mirrors AmbientCapabilities so
+# a hypothetical loader CVE attempting cap-escalation is bounded.
+AmbientCapabilities=CAP_BPF CAP_NET_ADMIN CAP_SYS_RESOURCE CAP_SYS_ADMIN CAP_PERFMON
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_SYS_RESOURCE CAP_SYS_ADMIN CAP_PERFMON
 NoNewPrivileges=true
 
 [Install]
