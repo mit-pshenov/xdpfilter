@@ -121,93 +121,14 @@ sudo -n install -D -m 0644 "${MALFORMED_FIX}"   "${CONFIG_INSTALLED}"
 echo "=== step 3: daemon-reload"
 sudo -n systemctl daemon-reload
 
-# ── Step 4 — systemctl start (expected to fail because config is malformed) ─
-echo "=== step 4: systemctl start (expect FAILURE)"
-set +e
-sudo -n systemctl start "${UNIT_INSTANCE}"
-rc_start=$?
-set -e
-echo "rc_start=${rc_start} (non-zero expected because config malformed → apply rc=9)"
-
-# We do NOT fail if rc_start is non-zero — that's expected here.
-# If rc_start IS 0 that's actually suspicious (would mean apply succeeded
-# on a deliberately-malformed config). Surface but don't fail on it:
-# the real assertion is "systemd eventually marks unit failed after burst".
-if [[ "${rc_start}" -eq 0 ]]; then
-    echo "WARN: systemctl start exited 0 against malformed config — possibly" \
-         "synchronous start succeeded; will verify via NRestarts + is-active anyway." >&2
-fi
-
-# ── Step 5 — wait for the retry burst to play out ───────────────────────
-# RestartSec=5 * StartLimitBurst=5 = 25s minimum + slack for systemd's
-# scheduling latency. Cap polling at 60s to keep TIMEOUT 120 safe.
-echo "=== step 5: wait up to 60s for StartLimit to bound the retry burst"
-deadline=$(( $(date +%s) + 60 ))
-final_state=""
-nrestarts=""
-while (( $(date +%s) < deadline )); do
-    final_state=$(sudo -n systemctl is-active "${UNIT_INSTANCE}" 2>/dev/null || true)
-    nrestarts=$(sudo -n systemctl show "${UNIT_INSTANCE}" -p NRestarts --value 2>/dev/null || true)
-    echo "  poll: is-active=${final_state} NRestarts=${nrestarts:-<unread>}"
-    # Stop polling once the unit has settled in failed state with burst exhausted.
-    if [[ "${final_state}" == "failed" ]] && [[ "${nrestarts:-0}" -ge 4 ]]; then
-        break
-    fi
-    sleep 3
-done
-
-# ── Step 6 — assertions ─────────────────────────────────────────────────
-echo
-echo "=== step 6: assertions"
-echo "--- systemctl status ${UNIT_INSTANCE} ---"
-sudo -n systemctl status "${UNIT_INSTANCE}" --no-pager || true
-echo "--- journalctl -u ${UNIT_INSTANCE} (last 100) ---"
-sudo -n journalctl -u "${UNIT_INSTANCE}" --no-pager -n 100 || true
-echo "--- end status/journal ---"
-
-# (6a) Unit is in 'failed' state (NOT 'active', NOT 'activating' loop).
-if [[ "${final_state}" != "failed" ]]; then
-    echo "FAIL[6a]: is-active = '${final_state}' (expected 'failed' after burst exhaustion)" >&2
-    echo "          if 'activating', StartLimit may be misplaced or RestartSec too long" >&2
-    fail=1
-fi
-
-# (6b) NRestarts numeric.
-if ! [[ "${nrestarts}" =~ ^[0-9]+$ ]]; then
-    echo "FAIL[6b]: NRestarts unreadable or non-numeric: '${nrestarts}'" >&2
-    fail=1
-else
-    # (6c) NRestarts is in band [4, 5] per §6.34 spec (Q4 RT2 + slack).
-    # Negation against "Restart= missing" (NRestarts==0) and against
-    # "StartLimit misplaced — infinite loop" (NRestarts very high).
-    if (( nrestarts == 0 )); then
-        echo "FAIL[6c-zero]: NRestarts=0 — Restart=on-failure directive missing entirely?" >&2
-        fail=1
-    elif (( nrestarts > 50 )); then
-        echo "FAIL[6c-loop]: NRestarts=${nrestarts} (>50) — StartLimit MISPLACED" \
-             "under [Service] not [Unit]; rate-limit not enforced (THE FOOTGUN)" >&2
-        fail=1
-    elif (( nrestarts < 4 || nrestarts > 5 )); then
-        # Outside the strict band but inside the sanity envelope — surface
-        # as soft warn (not auto-fail) to handle systemd version drift.
-        echo "WARN[6c-band]: NRestarts=${nrestarts} (outside §6.34 strict band [4,5])" >&2
-        echo "               accepting as PASS within sanity envelope (1..50); systemd" \
-             "version variance allowed." >&2
-    else
-        echo "  [6c] OK: NRestarts=${nrestarts} (in §6.34 band [4, 5])"
-    fi
-fi
-
-# (6d) journalctl mentions 'start request repeated too quickly' (systemd's
-# StartLimit emit literal, case-insensitive per §6.34).
-journal_dump=$(sudo -n journalctl -u "${UNIT_INSTANCE}" --no-pager 2>/dev/null || true)
-if ! grep -qiE 'start request repeated too quickly' <<<"${journal_dump}"; then
-    echo "FAIL[6d]: journalctl missing 'start request repeated too quickly'" \
-         "(systemd's StartLimit emit literal — if absent, StartLimit didn't fire)" >&2
-    fail=1
-fi
-
-# (6e) No XDP attached (malformed config never reached the attach path).
+# ── HK-11 §5.30 (Q5 S1): internal 2-attempt retry ───────────────────────
+# Wrap steps 4-6 in a function returning the number of failing assertions.
+# If attempt #1 fails any assertion, reset systemd state + clear pin-dir
+# residue + retry. Strict band [4,5] preserved as the
+# StartLimit-placement-footgun guard (the original purpose).
+# Use a `journalctl --since <attempt-start>` cursor so attempt #2's
+# journal grep doesn't see attempt #1's 'start request repeated' line
+# and false-pass on a unit that didn't actually rate-limit this attempt.
 host_xdp_prog_id() {
     local iface="$1"
     sudo -n ip -j link show "${iface}" 2>/dev/null | jq -r '
@@ -215,12 +136,131 @@ host_xdp_prog_id() {
         | (.xdp.prog.id // .xdp.attached[]?.prog.id // empty)
     ' | head -n1
 }
-final_prog=$(host_xdp_prog_id "${SYSD_IFACE_A}")
-echo "final xdp_prog_id=${final_prog:-<empty>}"
-if [[ -n "${final_prog}" ]]; then
-    echo "FAIL[6e]: XDP attached on ${SYSD_IFACE_A} despite malformed config (id=${final_prog})" >&2
-    fail=1
+
+run_probe_attempt() {
+    local attempt_n="$1" since_cursor="$2"
+    local attempt_fail=0
+
+    # ── Step 4 — systemctl start (expected to fail because config is malformed) ─
+    echo "=== step 4 (attempt ${attempt_n}/2): systemctl start (expect FAILURE)"
+    set +e
+    sudo -n systemctl start "${UNIT_INSTANCE}"
+    local rc_start=$?
+    set -e
+    echo "rc_start=${rc_start} (non-zero expected because config malformed → apply rc=9)"
+
+    if [[ "${rc_start}" -eq 0 ]]; then
+        echo "WARN: systemctl start exited 0 against malformed config — possibly" \
+             "synchronous start succeeded; will verify via NRestarts + is-active anyway." >&2
+    fi
+
+    # ── Step 5 — wait for the retry burst to play out ────────────────────
+    echo "=== step 5 (attempt ${attempt_n}/2): wait up to 60s for StartLimit to bound the retry burst"
+    local deadline=$(( $(date +%s) + 60 ))
+    local final_state=""
+    local nrestarts=""
+    while (( $(date +%s) < deadline )); do
+        final_state=$(sudo -n systemctl is-active "${UNIT_INSTANCE}" 2>/dev/null || true)
+        nrestarts=$(sudo -n systemctl show "${UNIT_INSTANCE}" -p NRestarts --value 2>/dev/null || true)
+        echo "  poll: is-active=${final_state} NRestarts=${nrestarts:-<unread>}"
+        if [[ "${final_state}" == "failed" ]] && [[ "${nrestarts:-0}" -ge 4 ]]; then
+            break
+        fi
+        sleep 3
+    done
+
+    # ── Step 6 — assertions ─────────────────────────────────────────────
+    echo
+    echo "=== step 6 (attempt ${attempt_n}/2): assertions"
+    echo "--- systemctl status ${UNIT_INSTANCE} ---"
+    sudo -n systemctl status "${UNIT_INSTANCE}" --no-pager || true
+    echo "--- journalctl -u ${UNIT_INSTANCE} --since '${since_cursor}' ---"
+    sudo -n journalctl -u "${UNIT_INSTANCE}" --since "${since_cursor}" --no-pager -n 200 || true
+    echo "--- end status/journal ---"
+
+    # (6a) Unit in 'failed' state.
+    if [[ "${final_state}" != "failed" ]]; then
+        echo "FAIL[6a]: is-active = '${final_state}' (expected 'failed' after burst exhaustion)" >&2
+        attempt_fail=$(( attempt_fail + 1 ))
+    fi
+
+    # (6b/c) NRestarts band [4, 5] strict (HK-11 preserves the band).
+    if ! [[ "${nrestarts}" =~ ^[0-9]+$ ]]; then
+        echo "FAIL[6b]: NRestarts unreadable or non-numeric: '${nrestarts}'" >&2
+        attempt_fail=$(( attempt_fail + 1 ))
+    else
+        if (( nrestarts == 0 )); then
+            echo "FAIL[6c-zero]: NRestarts=0 — Restart=on-failure directive missing entirely?" >&2
+            attempt_fail=$(( attempt_fail + 1 ))
+        elif (( nrestarts > 50 )); then
+            echo "FAIL[6c-loop]: NRestarts=${nrestarts} (>50) — StartLimit MISPLACED" \
+                 "under [Service] not [Unit]; rate-limit not enforced (THE FOOTGUN)" >&2
+            attempt_fail=$(( attempt_fail + 1 ))
+        elif (( nrestarts < 4 || nrestarts > 5 )); then
+            echo "WARN[6c-band]: NRestarts=${nrestarts} (outside §6.34 strict band [4,5])" >&2
+            echo "               accepting as PASS within sanity envelope (1..50); systemd" \
+                 "version variance allowed." >&2
+        else
+            echo "  [6c] OK: NRestarts=${nrestarts} (in §6.34 band [4, 5])"
+        fi
+    fi
+
+    # (6d) journalctl since attempt start mentions StartLimit emit literal.
+    local journal_dump
+    journal_dump=$(sudo -n journalctl -u "${UNIT_INSTANCE}" --since "${since_cursor}" --no-pager 2>/dev/null || true)
+    if ! grep -qiE 'start request repeated too quickly' <<<"${journal_dump}"; then
+        echo "FAIL[6d]: journalctl (since attempt start) missing 'start request repeated too quickly'" \
+             "(systemd's StartLimit emit literal — if absent, StartLimit didn't fire)" >&2
+        attempt_fail=$(( attempt_fail + 1 ))
+    fi
+
+    # (6e) No XDP attached.
+    local final_prog
+    final_prog=$(host_xdp_prog_id "${SYSD_IFACE_A}")
+    echo "final xdp_prog_id=${final_prog:-<empty>}"
+    if [[ -n "${final_prog}" ]]; then
+        echo "FAIL[6e]: XDP attached on ${SYSD_IFACE_A} despite malformed config (id=${final_prog})" >&2
+        attempt_fail=$(( attempt_fail + 1 ))
+    fi
+
+    return "${attempt_fail}"
+}
+
+# Capture the attempt-1 start cursor BEFORE running probe.
+attempt1_since=$(date '+%Y-%m-%d %H:%M:%S')
+set +e
+run_probe_attempt 1 "${attempt1_since}"
+attempt1_rc=$?
+set -e
+
+if [[ "${attempt1_rc}" -eq 0 ]]; then
+    echo "PASS: T_SYSTEMD_RESTART_ON_FAILURE (attempt 1/2)"
+    exit 0
 fi
 
-[[ "${fail}" == 0 ]] && echo "PASS: T_SYSTEMD_RESTART_ON_FAILURE"
-exit "${fail}"
+# ── Attempt 1 failed — reset systemd state, sleep, retry ────────────────
+echo
+echo "=== HK-11 §5.30 retry: attempt 1/2 failed (${attempt1_rc} sub-assertions);" \
+     "resetting systemd state for attempt 2/2"
+set +e
+sudo -n systemctl stop "${UNIT_INSTANCE}"         2>/dev/null
+sudo -n systemctl reset-failed "${UNIT_INSTANCE}" 2>/dev/null
+sleep 1
+# Clear any pin-dir residue from a fail-mid-attach. Belt-and-suspenders.
+sudo -n rm -rf "${SYSD_PIN_DIR}" 2>/dev/null
+set -e
+
+attempt2_since=$(date '+%Y-%m-%d %H:%M:%S')
+set +e
+run_probe_attempt 2 "${attempt2_since}"
+attempt2_rc=$?
+set -e
+
+if [[ "${attempt2_rc}" -eq 0 ]]; then
+    echo "PASS: T_SYSTEMD_RESTART_ON_FAILURE (attempt 2/2)"
+    exit 0
+fi
+
+echo "FAIL: T_SYSTEMD_RESTART_ON_FAILURE both attempts failed " \
+      "(attempt-1 sub-fails=${attempt1_rc}, attempt-2 sub-fails=${attempt2_rc})" >&2
+exit 1

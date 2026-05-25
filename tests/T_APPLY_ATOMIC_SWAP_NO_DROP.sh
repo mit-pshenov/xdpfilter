@@ -239,19 +239,23 @@ sleep 0.3
 read -r p_f d_f m_f < <(read_stats)
 echo "stats T2 (final): PASS=${p_f} DROP_DENY=${d_f} DROP_MALFORMED=${m_f}"
 
-# NOTE on stats-counter semantics across the swap (per impl-notes D-3.1-4):
-# the impl re-pins the stats map on every reattach — the post-swap reader
-# sees the NEW kernel map, with counters starting at 0 at swap time. So
-# (p_f - p_bl) can be NEGATIVE if pre-swap (read from old map) was higher
-# than post-swap (read from new map). Robust assertions use post-swap
-# TOTALS, not deltas:
-#   - "no drops since swap"  →  d_f == 0  (new map, never incremented)
-#   - "traffic flowing post-swap" → p_f >= LOWER_BOUND  (new map, accumulated
-#     in 2s @ ~RATE_HZ from continuous injector)
-# This is robust whether the impl resets stats on apply (current D-3.1-4)
-# or — in a future revision — keeps the stats map persistent across applies
-# (in which case p_f would be ~2× baseline, still ≥ LOWER_BOUND).
-echo "  (post-swap TOTAL from new stats map; impl re-pins on every reattach)"
+# NOTE: stats counters PRESERVED across apply per §5.26 D-3.1-4 reuse_fd loop
+# (per HK-12 §5.30 — corrects the prior NOTE which incorrectly claimed
+# the stats map is re-pinned and counters reset). Reality: D-3.1-4
+# specifies `bpf_map__reuse_fd` over the pinned maps so the new
+# skeleton's stats map shares the SAME kernel fd as the pre-swap map.
+# Counters accumulate continuously across the swap; (p_f - p_bl)
+# therefore reflects post-baseline-window traffic + any drops that
+# occurred during/after the swap. The original assertions remain
+# correct in their content:
+#   - "no drops since swap"  →  d_f == 0  iff baseline already showed
+#     d_bl == 0 (no drops yet); the test injects only MAC_X which is
+#     allowed under BOTH A and B, so the running-total drop counter
+#     stays 0 throughout — `d_f == 0` is the load-bearing assertion.
+#   - "traffic flowing post-swap" → p_f >= LOWER_BOUND remains valid:
+#     with preserved counters, p_f is the CUMULATIVE pass count and is
+#     therefore ≥ baseline (already ≥ LOWER_BOUND) — assertion is robust.
+echo "  (post-swap TOTAL from preserved stats map; D-3.1-4 reuse_fd loop)"
 echo "  d_f (post-swap drops) = ${d_f}  (expected 0)"
 echo "  p_f (post-swap passes) = ${p_f}  (expected >= ${LOWER_BOUND})"
 

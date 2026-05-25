@@ -23,6 +23,7 @@
 
 #include "common/mac_filter.h"  // XDPMF_BPFFS_ROOT
 #include "http.hpp"
+#include "stats_reader.hpp"     // §5.30 HK-16: validate_bpffs_root_or_warn
 #include "version.h"            // XDPMF_VERSION_STRING
 
 namespace {
@@ -48,9 +49,16 @@ void print_usage(std::FILE* out)
         "  GET /metrics   Prometheus text-format counter family.\n"
         "  GET /healthz   liveness probe (200 OK \"ok\\n\").\n"
         "\n"
-        "The exporter is read-only — no map mutations, no attach/detach.\n",
+        "Environment variables:\n"
+        "  XDPMF_BPFFS_ROOT      Compile-time default bpffs root; overridden by\n"
+        "                        --bpffs-root if both given. Current default: %s.\n"
+        "  XDPMF_TRUST_MODEL     NOT consumed by xdpmf-exporter (loader-only env\n"
+        "                        var; documented here for fleet-ops cross-reference).\n"
+        "\n"
+        "The exporter is read-only -- no map mutations, no attach/detach.\n",
         std::string{kProgName}.c_str(),
         std::string{kProgName}.c_str(),
+        XDPMF_BPFFS_ROOT,
         XDPMF_BPFFS_ROOT);
 }
 
@@ -152,10 +160,34 @@ int main(int argc, char* argv[])
     }
 
     xdpmf::exporter::install_signal_handlers();
+
+    /* §5.30 HK-16 (W1, MVP-3.4.5): one-shot bpffs-root existence check. Fires
+     * a single WARN line on stderr if `cfg.bpffs_root` does not exist (e.g.
+     * operator pointed --bpffs-root at a typo path). Continues regardless;
+     * the daemon serves empty metrics on a nonexistent root per PI-32. The
+     * helper is implemented in stats_reader.cpp so future bpffs-path checks
+     * cohere in one place. */
+    xdpmf::exporter::validate_bpffs_root_or_warn(cfg.bpffs_root);
+
+    int rc = kExitUsageErr;
     try {
-        return xdpmf::exporter::run(cfg);
+        rc = xdpmf::exporter::run(cfg);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "xdpmf-exporter: fatal: %s\n", e.what());
         return kExitUsageErr;
     }
+
+    /* §5.30 HK-17 (E1, MVP-3.4.5): run() returns 6 when the /metrics
+     * handler detected the all-iface EACCES condition. Emit the canonical
+     * stderr line "immediately before exit(6) from main()" per D-3.4.5-2
+     * — the <N> field is the total_discovered count from the scrape that
+     * fired the trigger (always >= 1; the trigger requires it). */
+    if (rc == 6) {
+        const std::size_t n = xdpmf::exporter::last_exit_six_total();
+        std::fprintf(stderr,
+                     "xdpmf-exporter: ERROR all %zu discovered interfaces failed "
+                     "permission-denied; check CAP_BPF and bpffs read mode (exit 6)\n",
+                     n);
+    }
+    return rc;
 }

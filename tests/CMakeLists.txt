@@ -6,6 +6,16 @@
 # already (per design §2 FileList); we do NOT call it here to avoid
 # double-init.
 
+# §5.30 HK-3: T_VERIFIER_REJECT.sh requires the loader to honor the
+# XDPMF_BPF_OBJECT_PATH env var. The top-level option defaults OFF
+# (release-clean nm); when this subdir is included (in-tree dev/test
+# build), we force the cache var ON so the generator expression in the
+# top-level target_compile_definitions(xdpmf_internal) evaluates true
+# at generate time. The genexp is evaluated AFTER all CMakeLists are
+# parsed, so this FORCE wins.
+set(XDPMF_ENABLE_BPF_OBJECT_OVERRIDE ON CACHE BOOL
+    "Allow loader to honor XDPMF_BPF_OBJECT_PATH env var (testing-only)" FORCE)
+
 set(TEST_DIR  ${CMAKE_CURRENT_SOURCE_DIR})
 # §5.25 P2: PINS_SH is the path to the CMake-generated tests/pins.sh
 # (configure_file output from tests/lib/pins.sh.in). common.sh sources
@@ -537,3 +547,73 @@ foreach(T IN ITEMS
         SKIP_RETURN_CODE 77
     )
 endforeach()
+
+# ─────────────────────────────────────────────────────────────────────────
+# MVP-3.4.5 additions (§5.30 / §6.43–§6.46 — housekeeping cycle).
+#
+# T_APPLY_EXITS_1_ON_MISSING_CONFIG (§6.43): HK-1 exit-code triple drift
+#   fix — `apply -f /nonexistent --iface lo` exits 1 (kExitUsageErr); the
+#   `xdpmacfilter: config error:` stderr prefix is preserved verbatim.
+#   Negation control: valid config does NOT exit 1. Uses `lo` so does NOT
+#   need RESOURCE_LOCK xdp_fixture; SKIP_RETURN_CODE 77 still present so
+#   require_passwordless_sudo can SKIP cleanly in unprivileged contexts
+#   (the negation-control branch does run the loader against `lo` which
+#   may attempt sudo-elevated calls).
+# T_BYPASS_INTERACTIVE_PROMPT (§6.44): pseudo-tty driven y/N/EOF prompt
+#   coverage via `script -qc` (SKIP-77 if neither script nor expect
+#   available). Also embeds the HK-4 audit-line uid=/euid=/sudo_user=
+#   structural-field assertion (per D-3.4.5-8 option (b)).
+# T_BYPASS_REASON_TRUNCATE (§6.45): HK-4 truncation contract — 253B
+#   boundary (no trunc), 254B first trunc (253 + `…`), 300B mid-UTF-8
+#   rewind-safety. SKIP-77 if neither python3 nor iconv present.
+# T_EXPORTER_EXITS_6_ALL_IFACES_EACCES (§6.46): HK-17 exit-6 verification.
+#   chmod 000 per-iface stats files; run exporter as unprivileged user;
+#   assert exit 6 + HK-17 ERROR line. Negation control: default perms →
+#   exporter does NOT exit 6 within 3s. SKIP-77 if EACCES not reproducible
+#   OR curl absent OR no unprivileged user available.
+#
+# Resource locks:
+#   - T_APPLY_EXITS_1_ON_MISSING_CONFIG: no RESOURCE_LOCK (pure CLI parse).
+#   - T_BYPASS_*: share `xdp_fixture` (touch veth via setup_veth).
+#   - T_EXPORTER_EXITS_6: shares `xdp_fixture` (touches veth) AND
+#     `exporter_port_9417` (new lock per §5.30 — prevents port clash with
+#     concurrent exporter-running tests in §6.37/§6.38/§6.39).
+add_test(
+    NAME T_APPLY_EXITS_1_ON_MISSING_CONFIG
+    COMMAND bash ${TEST_DIR}/T_APPLY_EXITS_1_ON_MISSING_CONFIG.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_APPLY_EXITS_1_ON_MISSING_CONFIG PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    TIMEOUT 30
+    SKIP_RETURN_CODE 77
+)
+
+foreach(T IN ITEMS
+    T_BYPASS_INTERACTIVE_PROMPT
+    T_BYPASS_REASON_TRUNCATE
+)
+    add_test(
+        NAME ${T}
+        COMMAND bash ${TEST_DIR}/${T}.sh
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    set_tests_properties(${T} PROPERTIES
+        ENVIRONMENT "${TEST_ENV}"
+        RESOURCE_LOCK xdp_fixture
+        TIMEOUT 90
+        SKIP_RETURN_CODE 77
+    )
+endforeach()
+
+add_test(
+    NAME T_EXPORTER_EXITS_6_ALL_IFACES_EACCES
+    COMMAND bash ${TEST_DIR}/T_EXPORTER_EXITS_6_ALL_IFACES_EACCES.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_EXPORTER_EXITS_6_ALL_IFACES_EACCES PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK "xdp_fixture;exporter_port_9417"
+    TIMEOUT 90
+    SKIP_RETURN_CODE 77
+)

@@ -175,5 +175,88 @@ if ! kill -0 "${EXPORTER_PID}" 2>/dev/null; then
     fail=1
 fi
 
+# ── HK-16 (§5.30): startup WARN MUST be present on nonexistent bpffs root ─
+# Per PI-32 (strengthened in §5.30): exporter logs ONE warning line at
+# startup when --bpffs-root does not exist. Exact wording per HK-16 spec:
+#   xdpmf-exporter: WARN bpffs root <path> does not exist; will serve empty metrics
+# The W1 semantic also dictates: the WARN MUST NOT fire when the path
+# EXISTS but is empty (graceful-empty contract). Sub-case 2 below
+# verifies the negation.
+echo
+echo "=== HK-16: WARN substring on stderr when --bpffs-root path does not exist"
+warn_ere='xdpmf-exporter: WARN bpffs root .* does not exist; will serve empty metrics'
+if ! grep -qE -- "${warn_ere}" "${exp_log}"; then
+    echo "FAIL[hk16-a]: exporter log missing HK-16 WARN line matching ERE:" >&2
+    echo "              ${warn_ere}" >&2
+    fail=1
+fi
+
+# ── HK-16 SUB-CASE 2: WARN MUST NOT fire when bpffs root EXISTS but empty ─
+echo
+echo "=== HK-16 sub-case 2: existing-but-empty bpffs root → WARN MUST NOT fire"
+
+# Kill the primary exporter first to free the port.
+if [[ -n "${EXPORTER_PID}" ]]; then
+    sudo -n kill "${EXPORTER_PID}" 2>/dev/null || true
+    sleep 0.2
+    sudo -n kill -9 "${EXPORTER_PID}" 2>/dev/null || true
+    wait "${EXPORTER_PID}" 2>/dev/null || true
+    EXPORTER_PID=""
+fi
+
+EXIST_ROOT=$(sudo -n mktemp -d /sys/fs/bpf/xdpmf-empty-existing-XXXXXX 2>/dev/null) || {
+    # Fallback: bpffs may not support mktemp; use a deterministic name.
+    EXIST_ROOT="/sys/fs/bpf/xdpmf-empty-existing-$$"
+    sudo -n mkdir -p "${EXIST_ROOT}" 2>/dev/null
+}
+echo "existing-empty bpffs root: ${EXIST_ROOT}"
+
+# Re-use the same port — primary exporter is gone.
+exp_log2=$(mktemp /tmp/xdpmf-noattach-explog2.XXXXXX)
+sudo -n "${EXPORTER_BIN}" \
+    --port "${PORT}" \
+    --bind 127.0.0.1 \
+    --bpffs-root "${EXIST_ROOT}" \
+    >"${exp_log2}" 2>&1 &
+EXPORTER_PID=$!
+
+# Wait for ready (or quick die).
+ready2=0
+for i in $(seq 1 50); do
+    if curl -sf -m 1 "http://127.0.0.1:${PORT}/healthz" -o /dev/null 2>/dev/null; then
+        ready2=1; break
+    fi
+    if ! kill -0 "${EXPORTER_PID}" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+
+# Force one scrape so the exporter has done its work.
+if [[ "${ready2}" == "1" ]]; then
+    curl -s -m 2 "http://127.0.0.1:${PORT}/metrics" -o /dev/null 2>/dev/null || true
+fi
+
+echo "--- exporter log (existing-empty) ---"
+cat "${exp_log2}" || true
+echo "--- end ---"
+
+# WARN MUST NOT appear (the directory exists; W1 contract is "exists
+# check, not contents check").
+if grep -qE -- "${warn_ere}" "${exp_log2}"; then
+    echo "FAIL[hk16-b]: WARN line FIRED on existing-but-empty bpffs root — over-WARN regression" >&2
+    echo "              W1 contract: PI-32 startup WARN is ONLY for nonexistent paths" >&2
+    fail=1
+fi
+
+# Cleanup sub-case 2 exporter + tmpdir.
+sudo -n kill "${EXPORTER_PID}" 2>/dev/null || true
+sleep 0.2
+sudo -n kill -9 "${EXPORTER_PID}" 2>/dev/null || true
+wait "${EXPORTER_PID}" 2>/dev/null || true
+EXPORTER_PID=""
+sudo -n rmdir "${EXIST_ROOT}" 2>/dev/null || true
+rm -f "${exp_log2}"
+
 [[ "${fail}" == 0 ]] && echo "PASS: T_EXPORTER_NO_ATTACHED_IFACE"
 exit "${fail}"

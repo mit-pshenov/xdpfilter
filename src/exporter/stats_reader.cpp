@@ -105,11 +105,49 @@ namespace {
 
 }  // namespace
 
-std::vector<StatsSample> read_all_attached(std::string_view bpffs_root)
+void validate_bpffs_root_or_warn(std::string_view bpffs_root) noexcept
 {
+    /* §5.30 HK-16 (W1): one-shot existence check at exporter startup.
+     * fs::exists() returns false for both "does not exist" and "I can't
+     * stat() because the parent denies search"; either flavour suffices
+     * for the operator-facing WARN (the metrics path will be empty/erroring
+     * either way). Suppress filesystem_error → noexcept contract. */
+    std::error_code ec;
+    const bool exists = std::filesystem::exists(
+        std::filesystem::path{bpffs_root}, ec);
+    if (ec || !exists) {
+        std::fprintf(stderr,
+                     "xdpmf-exporter: WARN bpffs root %.*s does not exist; "
+                     "will serve empty metrics\n",
+                     static_cast<int>(bpffs_root.size()),
+                     bpffs_root.data());
+    }
+}
+
+std::vector<StatsSample> read_all_attached(std::string_view bpffs_root) noexcept
+{
+    /* §5.30 HK-17: the legacy single-arg entry-point trampolines through the
+     * accounting variant with a discarded out-param. This keeps every
+     * existing call site (notably http.cpp's /metrics handler) byte-
+     * equivalent while letting the accounting path land in stats_reader.cpp.
+     * Anywhere that needs the exit-6 trigger semantic uses
+     * read_all_attached_with_acc directly. */
+    DiscoveryAccounting discard;
+    return read_all_attached_with_acc(bpffs_root, discard);
+}
+
+std::vector<StatsSample> read_all_attached_with_acc(std::string_view     bpffs_root,
+                                                     DiscoveryAccounting& acc) noexcept
+{
+    /* §5.30 HK-17: zero the accounting struct at every scrape. Caller
+     * polls the snapshot after this call returns; "all-EACCES" detection
+     * lives in main.cpp per D-3.4.5-2 (no exit() from library). */
+    acc = DiscoveryAccounting{};
+
     std::vector<StatsSample> out;
 
     const std::vector<std::string> ifaces = list_iface_dirs(bpffs_root);
+    acc.total_discovered = ifaces.size();
     if (ifaces.empty()) {
         return out;
     }
@@ -119,6 +157,10 @@ std::vector<StatsSample> read_all_attached(std::string_view bpffs_root)
         std::fprintf(stderr,
                      "xdpmf-exporter: WARN libbpf_num_possible_cpus returned %d\n",
                      num_cpus);
+        /* §5.30 HK-17: cannot bpf_obj_get without a cpu count; count every
+         * iface as other_failure so exit-6 (which requires all == EACCES)
+         * does NOT fire on this distinct error path. */
+        acc.other_failures = ifaces.size();
         return out;
     }
 
@@ -135,6 +177,17 @@ std::vector<StatsSample> read_all_attached(std::string_view bpffs_root)
         const int fd = ::bpf_obj_get(pin.c_str());
         if (fd < 0) {
             const int e = errno;
+            /* §5.30 HK-17: classify failure for the exit-6 accounting.
+             * EACCES/EPERM are the operator-action-required errors (cap
+             * mis-grant, bpffs mode change); any other errno (typically
+             * ENOENT for a half-attached iface) does NOT count toward the
+             * exit-6 trigger so a single permission glitch doesn't kill
+             * the daemon if other ifaces are healthy. */
+            if (e == EACCES || e == EPERM) {
+                ++acc.eacces_failures;
+            } else {
+                ++acc.other_failures;
+            }
             /* ENOENT is the common case for half-attached ifaces; squelch
              * to a single line per scrape (no flood). Other errors are
              * surfaced verbatim so operators can correlate via journalctl. */
@@ -151,6 +204,7 @@ std::vector<StatsSample> read_all_attached(std::string_view bpffs_root)
         }
         (void)::close(fd);
         out.push_back(std::move(sample));
+        ++acc.successes;
     }
 
     return out;

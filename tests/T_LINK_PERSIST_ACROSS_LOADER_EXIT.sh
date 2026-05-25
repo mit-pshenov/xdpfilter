@@ -41,9 +41,14 @@ stderr_apply_b=$(mktemp /tmp/xdpmf-persist-apply-b-stderr.XXXXXX)
 
 cleanup_persist() {
     set +e
-    # Per §6.25 cleanup: pkill any zombie; unlink the link pin (last
-    # reference drop should trigger kernel-side XDP detach).
-    sudo -n pkill -9 -f xdpmacfilter 2>/dev/null
+    # Per §6.25 cleanup + HK-10 §5.30 fix: pkill any zombie that matches
+    # OUR iface's argv (NOT a broad `-f xdpmacfilter` which would clobber
+    # any concurrent xdpmacfilter invocation belonging to a parallel test
+    # session). Iface-scoped match: the loader's argv always carries
+    # `--iface ${IFACE_A}`, so the regex `xdpmacfilter.*${IFACE_A}` matches
+    # only our own loader processes. Unlink the link pin (last reference
+    # drop should trigger kernel-side XDP detach).
+    sudo -n pkill -9 -f "xdpmacfilter.*${IFACE_A}" 2>/dev/null
     sudo -n rm -f "${PIN_DIR}/link" 2>/dev/null
     cleanup_veth
     rm -f "${stderr_apply_a}" "${stderr_apply_b}"
@@ -103,11 +108,13 @@ fi
 echo "prog_id after apply = '${prog_after_apply}'"
 
 # ── Step 4: loader process — assert none left running ────────────────────
-# Apply exited foreground; nothing to kill. But assert no zombie.
-if pgrep -f xdpmacfilter >/dev/null 2>&1; then
-    echo "WARN: found a running xdpmacfilter process — apply should have exited" >&2
-    # Belt-and-suspenders kill per §6.25 step 10 (optional).
-    sudo -n pkill -9 -f xdpmacfilter 2>/dev/null || true
+# Apply exited foreground; nothing to kill. But assert no zombie tied to
+# OUR iface (HK-10 §5.30: iface-scoped pgrep/pkill to avoid clobbering a
+# parallel session's loader processes).
+if pgrep -f "xdpmacfilter.*${IFACE_A}" >/dev/null 2>&1; then
+    echo "WARN: found a running xdpmacfilter process targeting ${IFACE_A} — apply should have exited" >&2
+    # Belt-and-suspenders kill per §6.25 step 10 (optional), iface-scoped.
+    sudo -n pkill -9 -f "xdpmacfilter.*${IFACE_A}" 2>/dev/null || true
     sleep 0.2
 fi
 

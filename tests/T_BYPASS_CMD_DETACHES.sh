@@ -77,8 +77,13 @@ if [[ "${rc}" -ne 0 ]]; then
     fail=1
 fi
 
-# (b) audit-log ERE
-audit_ere="^xdpmacfilter: BYPASS activated on ${IFACE_A} by uid=[0-9]+ reason=\"T_BYPASS_test\"\$"
+# (b) audit-log ERE — permissive middle-fill per §5.30 D-3.4.5-8 / HK-4.
+# HK-4 inserts `euid=<N> sudo_user="<X>"` between `uid=<N>` and `reason=...`.
+# The `.*` between `uid=[0-9]+ ` and `reason="..."` matches BOTH the pre-
+# HK-4 shape (empty middle) AND the post-HK-4 shape (` euid=N sudo_user=...`).
+# Detailed HK-4 field-shape assertions live in T_BYPASS_INTERACTIVE_PROMPT
+# per option (b); §6.40 keeps only the high-level structural assertion.
+audit_ere="^xdpmacfilter: BYPASS activated on ${IFACE_A} by uid=[0-9]+ .*reason=\"T_BYPASS_test\"\$"
 if ! grep -qE -- "${audit_ere}" "${stderr_file}"; then
     echo "FAIL[b]: stderr missing audit-log line matching ERE:" >&2
     echo "        ${audit_ere}" >&2
@@ -126,7 +131,7 @@ if [[ "${rc2}" -ne 0 ]]; then
     echo "FAIL[e1]: sub-case expected bypass exit 0, got ${rc2}" >&2
     fail=1
 fi
-audit_ere_unspec="^xdpmacfilter: BYPASS activated on ${IFACE_A} by uid=[0-9]+ reason=\"UNSPECIFIED\"\$"
+audit_ere_unspec="^xdpmacfilter: BYPASS activated on ${IFACE_A} by uid=[0-9]+ .*reason=\"UNSPECIFIED\"\$"
 if ! grep -qE -- "${audit_ere_unspec}" "${stderr2_file}"; then
     echo "FAIL[e2]: sub-case stderr missing audit-log line matching ERE:" >&2
     echo "         ${audit_ere_unspec}" >&2

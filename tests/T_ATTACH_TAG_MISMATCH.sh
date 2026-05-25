@@ -62,9 +62,32 @@ cleanup_tagmismatch() {
     ${NSEXEC} "${LOADER_BIN}" detach --iface "${IFACE_A}" 2>/dev/null
     # Detach any foreign xdpgeneric still attached (iface in netns).
     ${NSEXEC} ip link set "${IFACE_A}" xdpgeneric off 2>/dev/null
-    # Remove preflight scratch pins (may not exist; -f swallows ENOENT).
+    # Remove preflight scratch prog pins (may not exist; -f swallows ENOENT).
     # Bpffs is host-global; no NSEXEC needed.
     sudo -n rm -f "${ALT_PIN_TAG}" "${REAL_PIN_TAG}" 2>/dev/null
+    # HK-13 §5.30: the preflight `bpftool prog load` (above) was invoked
+    # WITHOUT `pinmaps <dir>`, so libbpf auto-pinned any LIBBPF_PIN_BY_NAME
+    # maps in mac_filter.bpf.o at /sys/fs/bpf/<map_name>. Remove those
+    # orphans before the test exits. We use the pre-test snapshot
+    # diff captured at script start (BPFFS_PRE_SNAPSHOT) — anything in
+    # /sys/fs/bpf root that was NOT there before the preflight is a
+    # candidate for removal. Restricted to depth 1 so we never touch
+    # per-iface subdirs (those are cleaned by cleanup_veth → rm -rf
+    # ${PIN_DIR}).
+    if [[ -n "${BPFFS_PRE_SNAPSHOT:-}" && -f "${BPFFS_PRE_SNAPSHOT}" ]]; then
+        local post_snap
+        post_snap=$(sudo -n find /sys/fs/bpf -maxdepth 1 -mindepth 1 \
+            ! -type d 2>/dev/null | sort)
+        local pre_snap
+        pre_snap=$(cat "${BPFFS_PRE_SNAPSHOT}")
+        local orphan
+        # Files present POST-test that were NOT in PRE snapshot.
+        while IFS= read -r orphan; do
+            [[ -z "${orphan}" ]] && continue
+            sudo -n rm -f "${orphan}" 2>/dev/null
+        done < <(comm -23 <(printf '%s\n' "${post_snap}") <(printf '%s\n' "${pre_snap}"))
+        rm -f "${BPFFS_PRE_SNAPSHOT}"
+    fi
     cleanup_veth
     rm -f "${stderr_file}"
     set -e
@@ -88,6 +111,16 @@ trap cleanup_tagmismatch EXIT INT TERM HUP
 # in practice, but a silent fixture regression (e.g. someone copy-pastes
 # the real body into the alt fixture) MUST surface loudly here, not as
 # a confusing exit-0-instead-of-4 in the primary scenario.
+#
+# HK-13 §5.30: capture a snapshot of /sys/fs/bpf/ top-level entries
+# BEFORE the preflight loads — the cleanup trap will diff against this
+# to remove any orphan map pins that bpftool's libbpf auto-creates from
+# LIBBPF_PIN_BY_NAME maps in mac_filter.bpf.o (the preflight calls
+# `bpftool prog load` WITHOUT `pinmaps`, so we can't redirect to a
+# scratch dir — diff-and-remove is the cleanup mechanism).
+BPFFS_PRE_SNAPSHOT=$(mktemp /tmp/xdpmf-tagmismatch-bpffs-pre.XXXXXX)
+sudo -n find /sys/fs/bpf -maxdepth 1 -mindepth 1 ! -type d 2>/dev/null \
+    | sort > "${BPFFS_PRE_SNAPSHOT}"
 echo "=== preflight: tag-distinctness check on the two fixtures"
 sudo -n rm -f "${ALT_PIN_TAG}" "${REAL_PIN_TAG}" 2>/dev/null || true
 sudo -n bpftool prog load "${ALT_OBJ}"  "${ALT_PIN_TAG}"  type xdp \

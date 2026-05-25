@@ -29,6 +29,16 @@
 #include <bpf/bpf_endian.h>     /* §5.27: bpf_htons for ETH_P_IP compare */
 #include "common/mac_filter.h"
 
+/* §5.30 HK-5 (MVP-3.4.5): leaf-null-check / bounds-check branch hint. All
+ * six call sites below mark verifier-MANDATED checks that are expected NOT
+ * to fire under normal operation (userspace populates both ruleset slots
+ * before first attach; valid Ethernet/IPv4 frames have well-formed bounds).
+ * The hint affects JIT code layout (fall-through preferred for the common
+ * non-error path); functional verdict is byte-equivalent (PI-28). */
+#ifndef unlikely
+#define unlikely(x) __builtin_expect(!!(x), 0)
+#endif
+
 /* §5.27: ETH_P_IP (0x0800) is a CPP macro from linux/if_ether.h — that
  * header is not available in the BPF-target build (we get types from
  * vmlinux.h, but vmlinux.h is BTF-derived so contains only types, no
@@ -185,7 +195,7 @@ int mac_filter_prog(struct xdp_md *ctx)
 
     /* Bounds-check before any Ethernet-header read; truncated frames
      * (data range < 14 bytes) are counted separately per Decision §5.5. */
-    if (data + sizeof(struct ethhdr) > data_end) {
+    if (unlikely(data + sizeof(struct ethhdr) > data_end)) {
         bump_stat(STAT_DROP_MALFORMED);
         return XDP_DROP;
     }
@@ -201,14 +211,14 @@ int mac_filter_prog(struct xdp_md *ctx)
      * practice because userspace populates both slots before the first attach. */
     __u32 zero = 0;
     __u32 *active_p = bpf_map_lookup_elem(&active_idx, &zero);
-    if (!active_p) {
+    if (unlikely(!active_p)) {
         bump_stat(STAT_DROP_DENY);
         return XDP_DROP;
     }
     __u32 active = *active_p;
 
     void *inner = bpf_map_lookup_elem(&rulesets, &active);
-    if (!inner) {
+    if (unlikely(!inner)) {
         bump_stat(STAT_DROP_DENY);
         return XDP_DROP;
     }
@@ -226,14 +236,14 @@ int mac_filter_prog(struct xdp_md *ctx)
      * concurrent userspace flip cannot split the MAC/CIDR axes mid-packet. */
     if (eth->h_proto == bpf_htons(ETH_P_IP)) {
         /* Verifier-required IPv4 header bounds check before saddr deref. */
-        if ((void *)(eth + 1) + sizeof(struct iphdr) > data_end) {
+        if (unlikely((void *)(eth + 1) + sizeof(struct iphdr) > data_end)) {
             bump_stat(STAT_DROP_MALFORMED);
             return XDP_DROP;
         }
         struct iphdr *ip = (struct iphdr *)(eth + 1);
 
         void *cidr_inner = bpf_map_lookup_elem(&cidr_rulesets, &active);
-        if (!cidr_inner) {
+        if (unlikely(!cidr_inner)) {
             bump_stat(STAT_DROP_DENY);
             return XDP_DROP;
         }
@@ -251,7 +261,7 @@ int mac_filter_prog(struct xdp_md *ctx)
     /* Inner miss (both axes) — consult defaults[active]. Q2-extension: same
      * active_idx value indexes ruleset+CIDR+default; one u32 flip swaps all. */
     __u32 *default_p = bpf_map_lookup_elem(&defaults, &active);
-    if (!default_p) {
+    if (unlikely(!default_p)) {
         bump_stat(STAT_DROP_DENY);
         return XDP_DROP;
     }

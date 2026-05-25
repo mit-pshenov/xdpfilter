@@ -12,6 +12,7 @@
  */
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -23,10 +24,21 @@ struct HttpConfig {
     std::string   bpffs_root;  // default XDPMF_BPFFS_ROOT
 };
 
-/* Bind / listen / serve until SIGINT/SIGTERM. Returns 0 on clean shutdown,
- * non-zero on fatal bind/listen failure. NEVER throws (top-level daemon
- * function — exceptions caught + logged + non-zero return). */
+/* Bind / listen / serve until SIGINT/SIGTERM. Returns:
+ *   - 0 on clean shutdown (SIGINT/SIGTERM)
+ *   - 1 on fatal bind/listen failure
+ *   - 6 on §5.30 HK-17 all-iface EACCES trigger (caller emits the
+ *     HK-17 stderr line via last_exit_six_total() and exits 6)
+ * NEVER throws (top-level daemon function — exceptions caught + logged
+ * + non-zero return). */
 [[nodiscard]] int run(const HttpConfig& cfg);
+
+/* §5.30 HK-17 (MVP-3.4.5): when run() returned 6, this getter returns the
+ * <N> field for the canonical stderr line (number of discovered interfaces
+ * on the scrape that fired the trigger; always >= 1 when run() returned 6,
+ * 0 otherwise). Single-threaded acceptor + non-throw contract — no atomic
+ * read needed. */
+[[nodiscard]] std::size_t last_exit_six_total() noexcept;
 
 /* Signal handler installation. main.cpp installs SIGINT + SIGTERM handlers
  * that flip a global stop flag the accept loop polls. Exposed for testability

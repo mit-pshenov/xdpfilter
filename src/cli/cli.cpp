@@ -97,13 +97,20 @@ std::string usage_text()
         "                              default generic). detach auto-detects\n"
         "                              from the attached program.\n"
         "  --unsafe                    bypass: required in non-interactive context;\n"
-        "                              suppresses interactive y/N prompt.\n"
+        "                              ALSO suppresses interactive y/N prompt when\n"
+        "                              passed at a tty.\n"
         "  --reason \"<text>\"           bypass: audit-log reason (free-form; default\n"
         "                              UNSPECIFIED; capped at 256 bytes).\n"
         "\n"
         "Exit codes: 0 ok, 1 usage, 2 load-fail, 3 attach-fail,\n"
         "            4 attach-refused-alien, 5 detach-fail, 6 permission,\n"
-        "            8 path-refused, 9 config-error.\n",
+        "            7 kernel-unsupported, 8 path-refused, 9 config-error.\n"
+        "\n"
+        "Environment variables:\n"
+        "  XDPMF_TRUST_MODEL={{strict|fleet}}   Default: strict. fleet relaxes only\n"
+        "                                      \xC2\xA7 5.4 alien-program refusal -- see\n"
+        "                                      docs/FLEET_DEPLOYMENT.md for the full\n"
+        "                                      gate diff between modes.\n",
         kProgName, XDPMF_ALLOWLIST_MAX);
 }
 

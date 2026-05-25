@@ -37,6 +37,16 @@ namespace {
  * the accept loop polls this between poll() calls. */
 volatile std::sig_atomic_t g_stop = 0;
 
+/* §5.30 HK-17 (MVP-3.4.5): per-scrape all-EACCES detection sets this flag
+ * from the /metrics handler; the accept loop polls it alongside g_stop and
+ * returns kExitAllEacces (= 6) from run(). main.cpp emits the HK-17 stderr
+ * line "immediately before exit(6)" using `g_exit_six_total` for the <N>
+ * field. Single-threaded acceptor + per-conn synchronous handler — no
+ * atomic needed; volatile + sig_atomic_t suffices for the visibility
+ * contract (sig handler reads g_stop, handler thread reads/writes both). */
+volatile std::sig_atomic_t g_exit_six       = 0;
+std::size_t                g_exit_six_total = 0;
+
 extern "C" void stop_handler(int /*signo*/) noexcept
 {
     g_stop = 1;
@@ -185,11 +195,27 @@ void handle_connection(int conn_fd, std::string_view bpffs_root)
         return;
     }
     if (path == "/metrics") {
-        const auto samples = read_all_attached(bpffs_root);
+        /* §5.30 HK-17: every scrape populates a DiscoveryAccounting struct.
+         * After writing the response, we check the all-EACCES trigger
+         * (`total_discovered > 0 && eacces_failures == total_discovered &&
+         *  successes == 0`) — if it holds, set the exit-six flag (the
+         * accept loop sees it and run() returns 6 to main, which emits
+         * the HK-17 stderr line and exits 6 per D-3.4.5-2). Note: we
+         * serve the response FIRST so the scraping client sees the
+         * empty body, then bail. */
+        DiscoveryAccounting acc;
+        const auto samples = read_all_attached_with_acc(bpffs_root, acc);
         const std::string body = emit_metrics(samples);
         const std::string resp = build_response(
             200, "OK", "text/plain; version=0.0.4", body);
         (void)write_all(conn_fd, resp);
+        if (acc.total_discovered > 0
+            && acc.eacces_failures == acc.total_discovered
+            && acc.successes       == 0)
+        {
+            g_exit_six_total = acc.total_discovered;
+            g_exit_six       = 1;
+        }
         return;
     }
     if (path == "/healthz") {
@@ -271,7 +297,10 @@ int run(const HttpConfig& cfg)
     std::fprintf(stderr, "xdpmf-exporter: listening on %s:%u\n",
                  cfg.bind_addr.c_str(), cfg.port);
 
-    while (g_stop == 0) {
+    /* §5.30 HK-17: exit the accept loop ALSO when the /metrics handler
+     * fires the all-EACCES trigger. run() returns kExitAllEacces below;
+     * main.cpp catches the rc + emits the HK-17 stderr line + exit(6). */
+    while (g_stop == 0 && g_exit_six == 0) {
         struct pollfd pfd{};
         pfd.fd = listen_fd;
         pfd.events = POLLIN;
@@ -305,7 +334,22 @@ int run(const HttpConfig& cfg)
 
     (void)::close(listen_fd);
     std::fprintf(stderr, "xdpmf-exporter: shutdown\n");
+    /* §5.30 HK-17: communicate the all-EACCES exit code through run()'s
+     * return. main.cpp reads the value and (if 6) emits the canonical
+     * stderr line with last_exit_six_total() and exits 6 itself. */
+    if (g_exit_six != 0) {
+        return 6;
+    }
     return 0;
+}
+
+std::size_t last_exit_six_total() noexcept
+{
+    /* §5.30 HK-17 helper: main.cpp uses this to format the HK-17 stderr
+     * line's <N> field (number of discovered interfaces, all of which
+     * failed EACCES/EPERM on the scrape that fired the trigger). Always
+     * 0 when run() returned 0 (no all-EACCES); >= 1 when run() returned 6. */
+    return g_exit_six_total;
 }
 
 }  // namespace xdpmf::exporter

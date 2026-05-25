@@ -93,8 +93,69 @@ constexpr int kKernelFloorMinor = 15;
  * fixture-path mechanism for T_VERIFIER_REJECT). Testing-only — not
  * documented in --help per §7 Robust OOS. When unset or empty, the
  * compiled-in embedded ELF bytes from the skeleton are used (byte-identical
- * to pre-§5.24 behaviour). */
+ * to pre-§5.24 behaviour).
+ *
+ * §5.30 HK-3 (MVP-3.4.5): the constant + its consumer paths + their error
+ * messages are now compile-gated behind XDPMF_ENABLE_BPF_OBJECT_OVERRIDE.
+ * In a default release build the env var has zero effect AND the literal
+ * string "XDPMF_BPF_OBJECT_PATH" is absent from the binary (reviewer asserts
+ * `nm $(which xdpmacfilter) | grep -c XDPMF_BPF_OBJECT_PATH` == 0). The
+ * in-tree test build forces this define ON via tests/CMakeLists.txt's
+ * cache-FORCE, so T_VERIFIER_REJECT.sh continues to pass. */
+#ifdef XDPMF_ENABLE_BPF_OBJECT_OVERRIDE
 constexpr std::string_view kBpfObjectPathEnv{"XDPMF_BPF_OBJECT_PATH"};
+#endif
+
+/* §5.30 HK-9 (MVP-3.4.5): consolidated `LIBBPF_PIN_BY_NAME` map table.
+ *
+ * Pre-HK-9, three call-sites in this TU each carried their own literal
+ * array of (bpf_map*, pin-name) pairs: `open_skeleton_only`'s
+ * `pinned_maps[]` clear-list, `internal::apply_request`'s `pin_specs[]`
+ * per-iface pinning list, and `internal::apply_request`'s `reuse_specs[]`
+ * state-b reattach list. A new pin-by-name map (rules / action_table in
+ * MVP-3.4; CIDR axis in MVP-3.2) had to be lockstep-added to all three —
+ * the MVP-3.4 EDIT-2 27/42 ctest failure ("libbpf: map already has pin
+ * path") came from missing exactly that lockstep.
+ *
+ * The table below replaces the three literals. Member-pointer
+ * representation (Q4 T1; D-3.4.5-3) catches a libbpf-skel rename at
+ * BUILD time (compiler error) rather than at runtime (cryptic libbpf
+ * NULL deref or pin-already-set EEXIST). 12 entries: 11 "real" maps
+ * (walked by all three callsites; pin/reuse loops skip none) + 1 legacy
+ * alias (`allowlist`, kept ONLY in the clear-list because its actual
+ * per-iface pin uses the special-pin path at the legacy alias location). */
+using SkelMapsT = std::remove_reference_t<decltype(std::declval<mac_filter_bpf&>().maps)>;
+
+struct ManagedMapEntry {
+    /* Pointer-to-member into the libbpf-skel `maps` struct. Compile-time-
+     * checked: any rename in mac_filter.bpf.c → mac_filter.skel.h auto-
+     * fails the build at this initializer. */
+    ::bpf_map* SkelMapsT::* member_ptr;
+    const char* name;       // pin file name under ${PIN_DIR}/<iface>/
+    bool legacy_alias;      // true → SKIP from pin_specs and reuse_specs;
+                            // KEEP in pinned_maps clear-list (the legacy
+                            // `allowlist` alias is pinned via the special
+                            // path at apply_request's legacy-alias step,
+                            // NOT via this table's per-iface loop).
+};
+
+/* Order matches the existing pre-HK-9 `pin_specs[]` literal for line-diff
+ * readability across the refactor commit. The legacy `allowlist` alias is
+ * appended at the end (only walked by open_skeleton_only's clear-list). */
+constexpr ManagedMapEntry kManagedMaps[] = {
+    { &SkelMapsT::allowlist_a,      XDPMF_MAP_INNER_A_NAME,             false },
+    { &SkelMapsT::allowlist_b,      XDPMF_MAP_INNER_B_NAME,             false },
+    { &SkelMapsT::rulesets,         XDPMF_MAP_RULESETS_OUTER_NAME,      false },
+    { &SkelMapsT::cidr_allowlist_a, XDPMF_MAP_CIDR_INNER_A_NAME,        false },
+    { &SkelMapsT::cidr_allowlist_b, XDPMF_MAP_CIDR_INNER_B_NAME,        false },
+    { &SkelMapsT::cidr_rulesets,    XDPMF_MAP_CIDR_RULESETS_OUTER_NAME, false },
+    { &SkelMapsT::active_idx,       XDPMF_MAP_ACTIVE_IDX_NAME,          false },
+    { &SkelMapsT::defaults,         XDPMF_MAP_DEFAULTS_NAME,            false },
+    { &SkelMapsT::stats,            XDPMF_MAP_STATS_NAME,               false },
+    { &SkelMapsT::rules,            XDPMF_MAP_RULES_NAME,               false },
+    { &SkelMapsT::action_table,     XDPMF_MAP_ACTION_TABLE_NAME,        false },
+    { &SkelMapsT::allowlist,        XDPMF_MAP_ALLOWLIST_NAME,           true  },
+};
 
 /* §5.4 + §5.20: per-iface XDP slot classification as observed by the §5.20
  * all-modes probe. Distinct from the public-API ::xdpmf::XdpMode (which
@@ -745,6 +806,7 @@ private:
  * computed from LIBBPF_PIN_BY_NAME during open; load() then skips the
  * auto-pin step. Manual pinning happens in attach() after the state
  * machine, once the per-iface dir is known-good. */
+#ifdef XDPMF_ENABLE_BPF_OBJECT_OVERRIDE
 /* §5.24 Q4 fixture-path override: read the BPF object ELF from `path` into
  * an in-memory buffer, allocate the typed skeleton struct manually (mirrors
  * mac_filter_bpf__open_opts), substitute s->data/s->data_sz with the file
@@ -753,7 +815,12 @@ private:
  * completes ELF parsing before returning, so the local buffer's lifetime
  * only needs to cover this call. Returns an owning BpfSkeleton.
  *
- * Testing-only path — undocumented in --help per §7 Robust OOS. */
+ * Testing-only path — undocumented in --help per §7 Robust OOS.
+ *
+ * §5.30 HK-3 (MVP-3.4.5): the entire function and its sole caller branch
+ * are #ifdef'd behind XDPMF_ENABLE_BPF_OBJECT_OVERRIDE — release builds
+ * lose the function body, the env var read, and the error-message string
+ * literals that mention "XDPMF_BPF_OBJECT_PATH". */
 [[nodiscard]] BpfSkeleton open_skeleton_from_path(const char* path)
 {
     std::ifstream ifs(path, std::ios::binary | std::ios::ate);
@@ -804,6 +871,7 @@ private:
     }
     return holder;
 }
+#endif  // XDPMF_ENABLE_BPF_OBJECT_OVERRIDE
 
 /* Open (no load) — used by both the direct-load path and the reuse_fd
  * path. Clears LIBBPF_PIN_BY_NAME pin paths for all 7 maps so libbpf's
@@ -811,13 +879,18 @@ private:
  * machine). */
 [[nodiscard]] BpfSkeleton open_skeleton_only()
 {
+    BpfSkeleton skel;
+#ifdef XDPMF_ENABLE_BPF_OBJECT_OVERRIDE
+    /* §5.30 HK-3 (MVP-3.4.5): env-var override only available in test builds.
+     * Release builds skip the getenv() call entirely — the function literal
+     * "XDPMF_BPF_OBJECT_PATH" is absent from the binary. */
     const char* env_path = std::getenv(kBpfObjectPathEnv.data());
     const char* obj_path = (env_path != nullptr && *env_path != '\0') ? env_path : nullptr;
-
-    BpfSkeleton skel;
     if (obj_path != nullptr) {
         skel = open_skeleton_from_path(obj_path);
-    } else {
+    } else
+#endif
+    {
         skel = BpfSkeleton{mac_filter_bpf__open()};
         if (!skel) {
             const int e = errno;
@@ -825,26 +898,19 @@ private:
                          std::format("mac_filter_bpf__open: {}", std::strerror(e)));
         }
     }
-    bpf_map* const pinned_maps[] = {
-        skel->maps.allowlist,           // legacy template — never pinned at runtime
-        skel->maps.allowlist_a,         // §5.26 Q6 inner slot 0 (MAC HASH)
-        skel->maps.allowlist_b,         // §5.26 Q6 inner slot 1 (MAC HASH)
-        skel->maps.rulesets,            // §5.26 Q6 outer MAP_OF_MAPS (MAC)
-        skel->maps.cidr_allowlist_a,    // §5.27 Q1 AS1 inner slot 0 (CIDR LPM_TRIE)
-        skel->maps.cidr_allowlist_b,    // §5.27 Q1 AS1 inner slot 1 (CIDR LPM_TRIE)
-        skel->maps.cidr_rulesets,       // §5.27 Q1 AS1 outer MAP_OF_MAPS (CIDR)
-        skel->maps.active_idx,          // §5.26 Q6 active index (shared by both outers)
-        skel->maps.defaults,            // §5.26 Q6 per-slot default action
-        skel->maps.stats,
-        skel->maps.rules,               // §5.29 (MVP-3.4) HG-3.4-1 skeleton
-        skel->maps.action_table,        // §5.29 (MVP-3.4) HG-3.4-1 skeleton
-    };
-    for (bpf_map* m : pinned_maps) {
+    /* §5.30 HK-9: clear LIBBPF_PIN_BY_NAME auto-pin for ALL managed maps,
+     * INCLUDING the legacy `allowlist` alias (`legacy_alias=true`). Manual
+     * pinning happens in `internal::apply_request` after the §5.4 state
+     * machine. Walks kManagedMaps[]; if a future cycle adds a new
+     * LIBBPF_PIN_BY_NAME map, adding ONE row to the table propagates to
+     * all three callsites (this clear-list, pin_specs, reuse_specs). */
+    for (const ManagedMapEntry& entry : kManagedMaps) {
+        ::bpf_map* m = skel->maps.*entry.member_ptr;
         if (bpf_map__set_pin_path(m, nullptr) != 0) {
             const int e = errno;
             throw_loader(classify(-e, LoaderError::LoadFailed),
-                         std::format("bpf_map__set_pin_path(clear): {}",
-                                     std::strerror(e)));
+                         std::format("bpf_map__set_pin_path(clear, {}): {}",
+                                     entry.name, std::strerror(e)));
         }
     }
     return skel;
@@ -1551,33 +1617,16 @@ std::uint32_t apply_request(const ApplyRequest& req)
         skel.reset();
         skel = open_skeleton_only();
 
-        struct ReuseSpec { bpf_map* map; const char* name; };
-        // §5.27 D-3.1-4 extension: the reuse_fd loop grows 6 → 9 maps to
-        // cover the new CIDR axis pinned maps (cidr_allowlist_a/_b +
-        // cidr_rulesets). Same reuse_fd mechanism per slot — single
-        // active_idx shared. Order doesn't matter (each slot is independent).
-        //
-        // §5.29 (MVP-3.4) extension: grows 9 → 11 to include the new
-        // skeleton maps (rules + action_table). Reuse semantic is identical
-        // (LIBBPF_PIN_BY_NAME on both). Datapath does NOT consult them per
-        // PI-28; reuse is needed to preserve their pin-dentry across the
-        // hot-swap so a parallel `bpftool map dump pinned ${PIN_DIR}/rules`
-        // observer doesn't ENOENT mid-reattach.
-        const ReuseSpec reuse_specs[] = {
-            { skel->maps.allowlist_a,      XDPMF_MAP_INNER_A_NAME             },
-            { skel->maps.allowlist_b,      XDPMF_MAP_INNER_B_NAME             },
-            { skel->maps.rulesets,         XDPMF_MAP_RULESETS_OUTER_NAME      },
-            { skel->maps.cidr_allowlist_a, XDPMF_MAP_CIDR_INNER_A_NAME        },
-            { skel->maps.cidr_allowlist_b, XDPMF_MAP_CIDR_INNER_B_NAME        },
-            { skel->maps.cidr_rulesets,    XDPMF_MAP_CIDR_RULESETS_OUTER_NAME },
-            { skel->maps.active_idx,       XDPMF_MAP_ACTIVE_IDX_NAME          },
-            { skel->maps.defaults,         XDPMF_MAP_DEFAULTS_NAME            },
-            { skel->maps.stats,            XDPMF_MAP_STATS_NAME               },
-            { skel->maps.rules,            XDPMF_MAP_RULES_NAME               },
-            { skel->maps.action_table,     XDPMF_MAP_ACTION_TABLE_NAME        },
-        };
-        for (const ReuseSpec& r : reuse_specs) {
-            const std::string p = pin_dir + "/" + r.name;
+        // §5.30 HK-9: reuse-fd loop walks kManagedMaps[] for every entry
+        // EXCEPT the legacy `allowlist` alias (its kernel-side map is the
+        // same as `allowlist_a`; the legacy pin dentry is recreated by the
+        // alias-step at the end of fresh-attach and reused via the same
+        // kernel fd implicitly). Same reuse semantic per slot — single
+        // active_idx shared. PI-7-3.4.5-cpp scope: this loop body replaces
+        // the prior pre-HK-9 11-entry literal at this site.
+        for (const ManagedMapEntry& entry : kManagedMaps) {
+            if (entry.legacy_alias) continue;
+            const std::string p = pin_dir + "/" + entry.name;
             const int fd = bpf_obj_get(p.c_str());
             if (fd < 0) {
                 const int e = errno;
@@ -1586,11 +1635,11 @@ std::uint32_t apply_request(const ApplyRequest& req)
                                          p, std::strerror(e)));
             }
             UniqueFd dup_holder{fd};
-            if (bpf_map__reuse_fd(r.map, dup_holder.get()) != 0) {
+            if (bpf_map__reuse_fd(skel->maps.*entry.member_ptr, dup_holder.get()) != 0) {
                 const int e = errno;
                 throw_loader(classify(-e, LoaderError::LoadFailed),
                              std::format("bpf_map__reuse_fd({}): {}",
-                                         r.name, std::strerror(e)));
+                                         entry.name, std::strerror(e)));
             }
             // bpf_map__reuse_fd dup()'s the fd internally; safe to close ours.
         }
@@ -1695,29 +1744,14 @@ std::uint32_t apply_request(const ApplyRequest& req)
     }
 
     // FRESH ATTACH path (state a / state d / state c-fleet).
-    struct PinSpec { bpf_map* map; const char* name; };
-    // §5.27 D-3.1-4 mirror: 9 maps to pin (was 6) — adds the 3 CIDR-axis
-    // pinned maps (cidr_allowlist_a/_b + cidr_rulesets) per §5.27 Q1 AS1.
-    // §5.29 (MVP-3.4) extension: 11 maps total — adds the two new skeleton
-    // maps `rules` + `action_table` per HG-3.4-1. Both use LIBBPF_PIN_BY_NAME
-    // (same mechanism as the existing 9) so a future reattach reuse-loop sees
-    // them by name. PI-29 (declared + populated, not consulted).
-    const PinSpec pin_specs[] = {
-        { skel->maps.allowlist_a,      XDPMF_MAP_INNER_A_NAME             },
-        { skel->maps.allowlist_b,      XDPMF_MAP_INNER_B_NAME             },
-        { skel->maps.rulesets,         XDPMF_MAP_RULESETS_OUTER_NAME      },
-        { skel->maps.cidr_allowlist_a, XDPMF_MAP_CIDR_INNER_A_NAME        },
-        { skel->maps.cidr_allowlist_b, XDPMF_MAP_CIDR_INNER_B_NAME        },
-        { skel->maps.cidr_rulesets,    XDPMF_MAP_CIDR_RULESETS_OUTER_NAME },
-        { skel->maps.active_idx,       XDPMF_MAP_ACTIVE_IDX_NAME          },
-        { skel->maps.defaults,         XDPMF_MAP_DEFAULTS_NAME            },
-        { skel->maps.stats,            XDPMF_MAP_STATS_NAME               },
-        { skel->maps.rules,            XDPMF_MAP_RULES_NAME               },
-        { skel->maps.action_table,     XDPMF_MAP_ACTION_TABLE_NAME        },
-    };
-    for (const PinSpec& s : pin_specs) {
-        const std::string p = pin_dir + "/" + s.name;
-        const int rc = bpf_map__pin(s.map, p.c_str());
+    // §5.30 HK-9: per-iface pin loop walks kManagedMaps[] for every entry
+    // EXCEPT the legacy `allowlist` alias (its pin is created via the
+    // special-pin path immediately below — same kernel fd as allowlist_a;
+    // a separate bpffs dentry the MVP-2 grep-checks expect).
+    for (const ManagedMapEntry& entry : kManagedMaps) {
+        if (entry.legacy_alias) continue;
+        const std::string p = pin_dir + "/" + entry.name;
+        const int rc = bpf_map__pin(skel->maps.*entry.member_ptr, p.c_str());
         if (rc < 0) {
             throw_loader(classify(rc, LoaderError::LoadFailed),
                          std::format("bpf_map__pin({}): {}", p, std::strerror(-rc)));

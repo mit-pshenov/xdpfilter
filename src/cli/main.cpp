@@ -125,6 +125,16 @@ int main(int argc, char* argv[])
                 }
             },
             cmd);
+    } catch (const xdpmf::CliError& e) {
+        // §5.30 HK-1 (Q1 C1, D-3.4.5-5): missing-file path from apply_internal::
+        // load_config_file raises CliError (semantically a CLI usage error:
+        // operator pointed -f at a path that does not exist). Mirror the FIRST
+        // try's CliError arm — render the message verbatim and exit 1. YAML
+        // parse / schema-validation failures still throw LoaderError::ConfigError
+        // (= 9) and are caught by the system_error arm below; the split is
+        // intentional (D-3.4.5-5 rationale: open-failure is upstream of YAML).
+        std::fprintf(stderr, "%s\n", e.what());
+        return kExitUsageErr;
     } catch (const std::system_error& e) {
         if (is_config_error(e)) {
             std::fprintf(stderr, "%s\n", e.what());

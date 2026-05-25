@@ -10,8 +10,8 @@ endif()
 
 project(xdpmacfilter
     LANGUAGES C CXX
-    VERSION   0.6.0
-    DESCRIPTION "MVP-3.4 L2 MAC + L3 src-CIDR allow-list XDP filter (OR-compose) + Prometheus exporter"
+    VERSION   0.6.1
+    DESCRIPTION "MVP-3.4.5 L2 MAC + L3 src-CIDR allow-list XDP filter (OR-compose) + Prometheus exporter"
 )
 
 # §5.25 P3: version-string sync — generate include/version.h from the
@@ -79,6 +79,19 @@ configure_file(
     ${CMAKE_BINARY_DIR}/tests/pins.sh
     @ONLY
 )
+
+# §5.30 HK-3 (MVP-3.4.5): the XDPMF_BPF_OBJECT_PATH env-var override is a
+# testing-only escape hatch consumed by T_VERIFIER_REJECT.sh. Default release
+# builds get the env-var code path COMPILE-GATED OUT — i.e. setting the
+# variable in a release build has zero effect, and the string literal is
+# absent from the binary (`nm` returns no match). The test build forces this
+# ON via tests/CMakeLists.txt's `set(... CACHE BOOL "" FORCE)` before
+# `add_subdirectory(tests)` is reached — but that runs AFTER the option line
+# below, so tests/CMakeLists.txt instead toggles the cache var which the
+# target_compile_definitions below reads. Reviewer asserts via
+# `nm $(which xdpmacfilter) | grep -c XDPMF_BPF_OBJECT_PATH` = 0 in release.
+option(XDPMF_ENABLE_BPF_OBJECT_OVERRIDE
+       "Allow loader to honor XDPMF_BPF_OBJECT_PATH env var (testing-only)" OFF)
 
 # XDPMF_SANITIZERS (design §5.18): test-only ASAN+UBSAN build mode for the
 # C++ loader. Default OFF — when OFF, the build is byte-identical to the
@@ -182,9 +195,34 @@ if(XDPMF_INSTALL_SYSTEMD_UNIT)
             ${CMAKE_SOURCE_DIR}/systemd/xdpmacfilter@.service
             ${CMAKE_SOURCE_DIR}/systemd/xdpmf-exporter.service
         DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/systemd/system/)
+    # §5.30 HK-7: install FLEET_DEPLOYMENT.md alongside the units so the
+    # `Documentation=file:///usr/share/doc/xdpmacfilter/FLEET_DEPLOYMENT.md`
+    # URI declared by both units resolves post-install. Gated on the same
+    # option as the units — operators handling units out-of-band don't get
+    # an orphan docs file copy.
+    install(FILES
+            ${CMAKE_SOURCE_DIR}/docs/FLEET_DEPLOYMENT.md
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/share/doc/xdpmacfilter/)
 endif()
 
 enable_testing()
-if(EXISTS ${CMAKE_SOURCE_DIR}/tests/CMakeLists.txt)
+# Match CTest's BUILD_TESTING convention: default ON for in-tree builds.
+# Operators wanting a true release build (no test artefacts, no HK-3
+# override compile-gate) pass -DBUILD_TESTING=OFF and skip the tests
+# subdir entirely — same path the reviewer uses to assert the HK-3
+# nm-grep evidence.
+option(BUILD_TESTING "Build the testing tree (CTest convention)" ON)
+if(BUILD_TESTING AND EXISTS ${CMAKE_SOURCE_DIR}/tests/CMakeLists.txt)
     add_subdirectory(tests)
 endif()
+
+# §5.30 HK-3: compile-gate the XDPMF_BPF_OBJECT_PATH env-var consumer in
+# src/lib/loader.cpp behind XDPMF_ENABLE_BPF_OBJECT_OVERRIDE. We add this
+# AFTER add_subdirectory(tests) so the tests/ subdir's
+# `set(XDPMF_ENABLE_BPF_OBJECT_OVERRIDE ON CACHE BOOL "" FORCE)` is visible
+# in the variable lookup that resolves the genexp's inner ${VAR} ref
+# (CMake substitutes ${VAR} at call-time, not at generate-time). Reviewer
+# asserts via `nm $(which xdpmacfilter) | grep -c XDPMF_BPF_OBJECT_PATH` = 0
+# in a release-only build (build with BUILD_TESTING=OFF, no tests subdir).
+target_compile_definitions(xdpmf_internal PRIVATE
+    $<$<BOOL:${XDPMF_ENABLE_BPF_OBJECT_OVERRIDE}>:XDPMF_ENABLE_BPF_OBJECT_OVERRIDE>)
