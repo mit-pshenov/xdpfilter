@@ -1,221 +1,175 @@
-# Task brief — MVP-3.4b: per-rule counters cycle 1 (brownfield)
+# Task brief — MVP-3.5: JSON structured logs (brownfield)
 
 ## Goal
 
-Ship **per-rule visibility** via `/metrics` — the first cycle of MVP-3.4b. Operator gains `xdpfilter_rule_match_total{iface, rule_id}` counter series exposing per-rule match counts. Lands the deferred-from-MVP-3.4 mechanics: per-rule counter map + inner-allowlist-value extension carrying `rule_id` to datapath + datapath wiring (`bump_rule` at the MAC-HASH-hit and CIDR-LPM_TRIE-hit sites) + loader-written `rule_index.json` sidecar for human-readable labels + exporter join of BPF + sidecar.
+Add `XDPMF_LOG_FORMAT={text,json}` env var to BOTH binaries (`xdpmacfilter` and `xdpmf-exporter`). When `XDPMF_LOG_FORMAT=json`, every diagnostic stderr line becomes a single-line JSON object with a stable schema (one event per line, NDJSON-style). When unset OR `text` (default), the existing stderr lines are byte-equivalent to current behaviour — fleet operators who grep text don't break.
 
-**This is MVP-3.4b cycle 1**, NOT the entire feature. Subsequent cycles can address:
-- Atomic-swap promotion of `rules` map (D-3.4-4 — was a stub in §5.29; now becomes datapath-consulted in this cycle so the question becomes load-bearing).
-- Counter-survival-across-apply discipline + dedicated ctests (Hidden Assumption #4 from /mint-hld Open Q #13).
-- Action-table consultation (currently `rules` carries `action_id` but datapath ignores — out of scope this cycle; PASS-on-allowlist-hit branch retained as-is, drop-rule counters work but action dispatch stays implicit).
-- Schema-v2 named-rules migration (Option 4 from /mint-hld, deferred indefinitely).
+The slice closes the **carry-forward fence** that's been sitting in §7 OOS since MVP-3.4.5 (5 consecutive cycles). It's the next-natural architectural slice per `architecture-v2.md` post-MVP-3.4b sequencing, and it pairs naturally with MVP-3.4b's structural fields work (per-rule counters → operator-readable Prometheus labels; JSON logs → operator-readable diagnostic stream). Together they complete the "observability surface" promise.
 
-Estimated budget: **~1.5 cycle, medium risk**. Largest risk vectors: (a) PI-13-3.1 adjudication on inner-value extension (PASS as additive vs. VIOLATE as byte-shape break — default PASS); (b) datapath verifier passes after `bump_rule` introduction at MAC + CIDR sites (BPF function-body changes beyond MVP-3.4 hint annotations — first substantive datapath edit since MVP-3.2).
+Scope is **41 stderr emission sites across 8 files** (grep-counted, brief-author Phase A discipline applied — see notes at bottom). Mostly mechanical conversion once the logger module + event-name catalog are in place. Estimated budget: **~1 cycle, low-medium risk**. Largest risk vectors: (a) text-mode byte-equivalence regression on the 52-ctest baseline (any text-mode drift = `[REGRESSION]`); (b) JSON shape decisions baking in long-lived contracts (event names, field types, timestamp format — operators will write log-shipping pipelines against these).
 
 ## Context: prior work
 
-- **All prior briefs**: archived in `mint/task-brief-mvp{1,1.1*,2-*,3.1,3.2,3.3,3.4,3.4.5}.md`. Most recent: MVP-3.4.5 housekeeping (round-1 pass 2026-05-25).
-- **Existing design**: `mint/design.md` — §5.29 (MVP-3.4 observability + skeleton + defer) is the immediate ancestor for the inner-value defer. §5.30 (MVP-3.4.5 housekeeping) confirmed PI-13-3.4.5/PI-27 untouched. Inner-allowlist-value still `__u8 present` byte (PI-27); `rules` and `action_table` BPF maps DECLARED and POPULATED but datapath does NOT consult either (PI-29). This brief LIFTS both fences.
-- **Architecture document**: `mint/architecture-v2.md` — MVP-3.4b row + §"§MVP-3.4 Open Question #13 RESOLUTION" (committed `2d4b31a` 2026-05-24) is the load-bearing /mint-hld output. Option 2 ("Sparse-direct-bounded ARRAY") is the standing default; Option 3 (two-map shadow) is the fallback if PI-13 adjudication returns VIOLATE.
-- **Source-of-truth claims from /mint-hld Open Q #13** (architects-HASH/ARRAY/T, synthesizer, design-reviewer; human-gate 2026-05-24):
-  - **Option 2 wins** if MVP-3.4b ships per-rule counters and PI-13 adjudication returns PASS-as-additive.
-  - **Open Q #3** (PI-13-3.1 inner-value adjudication) — **STILL OPEN at time of /mint-hld**. This brief PRE-DECIDES it (see HG-3.4b-1) but architect can override at Phase A with evidence.
-  - **Open Q #4** (does `rules`+`action_table` skeleton REQUIRE inner-value extension regardless?) — **RESOLVED by MVP-3.4 shipping**: NO. `rules`+`action_table` shipped at §5.29 WITHOUT inner-value extension; PI-13-3.1 cost was deferred. MVP-3.4b pays it now.
-- **MVP-3.4 review report** (`agent-teams-review/runs/mint-review-mint-l2-mac-filter-202605250825/report.md`): no MVP-3.4b-blocking items (the audit's MVP-3.4-targeted findings landed in MVP-3.4.5). Cross-doc consistency findings about `rules` map atomic-swap mechanics surface here as Q5.
-- **Prior PI continuity**: `loader.hpp` is in its 5th consecutive ZERO-diff cycle post-MVP-3.4.5; this brief is likely to break that streak (the `Config` schema needs a `rule_id` field carry-through, and the loader needs new sidecar-write logic — but `AttachConfig` / `DetachConfig` / `attach()` / `detach()` / `LoaderError` enum signatures stand to remain UNCHANGED). Brief author's expectation: **PI-7-3.4b-hpp is _strictly_ additive** (no removed/renamed symbols; no signature changes to attach/detach; new private helpers OK; new public `apply_config_inmemory` Config schema fields OK if pure-additive at the C++ struct level). 6th consecutive byte-equivalent-or-additive cycle on the public-API headers if architect agrees.
+- **All prior briefs**: archived in `mint/task-brief-mvp{1,1.1*,2-*,3.1,3.2,3.3,3.4,3.4.5,3.4b-c1}.md`. Most recent: MVP-3.4b cycle 1 per-rule counters (round-1 pass 2026-05-25; 52/52 ctests + 0 findings + 1 OOT inline-merge).
+- **Existing design**: `mint/design.md` — §5.31 (MVP-3.4b cycle 1 — per-rule counters + sidecar JSON writer in `src/lib/sidecar.cpp`) is the **direct ancestor** for the JSON-writing idiom. The roll-your-own JSON writer pattern is now established (zero `nlohmann/json` dep; ~200 LOC for sidecar; expect ~250-300 LOC for the logger module given more event types). `src/lib/sidecar.cpp` is the reference implementation — its `json_escape`, atomic-write idiom, line-oriented format are all relevant.
+- **Architecture document**: `mint/architecture-v2.md` — MVP-3.5 row sketches "JSON structured logs in loader + exporter". §"§5.30 §7 OOS" introduced the explicit fence + likely-shape sketch: `{"ts":"<iso8601>","level":"<info|warn|error>","event":"<name>","iface":"<iface or null>","msg":"<existing prose>","fields":{...}}`. This brief refines that sketch with concrete decisions.
+- **`/mint-review` audit (commit `325e2ee`)** has no MVP-3.5-specific findings — pre-3.5 audit so JSON logs weren't reviewable. Cross-cutting "structured-logging" sentiment was an implicit M2-class fleet-ops finding.
+- **PI continuity**: `loader.hpp` is in its 6th consecutive ZERO-diff cycle + `config.hpp` 1st cycle (per Phase A grep dividend in MVP-3.4b). This brief is **likely to break** the loader.hpp streak only if a new internal helper signature lands in the header (architect decides where logger module's public surface lives — `src/lib/logger.{cpp,hpp}` is the natural shape, NOT in `loader.hpp`). Brief author's expectation: **PI-7-3.5-hpp is byte-equivalent on `loader.hpp` (7th consecutive cycle)** + ZERO-or-additive on `config.hpp` (2nd cycle); the logger module owns its own header.
 
 ## Workflow rules (brownfield mode)
 
-- **Architect**: read existing `design.md` §5.29 (MVP-3.4 ancestor) + §5.30 (MVP-3.4.5 housekeeping ancestor) + §6.5 PI-1..PI-34 + §7 OOS + `architecture-v2.md` MVP-3.4b row + Open Q #13 RESOLUTION block fully. EDIT `design.md` in place. Append `§5.31 MVP-3.4b cycle 1: per-rule counters + inner-allowlist-value extension + datapath wiring + exporter labels`. Update §6.5 — PI-1..PI-34 mostly continue; **PI-13-3.4b adjudication is the big new PI** (architect formally rules on inner-value extension shape per HG-3.4b-1, documents the bytes layout, records the cross-reference to PI-27's prior strict reading); PI-7-3.4b-hpp additive-only continuation; PI-29 (rules+action_table populated NOT consulted) gets a documented carve-out for the bump_rule consult-but-not-action-dispatch read; PI-30 (bypass=detach-alias) and PI-31 (exporter READ-ONLY) UNCHANGED; new PI-35-3.4b candidates emerge from the rule-counter contract. Update §7 OOS — close MVP-3.4b cycle 1 deliverables; surface MVP-3.4b cycle 2 (atomic-swap promotion of `rules` per D-3.4-4 if datapath consultation makes it load-bearing now), MVP-3.4b cycle 3 (action-table dispatch — drop rules become operative), and MVP-3.5 JSON logs (carry-forward).
-- **Impl**: brownfield mode. FileList is a DIFF. Expect 0-1 NEW source files (potentially `src/cli/sidecar_writer.{cpp,hpp}` if architect chooses to split rule_index.json write from `apply_internal`; OR keep it inline in `apply_internal` and have 0 NEW source files). 8-12 EDITED source/build files. Inner-allowlist-value extension is the biggest single change — touches `src/bpf/mac_filter.bpf.c` (struct definition + datapath read), `src/lib/loader.cpp` (HASH populate path writes new struct), `src/lib/cidr.cpp` or `src/lib/loader.cpp` (LPM_TRIE populate path writes new struct — symmetric per T.5 OQ #3), AND ALL test fixtures + helpers that currently write a literal `__u8 present` byte to the inner maps (the impl-side discipline rule from MVP-3.4.5 [[impl-role-discipline]] applies — if `grep -rE 'present.*[=:]\s*1' src/ tests/` surfaces a literal `present=1` write outside the loader, that's an inner-value consumer that needs to update to the new struct shape).
+- **Architect**: read existing `design.md` §5.29 (MVP-3.4 — exporter stderr lines + bypass primitive audit-log) + §5.30 (MVP-3.4.5 — HK-4 escape + sudo identity in audit-log; HK-16 startup WARN format) + §5.31 (MVP-3.4b — `src/lib/sidecar.cpp` JSON-writer pattern; D-3.4b-10 zero-deps discipline; D-3.4b-14/20 line-oriented format) + §6.5 PI-1..PI-34 + new PI-3.4b-1..9 + §7 OOS. **Apply Phase A code-grep discipline** (post-MVP-3.4.5 architect-spec rule, sub-rule added post-MVP-3.4b): grep ALL stderr emission sites (`grep -rnE '(std::|f)?(printf|fprintf|cerr <<|fputs|fputc).*stderr' src/` → **41 sites across 8 files** per brief-author count); for each, identify whether it's an event (gets a stable event-name) or a free-form message (gets `msg` field only). EDIT `design.md` in place. Append `§5.32 MVP-3.5: JSON structured logs in loader + exporter`. Update §6.5 — PI-1..PI-34 + PI-3.4b-1..9 continue; **NEW PI-3.5-1 text-mode byte-equivalence** is the load-bearing invariant; PI-7-3.5-hpp byte-equivalent-or-additive continuation. Update §7 OOS — close MVP-3.5 deliverables; surface MVP-3.4b cycle 2 (atomic-swap promotion of `rules` map per D-3.4-4; action_table dispatch) AND MVP-3.5+ candidates (file/syslog destinations; log rotation; per-iface routing — all OOS this cycle).
+- **Impl**: brownfield mode. FileList is a DIFF. Expect 1 NEW source pair `src/lib/logger.{cpp,hpp}` (logger module — format selector via env var + per-event emitter helpers + event-name catalog as `constexpr` table). ~9-12 EDITED source files (the 8 stderr-emitting files + CMakeLists.txt + CHANGELOG + design.md). Each existing stderr emission site converts to a `logger::emit(level, event_name, "<prose>", fields...)` call. Text mode renders byte-equivalent to the pre-§5.32 line (this is the load-bearing PI-3.5-1 contract); JSON mode renders the JSON envelope.
 - **Tester**: NEW ctests (target 5-7):
-  - `T_RULE_COUNTER_MAC_HIT_BUMPS.sh` — attach with a config of N rules; inject K packets matching rule_id=R; assert `xdpfilter_rule_match_total{iface=...,rule_id="R"}` exporter output reports `K`; assert other rule_ids stay 0. Negation control: re-run with packets matching rule_id=R+1; assert R's counter unchanged.
-  - `T_RULE_COUNTER_CIDR_HIT_BUMPS.sh` — same but for CIDR LPM_TRIE matches. Important: CIDR has its own rule_id from the inner-LPM-value extension. Negation: inject MAC-matching-no-cidr packet; CIDR counter stays 0.
-  - `T_RULE_COUNTER_SURVIVES_APPLY.sh` — apply config A; bump counters via injection; apply config B (same rules, swap_count++); assert counters PRESERVED (Prometheus counter semantic per HG-3.4b-3). Per /mint-hld Hidden Assumption #4: this default is "preserve" matching D-3.1-4 reuse_fd, NOT "reset" matching existing global `stats`. Architect picks the canonical behaviour and tester locks it.
-  - `T_SIDECAR_JSON_SHAPE.sh` — apply known config; cat `${PIN_DIR}/<iface>/rule_index.json` (path per Q3); parse with `jq`; assert each rule entry contains expected `{rule_id, mac OR cidr, action, iface}` fields. Negation: malformed config triggers no sidecar write (exit 9 from existing ConfigError path).
-  - `T_EXPORTER_RULE_LABELS.sh` — exporter scrapes `/metrics`; assert `xdpfilter_rule_match_total{iface=..., rule_id="..."}` series appear with valid Prometheus label syntax; assert sidecar-orphan tolerance (per /mint-hld Option 3 OQ — sidecar-bpf consistency window means exporter MAY observe a rule_id in counter map that's not in sidecar across an apply boundary; expected behaviour: drop and reconcile next scrape, NOT crash, NOT loud-warn-per-orphan).
-  - `T_DROP_RULE_BUMPS_COUNTER.sh` — config has 1 PASS rule + 1 DROP rule (per §5.29 drop-rules-are-counted-but-action-still-implicit semantic — drop rules in `rules` map have action_id=1 but the datapath still drops via the "not in allowlist → defaults_map DROP" path; the per-rule counter for the drop rule bumps because the inner-allowlist-value still has its `rule_id`, even though the dispatch is via the existing PASS branch's _negation_). Sub-case: assert `xdpfilter_drop_match_total{iface, rule_id="<drop-rule-id>"}` (if architect chooses to separately count drop rules) OR a single `xdpfilter_rule_match_total{iface, rule_id, action}` with action label (per Q4 below).
-  - Optional: `T_RULE_COUNTER_VERIFIER_GREEN.sh` — micro-test that boots the BPF object and verifies it loads cleanly (the inner-value extension + bump_rule introduction is the first substantive datapath edit since MVP-3.2 — verifier is reviewer-critical).
-  - Existing 46 ctests post-MVP-3.4.5 should continue to pass (PI-6-3.4b strict superset). PI-13's existing strict-byte-shape readings on the 4 ctests that explicitly inspect inner-value bytes (typically `T_DROP_NOT_IN_ALLOWLIST`, `T_DROP_CIDR_NOT_IN_RANGE`, `T_APPLY_ATOMIC_SWAP_NO_DROP`, `T_PERCPU_STATS_SUM`) may need surgical fixes if their fixtures encode the old `__u8` literal — tester surfaces these to architect / impl during Phase B per [[impl-role-discipline]].
+  - `T_LOG_JSON_ATTACH_EVENTS.sh` — set `XDPMF_LOG_FORMAT=json`, run `attach`, capture stderr, parse with `jq`, assert each line is valid JSON with `{ts, level, event, msg}` + appropriate `iface` + `fields`. Negation: same trigger with `XDPMF_LOG_FORMAT=text` → no JSON lines (or default behaviour).
+  - `T_LOG_JSON_APPLY_EVENTS.sh` — same for `apply` (richer event set: rule counts, atomic_swap flip, sidecar write).
+  - `T_LOG_TEXT_BYTE_EQUIVALENT.sh` — **LOAD-BEARING canary for PI-3.5-1**: run a known stderr-producing sequence (attach + apply + detach with deterministic inputs) under `XDPMF_LOG_FORMAT=text` (default) and compare stderr byte-for-byte against MVP-3.4b's expected output. ANY drift = fail.
+  - `T_LOG_JSON_EXPORTER_EVENTS.sh` — exporter under `XDPMF_LOG_FORMAT=json`; verify HK-16 startup WARN + HK-17 exit-6 ERROR (when triggered) + normal startup `listening on …` line are valid JSON with matching `event` names.
+  - `T_LOG_JSON_BYPASS_AUDIT.sh` — bypass primitive's audit-log line under JSON mode; verify HK-4 structural fields (uid, euid, sudo_user, reason) map to JSON `fields:{}` cleanly.
+  - Optional: `T_LOG_EVENT_CATALOG_STABILITY.sh` — micro-test asserting that the event-name catalog (a compile-time constexpr table in `logger.hpp` per architect's choice) contains the expected set of event names; locked-in to prevent silent rename of an event-name across cycles.
+  - Existing 52 ctests post-MVP-3.4b must continue to pass (PI-6-3.5 strict superset). PI-3.5-1 byte-equivalence is the explicit fence — any ctest that greps stderr text MUST still pass without modification.
 - **Reviewer**: 5-point brownfield framework. Special attention:
-  - **(1) PI-13-3.4b adjudication is the load-bearing decision** — verify the new struct layout is documented byte-by-byte in §5.31 (offset 0 = `__u8 present`, offsets 1-3 = padding, offsets 4-7 = `__u32 rule_id` — total 8 bytes per slot), AND verify that the offset-0 byte stays byte-equivalent to PI-27's prior reading (a write of `present=1` at offset 0 followed by `bpftool map dump ... format c` SHOULD still show `0x01` at byte 0 for occupied slots — the old single-byte readers' interpretation survives).
-  - **(2) PI-29 carve-out for datapath read of `rules` map** — verify the carve-out is explicit + scoped. The bump_rule path reads from inner-allowlist-value's `rule_id` field directly THEN bumps `rule_counters[rule_id]`. It does NOT consult `action_table`. The PI-29 invariant becomes: `rules` map is now READ by datapath (for per-rule counting) but action dispatch still uses the existing PASS/DROP branches, not action_table lookups. Document this carefully.
-  - **(3) PI-7-3.4b-hpp additive continuation** — `loader.hpp` MAY add a new internal helper signature or extend `Config::Rule` struct with an internal `rule_id` field (set by loader during apply, not parsed from YAML — assigned 0..N-1 by source-order or by operator's `id:` field per architect Q decision). NO removed symbols, NO renamed symbols, NO signature breaks to `attach()`/`detach()`. Reviewer's regional-diff on `loader.hpp`: hunks ARE allowed this cycle but each hunk MUST be classifiable as "additive only" (new struct field, new helper declaration, new optional parameter — NOT removed parameter, NOT changed return type).
-  - **(4) Datapath verifier health** — the bump_rule introduction adds a per-packet read from inner-allowlist-value's `rule_id` field. This is a 4-byte read after offset 4 in the struct. Verifier must accept this; if it rejects (e.g. due to alignment or zero-init pessimism), impl peer-DMs architect and Option 3 fallback (two-map shadow) becomes load-bearing.
-  - **(5) Counter-survival-across-apply semantic preserved** — T_RULE_COUNTER_SURVIVES_APPLY ctest is the load-bearing canary. If apply resets counters, that's a contract bug at the bpf_map__reuse_fd discipline level (D-3.1-4) — reviewer flags as `[REGRESSION]`.
+  - **(1) PI-3.5-1 byte-equivalence is the load-bearing invariant** — verify `T_LOG_TEXT_BYTE_EQUIVALENT` passes AND verify NO ctest body changes (the 52 existing ctests' stderr-grep assertions all hold byte-equivalent).
+  - **(2) Event-name catalog stability** — verify the catalog is a compile-time `constexpr` table (per architect's design decision in Q1) so that adding/removing an event is grep-visible in the diff. No magic string literals scattered across emission sites.
+  - **(3) JSON shape compliance** — verify each JSON line parses with `jq`; verify required fields (`ts`, `level`, `event`, `msg`) always present; verify `iface` is null-or-string (not missing); verify `fields:{}` is always an object (possibly empty, never absent).
+  - **(4) PI-7-3.5-hpp** — `loader.hpp` byte-equivalent OR additive-only (impl-discretion — architect picks). `git diff main -- src/lib/loader.hpp` MUST be empty OR purely additive (new declarations, no removed/renamed symbols).
+  - **(5) Out-of-scope drift fence**: no file destination logic, no log rotation, no syslog/journald-specific code, no per-iface routing. Logger emits to stderr only this cycle.
 
 ## Human-gate decisions (defaults applied — override at architect Phase A if you disagree)
 
-### HG-3.4b-1: PI-13-3.1 inner-allowlist-value adjudication — **PASS as additive**
+### HG-3.5-1: Text-mode backward compat — **MUST be byte-equivalent**
 
-Per /mint-hld Open Q #3 (architecture-v2.md line 535): the question is whether extending the inner-allowlist-value from `__u8 present` to `struct allow_entry { __u8 present; __u8 _pad[3]; __u32 rule_id; }` (total 8 bytes) counts as additive PASS (PI-27's prior contract preserved at offset 0) or byte-shape break VIOLATE (the value's _size_ changed from 1 byte to 8 bytes; any external reader expecting 1-byte values gets garbage).
+Per `XDPMF_LOG_FORMAT` default `text` semantic: existing stderr lines are byte-equivalent to MVP-3.4b shape. No reordering, no field additions, no prose changes. Operators grepping for `"xdpmacfilter: config error: open"` continue to see the same line. The 52-ctest baseline IS the validation — any drift in text-mode stderr breaks at least one ctest's grep assertion.
 
-**Default**: **PASS as additive**.
+**Default**: **PI-3.5-1 byte-equivalence is MUST**. The new logger's text-rendering MUST produce identical output to the pre-§5.32 emission site. Implementation-wise this means: each emission site's pre-§5.32 `fprintf(stderr, "...")` string becomes the `msg` parameter of `logger::emit(level, event, "<exact-old-string>", ...)`; in text mode the logger just writes `<exact-old-string>` + newline; in JSON mode it wraps. Architect may amend the test grep patterns if a future-cycle wants to evolve text-mode (e.g. add a `[level]` prefix) — that would be a deliberate breaking change requiring its own slice; OOS for MVP-3.5.
 
-**Rationale**:
-- **At the operator-observable layer**, PI-27's contract is "present-or-not". A reader doing `bpftool map dump ... format c | head -1` on the value still sees `0x01` (the first byte). The extension doesn't break what operators observe.
-- **At the BPF datapath layer**, the existing reads in `mac_filter_prog` are all "is this slot occupied?" — they look at offset 0 only (the `present` byte). Verifier-passing reads of offset 0 are byte-equivalent. New reads at offset 4 (`rule_id`) are net additions, not changes to existing reads.
-- **At the ctest fixture layer**, ANY test that literally writes a 1-byte `present=1` payload via `bpf_map_update_elem` from userspace will break (value_size mismatch). Impl flags these via grep during Phase 2.5 smoke + tester picks up surgical fixes during Phase A/B. **This is the dominant cost of PI-13 PASS** — ~5 fixture touches per /mint-hld Option 2 cost estimate.
-- **Symmetric CIDR LPM_TRIE inner-value**: the `cidr_allowlist_a/_b` inner-value MUST extend identically per T.5 OQ #3 (else MAC and CIDR rule_ids live in different shape-spaces — bug-shaped). The 8-byte struct applies to BOTH MAC HASH inner-value AND CIDR LPM_TRIE inner-value.
+**If architect picks "text mode adds [level] prefix"** (semantically richer text output): all 52 ctests' grep patterns need updating + PI-3.5-1 framed as a STRENGTHENING of existing format. Architect's stronger call.
 
-**If architect disagrees** (e.g. holds PI-27 strictly and treats value-size change as VIOLATE): peer-DM architect at Phase A with the VIOLATE ruling; default flips to **Option 3 fallback (two-map shadow)** which keeps inner-value byte-equivalent. The brief's scope items below all need to be re-shaped for Option 3 (new `mac_to_rule_id` HASH + `cidr_to_rule_id` LPM_TRIE + datapath extra-lookup per match). Option 3 is ~1 cycle larger than Option 2 due to the extra maps.
+### HG-3.5-2: JSON shape — **single-line flat envelope** (one NDJSON line per event)
 
-### HG-3.4b-2: Counter survival across `apply -f` — **PRESERVE** (Prometheus counter semantic)
-
-Per /mint-hld Hidden Assumption #4: per-rule counters should survive `apply -f` so that Prometheus counter-monotonicity holds. This matches D-3.1-4's existing reuse_fd discipline (which already preserves global `stats` across apply per §5.26).
-
-**Default**: counter map uses LIBBPF_PIN_BY_NAME + bpf_map__reuse_fd on state-b reattach loop (same idiom as the other 10 managed maps in `kManagedMaps[]` post-MVP-3.4.5 HK-9). Counter map should be added to `kManagedMaps[]` as a NEW entry (13th — `{member_ptr, "rule_counters", legacy_alias=false}`) — this is the cleanest cycle-1 demonstration that the HK-9 refactor saved the next-cycle's cost.
-
-**If architect picks RESET semantic instead** (matching existing global `stats` operator-mental-model): document the divergence from D-3.1-4 in §5.31 + amend D-3.4b-1 with the rationale; T_RULE_COUNTER_SURVIVES_APPLY flips to T_RULE_COUNTER_RESETS_ON_APPLY (still load-bearing as a canary, just for the opposite contract).
-
-### HG-3.4b-3: `rule_index.json` sidecar — **INCLUDE** in cycle 1
-
-Per /mint-hld Option 2 composition: sidecar JSON is part of cycle 1 scope. Exporter joins `rule_counters` (BPF) with `rule_index.json` (sidecar) and emits `xdpfilter_rule_match_total{iface, rule_id}` with human-readable labels.
-
-**Default sidecar shape** (architect Q2 below for finalization):
+Per architecture-v2.md sketch + JSON Lines / NDJSON convention:
 ```json
-{
-  "iface": "eth0",
-  "schema_version": 1,
-  "applied_at": "2026-05-NN-HH:MM:SS",
-  "rules": [
-    {"rule_id": 0, "match": {"mac": "aa:bb:cc:dd:ee:ff"}, "action": "pass"},
-    {"rule_id": 1, "match": {"cidr": "10.0.0.0/24"}, "action": "pass"},
-    {"rule_id": 2, "match": {"mac": "11:22:33:44:55:66"}, "action": "drop"}
-  ]
-}
+{"ts":"2026-05-25T17:30:00Z","level":"info","event":"attach.success","iface":"veth_v0","msg":"attached prog id 29760 to veth_v0","fields":{"prog_id":29760}}
 ```
 
-**Default path** (architect Q3 below for finalization): `${PIN_DIR}/<iface>/rule_index.json`. Per-iface sidecar pairs naturally with the per-iface bpffs pin layout. Loader writes atomically (rename-into-place idiom) on apply.
+- **One event = one line** (newline-terminated; no pretty-printed multi-line JSON).
+- **Required fields**: `ts`, `level`, `event`, `msg` (always present, never null).
+- **Conditional fields**: `iface` (null if event isn't iface-scoped; string if it is — never absent).
+- **Free-form**: `fields:{}` (object; empty `{}` if no structural data; never absent).
+- **No schema_version field in MVP-3.5** — operators can detect via presence of `ts` field; explicit schema_version added when a breaking change ships.
 
-**If architect picks DEFER sidecar to a later cycle**: exporter falls back to emitting `xdpfilter_rule_match_total{iface=..., rule_id="N"}` with bare integer labels (no mac/cidr human-readable label). Cycle 1 cost shrinks ~30%; future cycle adds the sidecar + label join. Tester's T_SIDECAR_JSON_SHAPE.sh moves to the deferred cycle.
+**Default**: **above shape**. Architect can prune (e.g., drop `iface` and put it in `fields:{}`) but the flat top-level fields make jq queries cleaner (`jq 'select(.iface=="veth_v0")'` vs `jq 'select(.fields.iface=="veth_v0")'`).
 
-### HG-3.4b-4: `rules` map atomic-swap (D-3.4-4) — **STAY SHARED with clear-and-rewrite** for cycle 1
+### HG-3.5-3: Bypass audit-log under JSON mode — **emit as event `bypass.activated`**
 
-§5.29 declared `rules` as a SHARED ARRAY (single map, not parallel-outer via ARRAY_OF_MAPS) because the datapath ignored it. **MVP-3.4b cycle 1 makes the datapath consume rule_id from inner-allowlist-value** — but the consumption is via the INNER allowlist (already parallel-outer via `rulesets`/`cidr_rulesets` per §5.26/§5.27 atomic-swap), NOT via `rules` itself. So `rules` map can stay SHARED.
+HK-4 / D-3.4.5-8 already gave the bypass audit-log structural fields (uid, euid, sudo_user, reason). Under JSON mode these slot naturally into `fields:{}` of a `bypass.activated` event. This is the cleanest demonstration that "JSON mode = structural fields exposed", and it pairs with HK-4's permissive regex extension in T_BYPASS_CMD_DETACHES (the test already accepts both shapes per MVP-3.4.5 EDIT-3).
 
-**Default**: keep `rules` as SHARED ARRAY. The datapath does NOT read `rules` (it reads `rule_counters` via `bump_rule(rule_id)` after extracting rule_id from the inner-allowlist-value which itself is parallel-swapped). No new atomic-swap promotion needed this cycle.
+**Default**: yes — `bypass.activated` event with the 4 fields. Architect picks event-name (`bypass.activated` vs `bypass.audit` vs alternatives) per Q3 below.
 
-**If architect picks atomic-swap promotion** (D-3.4-4 closes now): `rules` flips to parallel-outer via new `rulesets_outer` ARRAY_OF_MAPS like the MAC and CIDR allowlists. Cost: +1 ARRAY_OF_MAPS + kManagedMaps[] gains 2 entries (parallel `rules_a/b` instead of single `rules`). This is a future-cycle architectural move; cycle 1 doesn't need it.
+### HG-3.5-4: Event-name discovery vs assignment — **architect catalogs all event names in design.md §5.32**
 
-## Open mechanism questions (architect decides; document in §5.31)
+Each of the ~41 stderr sites maps to ONE of:
+- A specific named event (loader: ~15 events; exporter: ~5 events; bypass: ~3 events; ~23 events total).
+- A generic free-form "info" / "warn" / "error" line that doesn't deserve an event (these get `event="generic"` OR the architect inlines them into specific events; default: architect groups them under ~5 generic event names like `loader.info`, `exporter.error`).
 
-### Q1: `bump_rule(rule_id)` datapath call-site placement
+**Default**: architect grep-walks the 41 sites + proposes a catalog of ~25-30 event names in §5.32. Brief author has NOT pre-cataloged them (would require reading 41 sites — that's architect's Phase A work per the spec rule). Catalog goes into design.md as a constexpr table + becomes the `constexpr` table in `logger.hpp` per Q1.
 
-- **B1**: Bump in BOTH the MAC HASH hit branch AND the CIDR LPM_TRIE hit branch. Two `bump_rule` calls in `mac_filter_prog`. Distinct rule_id per match (MAC and CIDR rules have disjoint rule_id allocation per architect's allocator decision in Q5).
-- **B2**: Bump in ONLY the MAC HASH hit branch — CIDR matches don't get per-rule counters in cycle 1, only aggregate via existing STAT_PASS_CIDR. Defer CIDR per-rule counters to a follow-up cycle.
-- **B3**: Bump in a unified post-decision branch — single `bump_rule(rule_id)` call after either MAC OR CIDR match, using rule_id read from whichever inner-value was the hit source.
+## Open mechanism questions (architect decides; document in §5.32)
 
-**Recommendation**: **B3**. Single call-site is cleaner, easier for verifier, symmetric MAC/CIDR semantic from cycle 1, no follow-up needed. B2 is the "defer half the feature" shape; B1 is correct but visually duplicative.
+### Q1: Logger module location — **`src/lib/logger.{cpp,hpp}`** (new file pair)
 
-### Q2: Sidecar JSON schema fields beyond the default
+- **M1**: NEW `src/lib/logger.{cpp,hpp}` — separate module; `src/lib/logger.hpp` exposes `logger::emit(level, event, msg, fields)` + the event-name catalog as a `constexpr` table; `src/lib/logger.cpp` implements format selection (text vs JSON via env var read once at startup) + JSON envelope rendering. Mirrors the §5.31 sidecar split.
+- **M2**: Inline helper functions in `src/cli/cli.cpp` (loader) + `src/exporter/main.cpp` (exporter) — DUPLICATE the logger logic. Smaller LOC delta but less DRY.
+- **M3**: Single `src/common/logger.{cpp,hpp}` shared between loader + exporter — slightly different from M1 (`src/common` vs `src/lib`). `src/common` is the right home for shared-by-both-binaries headers (cf. `mac_filter.h`).
 
-Default shape above has `{rule_id, match, action}` per rule + `{iface, schema_version, applied_at}` top-level. Architect picks:
+**Recommendation**: **M3** — `src/common/logger.{cpp,hpp}`. Both binaries need it; `src/common` is the established home for cross-binary code. Compiles into both `xdpmf_internal` library and the exporter binary.
 
-- **S1**: Defaults-only. Cycle 1 ships exactly the default shape.
-- **S2**: Add a `description` free-form field per rule (operator-supplied annotation from YAML; optional). Forward-fit for future operator UX.
-- **S3**: Add metadata like `loader_version`, `kernel_version`, `bpffs_root` to top-level. Forward-fit for debugging across deployment heterogeneity.
+### Q2: Timestamp format — **ISO-8601 UTC with `Z` suffix**
 
-**Recommendation**: **S1** (defaults-only). Cycle 1 ships the minimum that the exporter needs to emit labeled metrics. S2/S3 are nice-to-have additive shifts; future-cycle.
+- **T1**: `"2026-05-25T17:30:00Z"` (ISO-8601, UTC, second-precision). Matches `src/lib/sidecar.cpp::format_timestamp_utc` from MVP-3.4b — already implemented helper that can be promoted to `src/common/logger.cpp` (or stay in sidecar and be called from there).
+- **T2**: `"2026-05-25T17:30:00.123456Z"` (ISO-8601 with microsecond precision). Useful for ordering events fired within the same second.
+- **T3**: `1748192195` (epoch seconds) or `1748192195000000000` (epoch nanoseconds). Smaller, sort-friendly, but operator-unfriendly (need to convert for human reading).
 
-### Q3: `rule_index.json` sidecar path
+**Recommendation**: **T1** (ISO-8601 second-precision). Matches existing sidecar precedent. Operators can grep `2026-05-25T17:` for hourly windows. Microsecond precision (T2) is over-engineering for current event rates (which are operator-action events, not packet-rate events).
 
-- **P1**: `${PIN_DIR}/<iface>/rule_index.json` (per-iface, paired with bpffs pin layout). Concern: bpffs is for BPF objects, not JSON files — but the per-iface pin directory ALREADY contains non-BPF files in the §5.28 systemd layout (and config files in some deployment patterns), so the precedent is mild.
-- **P2**: `/var/lib/xdpmacfilter/<iface>/rule_index.json` (standard /var/lib spot for application state). Pairs with FHS conventions; requires new directory creation + permissions setup. Slightly more "right" but introduces a new filesystem touchpoint.
-- **P3**: `/etc/xdpmacfilter/<iface>/rule_index.json` (config-adjacent). Wrong-shape: this is loader-WRITTEN output, not operator-EDITED input. /etc is for the latter.
+### Q3: Event-name convention — **`<subsystem>.<action>[.<outcome>]`** dot-delimited
 
-**Recommendation**: **P1**. Pairs with bpffs pin layout, no new filesystem touchpoint, exporter already scans bpffs root by iface (HK-16 startup WARN/exit-6 codepath). Per-iface sidecar mirrors per-iface pinned maps. **Caveat**: bpffs is `tmpfs`-mounted in standard configurations; rule_index.json survives only as long as the bpffs mount survives — but THAT'S ALREADY TRUE for the pinned maps too (they survive loader restart but not bpffs unmount). Sidecar inherits the same lifecycle naturally. If architect picks P2 (FHS-correct), add `/var/lib/xdpmacfilter/<iface>/` mkdir + chown in apply path + corresponding cleanup in detach + ansible playbook touch + systemd RuntimeDirectory= or StateDirectory= update — all small but each-touch coordination cost.
+- **E1**: Dot-delimited path: `attach.success`, `attach.fail.tag_mismatch`, `apply.start`, `apply.complete`, `bypass.activated`, `exporter.scrape.error.permission_denied`. Hierarchical, easy to filter (`.startswith("attach.")`).
+- **E2**: snake_case flat: `attach_success`, `attach_fail_tag_mismatch`, etc. Simpler; matches existing C++ snake_case identifiers.
+- **E3**: camelCase flat: `attachSuccess` etc. Inconsistent with project's C/snake_case convention.
 
-### Q4: Action label on `xdpfilter_rule_match_total`
+**Recommendation**: **E1** (dot-delimited). Hierarchical event-names are the convention in structured-logging ecosystems (ECS, OpenTelemetry); easy to filter via `jq 'select(.event | startswith("attach."))'`. Slightly more characters than E2 but operator-readable wins.
 
-- **A1**: Single series `xdpfilter_rule_match_total{iface, rule_id}` — action info comes from joining with sidecar's `action` field at scrape consumer's side (operator queries Prometheus with `xdpfilter_rule_match_total * on(rule_id) group_left(action) xdpfilter_rule_meta`). Two-series approach.
-- **A2**: Two series `xdpfilter_rule_pass_total{iface, rule_id}` + `xdpfilter_rule_drop_total{iface, rule_id}` — action baked into series name. Simpler operator query.
-- **A3**: Single series `xdpfilter_rule_match_total{iface, rule_id, action}` — action as a label. Operator query is `sum by (action)(xdpfilter_rule_match_total)`. Highest cardinality but most natural Prometheus shape.
+### Q4: Env-var read timing — **once at startup, cached for process lifetime**
 
-**Recommendation**: **A3**. Action as a label is Prometheus-idiomatic; sidecar already carries action; exporter joins both. A1's "join at query time" pushes work to operator; A2's "split series" multiplies metric count.
+- **R1**: Read `XDPMF_LOG_FORMAT` once at startup; cache the format choice in a `constexpr` (no — `const`) module-static; every emission site reads the cached value. **Process restart required to switch format.**
+- **R2**: Read on every emission. Cost: a `getenv` per stderr write. **Live-toggleable via env var update.**
+- **R3**: Re-read on SIGHUP. Compromise.
 
-### Q5: Rule_id allocation policy in loader
+**Recommendation**: **R1**. Matches the existing pattern (`XDPMF_TRUST_MODEL`, `XDPMF_BPFFS_ROOT` — all read once). Live-toggleable logging is over-engineering; if an operator wants to switch they restart the binary (cheap).
 
-The /mint-hld synthesizer didn't pin this down — left to MVP-3.4b architect. Options:
+### Q5: `fields:{}` value types — **flat scalars only** (string, int, bool, null)
 
-- **R1**: Operator's `id:` from YAML config IS the BPF key directly (sparse-but-bounded usage per Option 2 default). Operator writes `id: 5`, datapath bumps `rule_counters[5]`. Cap stays at 64.
-- **R2**: Source-order allocation (loader assigns 0..N-1 by YAML order). Operator's `id:` becomes display-only. Risk: re-ordering rules in YAML invalidates Prometheus counter continuity across applies.
-- **R3**: Sort-by-name allocation (Option 4 from /mint-hld). Out of scope per architecture-v2 — requires schema-v2.
+- **F1**: Only scalar values in `fields:{}`. No nested objects, no arrays. Each field is `"key":"string"|123|true|null`.
+- **F2**: Allow nested objects (e.g., `fields: {"pin_paths": {"a": "/sys/fs/bpf/...", "b": "/sys/fs/bpf/..."}}`).
+- **F3**: Allow arrays (e.g., `fields: {"failed_ifaces": ["veth0", "veth1"]}`).
 
-**Recommendation**: **R1**. Honors the operator-observable §5.26 rule 3 contract (operator's `id` is the canonical identifier; gaps in 0..63 are normal). Matches Option 2 synthesizer default. R2 violates Prometheus counter monotonicity on YAML edits (operator surprise). R3 is Option 4 and out of scope.
+**Recommendation**: **F1** (flat scalars). Matches the §5.31 sidecar one-rule-per-line shape; minimal JSON writer complexity (no recursive nesting); operators can re-construct nested structures from multiple events if needed.
+
+### Q6: Logger build into both binaries — **CMake target inclusion**
+
+- **B1**: `src/common/logger.cpp` added to BOTH `xdpmf_internal` (linked by loader) AND `xdpmf-exporter` target. Two compilations of the same TU.
+- **B2**: `src/common/logger.cpp` becomes a separate STATIC library `xdpmf_common`; both binaries link it. Cleaner CMake but introduces a new target.
+- **B3**: `src/common/logger.{cpp,hpp}` in `xdpmf_internal` only; exporter linked against `xdpmf_internal` (already half-true — exporter doesn't link `xdpmf_internal` today; would change build graph). Probably wrong shape.
+
+**Recommendation**: **B1** (duplicate compilation). Minimal CMake change; symmetric to `src/lib/sidecar.cpp` which is only in `xdpmf_internal` (exporter has its own `sidecar_reader.cpp`). One TU compiled twice is negligible cost.
 
 ## Scope (cycle 1 — concrete items)
 
-### Item PI-3.4b-1 — `rule_counters` PERCPU_ARRAY[64] map
-**Where**: `src/bpf/mac_filter.bpf.c` (NEW map declaration `rule_counters` PERCPU_ARRAY[64] of `__u64`; `bump_rule(__u32 rule_id)` inline helper adjacent to existing `bump_stat`); `src/lib/loader.cpp` (add to `kManagedMaps[]` as 13th entry per HK-9 refactor); `src/exporter/stats_reader.cpp` or new helper (read PERCPU sum across all CPUs per slot); `src/exporter/main.cpp` (emit Prometheus series — see PI-3.4b-6).
+### Item PI-3.5-1 — Logger module (`src/common/logger.{cpp,hpp}`)
+**Where**: NEW `src/common/logger.{cpp,hpp}` (~250-300 LOC total). `logger.hpp` exposes `enum class Level {Info, Warn, Error}`, `enum class Format {Text, Json}`, `void emit(Level, std::string_view event, std::string_view msg, std::span<const Field> fields = {})` where `struct Field { std::string_view key; FieldValue value; }` and `FieldValue` is a variant of `string_view | int64_t | bool | nullptr_t`. Module-static `Format g_format` cached from `XDPMF_LOG_FORMAT` env var at first call. Event-name catalog as `constexpr std::array<std::string_view, N> kEventNames` for stability checks. JSON writer reuses `json_escape` idiom from `src/lib/sidecar.cpp:38-158` (architect picks whether to refactor sidecar's escape helper into `src/common/json.{cpp,hpp}` shared OR duplicate the helper in logger.cpp).
 
-### Item PI-3.4b-2 — Inner-allowlist-value extension to `struct allow_entry`
-**Where**: `src/bpf/mac_filter.bpf.c` (replace `__u8` inner-value type for BOTH MAC HASH `allowlist_a/b` AND CIDR LPM_TRIE `cidr_allowlist_a/b` with `struct allow_entry { __u8 present; __u8 _pad[3]; __u32 rule_id; }` — symmetric; verify total size is 8 bytes via `BPF_CORE_READ`-safe layout). PI-13-3.4b adjudication output documented per HG-3.4b-1.
+### Item PI-3.5-2 — Stderr-emission site conversion (~41 sites across 8 files)
+**Where**: EDIT `src/cli/main.cpp`, `src/cli/cli.cpp`, `src/cli/bypass.cpp`, `src/cli/apply.cpp` (if it has emission sites — check during Phase A), `src/lib/loader.cpp`, `src/lib/sidecar.cpp`, `src/exporter/main.cpp`, `src/exporter/http.cpp`, `src/exporter/stats_reader.cpp`, `src/exporter/rule_counters_reader.cpp` — convert each `fprintf(stderr, "<prose>", ...)` to `logger::emit(Level::<...>, "<event-name>", "<prose>", {Field{...},...})`. Text mode preserves byte-equivalence per HG-3.5-1.
 
-### Item PI-3.4b-3 — Loader writes new struct shape
-**Where**: `src/lib/loader.cpp` `internal::apply_request` step 8 (populate inactive inner allowlist) — replace literal `__u8 present = 1` writes with full `struct allow_entry{present=1, rule_id=<R>}` per rule entry. Loader assigns `rule_id` per Q5 (default R1: operator's YAML `id:`). Symmetric for both MAC HASH and CIDR LPM_TRIE populate paths. Out-of-band cleanup: `${PIN_DIR}/<iface>/allowlist` legacy alias (D-3.1-2) — needs the same struct shape; legacy single-byte reader breaks; this is a documented break (PI-13-3.4b's PASS-as-additive reading covers the case at the offset-0 byte level — old single-byte readers see `0x01` for occupied slots which preserves their semantic).
+### Item PI-3.5-3 — Event-name catalog in design.md + logger.hpp
+**Where**: §5.32 in design.md contains the full table (~25-30 events: `attach.success`, `attach.fail.config`, `attach.fail.tag_mismatch`, `attach.fail.kernel_unsupported`, `detach.success`, `apply.start`, `apply.complete`, `apply.fail`, `bypass.activated`, `bypass.cancelled`, `exporter.listening`, `exporter.warn.bpffs_root_missing`, `exporter.error.all_ifaces_eacces`, `exporter.scrape.warn.iface_eacces`, `loader.warn`, `loader.info`, `exporter.warn`, `exporter.error`, ...). Architect commits the catalog in §5.32; `logger.hpp` mirrors it as a `constexpr` table.
 
-### Item PI-3.4b-4 — Datapath `bump_rule` wiring
-**Where**: `src/bpf/mac_filter.bpf.c` `mac_filter_prog` — on MAC HASH hit OR CIDR LPM_TRIE hit, read `rule_id` from inner-value's offset-4 `__u32`; call `bump_rule(rule_id)` per Q1 (default B3: unified post-decision branch — single call-site). Verifier-pass critical; impl runs T_VERIFIER_REJECT-equivalent if not already covered.
+### Item PI-3.5-4 — Tests (5-7 new ctests)
+**Where**: `tests/T_LOG_JSON_ATTACH_EVENTS.sh`, `tests/T_LOG_JSON_APPLY_EVENTS.sh`, `tests/T_LOG_TEXT_BYTE_EQUIVALENT.sh`, `tests/T_LOG_JSON_EXPORTER_EVENTS.sh`, `tests/T_LOG_JSON_BYPASS_AUDIT.sh`, optional `tests/T_LOG_EVENT_CATALOG_STABILITY.sh`. Plus tests/CMakeLists.txt entries.
 
-### Item PI-3.4b-5 — `rule_index.json` sidecar write
-**Where**: `src/lib/loader.cpp` `internal::apply_request` step 9 (or new step 10 — after inner-map populate + before active_idx flip) — write `rule_index.json` to per-iface path (default P1) per Q2 default shape (S1). Atomic write idiom: write to `rule_index.json.tmp`, fsync, rename. Schema_version=1 hard-coded. NEW one-off helper function (could live in new file `src/lib/sidecar.cpp` OR inline in `apply_internal` — architect's call).
-
-### Item PI-3.4b-6 — Exporter rule label join
-**Where**: `src/exporter/stats_reader.cpp` (read `rule_counters` PERCPU_ARRAY); `src/exporter/main.cpp` or new helper (parse `rule_index.json` per iface; build rule_id → {match, action} lookup); `src/exporter/prom_format.cpp` (NEW series emission — `xdpfilter_rule_match_total{iface, rule_id, action}` per Q4 A3). Sidecar-orphan tolerance: if BPF map has `rule_id=R` but sidecar doesn't, emit `rule_id="R"` with `action="unknown"` label (drop-and-reconcile next scrape; do NOT crash; do NOT loud-warn-per-orphan).
-
-### Item PI-3.4b-7 — `Config::Rule` struct gains `rule_id` field (loader-internal)
-**Where**: `src/lib/config.{cpp,hpp}` — `Config::Rule` struct adds `rule_id` field (loader-internal; not parsed from YAML directly; set by loader during apply per Q5). Public-API impact: minor (additive on a config struct that's already plumbed through `apply()`). PI-7-3.4b-hpp additive-only continuation.
-
-### Item PI-3.4b-8 — Tests (5-7 new ctests)
-**Where**: `tests/T_RULE_COUNTER_MAC_HIT_BUMPS.sh`, `tests/T_RULE_COUNTER_CIDR_HIT_BUMPS.sh`, `tests/T_RULE_COUNTER_SURVIVES_APPLY.sh`, `tests/T_SIDECAR_JSON_SHAPE.sh`, `tests/T_EXPORTER_RULE_LABELS.sh`, `tests/T_DROP_RULE_BUMPS_COUNTER.sh`, optional `tests/T_RULE_COUNTER_VERIFIER_GREEN.sh`. Plus tests/CMakeLists.txt entries.
-
-### Item PI-3.4b-9 — Fixture surgical fixes (PI-13 ripple)
-**Where**: ANY ctest fixture that literally writes a 1-byte `present=1` payload to inner-allowlist maps via `bpf_map_update_elem` from userspace. Impl Phase 2.5 smoke runs `grep -rE 'value_size.*1\b\|__u8.*present' tests/` and `grep -rE 'bpf_map_update_elem.*allowlist' tests/` to find them. Surgical fixes only (replace 1-byte literal with the new struct shape; preserve test semantic). Counted as EDITED-test-bodies carve-out per PI-34-3.4b strict-superset (5-10 EDITs estimated).
-
-### Item PI-3.4b-10 — Version bump 0.6.1 → 0.7.0 + CHANGELOG
-**Where**: `CMakeLists.txt` (project VERSION 0.6.1 → 0.7.0 — MINOR bump because this is a new operator-facing feature, not a patch). `CHANGELOG.md` (new `[0.7.0] - 2026-05-NN` entry per Keep-a-Changelog format; sub-groups: Added — per-rule counters, sidecar JSON, exporter rule labels; Changed — inner-allowlist-value struct shape (PI-13-3.4b adjudication note); Internal — `kManagedMaps[]` gains 13th entry, datapath consumes rule_id).
+### Item PI-3.5-5 — Version bump 0.7.0 → 0.8.0 + CHANGELOG
+**Where**: `CMakeLists.txt` (VERSION 0.7.0 → 0.8.0 — MINOR bump because new operator-facing env var + new structured-logging surface). `CHANGELOG.md` (new `[0.8.0]` entry per Keep-a-Changelog; sub-groups: Added — logger module + JSON format + 5-7 ctests; Internal — 41 stderr-site conversions).
 
 ## Out of scope (explicit)
 
-- **`action_table` datapath consultation** — `rules` map carries action_id but datapath does NOT dispatch via action_table lookup. PASS-on-allowlist-hit and DROP-via-defaults-map branches retained from §5.26. **MVP-3.4c future cycle** if needed.
-- **Atomic-swap promotion of `rules` map (D-3.4-4)** — stays SHARED with clear-and-rewrite per HG-3.4b-4. MVP-3.4c if datapath consultation makes it load-bearing.
-- **Action types beyond {PASS, DROP}** — still MVP-3.8+.
-- **Cap-lift beyond 64 rules** — 64 stays per /mint-hld Option 5 rejection + Open Q #13 Q5 human-gate (permanent product contract).
-- **Named rules schema-v2 (Option 4 from /mint-hld)** — deferred indefinitely. operator's `id:` is canonical identifier per R1.
-- **Sidecar JSON history / versioning** — single rule_index.json, overwritten on apply; no rotation, no .prev backup, no audit log of past rule sets.
-- **Sidecar JSON path under FHS /var/lib (P2)** — staying with bpffs-adjacent P1 per Q3 default. Future-cycle if operator demand surfaces.
-- **`xdpfilter_drop_match_total` as separate series (Q4 A2)** — `action` as label per A3 default. Future-cycle if operator demand surfaces.
-- **JSON structured logs (MVP-3.5)** — carry-forward.
-- **sFlow (MVP-3.6 conditional)** — carry-forward.
-- **Library extraction `libxdpmf.so.0` (MVP-3.6+)** — carry-forward.
-- **Daemon `xdpmfd` (MVP-3.6+)** — carry-forward.
-- **Binary rename `xdpmacfilter` → `xdpfilter` (MVP-3.12)** — carry-forward.
-- **L4 ports / VLAN / IPv6 CIDR** — carry-forward.
-- **Documentation pass (13 items D1..D13 from `/mint-review` report)** — separate manual pass per user direction. NOT in this slice.
-- **Systemd sandbox directives (security M3 from /mint-review)** — separate security cycle, NOT in this slice.
-- **TSAN build / CO-RE field-probe failure test** — coverage scope, NOT in this slice.
+- **File / syslog / journald destinations** — `XDPMF_LOG_DEST={stderr,file,syslog,journald}` is candidate scope for a follow-up cycle (MVP-3.5+; brief author calls it MVP-3.5b if/when it surfaces). This cycle is stderr-only.
+- **Log rotation** — operators wrap stderr with their own log shippers (rsyslog, vector, fluentbit); native rotation is OOS forever.
+- **Per-iface log routing** — separate stderr streams per iface; not needed at current event rate.
+- **Log level filtering via env var** — `XDPMF_LOG_LEVEL={info,warn,error}` could mute info-level events; OOS this cycle (all events always emitted).
+- **Schema_version field in JSON envelope** — added when a future cycle ships a breaking change; cycle 1 implicit schema_version=1.
+- **bpf_printk JSON-ification** — kernel-side BPF debug-prints stay text; only userspace stderr converts.
+- **MVP-3.4b cycle 2** (atomic-swap promotion of `rules` map; action_table dispatch) — carry-forward.
+- **Doc bucket D1..D13** — user-driven manual pass, not /mint-dev.
+- **Security M3 / Perf M1-M4 / TSAN / CO-RE field-probe** — separate cycles.
 
 ## Definition of done
 
-- `§5.31 MVP-3.4b cycle 1` amendment in `design.md` documenting PI-3.4b-1..PI-3.4b-10 + Q1-Q5 decisions + HG-3.4b-1/2/3/4 confirmation; cross-references to `/mint-hld` Open Q #13 RESOLUTION + Option 2 composition.
-- New `§6.x TestStrategy` entries for 5-7 new ctests + EDITed-fixture catalog for the PI-3.4b-9 surgical fixes.
-- `§6.5 Preserved invariants` extended: **PI-13-3.4b adjudication** (the headline new PI — byte-layout of `struct allow_entry` documented + offset-0 byte-equivalence to PI-27 claimed); PI-7-3.4b-hpp additive-only (NO removed/renamed symbols); PI-29-3.4b carve-out (rules+action_table previously NOT consulted; now `rules` is still NOT consulted by datapath but inner-allowlist-value's rule_id IS read; action_table still NOT consulted); PI-31 (exporter READ-ONLY) UNCHANGED; PI-34 strict-superset 46-ctest baseline.
-- `xdpmacfilter --version` reports `xdpmacfilter 0.7.0` (MINOR bump from 0.6.1; new operator-facing feature).
-- `xdpmf-exporter --version` reports `xdpmf-exporter 0.7.0`.
-- `CHANGELOG.md` entry `[0.7.0] - 2026-05-NN`.
-- 5-7 new ctests pass; 46 existing ctests still pass modulo PI-3.4b-9 surgical fixes (5-10 EDITed-fixture-body carve-out documented in PI-34-3.4b — third "fixture-body carve-out" cycle after MVP-3.4 (4 EDITs) and MVP-3.4.5 (7 EDITs) — pattern is stable).
+- `§5.32 MVP-3.5` amendment in `design.md` with full event-name catalog (~25-30 entries) + Q1-Q6 decisions + HG-3.5-1/2/3/4 confirmation.
+- `xdpmacfilter --version` reports `xdpmacfilter 0.8.0` (MINOR bump from 0.7.0).
+- `xdpmf-exporter --version` reports `xdpmf-exporter 0.8.0`.
+- `CHANGELOG.md` entry `[0.8.0] - 2026-05-NN`.
+- 5-7 new ctests pass; 52 existing ctests still pass byte-equivalent (PI-3.5-1 text-mode contract — load-bearing canary T_LOG_TEXT_BYTE_EQUIVALENT).
 - `XDPMF_SANITIZERS=ON` build clean.
-- BPF object verifier-loads cleanly (T_RULE_COUNTER_VERIFIER_GREEN OR existing T_VERIFIER_REJECT-style canary).
-- `mint/review.md` round-1 verdict = `pass` (cycle 1 is medium-risk; round-2 rework is acceptable if verifier or PI-13 adjudication surfaces issues; aim for round-1 pass).
+- `mint/review.md` round-1 verdict = `pass` (cycle is low-medium risk; aim for round-1 pass).
 - One git commit per phase boundary per workflow B.
 
 ## Dependencies
 
-- libbpf (existing); no new build deps.
-- `nlohmann/json` or equivalent JSON library for `rule_index.json` write + read. Current project does NOT have a JSON dep (config is custom YAML subset per §5.26). Architect picks: vendor `nlohmann/json` single-header via `FetchContent` / `find_package`, OR roll a minimal JSON writer in `src/lib/sidecar.cpp` (~150 LOC for the writer; exporter reads via existing test-stack idioms — `jq` for assertions, custom parse if no dep).
-- `jq` in test runtime (already a dep for several existing ctests; T_SIDECAR_JSON_SHAPE leverages it).
-- No new BPF features. No new kernel-version dependencies (struct layout in BPF is verifier-trivial; CO-RE relocations not needed).
+- No new build deps (roll-your-own JSON writer per MVP-3.4b D-3.4b-10 precedent).
+- `jq` in test runtime (existing dep; multiple new ctests grep JSON output).
+- No new BPF features.
+- No new kernel-version dependencies.
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 
@@ -223,24 +177,26 @@ The /mint-hld synthesizer didn't pin this down — left to MVP-3.4b architect. O
 mode: brownfield
 packs:
   architect:  []
-  impl:       [lang/cpp.md, lang/cmake.md, lang/bpf.md]
+  impl:       [lang/cpp.md, lang/cmake.md]
   tester:     [test/bpf-xdp.md]
   reviewer:   []
 ```
+
+Note: `lang/bpf.md` pack DROPPED from impl this cycle (no datapath edit; pure userspace work). Tester pack stays since ctests still attach loader against veth fixture.
 
 ---
 
 ## Pre-brief sanity check (per [[mint-hld-scope-discipline]])
 
-This brief defers no questions to /mint-hld; all open questions are tactical (architect-tier). /mint-hld already ran for Open Q #13 (architecture-v2.md commit `2d4b31a` 2026-05-24) — synthesizer's Option 2 + Caveat (b) human-gate held → MVP-3.4b ships Option 2 when re-asked. This brief IS the re-ask. No multi-axis design space to brainstorm; mechanical answer falls out of stated constraints. Single architect via standard /mint-dev is correct.
+This brief defers no questions to /mint-hld; all open questions are tactical (architect-tier). The JSON shape, event-name convention, env-var timing, etc., have strong defaults (industry conventions: NDJSON, dot-delimited event names, read-once env vars). No multi-axis design space to brainstorm. Single architect via standard /mint-dev is correct.
 
-## Notes for architect Phase A code-grep discipline (per architect spec rule)
+## Notes for architect Phase A code-grep discipline (per architect spec rules)
 
-Before publishing §5.31:
-- `grep -nE '__u8.*present\|present.*__u8' src/bpf/mac_filter.bpf.c src/lib/*.cpp tests/lib/*.sh tests/T_*.sh` — find every inner-value-shape touch site (PI-3.4b-9 fixture ripple).
-- `grep -nE 'allowlist|cidr_allowlist' src/lib/loader.cpp | grep -v "// "` — find the populate paths that need to write the new struct.
-- `Read src/lib/loader.cpp` around the post-MVP-3.4.5 `kManagedMaps[]` table (line 127-158 per MVP-3.4.5 review.md) — verify the 13th entry addition for `rule_counters` is one-line clean.
-- `Read src/exporter/stats_reader.cpp` `read_all_attached*` overloads — verify the rule_counters read fits the existing pattern.
-- `grep -nE '0.6.1|VERSION' CMakeLists.txt CHANGELOG.md tests/T_EXPORTER_METRICS_FORMAT.sh` — version bump touch sites.
+Brief author already ran these greps (April 2026 sense of "Phase A discipline" applied at brief-write time per [[mint-hld-scope-discipline]] post-MVP-3.4b retrospective). Architect should re-verify:
 
-The Phase A code-grep discipline rule was added to architect spec post-MVP-3.4.5 (where 3 Phase B EDITs surfaced via impl peer-DM precisely because the architect's design literals weren't grep-verified against the existing code). For MVP-3.4b — where the inner-value extension touches ~5-10 fixtures + the kManagedMaps[] table gains an entry + datapath verifier-passes are critical — a 15-minute Phase A grep pass should keep Phase B EDITs to ≤1.
+- `grep -rnE '(std::|f)?(printf|fprintf|cerr <<|fputs|fputc).*stderr' src/` → **41 sites across 8 files** (cli/{main,bypass,apply}.cpp, lib/{loader,sidecar}.cpp, exporter/{main,http,stats_reader,rule_counters_reader}.cpp). Architect catalog event names against this list during Phase A.
+- `Read src/lib/sidecar.cpp:38-158` — the existing `json_escape` + `format_timestamp_utc` helpers. Decide: promote to `src/common/json.{cpp,hpp}` shared OR duplicate in `src/common/logger.cpp`.
+- `grep -nE "XDPMF_LOG_FORMAT\|XDPMF_LOG" .` — should return ZERO matches (env var doesn't exist yet).
+- `grep -nE 'XDPMF_(BPFFS_ROOT|TRUST_MODEL|ENABLE_BPF_OBJECT_OVERRIDE|SANITIZERS)' src/ docs/` — existing env-var patterns; new XDPMF_LOG_FORMAT follows the same idiom (read-once at startup; documented in `--help` env-var block per HK-6).
+- `grep -rnE 'fprintf\(stderr.*[A-Z][a-z]+ ' src/` — find sites that emit identifying prefixes (`xdpmacfilter:`, `xdpmf-exporter:`); these become `event` candidates rather than `msg` candidates per the architect-spec sub-rule "where is X called per-runtime".
+- Read existing ctests that grep stderr (`grep -rnE 'grep.*stderr\|grep.*\.stderr' tests/` or similar) — these are the byte-equivalence canaries. Architect catalogs the regex set so PI-3.5-1 has explicit invariant list.
