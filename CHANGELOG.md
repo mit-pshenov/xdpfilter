@@ -5,6 +5,49 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-05-25
+
+MVP-3.4b cycle 1 — per-rule observability (brownfield amendment §5.31). First operator-facing feature since MVP-3.4: `xdpfilter_rule_match_total{iface, rule_id, action}` Prometheus series exposing per-rule packet match counts. Lifts the §5.29 PI-13-3.1 inner-allowlist-value defer fence (adjudicated PASS as additive per HG-3.4b-1) and the PI-29 datapath-non-consultation fence (RELAXED with documented carve-out — inner-VALUE's `rule_id` IS read by datapath; `rules` + `action_table` maps STILL NOT consulted). First substantive `mac_filter_prog` body edit since MVP-3.2 (verifier-pass critical).
+
+### Added
+- **Per-rule packet counters** — new `rule_counters` PERCPU_ARRAY[64] of `__u64` BPF map, pinned per-iface at `${PIN_DIR}/<iface>/rule_counters`. Bumped by `bump_rule(rule_id)` on every MAC HASH-hit and CIDR LPM_TRIE-hit in the datapath (Q1=B3 unified per-match semantic).
+- **`rule_index.json` sidecar** — loader-written under `/run/xdpmacfilter/<iface>/rule_index.json` (Q3 P4 per §5.31 EDIT-1 Phase B platform-constraint correction; the initial Q3 P1 path `${PIN_DIR}/...` under bpffs was retracted because bpffs rejects regular-file creation) describing the LIVE config per apply, schema_version=1, defaults-only shape (Q2 S1). Loader mkdir-p's the per-iface dir under /run; atomic write idiom (write-to-.tmp → fsync → rename); writer is roll-your-own JSON (~150 LOC, NO new build dep per D-3.4b-10). Failure is non-fatal (D-3.4b-17 — exporter degrades to `action="unknown"` labels). Lifecycle: tmpfs (cleared on reboot; survives loader restart — symmetric to bpffs-pinned map lifecycle on unmount).
+- **Exporter rule-label join** — new `xdpfilter_rule_match_total{iface, rule_id, action}` Prometheus series, joining BPF `rule_counters` with sidecar `rule_index.json` action labels. New translation units `src/exporter/rule_counters_reader.{cpp,hpp}` (PERCPU sum) + `src/exporter/sidecar_reader.{cpp,hpp}` (line-oriented regex extraction per D-3.4b-14). Sidecar-orphan tolerance: non-zero counter slot for rule_id absent from sidecar emits `action="unknown"` (PI-32-3.4b).
+- 6 new ctests (`T_RULE_COUNTER_MAC_HIT_BUMPS`, `T_RULE_COUNTER_CIDR_HIT_BUMPS`, `T_RULE_COUNTER_SURVIVES_APPLY`, `T_SIDECAR_JSON_SHAPE`, `T_EXPORTER_RULE_LABELS`, `T_DROP_RULE_BUMPS_COUNTER`) + 1 new fixture (`config_per_rule_counters.yaml`) + 1 new helper (`tests/lib/read_rule_counters.py`).
+
+### Changed
+- **Inner-allowlist-value byte shape** — `xdpmf_allowlist_inner` (MAC HASH) and `xdpmf_cidr_inner` (CIDR LPM_TRIE) inner-VALUE extends from `__u8` (1 byte) to `struct allow_entry { unsigned char present; unsigned char _pad[3]; unsigned int rule_id; }` (8 bytes). **PI-13-3.4b adjudicated PASS-as-additive** (HG-3.4b-1, D-3.4b-1): offset-0 `present` byte stays byte-equivalent to PI-27 (`bpftool map dump ... format c | head -c 1` still returns `0x01` for occupied slots); `value_size 1 → 8` is documented + intended. Symmetric across MAC HASH + CIDR LPM_TRIE per T.5 OQ #3.
+- `kManagedMaps[]` table grows 12 → 13 entries (adds `rule_counters`). Single-line table extension — MVP-3.4.5 HK-9 landmine refactor dividend.
+
+### Internal
+- `populate_inner_slot` + `populate_cidr_inner_slot` signatures carry rule_id alongside the key (new anon-namespace `MacRule` / `CidrRule` structs per D-3.4b-15 Option A); body writes a full `struct allow_entry` per insert with `rule_id` sourced from operator's YAML `id:` (Q5 R1 + D-3.4b-9).
+- `apply_request` invokes `sidecar::write_rule_index` POST active_idx-flip (D-3.4b-16) so the sidecar describes the LIVE config.
+- BPF datapath gains `bump_rule(__u32 rule_id)` inline helper adjacent to `bump_stat` (verifier-required bounds check folded inline).
+
+### Preserved invariants
+- **PI-7-3.4b-hpp**: `loader.hpp` ZERO diff — **6th consecutive cycle**. `config.hpp` also ZERO diff (D-3.4b-11 Phase A correction: `Rule::id` already serves Q5 R1).
+- **PI-7-3.4b-cpp**: `loader.cpp` SCOPED EDIT — diffs confined to kManagedMaps[] table 12→13, populate_inner_slot + populate_cidr_inner_slot signatures + bodies, apply_request rule-extraction + sidecar-write steps, new anon-namespace MacRule/CidrRule structs.
+- **PI-10-3.4b**: `src/common/mac_filter.h` ADDITIVE-ONLY (new `struct allow_entry`, `XDPMF_MAP_RULE_COUNTERS_NAME`, `XDPMF_RULE_COUNTERS_MAX`, `XDPMF_SIDECAR_ROOT` per §5.31 EDIT-1; existing constants + struct layouts UNCHANGED).
+- **PI-13-3.4b**: NEW — inner-allowlist-value byte layout documented byte-by-byte; offset-0 byte-equivalence to PI-27 preserved.
+- **PI-28-3.4b**: `mac_filter_prog` body extends with `bump_rule` calls + typed-pointer inner-value reads at MAC HASH-hit and CIDR LPM_TRIE-hit branches. All other body lines byte-equivalent. First substantive body change since MVP-3.2.
+- **PI-29-3.4b**: `rules` + `action_table` maps STILL NOT consulted by datapath; inner-VALUE's `rule_id` IS read.
+- **PI-31-3.4b**: exporter still READ-ONLY (new `rule_counters_reader.cpp` + `sidecar_reader.cpp` covered).
+- **PI-32-3.4b**: STRENGTHENED — exporter handles missing rule_index.json gracefully (degrades to `action="unknown"` labels, NOT crash).
+- **PI-6-3.4b / PI-34-3.4b**: 46 pre-§5.31 ctests pass byte-equivalent with 2-ctest-body EDIT carve-out (T_RULES_SKELETON_NOT_WIRED comment-rewrite + T_EXPORTER_METRICS_FORMAT version-literal bump per PI-3.4b-9 catalog).
+
+### Out-of-scope fences (per §5.31)
+- `action_table` datapath consultation (action-dispatch) — MVP-3.4c future cycle.
+- `rules` map atomic-swap promotion (D-3.4-4 close-out) — MVP-3.4b cycle 2 if cycle 3 makes it load-bearing.
+- Sidecar schema S2 (free-form description) / S3 (deployment metadata) — future-cycle if operator demand surfaces.
+- `nlohmann/json` as build dep — explicitly REJECTED for cycle 1 (roll-your-own writer + line-regex reader).
+- Counter zero / reset API — MVP-3.4b cycle 2 candidate.
+- Cap-lift beyond 64 rules — permanent product contract.
+
+### Build pace
+| Cycle | Slice | Anchor | Source delta |
+|---|---|---|---|
+| MVP-3.4b | Per-rule counters cycle 1 | §5.31 | ~400 LOC across 8 EDITED + 4 NEW source files; tests: 2 EDITs + 6 NEW + 1 fixture + 1 helper |
+
 ## [0.6.1] — 2026-05-25
 
 MVP-3.4.5 — housekeeping (defer-posture audit + landmine removal) (brownfield amendment §5.30). Pure non-functional cleanup of the backlog accumulated through MVP-3.1..3.4 plus the `/mint-review` audit findings. 17 housekeeping items in three themes: contract-drift fixes (HK-1..HK-8), landmine removal (HK-9..HK-10), and OOT-deferred backlog (HK-11..HK-17). **No new operator-facing feature, no new BPF map, no datapath behaviour change, no new public API, no schema change, no new exit code.** Smallest LOC delta of MVP-3.x to date.

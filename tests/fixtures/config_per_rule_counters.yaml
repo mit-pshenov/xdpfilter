@@ -1,0 +1,32 @@
+# §6.47..§6.52 fixture (MVP-3.4b cycle 1 / §5.31).
+#
+# Sparse rule_id allocation (per Q5 R1 — operator's `id:` IS the BPF
+# rule_counters[] array index directly). The 4 ids 0, 5, 17, 42 are spread
+# across [0, 63] to catch off-by-one / dense-only assumptions.
+#
+# Mix of match kinds:
+#   - id=0  : MAC-only PASS (baseline allow)
+#   - id=5  : MAC-only PASS (used by §6.47 hit-bumps + §6.49 survives-apply)
+#   - id=17 : MAC-only DROP (used by §6.52 — drop rule populated into `rules`
+#             map per HG-3.4b-4 + §5.29 forward-compat, but MAC NOT added to
+#             inner-allowlist per §5.26 schema cycle 2 contract; rule_counters
+#             stays 0 because datapath never reaches bump_rule for that MAC)
+#   - id=42 : CIDR-only PASS (used by §6.48 CIDR hit-bumps)
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      mac: "02:00:00:00:00:01"
+  - id: 5
+    action: pass
+    match:
+      mac: "02:00:00:00:00:05"
+  - id: 17
+    action: drop
+    match:
+      mac: "02:00:00:00:00:11"
+  - id: 42
+    action: pass
+    match:
+      src_cidr: "10.0.0.0/24"

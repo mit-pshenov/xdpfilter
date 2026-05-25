@@ -617,3 +617,56 @@ set_tests_properties(T_EXPORTER_EXITS_6_ALL_IFACES_EACCES PROPERTIES
     TIMEOUT 90
     SKIP_RETURN_CODE 77
 )
+
+# ─────────────────────────────────────────────────────────────────────────
+# MVP-3.4b cycle 1 additions (§5.31 / §6.47–§6.52 — per-rule counters +
+# inner-allowlist-value extension + datapath wiring + exporter rule labels).
+#
+# T_RULE_COUNTER_MAC_HIT_BUMPS  (§6.47): MAC HASH-hit increments
+#   rule_counters[rule_id]; sparse-id verification (id=0, id=5); negation
+#   on non-matching MAC. Uses config_per_rule_counters.yaml fixture.
+# T_RULE_COUNTER_CIDR_HIT_BUMPS (§6.48): CIDR LPM_TRIE-hit symmetric;
+#   negation on out-of-range src_ip; MAC/CIDR axis isolation sub-case.
+# T_RULE_COUNTER_SURVIVES_APPLY (§6.49): LOAD-BEARING canary for
+#   HG-3.4b-2 — counter survival across apply via PIN_BY_NAME + reuse_fd.
+# T_SIDECAR_JSON_SHAPE          (§6.50): rule_index.json shape per Q2 S1;
+#   negation on malformed config (sidecar NOT corrupted).
+# T_EXPORTER_RULE_LABELS        (§6.51): xdpfilter_rule_match_total
+#   Prometheus series + sidecar-orphan tolerance (action="unknown").
+#   Takes BOTH xdp_fixture AND exporter_port_9417 RESOURCE_LOCKs.
+# T_DROP_RULE_BUMPS_COUNTER     (§6.52): PI-29-3.4b carve-out signature —
+#   drop rule MAC never bumps rule_counters (no inner match).
+#
+# All 6 tests touch the veth fixture → share xdp_fixture RESOURCE_LOCK.
+# §6.51 additionally takes exporter_port_9417 (port-clash serialization).
+foreach(T IN ITEMS
+    T_RULE_COUNTER_MAC_HIT_BUMPS
+    T_RULE_COUNTER_CIDR_HIT_BUMPS
+    T_RULE_COUNTER_SURVIVES_APPLY
+    T_SIDECAR_JSON_SHAPE
+    T_DROP_RULE_BUMPS_COUNTER
+)
+    add_test(
+        NAME ${T}
+        COMMAND bash ${TEST_DIR}/${T}.sh
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    set_tests_properties(${T} PROPERTIES
+        ENVIRONMENT "${TEST_ENV}"
+        RESOURCE_LOCK xdp_fixture
+        TIMEOUT 60
+        SKIP_RETURN_CODE 77
+    )
+endforeach()
+
+add_test(
+    NAME T_EXPORTER_RULE_LABELS
+    COMMAND bash ${TEST_DIR}/T_EXPORTER_RULE_LABELS.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_EXPORTER_RULE_LABELS PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK "xdp_fixture;exporter_port_9417"
+    TIMEOUT 90
+    SKIP_RETURN_CODE 77
+)

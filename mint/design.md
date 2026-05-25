@@ -7699,7 +7699,7 @@ Field semantics:
 
 S2 (free-form `description`) + S3 (loader/kernel/bpffs metadata) explicitly REJECTED for cycle 1 — additive in future cycles if operator demand surfaces. See §7 OOS NEW FENCE block.
 
-##### Q3: `rule_index.json` sidecar path → **P1 (`${PIN_DIR}/<iface>/rule_index.json`)**
+##### Q3: `rule_index.json` sidecar path → **P1 (`${PIN_DIR}/<iface>/rule_index.json`)**  **[SUPERSEDED BY §5.31 EDIT-1 → Q3 = P4 `/run/xdpmacfilter/<iface>/rule_index.json`; see EDIT-1 + D-3.4b-21 below]**
 
 Confirmed per brief recommendation. **Per-iface sidecar pairs with per-iface bpffs pin layout.** The exporter already scans `${XDPMF_BPFFS_ROOT}/<iface>/` for the `stats` map (existing `stats_reader.cpp`); discovering `rule_index.json` and `rule_counters` in the SAME directory is the natural fleet operations pattern. Reviewer's HK-16 startup discovery codepath is the precedent.
 
@@ -8004,9 +8004,11 @@ Two source-line call-sites (MAC HASH-hit branch + CIDR LPM_TRIE-hit branch) call
 
 Cycle 1 ships the minimum the exporter needs (rule_id + action label). S2 description-field is operator-UX nice-to-have; gating on demand. S3 deployment-metadata is debug-tool nice-to-have; gating on demand. Cycle 1 brownfield budget discipline prefers narrow scope; future cycles widen as use cases surface.
 
-##### D-3.4b-7 — Per-iface bpffs sidecar path (Q3 P1) — because
+##### D-3.4b-7 — Per-iface bpffs sidecar path (Q3 P1) — because  **[SUPERSEDED BY D-3.4b-21 — see §5.31 EDIT-1 Phase B platform-constraint correction below]**
 
 `${PIN_DIR}/<iface>/rule_index.json` pairs naturally with the existing `${PIN_DIR}/<iface>/stats`, `${PIN_DIR}/<iface>/allowlist_a/b`, etc. Exporter discovery via the EXISTING per-iface scan loop — zero new filesystem touchpoints. bpffs tmpfs lifecycle is consistent with the pinned maps' lifecycle (both disappear on bpffs unmount; both survive loader restart). P2 (/var/lib) adds mkdir + chown + systemd `StateDirectory=` coordination cost without clear value; gate on future operator demand.
+
+**[SUPERSEDED — D-3.4b-7's premise that "bpffs is tmpfs" is factually WRONG; bpffs is `bpf` filesystem type (kernel/bpf/inode.c) which REJECTS regular-file creation via EPERM at inode_create. See D-3.4b-21 below for the corrected Q3 = P4 = `/run/xdpmacfilter/<iface>/rule_index.json` decision.]**
 
 ##### D-3.4b-8 — Action as label, single series (Q4 A3) — because
 
@@ -8146,7 +8148,7 @@ This is valid JSON (jq accepts it) AND line-oriented (the exporter regex matches
 **Trigger**: attach via `apply -f config_per_rule_counters.yaml`.
 
 **Observable outcome**:
-- File `${PIN_DIR}/<iface>/rule_index.json` exists, mode 0644, non-empty.
+- File `/run/xdpmacfilter/<iface>/rule_index.json` exists, mode 0644, non-empty (path per §5.31 EDIT-1 Q3 P4 correction; was `${PIN_DIR}/<iface>/...` at initial publish — SUPERSEDED because bpffs rejects regular-file creation).
 - `jq -e '.iface == "<expected iface>"' rule_index.json` succeeds.
 - `jq -e '.schema_version == 1' rule_index.json` succeeds.
 - `jq -e '.applied_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")' rule_index.json` succeeds (ISO-8601 UTC pattern).
@@ -8249,7 +8251,7 @@ Reviewer's 5th framework point walks the COMBINED list (PI-1..PI-34 + PI-3.4b-*)
 | # | Invariant | §5.31 check mechanism |
 |---|---|---|
 | PI-1..PI-5 | Trust+identity gates ENFORCED in both modes (alien-program refusal, name-identity, tag-check, O_PATH path-discipline, kernel-version probe) | Re-run §6.9 / §6.14 / §6.15 / §6.20 / §6.26 sub-cases; all pass. The new BPF map declaration + new inner-value shape do NOT touch any gate codepath. The bpf object tag CHANGES (bytecode differs), but tag-check at `T_ATTACH_TAG_MISMATCH` is about REFUSING ALIEN tags — our own self-tag is recomputed each cycle, byte-equivalent to MVP-3.4.5's recomputation. |
-| **PI-6-3.4b** | **46 pre-§5.31 ctests pass byte-equivalent OR legitimately SKIP-77 — STRICT SUPERSET with explicit 2-ctest-body EDIT carve-out** (T_RULES_SKELETON_NOT_WIRED comment-rewrite + T_EXPORTER_METRICS_FORMAT version-literal bump per PI-3.4b-9 catalog above) | Re-run all 46 tests post-§5.31 → all pass (or SKIP-77); `git diff --stat tests/T_*.sh` shows changes confined to the 2 EDITED ctests PLUS 6 NEW files (§6.47..§6.52) PLUS 1 NEW fixture (`config_per_rule_counters.yaml`) PLUS 1 NEW helper (`tests/lib/read_rule_counters.py`). The 2 EDITED ctest BODIES are scope-fenced + documented. All 44 other ctest bodies byte-equivalent. PI-6-3.4.5 had 7-EDIT carve-out; PI-6-3.4b has 2-EDIT carve-out (narrower). Reviewer accepts both EDITs as scope-fenced. |
+| **PI-6-3.4b** | **46 pre-§5.31 ctests pass byte-equivalent OR legitimately SKIP-77 — STRICT SUPERSET with explicit 3-ctest-body EDIT carve-out per §5.31 EDIT-2 amendment** (T_RULES_SKELETON_NOT_WIRED comment-rewrite + T_EXPORTER_METRICS_FORMAT version-literal bump + T_ATTACH_TAG_MISMATCH preflight hybrid-rewrite per PI-3.4b-9 catalog above; was 2-EDIT at initial publish, bumped to 3-EDIT post-§5.31 EDIT-2 Phase B adjudication — see §5.31 EDIT-2 + D-3.4b-22) | Re-run all 46 tests post-§5.31 → all pass (or SKIP-77); `git diff --stat tests/T_*.sh` shows changes confined to the 2 EDITED ctests PLUS 6 NEW files (§6.47..§6.52) PLUS 1 NEW fixture (`config_per_rule_counters.yaml`) PLUS 1 NEW helper (`tests/lib/read_rule_counters.py`). The 2 EDITED ctest BODIES are scope-fenced + documented. All 44 other ctest bodies byte-equivalent. PI-6-3.4.5 had 7-EDIT carve-out; PI-6-3.4b has 2-EDIT carve-out (narrower). Reviewer accepts both EDITs as scope-fenced. |
 | **PI-7-3.4b-hpp** | **`loader.hpp` ZERO diff — 6TH consecutive slice** (MVP-3.1 +1; MVP-3.2/3.3/3.4/3.4.5/3.4b = 0). Public-API surface byte-equivalent. ALSO: `src/lib/config.hpp` ZERO diff this slice (D-3.4b-11 — `Rule::id` field already serves Q5 R1; no new field needed). | `git diff main -- src/lib/loader.hpp src/lib/config.hpp` shows ZERO output. Any diff = `[INVARIANT-VIOLATED]`. |
 | **PI-7-3.4b-cpp** | **`loader.cpp` SCOPED EDIT only** — diff lines confined to: (a) kManagedMaps[] table 12 → 13 entries (one-line insertion + table-comment count update); (b) `populate_inner_slot` body + signature (rule_id-carrying); (c) `populate_cidr_inner_slot` body + signature (rule_id-carrying); (d) `apply_request` rule-extraction step extension (produces rule_id-tagged vectors alongside the existing dedup vectors); (e) `apply_request` new sidecar-write step (post-flip per D-3.4b-16, calling `sidecar::write_rule_index`); (f) optional new private helpers in anon-namespace for the rule_id-tagged-vector intermediate (`MacRule`, `CidrRule` structs per D-3.4b-15 Option A). ZERO diff in: `attach()` / `detach()` public bodies, §5.4 state-machine, §5.19 name-check, §5.22 tag-check + O_PATH, §5.24 kernel-version probe, §5.26 trust_model parse+log, §5.27 CIDR-axis active_idx flip mechanism, link-pin P0a logic, RAII wrappers, error-translation paths, the special-pin legacy-alias path (lines 1761-1778), §5.29 `populate_rules_skeleton` + `populate_action_table` body bytes (UNCHANGED — they still write `rule_entry` / `action_entry` to `rules` / `action_table` maps per HG-3.4b-4). | `git diff <MVP-3.4.5-HEAD> -- src/lib/loader.cpp` shows changes confined to scopes (a)-(f). Reviewer applies regional-diff: classify each hunk by enclosing function name; allowed function names = {`populate_inner_slot`, `populate_cidr_inner_slot`, `apply_request`, anon-namespace (kManagedMaps[] table + new MacRule/CidrRule struct definitions)}. Any hunk outside this set = `[INVARIANT-VIOLATED]`. Cross-cycle baseline: reviewer compares against MVP-3.4.5-shipped HEAD (not project's pristine main). |
 | PI-8-3.4b | `xdpmacfilter --version` reports `xdpmacfilter 0.7.0` AND `xdpmf-exporter --version` reports `xdpmf-exporter 0.7.0` (shared `version.h` per §5.25 P3) | Run both `--version`; both single-line outputs `0.7.0` + newline. MINOR bump from 0.6.1 (operator-facing feature: per-rule observability). |
@@ -8284,11 +8286,11 @@ Reviewer's 5th framework point walks the COMBINED list (PI-1..PI-34 + PI-3.4b-*)
 | **PI-3.4b-2** | **Counter survival across apply -f** — PIN_BY_NAME + reuse_fd discipline preserves PERCPU values across re-apply. Prometheus counter-monotonicity holds. | T_RULE_COUNTER_SURVIVES_APPLY (§6.49). If counters reset on re-apply, this PI is VIOLATED — root cause is likely the 13th kManagedMaps[] entry missing from the reuse loop (which would be impossible if HK-9 refactor is intact). |
 | **PI-3.4b-3** | **`struct allow_entry` is the INNER-VALUE type for both `xdpmf_allowlist_inner` (MAC HASH) AND `xdpmf_cidr_inner` (CIDR LPM_TRIE)** — symmetric per T.5 OQ #3. Total size 8 bytes. PI-13-3.4b documents the byte-by-byte layout. | `bpftool map show pinned ${PIN_DIR}/<iface>/allowlist_a` reports `value_size 8`; same for `allowlist_b` (MAC). `bpftool map show pinned ${PIN_DIR}/<iface>/cidr_allowlist_a` reports `value_size 8`; same for `cidr_allowlist_b` (CIDR). |
 | **PI-3.4b-4** | **`bump_rule(rule_id)` is called per-match from BOTH MAC HASH-hit and CIDR LPM_TRIE-hit branches in `mac_filter_prog`** — Q1 B3 contract. rule_id read from `struct allow_entry::rule_id` (offset 4) of the looked-up inner-value pointer. NO bump_rule call in default-fallthrough or drop branches. | (a) `git diff` of `mac_filter.bpf.c` shows TWO new `bump_rule` call-sites (lines ~228 and ~256 areas). (b) T_RULE_COUNTER_MAC_HIT_BUMPS + T_RULE_COUNTER_CIDR_HIT_BUMPS verify per-hit increment. (c) T_DROP_RULE_BUMPS_COUNTER negation: drop-rule MAC produces NO bump_rule call (MAC not in inner-allowlist; fallthrough to defaults). |
-| **PI-3.4b-5** | **`rule_index.json` sidecar exists at `${PIN_DIR}/<iface>/rule_index.json` after every successful apply** — Q3 P1 path. Schema per Q2 S1. File mode 0644. Atomic-write via rename-into-place. | T_SIDECAR_JSON_SHAPE (§6.50). Sidecar-write failure is non-fatal (D-3.4b-17) — apply still exits 0 + WARN logged. |
+| **PI-3.4b-5** | **`rule_index.json` sidecar exists at `/run/xdpmacfilter/<iface>/rule_index.json` after every successful apply** — Q3 P4 path per §5.31 EDIT-1 (was Q3 P1 `${PIN_DIR}/<iface>/...` at initial publish; SUPERSEDED — bpffs rejects regular-file creation per impl Phase B finding). Schema per Q2 S1. File mode 0644. Atomic-write via rename-into-place. Loader does `mkdir -p /run/xdpmacfilter/<iface>` if not present. | T_SIDECAR_JSON_SHAPE (§6.50). Sidecar-write failure is non-fatal (D-3.4b-17) — apply still exits 0 + WARN logged. |
 | **PI-3.4b-6** | **Exporter emits `xdpfilter_rule_match_total{iface, rule_id, action}` Prometheus series** for each iface with non-empty `rule_counters` AND/OR non-empty sidecar — Q4 A3 + D-3.4b-8. Sidecar-orphan tolerance: `action="unknown"` label for rule_id present in counters but absent from sidecar. | T_EXPORTER_RULE_LABELS (§6.51). |
 | **PI-3.4b-7** | **`Config::Rule::id` field is the rule_id source for both inner-VALUE `rule_id` AND `rule_counters` ARRAY index AND sidecar JSON `rule_id`** — Q5 R1 + D-3.4b-9 + D-3.4b-11. Range [0, XDPMF_ALLOWLIST_MAX-1] = [0, 63] enforced at `config.cpp:204`. | T_RULE_COUNTER_MAC_HIT_BUMPS + T_RULE_COUNTER_CIDR_HIT_BUMPS verify rule_id correspondence end-to-end (YAML `id: 5` → inner-VALUE.rule_id = 5 → rule_counters[5] bumps → sidecar `"rule_id": 5` → Prometheus `rule_id="5"` label). Negation: rule_id out of range would FAIL config validation (existing path; not a new check). |
 | **PI-3.4b-8** | **`kManagedMaps[]` table has 13 entries post-§5.31** — `rule_counters` joins the table; all 3 call-site loops walk it automatically. | `grep -c '^\s*{ &SkelMapsT::' src/lib/loader.cpp` returns 13 (was 12 pre-§5.31). The new entry's `member_ptr` is `&SkelMapsT::rule_counters`; `name` is `XDPMF_MAP_RULE_COUNTERS_NAME`; `legacy_alias` is `false`. |
-| **PI-3.4b-9** | **PI-13-3.4b fixture-ripple cost is 2 ctest body EDITs ONLY** (T_RULES_SKELETON_NOT_WIRED comment-rewrite + T_EXPORTER_METRICS_FORMAT version-literal bump). All 44 other ctest bodies BYTE-EQUIVALENT. Documented + scope-fenced. | `git diff <MVP-3.4.5-HEAD> --stat tests/T_*.sh` shows 2 modified files (plus 6 NEW files). The 2 MODIFIED files have diffs confined to: T_RULES_SKELETON_NOT_WIRED — 2 lines of comment-rewrite (lines 14 + 297 ranges); T_EXPORTER_METRICS_FORMAT — 2 lines of version-literal-bump (lines 21-22 comment + line 100-101 assertion literal). Any additional diff = `[INVARIANT-VIOLATED]` (impl SendMessages architect for any third EDIT). |
+| **PI-3.4b-9** | **PI-13-3.4b fixture-ripple cost is 3 ctest body EDITs per §5.31 EDIT-2** (T_RULES_SKELETON_NOT_WIRED comment-rewrite + T_EXPORTER_METRICS_FORMAT version-literal bump + T_ATTACH_TAG_MISMATCH preflight hybrid-rewrite). All 43 other ctest bodies BYTE-EQUIVALENT. Documented + scope-fenced. Was "2 EDITs" at initial §5.31 publish; bumped to 3 post-§5.31 EDIT-2 Phase B adjudication on bpftool-vs-libbpf-skeleton BTF asymmetry (D-3.4b-22). | `git diff <MVP-3.4.5-HEAD> --stat tests/T_*.sh` shows 3 modified files (plus 6 NEW files). The 3 MODIFIED files have diffs confined to: T_RULES_SKELETON_NOT_WIRED — 2 lines of comment-rewrite (lines 14 + 297 ranges); T_EXPORTER_METRICS_FORMAT — 2 lines of version-literal-bump (lines 21-22 comment + line 100-101 assertion literal); T_ATTACH_TAG_MISMATCH — ~5-7 LOC preflight body rewrite at line 124-131 area (real-fixture branch flips from bpftool standalone to xdpmacfilter attach-based tag-read; alt-fixture branch unchanged). Any additional diff = `[INVARIANT-VIOLATED]` (impl/tester SendMessages architect for any 4th EDIT). |
 
 **No deletions/relaxations** of PI-1..PI-34 in this slice EXCEPT:
 - **PI-13 ADJUDICATED** (PASS-as-additive per HG-3.4b-1 + D-3.4b-1; offset-0 byte preserved; value_size 1 → 8 documented + intended).
@@ -8328,8 +8330,8 @@ In addition to PI-1..PI-34 + PI-3.4b-* + PI-7-3.4b-hpp/cpp above:
 - `bpftool map show pinned ${PIN_DIR}/<iface>/cidr_allowlist_a` SHOULD report `value_size 8` post-§5.31 (was 1 pre-§5.31 — PI-13-3.4b symmetric CIDR extension).
 - `bpftool map dump pinned ${PIN_DIR}/<iface>/allowlist_a format c | head -c 1` for an occupied slot SHOULD return `0x01` (PI-13-3.4b offset-0 byte-equivalence to PI-27).
 - `bpftool map dump pinned ${PIN_DIR}/<iface>/allowlist_a --json | jq '.[0].formatted.value.rule_id'` SHOULD return the rule.id of the matching applied rule (PI-13-3.4b new offset-4 field).
-- `test -f ${PIN_DIR}/<iface>/rule_index.json` SHOULD return success after every successful apply (PI-3.4b-5).
-- `jq -e '.schema_version == 1' ${PIN_DIR}/<iface>/rule_index.json` SHOULD return success (PI-3.4b-5).
+- `test -f /run/xdpmacfilter/<iface>/rule_index.json` SHOULD return success after every successful apply (PI-3.4b-5; SUPERSEDED path per §5.31 EDIT-1 — was `${PIN_DIR}/<iface>/...` at initial publish).
+- `jq -e '.schema_version == 1' /run/xdpmacfilter/<iface>/rule_index.json` SHOULD return success (PI-3.4b-5).
 - `curl -s http://127.0.0.1:9417/metrics | grep -cE '^xdpfilter_rule_match_total\{'` SHOULD return ≥1 for an exporter against a non-empty fleet (PI-3.4b-6).
 - `grep -c '^\s*{ &SkelMapsT::' src/lib/loader.cpp` SHOULD return 13 (PI-3.4b-8 — kManagedMaps[] grew 12 → 13).
 - `grep -rE 'bpf_(map_(update\|delete)_elem\|obj_pin\|link_create\|link_destroy\|xdp_(attach\|detach)\|prog_load)' src/exporter/` SHOULD return ZERO matches (PI-31-3.4b — exporter READ-ONLY extended to NEW exporter translation units).
@@ -8420,3 +8422,157 @@ This slice carries forward all anti-misdiagnosis guards from prior cycles + adds
 5. **Phase A code-grep discipline pays off** (NEW anti-misdiagnosis note): the Phase A grep of inner-value touch sites + fixture-ripple sites + version-literal sites caught (a) the actual fixture-ripple count is 2 EDITs NOT 5, (b) `Config::Rule::id` field already exists (brief's overstatement on `Config::Rule gains rule_id`), (c) the `kManagedMaps[]` table is at 12 entries (not 9 or 10 per prior cycle counts) and grows to 13. **Future-cycle guard for any architect agent**: BEFORE publishing brownfield design.md, grep the literal field counts / table sizes / version strings the brief mentions. The 15-minute Phase A pass during this slice's architecture phase reduced expected Phase B EDITs from ~3 (MVP-3.4.5 average) to ~0 expected (TBD pending impl). Citation: this anti-misdiagnosis note IS the Phase A discipline rule from architect spec, validated by this slice.
 
 Evidence: `mint/task-brief.md` MVP-3.4b cycle 1 brief (HG-3.4b-1/2/3/4 + Q1-Q5 + PI-3.4b-1..PI-3.4b-10); `mint/architecture-v2.md` §"§MVP-3.4 Open Question #13 RESOLUTION" Option 2 + Caveat (b) human-gate (committed 2d4b31a 2026-05-24 — the load-bearing pre-decision); §5.29 (MVP-3.4 ancestor — `rules` + `action_table` skeleton declared, PI-27/PI-13-3.4 STRICT-byte-shape defer fence, PI-28 mac_filter_prog byte-equivalent fence — BOTH LIFTED this slice with documented adjudications); §5.30 (MVP-3.4.5 ancestor — HK-9 kManagedMaps[] refactor SHIPPED + landmine resolved, PI-7-3.4.5-hpp 5th-cycle ZERO-diff); §5.26 D-3.1-1 (apply_request lives in loader.cpp); §5.26 schema rule 4 + rule 3 (id ∈ [0, 63], action ∈ {pass, drop} — preserved); §5.27 Q1 AS1 (CIDR-axis active_idx flip mechanism — preserved + SYMMETRIC inner-VALUE extension); project memory [[libbpf-pin-by-name-three-callsites]] (HK-9 dividend collected); [[impl-role-discipline]] (Phase B escalation discipline); architect-spec Phase A code-grep discipline (15-minute grep pass during this slice — fixture-ripple count corrected, Config::Rule pre-existing-field finding, kManagedMaps[] 12-entry baseline).
+
+#### §5.31 EDIT-1 — Phase B platform-constraint correction: Q3 sidecar path P1 → P4 (2026-05-25, dialog with mint-dev-impl)
+
+**Trigger**: mint-dev-impl Phase B peer-DM with concrete platform-constraint evidence that Q3 P1 (`${PIN_DIR}/<iface>/rule_index.json` under bpffs) is **infeasible**.
+
+**Evidence (impl-supplied, reproduced verbatim)**:
+```
+$ sudo mkdir -p /sys/fs/bpf/xdpmacfilter/test_dir       # OK
+$ sudo touch /sys/fs/bpf/xdpmacfilter/test_dir/foo.txt
+touch: cannot touch '/sys/fs/bpf/xdpmacfilter/test_dir/foo.txt': Operation not permitted
+
+$ sudo /home/user/mint-l2-mac-filter/build/src/cli/xdpmacfilter attach --iface veth_v0
+xdpmacfilter: trust_model=strict
+xdpmacfilter: WARN: rule_index.json write failed: Operation not permitted
+attached prog id 28562 to veth_v0   # apply succeeds; sidecar write fails per D-3.4b-17 non-fatal
+```
+
+**Root cause**: bpffs (`bpf` filesystem type, kernel/bpf/inode.c) only accepts pinned BPF objects (maps/programs/links) via the `bpf_obj_pin` syscall plus `mkdir` for directories. Regular file creation via `open(O_CREAT)` returns EPERM at the bpffs inode_create hook. My D-3.4b-7 + Q3 P1 prose (and the task-brief's mirrored claim at line 127) — "bpffs is `tmpfs`-mounted in standard configurations; rule_index.json survives only as long as the bpffs mount survives" — was **factually wrong**. bpffs is its OWN filesystem type, not tmpfs.
+
+**Disposition**: D-3.4b-21 (NEW) supersedes D-3.4b-7. New Q3 winning option is **P4 = `/run/xdpmacfilter/<iface>/rule_index.json`** (a 4th option not enumerated in the original Q3; introduced Phase B per impl's recommendation). All initial PI-3.4b-5 references to `${PIN_DIR}/<iface>/rule_index.json` are SUPERSEDED with the new `/run/xdpmacfilter/<iface>/rule_index.json` path; inline `[SUPERSEDED]` markers added on the affected items in the prior §5.31 sub-sections.
+
+**This is a tactical platform-constraint correction within Q3 scope (path choice)**, not a HG human-gate-tier decision. HG-3.4b-3 ("INCLUDE sidecar in cycle 1") stands UNCHANGED. The feature ships; only the path moves. Team-lead notified at SendMessage time; ack pending but architect proceeding per "design flaw → re-design item Z + edit design.md" path in architect spec.
+
+##### D-3.4b-21 — Sidecar path = `/run/xdpmacfilter/<iface>/rule_index.json` (Q3 P4 — supersedes D-3.4b-7) — because
+
+bpffs **rejects regular-file creation** per kernel/bpf/inode.c; D-3.4b-7's P1 premise (bpffs is tmpfs) is factually wrong. `/run` is the systemd-blessed tmpfs convention for ephemeral state (FHS 3.0 §3.15; systemd `RuntimeDirectory=` family of directives) and is universally writable as root on any systemd host. Adopting P4 preserves the ORIGINAL design intent that motivated P1 (ephemeral; tracks bpffs lifecycle) — the corrected premise is that `/run` is the actual tmpfs filesystem, not bpffs. Smallest delta from build state at the time of impl's peer-DM (build was already green at 0.7.0; only path constants + mkdir-p + 3 ctest path strings change). Avoids the FHS coordination cost that Q3 P2 explicitly rejected at Phase A (`/var/lib/...` would need mkdir + chown + systemd `StateDirectory=` + ansible touch).
+
+**Lifecycle** (post-correction): `/run/xdpmacfilter/<iface>/rule_index.json` survives loader restart but NOT reboot (tmpfs). Symmetric to pinned-map lifecycle on bpffs unmount: BOTH bpffs unmount AND reboot clear the sidecar; operator's mental model is preserved ("ephemeral state, refreshed on next apply"). Exporter sidecar-orphan tolerance (PI-32-3.4b) handles the post-reboot pre-first-apply window via `action="unknown"` labels.
+
+**Concrete impl contract changes** (Phase B-amended):
+- `src/common/mac_filter.h` (additive — PI-10-3.4b ADDITIVE-ONLY preserved):
+  ```
+  /* §5.31 EDIT-1 (Phase B Q3 P4 correction): sidecar lives on tmpfs under
+   * /run because bpffs rejects regular-file creation. */
+  #define XDPMF_SIDECAR_ROOT  "/run/xdpmacfilter"
+  ```
+- `src/lib/sidecar.cpp` `write_rule_index()`: writes to `${XDPMF_SIDECAR_ROOT}/<iface>/rule_index.json` with `mkdir -p ${XDPMF_SIDECAR_ROOT}/<iface>` before atomic-write. Failure to create directory OR write file remains non-fatal per D-3.4b-17 (WARN-and-continue; apply still exits 0).
+- `src/exporter/sidecar_reader.cpp` (parser): reads from `${XDPMF_SIDECAR_ROOT}/<iface>/rule_index.json` (NEW path constant) — exporter still discovers per-iface via the existing-iface set, but the sidecar-root scan is now `/run/xdpmacfilter/*/rule_index.json` instead of `${XDPMF_BPFFS_ROOT}/*/rule_index.json`. Discovery model unchanged; root constant changes.
+- `src/exporter/main.cpp`: NO change required if discovery delegates iface enumeration to the existing bpffs stats-pin scan (per-iface set comes from there; sidecar reader is keyed by iface name). If impl chose to enumerate from sidecar root directly, that scan path moves to `XDPMF_SIDECAR_ROOT` — impl picks the cleaner shape.
+
+**FileList row update for `src/common/mac_filter.h`** (supersedes the row in §5.31 EDITED table):
+> ADD `XDPMF_SIDECAR_ROOT "/run/xdpmacfilter"` (NEW constant per §5.31 EDIT-1) — in addition to the prior-listed `struct allow_entry`, `XDPMF_MAP_RULE_COUNTERS_NAME`, `XDPMF_RULE_COUNTERS_MAX`. ALL additions; ZERO modifications to existing types/constants. PI-10-3.4b ADDITIVE-ONLY contract preserved.
+
+**Test path corrections** (supersedes the path strings in §6.50 / §6.51 / §6.52 / §6.49 / §6.47 / §6.48):
+- `T_SIDECAR_JSON_SHAPE` (§6.50): asserts existence + jq-validation at `/run/xdpmacfilter/<iface>/rule_index.json` (was `${PIN_DIR}/...`). Permission check `stat -c %a` against the new path. Negation: apply-fail does not corrupt prior sidecar at the SAME `/run/...` path.
+- `T_EXPORTER_RULE_LABELS` (§6.51): orphan sub-test deletes `/run/xdpmacfilter/<iface>/rule_index.json` (was `${PIN_DIR}/...`).
+- `T_DROP_RULE_BUMPS_COUNTER` (§6.52): asserts `jq` on `/run/xdpmacfilter/<iface>/rule_index.json` for the drop-rule action label (was `${PIN_DIR}/...`).
+- `T_RULE_COUNTER_MAC_HIT_BUMPS` (§6.47), `T_RULE_COUNTER_CIDR_HIT_BUMPS` (§6.48), `T_RULE_COUNTER_SURVIVES_APPLY` (§6.49): assertions for `rule_counters` map are UNCHANGED (counters live in bpffs under `${PIN_DIR}/<iface>/rule_counters` — pinned BPF map, NOT a sidecar file). ONLY tests that touch `rule_index.json` need path updates (3 tests).
+- Cleanup: ctests SHOULD `rm -f /run/xdpmacfilter/<iface>/rule_index.json` in their cleanup paths (or `rm -rf /run/xdpmacfilter/<iface>/` if no other state lives there) — symmetric to existing bpffs pin-dir cleanup.
+
+**PI-3.4b-9 fixture-ripple count update**: still 2 EDITed ctest BODIES (the path correction does NOT add new EDIT files; T_SIDECAR_JSON_SHAPE / T_EXPORTER_RULE_LABELS / T_DROP_RULE_BUMPS_COUNTER are NEW ctests and so their path strings are written-from-scratch per EDIT-1, not "edited"). Only T_RULES_SKELETON_NOT_WIRED + T_EXPORTER_METRICS_FORMAT continue to be the EDITED bodies. **PI-6-3.4b / PI-34 strict-superset with 2-EDIT carve-out UNCHANGED**.
+
+**PI-7-3.4b-hpp impact**: ZERO. `loader.hpp` + `config.hpp` byte-equivalent still. The new `XDPMF_SIDECAR_ROOT` constant is in `src/common/mac_filter.h` (additive — PI-10-3.4b), NOT in any public-API header.
+
+**PI-7-3.4b-cpp impact**: scopes (a)-(f) in PI-7-3.4b-cpp's scope-fence UNCHANGED; the path string change inside `apply_request`'s sidecar-write step (scope (e)) is BYTE-EQUIVALENT in terms of which function the hunk lives in. Reviewer's regional-diff check passes as before.
+
+##### Anti-misdiagnosis institutional learning from §5.31 EDIT-1 (NEW; supplements §7 anti-misdiagnosis notes)
+
+**Add to §7 OOS anti-misdiagnosis notes after item 5 (Phase A code-grep discipline):**
+
+6. **bpffs ≠ tmpfs — filesystem-semantics misdiagnosis trap**. The original D-3.4b-7 + Q3 P1 + task-brief.md line 127 ALL described bpffs as "tmpfs-mounted". This is FALSE: bpffs is its own filesystem type (kernel/bpf/inode.c) which rejects regular-file creation. The factual error was inherited from the task-brief and not caught by Phase A code-grep discipline (which checked LITERAL code sites, NOT conceptual claims about kernel filesystem semantics). **Future-cycle architect anti-misdiagnosis rule**: when picking a path under bpffs OR any non-mainline filesystem for a regular-file write, RUN `sudo touch ${PATH}/probe.txt; ls -l ${PATH}/probe.txt; rm -f ${PATH}/probe.txt` smoke-check during Phase A grep discipline BEFORE publishing the design. Cost: 5 seconds. Benefit: catches THIS class of bug before it becomes a Phase B platform-constraint surprise. **Validated by §5.31 EDIT-1 (2026-05-25)**: impl peer-DM caught it cleanly via [[impl-role-discipline]] mechanism, but cycle-1 cost was 1 architect EDIT + 1 impl context-switch + path-rewire across 4 source files. A 5-second Phase A `sudo touch` would have surfaced it during initial design.
+
+This learning is recorded as a permanent guard for any future cycle that introduces a NEW sidecar / log / state file under bpffs OR any unusual filesystem (procfs, sysfs, debugfs, configfs). Cite §5.31 EDIT-1 as the source.
+
+##### §7 OOS update (post-EDIT-1)
+
+The "**Sidecar JSON path under FHS /var/lib (P2)**" NEW FENCE entry stands UNCHANGED — P2 still out of scope per the FHS coordination cost rationale. The original Q3 P1 (bpffs-path) becomes RETROACTIVELY OOS (was never feasible; reviewer notes the platform-constraint as the gating reason, not architect preference).
+
+NEW FENCE: **`/run` as sidecar lifetime guarantee** — `/run/xdpmacfilter/<iface>/rule_index.json` is cleared on reboot (tmpfs). Operators wanting persistent rule_id → action labels across reboot must EITHER (a) ensure `xdpmacfilter apply -f <config>` runs on boot (e.g. via systemd unit `Before=...network-pre.target` with `Type=oneshot`) — recommended pattern per FLEET_DEPLOYMENT.md, OR (b) wait for Q3 P2 migration in a future cycle. Cycle 1 ships /run only.
+
+##### Notifications dispatched (Phase B closure dispatch)
+
+Per architect spec "design flaw" scenario:
+1. team-lead notified via SendMessage at correction-flag time with the diff summary + Option A pick + 60s implicit-ack window.
+2. mint-dev-impl will be notified via SendMessage with the design.md diff line ranges + the XDPMF_SIDECAR_ROOT constant name + approval for Option A.
+3. mint-dev-tester will be notified via SendMessage with the path change so ctest path-string assertions reflect `/run/xdpmacfilter/<iface>/rule_index.json` instead of `${PIN_DIR}/<iface>/...`.
+
+#### §5.31 EDIT-2 — Phase B 3rd PI-3.4b-9 carve-out: T_ATTACH_TAG_MISMATCH preflight (bpftool-vs-skeleton BTF asymmetry; 2026-05-25, dialog with mint-dev-tester + mint-dev-impl)
+
+**Trigger**: Phase 2.5 smoke surfaced T_ATTACH_TAG_MISMATCH (§6.14, MVP-2 Sec-era test) red post-§5.31. Impl confirmed root cause; tester peer-DM'd architect for adjudication on a 3rd PI-3.4b-9 EDIT.
+
+**Root cause** (bpftool-API asymmetry, NOT a §5.31 contract bug):
+- `tests/T_ATTACH_TAG_MISMATCH.sh:124-131` runs a **defensive tag-distinctness preflight** that uses standalone `bpftool prog load ${MAC_FILTER_BPF_O} ${SCRATCH_PIN} type xdp` to compute the real fixture's kernel-side tag BEFORE invoking the loader.
+- Pre-§5.31 the preflight worked because the inner-VALUE was `__u8` (size 1).
+- Post-§5.31 the standalone `bpftool prog load` path doesn't propagate the BTF inner-template's `value_size=8` to the outer ARRAY_OF_MAPS shape; the verifier sees `vs=1` and rejects the offset-4 `entry->rule_id` load with `invalid access to map value, value_size=1 off=4 size=4`.
+- **The actual `xdpmacfilter attach` path works correctly** — counters bump, sidecar writes, exporter emits new series. Impl's end-to-end is green. ONLY the standalone bpftool-load preflight breaks due to bpftool-vs-libbpf-skeleton BTF propagation asymmetry.
+- The alt fixture (`mac_filter_alt.bpf.c`, trivial body returning XDP_PASS — no inner-value load) does NOT trigger this; its preflight branch works fine via bpftool standalone.
+
+**Options considered**:
+- A — drop bpftool real-fixture preflight, rely on downstream alien-refusal assertion as suspenders-only.
+- **B (CHOSEN)** — hybrid: alt-fixture preflight stays via bpftool (works; trivial body); real-fixture preflight uses real loader path (`xdpmacfilter attach` → `bpftool prog show id <id>` → `xdpmacfilter detach`).
+- C — mark preflight skipped with TODO; loses defensive-paranoia, creates tech debt.
+- D — SKIP-77 whole test, defer fix to MVP-3.4c; rejected (gates PI-1 + PI-3 alien-refusal security-critical invariants).
+
+**Disposition (D-3.4b-22)**: Option B. Real-fixture tag computed via real loader path (methodologically clean — test's real contract is exercised); alt-fixture tag computed via bpftool standalone (defensive belt preserved — catches alt-fixture build regression independent of the loader). Both belt + suspenders intact.
+
+##### D-3.4b-22 — T_ATTACH_TAG_MISMATCH preflight: Option B hybrid (Phase B §5.31 EDIT-2) — because
+
+The bpftool-based preflight's PURPOSE is to verify alt-fixture tag ≠ real-fixture tag (so the downstream alien-refusal assertion is testing TAG-mismatch, not name-mismatch). Two ways to read tags:
+1. **Standalone bpftool prog load** (pre-§5.31 path) — works for trivial programs (alt fixture); breaks for our real program post-PI-13-3.4b due to bpftool-vs-libbpf BTF propagation asymmetry on inner-template ARRAY_OF_MAPS value_size.
+2. **Real loader path** (`xdpmacfilter attach`) — works for our real program (skeleton init handles BTF correctly).
+
+Option B uses the right tool per fixture: standalone bpftool for alt (still works), real loader for real (works post-§5.31). The hybrid keeps the test methodologically clean: the real fixture's tag is whatever the actual loader sees post-load — which is what the test downstream actually verifies. Cost: ~5-7 LOC delta in T_ATTACH_TAG_MISMATCH.sh:124-131 area.
+
+Concrete shape (impl reference; tester picks exact bash idiom):
+```
+# Real-fixture tag via real loader (§5.31 EDIT-2 Option B — bpftool standalone
+# can't load post-PI-13-3.4b inner-VALUE-extended fixtures due to BTF asymmetry):
+sudo -n ${XDPMF_BIN} attach --iface ${IFACE_A}
+REAL_PROG_ID=$(sudo -n bpftool net show dev ${IFACE_A} | awk '/prog id/ {print $3}')
+REAL_TAG=$(sudo -n bpftool prog show id ${REAL_PROG_ID} --json | jq -r '.tag')
+sudo -n ${XDPMF_BIN} detach --iface ${IFACE_A}
+
+# Alt-fixture tag via bpftool (trivial body, no offset-4 load — still works):
+sudo -n bpftool prog load ${MAC_FILTER_ALT_BPF_O} ${SCRATCH_PIN_ALT} type xdp
+ALT_TAG=$(sudo -n bpftool prog show pinned ${SCRATCH_PIN_ALT} --json | jq -r '.tag')
+sudo -n bpftool prog unpin ${SCRATCH_PIN_ALT}
+
+[[ "${REAL_TAG}" != "${ALT_TAG}" ]] || { echo "preflight FAIL: tags identical"; exit 1; }
+```
+
+##### PI-3.4b-9 carve-out amendment (§5.31 EDIT-2): 2 EDITs → 3 EDITs
+
+The PI-3.4b-9 fixture-ripple catalog gains a 3rd EDITed ctest body. Updated table:
+
+| Path | Line(s) | Change kind | Reason |
+|---|---|---|---|
+| `tests/T_RULES_SKELETON_NOT_WIRED.sh` | 14 (comment), 297 (stderr-msg) | comment + stderr-message rewrite | PI-13-3.4b PASS-adjudication-forced (no assertion change) — see §5.31 PI-3.4b-9 catalog above |
+| `tests/T_EXPORTER_METRICS_FORMAT.sh` | 21-22 (comments), 100-101 (assertion) | version-literal bump | HK-8-forced 0.6.1 → 0.7.0 — see §5.31 PI-3.4b-9 catalog above |
+| **`tests/T_ATTACH_TAG_MISMATCH.sh`** (NEW per §5.31 EDIT-2) | **124-131 (defensive preflight)** | **preflight body rewrite — real-fixture branch flips from bpftool standalone to `xdpmacfilter attach`-based tag-read (hybrid; alt-fixture branch unchanged)** | **bpftool standalone `prog load` rejects post-PI-13-3.4b inner-VALUE-extended fixtures due to bpftool-vs-libbpf-skeleton BTF propagation asymmetry on inner-template ARRAY_OF_MAPS value_size. Real loader path (skeleton init) handles BTF correctly. Hybrid preserves defensive belt + suspenders.** |
+
+**PI-6-3.4b / PI-34 carve-out language amendment (supersedes prior 2-EDIT phrasing)**:
+
+> **PI-6-3.4b** | **46 pre-§5.31 ctests pass byte-equivalent OR legitimately SKIP-77 — STRICT SUPERSET with explicit 3-ctest-body EDIT carve-out** (T_RULES_SKELETON_NOT_WIRED comment-rewrite + T_EXPORTER_METRICS_FORMAT version-literal bump + T_ATTACH_TAG_MISMATCH preflight hybrid-rewrite per PI-3.4b-9 catalog updated by §5.31 EDIT-2)
+
+The 3rd EDIT is scope-fenced + documented. Reviewer accepts. The post-§5.31 EDIT-2 ctest-body count is 3 EDITed + 6 NEW + 43 byte-equivalent (out of 46 pre-§5.31 baseline) + the 6 NEW ctests for §6.47..§6.52.
+
+##### Anti-misdiagnosis institutional learning from §5.31 EDIT-2 (NEW guard #7)
+
+**Add to §7 OOS anti-misdiagnosis notes after item 6 (bpffs ≠ tmpfs trap):**
+
+7. **bpftool-vs-libbpf-skeleton BTF propagation asymmetry — inner-template ARRAY_OF_MAPS value_size**. When the inner-VALUE of an outer ARRAY_OF_MAPS / HASH_OF_MAPS changes shape (size or layout), STANDALONE `bpftool prog load <obj.o> type xdp` may FAIL where skeleton-based libbpf load SUCCEEDS, because bpftool's standalone path doesn't always propagate the BTF inner-template's value_size to the outer map shape. The verifier then rejects loads from the inner with `invalid access to map value, value_size=<wrong> off=<X> size=<Y>`. **Future-cycle architect anti-misdiagnosis rule**: when the inner-value of an outer ARRAY_OF_MAPS / HASH_OF_MAPS changes (especially size, alignment, or new offset access in the datapath), grep tests for `bpftool prog load <our-obj>` invocations and validate each ONE against the new value_size BEFORE publishing the design:
+```
+grep -nE 'bpftool prog load.*mac_filter\.bpf\.o' tests/T_*.sh tests/lib/*.sh
+```
+For each hit, smoke-test the load with `sudo -n bpftool prog load <built-obj.o> /sys/fs/bpf/probe type xdp; rc=$?; sudo -n bpftool prog unpin /sys/fs/bpf/probe; echo $rc` — non-zero rc means the test will break post-rebuild and needs preflight migration (Option B pattern: real loader path for the affected fixture; standalone bpftool only for fixtures whose body avoids the new field access). Cost: ~30 seconds of Phase A grep + 5 seconds per smoke-test. Benefit: catches THIS class of bug before Phase 2.5 surfaces a red ctest. **Validated by §5.31 EDIT-2 (2026-05-25)**: only T_ATTACH_TAG_MISMATCH was affected (1 hit per Phase B grep), but Phase A would have caught it pre-publish. Combined with guard #6 (bpffs ≠ tmpfs) and guard #5 (Phase A code-grep discipline pays off): the Phase A discipline now covers literals + filesystem semantics + bpftool-API smokes.
+
+**Bug 1 (T_RULE_COUNTER_MAC_HIT_BUMPS bpftool format-string drift) closure note** (per tester's report): tester switched to `--json | jq -r '.value_size'` per impl's Suggestion A; the test is NEW per §6.47 (write-from-scratch; PI-3.4b-9 unaffected). NO design.md amendment needed — captured here only as Phase B audit-trail.
+
+##### Notifications dispatched (§5.31 EDIT-2 closure)
+
+1. team-lead notified via SendMessage with the EDIT-2 carve-out bump 2 → 3 (not human-gate worthy; tactical Q within PI-3.4b-9 scope).
+2. mint-dev-tester notified with Option B pick + concrete preflight rewrite shape + cite of D-3.4b-22 + PI-3.4b-9 catalog 3rd-row text.
+3. mint-dev-impl notified via cc on the tester DM (audit-trail; no impl-side action needed — the fix is test-body, not impl-body).

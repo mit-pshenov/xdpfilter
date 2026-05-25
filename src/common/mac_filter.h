@@ -125,6 +125,47 @@ enum xdpmf_action_type {
 #define XDPMF_MAP_RULES_NAME         "rules"        /* ARRAY[XDPMF_ALLOWLIST_MAX] of struct rule_entry */
 #define XDPMF_MAP_ACTION_TABLE_NAME  "action_table" /* ARRAY[ACTION_MAX] of struct action_entry */
 
+/* §5.31 (MVP-3.4b): inner-allowlist-value extension carrying per-rule id.
+ *
+ * PI-13-3.4b adjudication = PASS as additive (HG-3.4b-1 + D-3.4b-1). Byte
+ * layout is byte-by-byte explicit so the offset-0 `present` byte stays
+ * byte-equivalent to PI-27's prior `__u8 present` reading (bpftool dump
+ * `format c | head -c 1` still returns 0x01 for occupied slots — old
+ * single-byte readers observe the SAME byte at the same offset). The
+ * `_pad[3]` is explicit (not implicit ABI padding) so loader-side
+ * memset-to-zero on the struct guarantees no uninitialised bytes go to
+ * the verifier — pessimistic verifiers reject uninitialised stack reads.
+ *
+ * Used as INNER value for BOTH `xdpmf_allowlist_inner` (MAC HASH) AND
+ * `xdpmf_cidr_inner` (CIDR LPM_TRIE) per T.5 OQ #3 — symmetric. Datapath
+ * reads `rule_id` at offset 4 on every successful inner-map lookup and
+ * passes it to `bump_rule()` (mac_filter.bpf.c §5.31). */
+struct allow_entry {
+    unsigned char present;     /* offset 0, size 1: 0x01 = occupied; 0x00 = empty */
+    unsigned char _pad[3];     /* offsets 1-3, size 3: explicit u32 alignment padding */
+    unsigned int  rule_id;     /* offsets 4-7, size 4: rule_id in [0, XDPMF_ALLOWLIST_MAX-1] */
+};                             /* total: 8 bytes */
+
+/* §5.31 (MVP-3.4b): per-rule packet counter map.
+ *
+ * PERCPU_ARRAY[XDPMF_ALLOWLIST_MAX] of __u64. Pinned at
+ * ${PIN_DIR}/<iface>/rule_counters. Bumped by `bump_rule(rule_id)` at the
+ * MAC HASH-hit and CIDR LPM_TRIE-hit branches in mac_filter_prog. Read by
+ * xdpmf-exporter (rule_counters_reader.cpp) for the
+ * `xdpfilter_rule_match_total{iface, rule_id, action}` Prometheus series. */
+#define XDPMF_MAP_RULE_COUNTERS_NAME "rule_counters"
+/* §5.31 (MVP-3.4b): alias for XDPMF_ALLOWLIST_MAX = 64. Documents that the
+ * rule_counters[] index space and the operator's YAML `id:` namespace are
+ * IDENTICAL (Q5 R1 + D-3.4b-9 + PI-3.4b-7). */
+#define XDPMF_RULE_COUNTERS_MAX      XDPMF_ALLOWLIST_MAX
+
+/* §5.31 EDIT-1 (Phase B Q3 P4 correction): sidecar lives on tmpfs under
+ * /run because bpffs (kernel/bpf/inode.c) rejects regular-file creation via
+ * EPERM at the inode_create hook. The initial design's Q3 P1 (under bpffs)
+ * was retracted at impl Phase B with concrete platform-constraint evidence;
+ * `/run` is the systemd-blessed tmpfs convention for ephemeral state. */
+#define XDPMF_SIDECAR_ROOT  "/run/xdpmacfilter"
+
 #ifdef __cplusplus
 }
 #endif

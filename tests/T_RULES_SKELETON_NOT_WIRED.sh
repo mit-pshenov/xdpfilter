@@ -11,7 +11,8 @@
 #
 # PI bindings:
 #   - PI-27 / PI-13-3.4: inner-allowlist-value byte-equivalent to MVP-3.2
-#     (the bpftool dump of the active allowlist returns 1-byte values).
+#     (the bpftool dump of the active allowlist returns 8-byte
+#     `struct allow_entry` values per §5.31 PI-13-3.4b adjudication).
 #   - PI-28: mac_filter_prog body byte-equivalent (indirect — datapath
 #     does NOT consult `rules` map, verified by drop-MAC ABSENCE from inner).
 #   - PI-29: rules+action_table populated but NOT consulted; WARN emitted.
@@ -294,7 +295,9 @@ else
     if mac_in_inner_pin "${inner_pin}" "${MAC_C}"; then
         echo "FAIL[fC]: drop-rule MAC ${MAC_C} (id=2) FOUND in active inner —" >&2
         echo "         either (i) the apply path treats drop-rules as pass (PI-29 violation), OR" >&2
-        echo "         (ii) the inner-value shape was extended to embed rule_id (PI-27/PI-13-3.4 violation, defer broken)." >&2
+        echo "         (ii) the apply path INCORRECTLY added the drop-rule MAC to the inner allowlist" >&2
+        echo "         (per §5.26 schema cycle 2 'drop rules do NOT populate inner-allowlist' contract —" >&2
+        echo "         that contract is preserved post-§5.31)." >&2
         fail=1
     fi
 fi

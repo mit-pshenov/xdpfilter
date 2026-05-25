@@ -52,7 +52,11 @@
 struct xdpmf_allowlist_inner {
     __uint(type, BPF_MAP_TYPE_HASH);
     __type(key, struct xdpmf_mac);
-    __type(value, __u8);
+    /* §5.31 (MVP-3.4b) PI-13-3.4b adjudicated PASS-as-additive: inner-value
+     * extends from `__u8 present` (value_size 1) to `struct allow_entry`
+     * (value_size 8). Byte at offset 0 stays byte-equivalent to PI-27's
+     * `present` byte; offset-4 `rule_id` is the NEW per-rule counter index. */
+    __type(value, struct allow_entry);
     __uint(max_entries, XDPMF_ALLOWLIST_MAX);
 };
 
@@ -92,7 +96,10 @@ struct {
 struct xdpmf_cidr_inner {
     __uint(type, BPF_MAP_TYPE_LPM_TRIE);
     __type(key, struct xdpmf_cidr_v4);
-    __type(value, __u8);
+    /* §5.31 (MVP-3.4b) PI-13-3.4b CIDR symmetry per T.5 OQ #3: inner-value
+     * extends to `struct allow_entry` matching MAC HASH branch — without
+     * symmetry MAC and CIDR rule_ids would live in different shape-spaces. */
+    __type(value, struct allow_entry);
     __uint(max_entries, XDPMF_ALLOWLIST_MAX);
     __uint(map_flags, BPF_F_NO_PREALLOC);
 };
@@ -178,10 +185,43 @@ struct {
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } action_table SEC(".maps");
 
+/* §5.31 (MVP-3.4b) PI-3.4b-1: per-rule packet counter PERCPU_ARRAY[64] of
+ * __u64. PERCPU semantics — no cross-CPU race, no atomic. max_entries =
+ * XDPMF_RULE_COUNTERS_MAX = XDPMF_ALLOWLIST_MAX = 64 — alias used here so
+ * the operator-observable index space (operator's YAML `id:` per Q5 R1)
+ * and the BPF ARRAY index space share a single literal. Pinned per-iface
+ * via LIBBPF_PIN_BY_NAME at ${PIN_DIR}/<iface>/rule_counters; survives
+ * apply -f via kManagedMaps[] reuse_fd discipline (D-3.4b-2, PI-3.4b-2). */
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __type(key, __u32);
+    __type(value, __u64);
+    __uint(max_entries, XDPMF_RULE_COUNTERS_MAX);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} rule_counters SEC(".maps");
+
 /* PERCPU bump: pointer returned is to this CPU's slot only. No atomic. */
 static __always_inline void bump_stat(__u32 idx)
 {
     __u64 *v = bpf_map_lookup_elem(&stats, &idx);
+    if (v) {
+        *v += 1;
+    }
+}
+
+/* §5.31 (MVP-3.4b) PI-3.4b-4: per-rule counter bump. Called from BOTH the
+ * MAC HASH-hit branch AND the CIDR LPM_TRIE-hit branch in mac_filter_prog
+ * (Q1=B3 unified per-match semantic — two source-line call-sites sharing
+ * the SAME helper). Verifier-required bounds check on `rule_id` is folded
+ * inline; an out-of-range value is silently dropped (defense-in-depth —
+ * loader-side validation at config.cpp:204 already ensures
+ * `rule.id < XDPMF_ALLOWLIST_MAX`). */
+static __always_inline void bump_rule(__u32 rule_id)
+{
+    if (rule_id >= XDPMF_RULE_COUNTERS_MAX) {
+        return;
+    }
+    __u64 *v = bpf_map_lookup_elem(&rule_counters, &rule_id);
     if (v) {
         *v += 1;
     }
@@ -223,8 +263,13 @@ int mac_filter_prog(struct xdp_md *ctx)
         return XDP_DROP;
     }
 
-    __u8 *present = bpf_map_lookup_elem(inner, &key);
-    if (present) {
+    /* §5.31 (MVP-3.4b) PI-28-3.4b: inner-VALUE is now `struct allow_entry`
+     * (PI-13-3.4b adjudication). The offset-0 byte-equivalent null-check
+     * pattern is preserved (`if (entry)` shape unchanged from `if (present)`);
+     * NEW read at offset 4 (`entry->rule_id`) feeds bump_rule per Q1=B3. */
+    struct allow_entry *entry = bpf_map_lookup_elem(inner, &key);
+    if (entry) {
+        bump_rule(entry->rule_id);
         bump_stat(STAT_PASS);
         return XDP_PASS;
     }
@@ -251,8 +296,12 @@ int mac_filter_prog(struct xdp_md *ctx)
             .prefixlen = 32u,        /* lookup is /32 host-route; LPM_TRIE picks longest matching prefix */
             .addr      = ip->saddr,  /* network byte order on wire, matches LPM_TRIE key shape */
         };
-        __u8 *cidr_hit = bpf_map_lookup_elem(cidr_inner, &cidr_key);
+        /* §5.31 (MVP-3.4b) PI-28-3.4b CIDR symmetry: same shape as MAC HASH
+         * hit branch — typed pointer deref + rule_id read at offset 4 +
+         * bump_rule. STAT_PASS_CIDR bump preserved byte-equivalent. */
+        struct allow_entry *cidr_hit = bpf_map_lookup_elem(cidr_inner, &cidr_key);
         if (cidr_hit) {
+            bump_rule(cidr_hit->rule_id);
             bump_stat(STAT_PASS_CIDR);
             return XDP_PASS;
         }

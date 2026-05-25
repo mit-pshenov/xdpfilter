@@ -1,14 +1,18 @@
 /*
  * prom_format.cpp — Prometheus text-format (version 0.0.4) emitter.
- * See design §5.29 DataStructures additions for the expected output shape.
+ * See design §5.29 + §5.31 DataStructures for the expected output shape.
  */
 #include "prom_format.hpp"
 
+#include <cstdint>
 #include <format>
+#include <map>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <vector>
 
-#include "common/mac_filter.h"  // STAT_PASS / STAT_DROP_DENY / STAT_DROP_MALFORMED / STAT_PASS_CIDR / STAT_MAX
+#include "common/mac_filter.h"  // STAT_PASS / STAT_DROP_DENY / STAT_DROP_MALFORMED / STAT_PASS_CIDR / STAT_MAX / XDPMF_RULE_COUNTERS_MAX
 
 namespace xdpmf::exporter {
 
@@ -48,10 +52,13 @@ namespace {
 
 }  // namespace
 
-std::string emit_metrics(const std::vector<StatsSample>& samples)
+std::string emit_metrics(
+    const std::vector<StatsSample>&                       samples,
+    const std::vector<RuleCountersSample>&                rule_counters,
+    const std::map<std::string, std::vector<RuleMeta>>&   rule_meta_by_iface)
 {
     std::string out;
-    out.reserve(256 + samples.size() * 256);
+    out.reserve(512 + samples.size() * 256 + rule_counters.size() * 512);
 
     /* HELP + TYPE lines fire EXACTLY ONCE per metric family even when the
      * sample set is empty (PI-32 — "0 timeseries" is a valid scrape). */
@@ -68,6 +75,51 @@ std::string emit_metrics(const std::vector<StatsSample>& samples)
                 s.stats[k]));
         }
     }
+
+    /* §5.31 (MVP-3.4b) PI-3.4b-6 + Q4 A3: per-rule counter series with
+     * `action` label sourced from the sidecar (PI-32-3.4b orphan tolerance
+     * → `action="unknown"` for rule_id in counters but absent from sidecar).
+     * HELP+TYPE emitted unconditionally so an empty fleet still produces
+     * a complete-shape scrape. */
+    out.append("# HELP xdpfilter_rule_match_total Total per-rule packet matches by iface and rule_id, labelled with action.\n");
+    out.append("# TYPE xdpfilter_rule_match_total counter\n");
+
+    for (const RuleCountersSample& s : rule_counters) {
+        const std::string iface_escaped = escape_label_value(s.iface);
+
+        /* Per-iface rule_id → action lookup table from sidecar. Missing
+         * iface or missing rule_id => "unknown" action. Built per-iface
+         * rather than globally so a sidecar-orphan in iface A doesn't
+         * contaminate iface B's labels. */
+        std::unordered_map<std::uint32_t, std::string_view> action_for_rule;
+        const auto it = rule_meta_by_iface.find(s.iface);
+        if (it != rule_meta_by_iface.end()) {
+            for (const RuleMeta& rm : it->second) {
+                action_for_rule.emplace(rm.rule_id, std::string_view{rm.action});
+            }
+        }
+
+        /* Emit ALL sidecar-known rules even at count 0 (Prometheus
+         * convention: emit zeroes for known series). Then emit any
+         * orphan counter slots (non-zero counter for a rule_id absent
+         * from sidecar) with action="unknown". */
+        for (const auto& [rule_id, action] : action_for_rule) {
+            const std::uint64_t v = (rule_id < XDPMF_RULE_COUNTERS_MAX)
+                                        ? s.counters[rule_id]
+                                        : 0u;
+            out.append(std::format(
+                "xdpfilter_rule_match_total{{iface=\"{}\",rule_id=\"{}\",action=\"{}\"}} {}\n",
+                iface_escaped, rule_id, action, v));
+        }
+        for (std::uint32_t k = 0; k < XDPMF_RULE_COUNTERS_MAX; ++k) {
+            if (s.counters[k] == 0) continue;
+            if (action_for_rule.contains(k)) continue;
+            out.append(std::format(
+                "xdpfilter_rule_match_total{{iface=\"{}\",rule_id=\"{}\",action=\"unknown\"}} {}\n",
+                iface_escaped, k, s.counters[k]));
+        }
+    }
+
     return out;
 }
 

@@ -16,10 +16,16 @@
 # both gates of the §5.22 Q1 identity predicate (mode && name && tag).
 #
 # Trigger (sequential):
-#   1. Tag-distinctness preflight — bpftool prog load on both fixtures,
-#      compare reported tags; abort with explicit error if they match
-#      (silent fixture-regression catcher; defensive only).
-#   2. setup_veth.
+#   1. setup_veth.
+#   2. Tag-distinctness preflight (HYBRID per §5.31 EDIT-2 + D-3.4b-22):
+#      - real-fixture tag via real loader `xdpmacfilter attach` + bpftool
+#        prog show id + `xdpmacfilter detach` (bpftool standalone `prog load`
+#        cannot parse the post-§5.31 ARRAY_OF_MAPS inner-template value_size=8
+#        because the BTF propagation isn't applied on its no-skeleton path);
+#      - alt-fixture tag via bpftool standalone `prog load` (alt fixture body
+#        is `return XDP_PASS;` — no inner-VALUE offset-4 load, still works);
+#      - compare tags; abort with explicit error if they match (silent
+#        fixture-regression catcher; defensive only).
 #   3. Pre-attach mac_filter_alt.bpf.o (same `mac_filter_prog` name,
 #      different bytecode → different tag) on ${IFACE_A} via xdpgeneric.
 #   4. Capture foreign prog id + foreign tag.
@@ -104,7 +110,17 @@ trap cleanup_tagmismatch EXIT INT TERM HUP
          echo "       (expected build artifact from add_bpf_object mac_filter)" >&2
          exit 1; }
 
-# ── Defensive tag-distinctness preflight ─────────────────────────────────
+# ── setup_veth FIRST (real-fixture preflight needs a live iface) ────────
+# Per §5.31 EDIT-2 + D-3.4b-22 hybrid preflight: the real-fixture tag is
+# read via the real loader's `attach` path (since standalone bpftool
+# `prog load` mis-parses the new ARRAY_OF_MAPS inner-template value_size=8
+# post-§5.31 PI-13-3.4b — verifier rejects with vs=1). Real loader needs
+# an iface to attach to, so setup_veth must run BEFORE the preflight (was
+# AFTER pre-§5.31 — ordering change is purely scope-internal to the
+# preflight rewrite; PRIMARY scenario sequence below is byte-equivalent).
+setup_veth
+
+# ── Defensive tag-distinctness preflight (HYBRID per §5.31 EDIT-2) ──────
 # Per design §6.14: paranoia check that the two .bpf.o files actually
 # produce distinct kernel-reported tags. clang's instruction selection
 # on `return XDP_PASS;` vs the real allowlist-lookup body always differs
@@ -112,24 +128,58 @@ trap cleanup_tagmismatch EXIT INT TERM HUP
 # the real body into the alt fixture) MUST surface loudly here, not as
 # a confusing exit-0-instead-of-4 in the primary scenario.
 #
+# Hybrid post-§5.31 (D-3.4b-22, Option B): the REAL fixture's tag comes
+# from the actual loader path (bpftool standalone can't parse the new
+# inner-template value_size=8 on ARRAY_OF_MAPS lookups — see verifier
+# trace in Phase B test-run.log lines 8-80 of the pre-fix run). The ALT
+# fixture's body is `return XDP_PASS;` with NO inner-VALUE loads, so
+# the standalone `bpftool prog load` path STILL works for it (verified:
+# `vs=1`-rejection only fires on programs that dereference offset 4 of
+# the inner-allowlist-value, which alt fixture doesn't do). Belt + suspenders.
+#
 # HK-13 §5.30: capture a snapshot of /sys/fs/bpf/ top-level entries
 # BEFORE the preflight loads — the cleanup trap will diff against this
 # to remove any orphan map pins that bpftool's libbpf auto-creates from
-# LIBBPF_PIN_BY_NAME maps in mac_filter.bpf.o (the preflight calls
-# `bpftool prog load` WITHOUT `pinmaps`, so we can't redirect to a
-# scratch dir — diff-and-remove is the cleanup mechanism).
+# LIBBPF_PIN_BY_NAME maps. The alt fixture has NO maps (verified at
+# /tests/fixtures/mac_filter_alt.bpf.c), so this snapshot is defensive
+# / no-op for the alt-only bpftool path; the real-fixture path uses the
+# real loader which pins under PIN_DIR (cleaned by cleanup_veth).
 BPFFS_PRE_SNAPSHOT=$(mktemp /tmp/xdpmf-tagmismatch-bpffs-pre.XXXXXX)
 sudo -n find /sys/fs/bpf -maxdepth 1 -mindepth 1 ! -type d 2>/dev/null \
     | sort > "${BPFFS_PRE_SNAPSHOT}"
-echo "=== preflight: tag-distinctness check on the two fixtures"
-sudo -n rm -f "${ALT_PIN_TAG}" "${REAL_PIN_TAG}" 2>/dev/null || true
-sudo -n bpftool prog load "${ALT_OBJ}"  "${ALT_PIN_TAG}"  type xdp \
+
+echo "=== preflight: real-fixture tag via real loader (§5.31 EDIT-2 hybrid)"
+# Real-fixture: xdpmacfilter attach → read prog id → bpftool prog show id → detach.
+set +e
+${NSEXEC} "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" >/dev/null 2>&1
+attach_rc=$?
+set -e
+if [[ "${attach_rc}" -ne 0 ]]; then
+    echo "FAIL: preflight real-fixture attach failed (rc=${attach_rc})" >&2
+    echo "      cannot proceed — real-fixture tag cannot be computed via loader path" >&2
+    exit 1
+fi
+real_prog_id=$(xdp_prog_id "${IFACE_A}")
+if [[ -z "${real_prog_id}" || "${real_prog_id}" == "0" ]]; then
+    echo "FAIL: preflight real-fixture attach left no XDP prog id on ${IFACE_A}" >&2
+    exit 1
+fi
+real_tag_pre=$(sudo -n bpftool -j prog show id "${real_prog_id}" | jq -r '.tag')
+# Detach IMMEDIATELY — leave veth in clean state for PRIMARY scenario.
+${NSEXEC} "${LOADER_BIN}" detach --iface "${IFACE_A}" >/dev/null 2>&1 || true
+# Defensive: verify XDP is detached before continuing.
+if [[ -n "$(xdp_prog_id "${IFACE_A}")" ]]; then
+    echo "FAIL: preflight real-fixture detach did not clean XDP from ${IFACE_A}" >&2
+    exit 1
+fi
+
+echo "=== preflight: alt-fixture tag via bpftool standalone (trivial body — still works)"
+sudo -n rm -f "${ALT_PIN_TAG}" 2>/dev/null || true
+sudo -n bpftool prog load "${ALT_OBJ}" "${ALT_PIN_TAG}" type xdp \
     || { echo "FAIL: preflight bpftool prog load (${ALT_OBJ}) failed" >&2; exit 1; }
-sudo -n bpftool prog load "${REAL_OBJ}" "${REAL_PIN_TAG}" type xdp \
-    || { echo "FAIL: preflight bpftool prog load (${REAL_OBJ}) failed" >&2; exit 1; }
-alt_tag_pre=$(sudo -n bpftool -j prog show pinned "${ALT_PIN_TAG}"  | jq -r '.tag')
-real_tag_pre=$(sudo -n bpftool -j prog show pinned "${REAL_PIN_TAG}" | jq -r '.tag')
-sudo -n rm -f "${ALT_PIN_TAG}" "${REAL_PIN_TAG}"
+alt_tag_pre=$(sudo -n bpftool -j prog show pinned "${ALT_PIN_TAG}" | jq -r '.tag')
+sudo -n rm -f "${ALT_PIN_TAG}"
+
 echo "   alt  tag = ${alt_tag_pre}"
 echo "   real tag = ${real_tag_pre}"
 if [[ -z "${alt_tag_pre}" || -z "${real_tag_pre}" ]]; then
@@ -142,8 +192,6 @@ if [[ "${alt_tag_pre}" == "${real_tag_pre}" ]]; then
     echo "       this fixture as built cannot exercise the tag-axis check)" >&2
     exit 1
 fi
-
-setup_veth
 
 # ─────────────────────────────────────────────────────────────────────────
 # PRIMARY SCENARIO — pre-attach alt fixture (same name, different tag).

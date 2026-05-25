@@ -11,7 +11,11 @@
 #include "http.hpp"
 
 #include "prom_format.hpp"
+#include "rule_counters_reader.hpp"   // §5.31 MVP-3.4b
+#include "sidecar_reader.hpp"         // §5.31 MVP-3.4b
 #include "stats_reader.hpp"
+
+#include "common/mac_filter.h"        // §5.31 EDIT-1: XDPMF_SIDECAR_ROOT (/run/xdpmacfilter)
 
 #include <cerrno>
 #include <chrono>
@@ -19,8 +23,10 @@
 #include <cstdio>
 #include <cstring>
 #include <format>
+#include <map>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -205,7 +211,27 @@ void handle_connection(int conn_fd, std::string_view bpffs_root)
          * empty body, then bail. */
         DiscoveryAccounting acc;
         const auto samples = read_all_attached_with_acc(bpffs_root, acc);
-        const std::string body = emit_metrics(samples);
+
+        /* §5.31 (MVP-3.4b) PI-3.4b-6: read the per-rule counter map AND
+         * each iface's rule_index.json sidecar; pass both into the
+         * formatter for the new `xdpfilter_rule_match_total` series.
+         * Sidecar-missing → empty vector → all-orphan path emits
+         * `action="unknown"` labels per Q4 A3 + PI-32-3.4b.
+         *
+         * §5.31 EDIT-1 + D-3.4b-21: sidecar lives under XDPMF_SIDECAR_ROOT
+         * = `/run/xdpmacfilter/` (tmpfs); rule_counters map lives under
+         * bpffs as before. Two roots; iface key is the join. */
+        const auto rule_samples = read_rule_counters(bpffs_root);
+        std::map<std::string, std::vector<RuleMeta>> meta_by_iface;
+        for (const RuleCountersSample& rs : rule_samples) {
+            std::string p{XDPMF_SIDECAR_ROOT};
+            p.push_back('/');
+            p += rs.iface;
+            p += "/rule_index.json";
+            meta_by_iface.emplace(rs.iface, parse_rule_index(p));
+        }
+
+        const std::string body = emit_metrics(samples, rule_samples, meta_by_iface);
         const std::string resp = build_response(
             200, "OK", "text/plain; version=0.0.4", body);
         (void)write_all(conn_fd, resp);

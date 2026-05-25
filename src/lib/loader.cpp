@@ -33,6 +33,7 @@
 #include "loader.hpp"
 #include "apply_internal.hpp"
 #include "config.hpp"
+#include "sidecar.hpp"     // §5.31 (MVP-3.4b) rule_index.json writer
 
 #include <algorithm>
 #include <array>
@@ -154,6 +155,13 @@ constexpr ManagedMapEntry kManagedMaps[] = {
     { &SkelMapsT::stats,            XDPMF_MAP_STATS_NAME,               false },
     { &SkelMapsT::rules,            XDPMF_MAP_RULES_NAME,               false },
     { &SkelMapsT::action_table,     XDPMF_MAP_ACTION_TABLE_NAME,        false },
+    /* §5.31 (MVP-3.4b) D-3.4b-13: 13th entry — `rule_counters` PERCPU_ARRAY.
+     * Single-line table extension is the MVP-3.4.5 HK-9 landmine refactor
+     * dividend (pre-HK-9 this slice would have needed 3 lockstep updates
+     * across pinned_maps/pin_specs/reuse_specs literals). LIBBPF_PIN_BY_NAME
+     * + bpf_map__reuse_fd discipline preserves PERCPU values across apply
+     * per HG-3.4b-2 (Prometheus counter-monotonicity). */
+    { &SkelMapsT::rule_counters,    XDPMF_MAP_RULE_COUNTERS_NAME,       false },
     { &SkelMapsT::allowlist,        XDPMF_MAP_ALLOWLIST_NAME,           true  },
 };
 
@@ -1064,10 +1072,32 @@ void pin_fd(int fd, const std::string& path)
     }
 }
 
-/* §5.26 Q2 inner-slot population: bulk-clear the inactive inner map then
- * insert the new pass_macs presence markers. Caller passes the FD of the
- * inactive inner allowlist (allowlist_a or allowlist_b). */
-void populate_inner_slot(int inner_fd, const std::vector<xdpmf_mac>& pass_macs)
+/* §5.31 (MVP-3.4b) D-3.4b-15 Option A: rule_id-carrying intermediate
+ * shapes for the inner-slot populate paths. Replaces the prior
+ * std::vector<xdpmf_mac> / std::vector<xdpmf_cidr_v4> shapes so each
+ * populate call carries the per-entry rule_id alongside the key (loader
+ * writes a full `struct allow_entry` per insert).
+ *
+ * rule_id source: operator's YAML `id:` field per Q5 R1 — already
+ * validated to [0, XDPMF_ALLOWLIST_MAX-1] by config.cpp. Anon-namespace
+ * scope keeps these out of any public header (loader.hpp ZERO diff
+ * preserved per PI-7-3.4b-hpp). */
+struct MacRule {
+    xdpmf_mac     mac;
+    std::uint32_t rule_id;
+};
+
+struct CidrRule {
+    xdpmf_cidr_v4 cidr;
+    std::uint32_t rule_id;
+};
+
+/* §5.26 Q2 inner-slot population — §5.31 PI-13-3.4b: writes full
+ * `struct allow_entry` per insert (offset 0 = present=1, offset 4 = rule_id
+ * from operator's YAML `id:`). Bulk-clear-then-insert preserved. Caller
+ * passes the FD of the inactive inner allowlist (allowlist_a or
+ * allowlist_b). */
+void populate_inner_slot(int inner_fd, const std::vector<MacRule>& pass_macs)
 {
     // Bulk-clear: iterate keys via bpf_map_get_next_key and delete each.
     // The map is small (≤ 64 entries) so cost is bounded.
@@ -1093,9 +1123,16 @@ void populate_inner_slot(int inner_fd, const std::vector<xdpmf_mac>& pass_macs)
         prev      = cur;
         have_prev = true;
     }
-    for (const xdpmf_mac& m : pass_macs) {
-        const std::uint8_t present = 1;
-        const int rc = bpf_map_update_elem(inner_fd, &m, &present, BPF_ANY);
+    for (const MacRule& m : pass_macs) {
+        /* §5.31 PI-13-3.4b: full struct write — offset-0 `present`=1 keeps
+         * PI-27 byte-equivalent reading at the operator-observable layer;
+         * offset-4 `rule_id` is the NEW per-rule counter index. `_pad[3]`
+         * zero-init via C++ struct-init `{}` defense against verifier
+         * uninitialized-byte pessimism (D-3.4b-1). */
+        struct allow_entry entry{};
+        entry.present = 1;
+        entry.rule_id = m.rule_id;
+        const int rc = bpf_map_update_elem(inner_fd, &m.mac, &entry, BPF_ANY);
         if (rc < 0) {
             throw_loader(classify(rc, LoaderError::LoadFailed),
                          std::format("bpf_map_update_elem(inner): {}",
@@ -1104,11 +1141,10 @@ void populate_inner_slot(int inner_fd, const std::vector<xdpmf_mac>& pass_macs)
     }
 }
 
-/* §5.27 Q1 AS1 CIDR-inner population: parallel shape to populate_inner_slot
- * for the LPM_TRIE-typed inactive CIDR inner. LPM_TRIE keys are
- * `xdpmf_cidr_v4{prefixlen, addr_be}` — already canonical from
- * cidr::parse_cidr_v4. Bulk-clear then insert. */
-void populate_cidr_inner_slot(int inner_fd, const std::vector<xdpmf_cidr_v4>& pass_cidrs)
+/* §5.27 Q1 AS1 CIDR-inner population — §5.31 PI-13-3.4b CIDR symmetry:
+ * parallel shape to populate_inner_slot writing full `struct allow_entry`
+ * into the LPM_TRIE-typed inactive CIDR inner. */
+void populate_cidr_inner_slot(int inner_fd, const std::vector<CidrRule>& pass_cidrs)
 {
     xdpmf_cidr_v4 prev{};
     xdpmf_cidr_v4 cur{};
@@ -1132,9 +1168,11 @@ void populate_cidr_inner_slot(int inner_fd, const std::vector<xdpmf_cidr_v4>& pa
         prev      = cur;
         have_prev = true;
     }
-    for (const xdpmf_cidr_v4& c : pass_cidrs) {
-        const std::uint8_t present = 1;
-        const int rc = bpf_map_update_elem(inner_fd, &c, &present, BPF_ANY);
+    for (const CidrRule& c : pass_cidrs) {
+        struct allow_entry entry{};
+        entry.present = 1;
+        entry.rule_id = c.rule_id;
+        const int rc = bpf_map_update_elem(inner_fd, &c.cidr, &entry, BPF_ANY);
         if (rc < 0) {
             throw_loader(classify(rc, LoaderError::LoadFailed),
                          std::format("bpf_map_update_elem(cidr_inner): {}",
@@ -1418,10 +1456,16 @@ namespace internal {
 /* Extract the inner-allowlist contents from the validated Config: only
  * rules with action==Pass + a present mac contribute. Drop-action rules
  * are accepted-but-no-op in cycle 1 (the global default_action carries
- * them) per design §5.26 schema rule 4. Dedup preserved by insertion-order. */
-[[nodiscard]] std::vector<xdpmf_mac> extract_pass_macs(const Config& c)
+ * them) per design §5.26 schema rule 4. Dedup preserved by insertion-order.
+ *
+ * §5.31 (MVP-3.4b) Q5 R1: each entry carries its operator-supplied
+ * `rule.id` so the inner-allowlist-value's offset-4 `rule_id` matches the
+ * Prometheus `xdpfilter_rule_match_total{rule_id="N"}` label namespace.
+ * Dedup retains the FIRST rule_id for a given MAC (preserves §5.26 dedup
+ * semantic; collision case is operator config bug surfaced elsewhere). */
+[[nodiscard]] std::vector<MacRule> extract_pass_macs(const Config& c)
 {
-    std::vector<xdpmf_mac> out;
+    std::vector<MacRule> out;
     out.reserve(c.rules.size());
     for (const Rule& r : c.rules) {
         if (r.action != RuleAction::Pass) continue;
@@ -1429,10 +1473,10 @@ namespace internal {
         const xdpmf_mac& m = *r.match.mac;
         const bool already = std::any_of(
             out.begin(), out.end(),
-            [&](const xdpmf_mac& e) {
-                return std::memcmp(e.octets, m.octets, sizeof(m.octets)) == 0;
+            [&](const MacRule& e) {
+                return std::memcmp(e.mac.octets, m.octets, sizeof(m.octets)) == 0;
             });
-        if (!already) out.push_back(m);
+        if (!already) out.push_back(MacRule{m, r.id});
     }
     return out;
 }
@@ -1440,10 +1484,12 @@ namespace internal {
 /* §5.27 sibling of extract_pass_macs for the CIDR axis. Mirror shape:
  * only Pass-action rules with src_cidr set contribute; dedup by
  * (prefixlen, addr) tuple equality. Rules with BOTH mac AND src_cidr
- * populate both axes — OR-compose at the BPF datapath. */
-[[nodiscard]] std::vector<xdpmf_cidr_v4> extract_pass_cidrs(const Config& c)
+ * populate both axes — OR-compose at the BPF datapath.
+ *
+ * §5.31: rule_id-carrying parallel to extract_pass_macs above. */
+[[nodiscard]] std::vector<CidrRule> extract_pass_cidrs(const Config& c)
 {
-    std::vector<xdpmf_cidr_v4> out;
+    std::vector<CidrRule> out;
     out.reserve(c.rules.size());
     for (const Rule& r : c.rules) {
         if (r.action != RuleAction::Pass)     continue;
@@ -1451,10 +1497,10 @@ namespace internal {
         const xdpmf_cidr_v4& c4 = *r.match.src_cidr;
         const bool already = std::any_of(
             out.begin(), out.end(),
-            [&](const xdpmf_cidr_v4& e) {
-                return e.prefixlen == c4.prefixlen && e.addr == c4.addr;
+            [&](const CidrRule& e) {
+                return e.cidr.prefixlen == c4.prefixlen && e.cidr.addr == c4.addr;
             });
-        if (!already) out.push_back(c4);
+        if (!already) out.push_back(CidrRule{c4, r.id});
     }
     return out;
 }
@@ -1466,9 +1512,9 @@ namespace internal {
  * lives in exactly ONE place. */
 std::uint32_t apply_request(const ApplyRequest& req)
 {
-    const std::vector<xdpmf_mac>      deduped        = extract_pass_macs(req.config);
-    const std::vector<xdpmf_cidr_v4>  deduped_cidrs  = extract_pass_cidrs(req.config);
-    const DefaultAction               default_action = req.config.default_action;
+    const std::vector<MacRule>   deduped        = extract_pass_macs(req.config);
+    const std::vector<CidrRule>  deduped_cidrs  = extract_pass_cidrs(req.config);
+    const DefaultAction          default_action = req.config.default_action;
 
     if (deduped.size() > XDPMF_ALLOWLIST_MAX) {
         throw_loader(LoaderError::LoadFailed,
@@ -1739,6 +1785,13 @@ std::uint32_t apply_request(const ApplyRequest& req)
                      "xdpmacfilter: replacing existing program on %s\n",
                      req.iface.c_str());
 
+        // §5.31 (MVP-3.4b) PI-3.4b-5 + D-3.4b-16: write rule_index.json
+        // POST-flip so the sidecar describes the LIVE config (matches the
+        // bpftool dump for inner-allowlist values' rule_id field). NEVER
+        // throws — failures degrade to exporter's action="unknown" labels
+        // per D-3.4b-17.
+        sidecar::write_rule_index(req.iface, XDPMF_SIDECAR_ROOT, req.config);
+
         const XdpProbe after_probe = probe_attached_xdp(ifindex, self_tag);
         return after_probe.prog_id;
     }
@@ -1846,6 +1899,11 @@ std::uint32_t apply_request(const ApplyRequest& req)
 
     // ATOMIC SWAP COMMIT: active_idx[0] = 0 (slot 0 with our just-written rules).
     write_active_idx(active_idx_fd, 0u);
+
+    // §5.31 (MVP-3.4b) PI-3.4b-5 + D-3.4b-16: write rule_index.json POST-flip.
+    // See reattach branch above for rationale (non-fatal degrade, exporter
+    // falls back to action="unknown" labels per D-3.4b-17 if this fails).
+    sidecar::write_rule_index(req.iface, XDPMF_SIDECAR_ROOT, req.config);
 
     const XdpProbe after = probe_attached_xdp(ifindex, self_tag);
     dir_guard.release();
