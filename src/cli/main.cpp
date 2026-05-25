@@ -7,12 +7,14 @@
 #include <exception>
 #include <format>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <variant>
 
 #include "apply.hpp"   // §5.26 Q4 G1: apply subcommand dispatcher
 #include "bypass.hpp"  // §5.29 HG-3.4-2: bypass subcommand dispatcher (MVP-3.4)
 #include "cli.hpp"
+#include "common/logger.hpp"  // §5.32 (MVP-3.5): structured-logging surface
 #include "lib/loader.hpp"
 
 namespace {
@@ -97,8 +99,22 @@ int main(int argc, char* argv[])
     try {
         cmd = xdpmf::parse(argc, argv);
     } catch (const xdpmf::CliError& e) {
-        std::fprintf(stderr, "error: %s\n\n", e.what());
-        std::fputs(xdpmf::usage_text().c_str(), stderr);
+        // §5.32 PI-3.5-1: text-mode byte-equivalent. The "error: <what>\n\n"
+        // line trails with two newlines; logger sees trailing '\n' and
+        // appends nothing extra (D-3.5-6). The usage-text dump follows as a
+        // separate cli.usage_text event whose msg already terminates in '\n'.
+        const std::string what_str = e.what();
+        const std::string usage_msg = std::format("error: {}\n\n", what_str);
+        const xdpmf::logger::Field usage_err_fields[] = {
+            xdpmf::logger::Field{"what", std::string_view{what_str}},
+        };
+        xdpmf::logger::emit(xdpmf::logger::Level::Error,
+                            "cli.usage_error",
+                            usage_msg,
+                            usage_err_fields);
+        xdpmf::logger::emit(xdpmf::logger::Level::Info,
+                            "cli.usage_text",
+                            xdpmf::usage_text());
         return kExitUsageErr;
     }
 
@@ -133,17 +149,45 @@ int main(int argc, char* argv[])
         // parse / schema-validation failures still throw LoaderError::ConfigError
         // (= 9) and are caught by the system_error arm below; the split is
         // intentional (D-3.4.5-5 rationale: open-failure is upstream of YAML).
-        std::fprintf(stderr, "%s\n", e.what());
+        // §5.32 (MVP-3.5): routed through logger as cli.error (catalog shares
+        // this event with the system_error + std::exception fallback arms).
+        const std::string what_str = e.what();
+        const std::string msg = std::format("{}\n", what_str);
+        const xdpmf::logger::Field fs[] = {
+            xdpmf::logger::Field{"what", std::string_view{what_str}},
+        };
+        xdpmf::logger::emit(xdpmf::logger::Level::Error,
+                            "cli.error", msg, fs);
         return kExitUsageErr;
     } catch (const std::system_error& e) {
+        const std::string what_str = e.what();
+        const int         code     = e.code().value();
         if (is_config_error(e)) {
-            std::fprintf(stderr, "%s\n", e.what());
+            const std::string msg = std::format("{}\n", what_str);
+            const xdpmf::logger::Field fs[] = {
+                xdpmf::logger::Field{"what",     std::string_view{what_str}},
+                xdpmf::logger::Field{"errno",    static_cast<std::int64_t>(code)},
+            };
+            xdpmf::logger::emit(xdpmf::logger::Level::Error,
+                                "config.error", msg, fs);
         } else {
-            std::fprintf(stderr, "error: %s\n", e.what());
+            const std::string msg = std::format("error: {}\n", what_str);
+            const xdpmf::logger::Field fs[] = {
+                xdpmf::logger::Field{"what",     std::string_view{what_str}},
+                xdpmf::logger::Field{"errno",    static_cast<std::int64_t>(code)},
+            };
+            xdpmf::logger::emit(xdpmf::logger::Level::Error,
+                                "cli.error", msg, fs);
         }
         return exit_code_from(e);
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "error: %s\n", e.what());
+        const std::string what_str = e.what();
+        const std::string msg = std::format("error: {}\n", what_str);
+        const xdpmf::logger::Field fs[] = {
+            xdpmf::logger::Field{"what", std::string_view{what_str}},
+        };
+        xdpmf::logger::emit(xdpmf::logger::Level::Error,
+                            "cli.error", msg, fs);
         return static_cast<int>(xdpmf::LoaderError::LoadFailed);
     }
 }

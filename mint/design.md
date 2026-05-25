@@ -8588,7 +8588,7 @@ The slice CLOSES the carry-forward fence on JSON logs. It LIFTS nothing — stri
 **Scope contract (§5.32 short form)**:
 - NEW (source files): `src/common/logger.hpp` + `src/common/logger.cpp` (~280-320 LOC total; cross-binary shared per Q1=M3 + Q6=B1 dup-TU compile).
 - NEW (env var): `XDPMF_LOG_FORMAT={text,json}` default `text`. Read ONCE at first `logger::emit()` call (lazy init under a `std::once_flag`); cached in module-static `Format g_format`.
-- NEW (event-name catalog): 33 unique event names (40 emission sites; 31 unique events for loader-side + 2 events for events shared across multiple sites). Catalogued as `constexpr std::array<std::string_view, kEventCount> kEventNames` in `logger.hpp`; T_LOG_EVENT_CATALOG_STABILITY locks the set.
+- NEW (event-name catalog): **34** unique event names = 33 derived from the 40 converted emission sites (5 exporter usage-error sites share 1 event; 3 cli error sites share 1 event; 2 cpu_count_invalid sites share 1 event = 7 site-collapses; 40 − 7 = 33) PLUS 1 logger-internal self-emit (`logger.warn.unknown_log_format`, the Q4 R1 edge-case WARN for unknown env-var values — not in the 41 pre-existing fprintf sites, but emitted via logger::emit() therefore catalogued per the "if it goes through emit(), it's in kEventNames" contract). Catalogued as `constexpr std::array<std::string_view, kEventCount> kEventNames` in `logger.hpp`; T_LOG_EVENT_CATALOG_STABILITY locks the set.
 - EDITED (8 stderr-emission files): convert each `fprintf(stderr, "<prose>", args)` → `logger::emit(Level::<L>, "<event>", "<prose>", {Field{...},...})`. 40 sites converted; 1 site EXEMPT (`src/cli/bypass.cpp:96` interactive `BYPASS will detach... [y/N]:` prompt — UI primitive, not a log event; stays as raw fprintf — see D-3.5-7).
 - EDITED (CMakeLists.txt): add `src/common/logger.cpp` to BOTH `xdpmf_internal` lib AND `xdpmf-exporter` binary target (Q6=B1); VERSION bump 0.7.0 → 0.8.0 (MINOR — new operator-facing env var + structured-logging surface).
 - EDITED (CHANGELOG.md): new `[0.8.0]` Keep-a-Changelog entry.
@@ -8607,7 +8607,7 @@ The slice CLOSES the carry-forward fence on JSON logs. It LIFTS nothing — stri
 
 - **HG-3.5-3 — bypass.activated event with HK-4 structural fields.** Confirmed. `src/cli/bypass.cpp:174` converts to `logger::emit(Level::Info, "bypass.activated", "<full original audit-line prose>", {Field{"uid", uid_int}, Field{"euid", euid_int}, Field{"sudo_user", sudo_user_or_none}, Field{"reason", escaped_reason}})`. In text mode, byte-equivalent to MVP-3.4.5 HK-4 line (PI-3.5-1). In JSON mode, structural fields appear in `fields:{}` for log-shipping query (operators query `jq '.event=="bypass.activated" and .fields.sudo_user=="alice"'`). NOTE: the `iface` is ALSO emitted as the top-level `iface` field (operator's `--iface` arg) — convenient for cross-event correlation by iface — AND duplicated in the prose `msg`. Slight redundancy is acceptable per HG-3.5-2's flat-envelope convenience rationale (`jq 'select(.iface=="veth_v0")'` works for ANY iface-scoped event without reaching into prose).
 
-- **HG-3.5-4 — architect catalogs all event names.** Confirmed. §5.32 Decisions sub-section "Event-name catalog (full)" below lists all 33 unique events with file:line cross-reference + Level + iface-scoped flag + fields keys. The catalog mirrors `kEventNames` in `logger.hpp`; T_LOG_EVENT_CATALOG_STABILITY asserts the set matches.
+- **HG-3.5-4 — architect catalogs all event names.** Confirmed. §5.32 Decisions sub-section "Event-name catalog (full)" below lists all 34 unique events (33 emission-site-derived + 1 logger self-emit; see §5.32 EDIT-1 below for the count correction audit-trail) with file:line cross-reference + Level + iface-scoped flag + fields keys. The catalog mirrors `kEventNames` in `logger.hpp`; T_LOG_EVENT_CATALOG_STABILITY asserts the set matches.
 
 #### §5.32 Q-decisions (mechanism)
 
@@ -8659,7 +8659,7 @@ Confirmed. `src/common/logger.cpp` added to BOTH `xdpmf_internal` (existing stat
 | `tests/T_LOG_JSON_EXPORTER_EVENTS.sh` | §6.55: exporter startup + listening + HK-16 WARN (missing bpffs root) + HK-17 ERROR (all-iface EACCES); jq-validate; assert event names | bash | 130 |
 | `tests/T_LOG_JSON_BYPASS_AUDIT.sh` | §6.56: bypass under `XDPMF_LOG_FORMAT=json`; assert `bypass.activated` event with HK-4 structural fields in `fields:{}` (uid/euid/sudo_user/reason); negation = text mode preserves audit line byte-equivalent | bash | 100 |
 | `tests/T_LOG_JSON_ENVELOPE_INVARIANTS.sh` | §6.57: across ALL events emitted in a sweep run, assert envelope invariants (required fields always present; iface null-or-string; fields always object; level ∈ {info,warn,error}) | bash | 90 |
-| `tests/T_LOG_EVENT_CATALOG_STABILITY.sh` | §6.58: assert `kEventNames` catalog has exactly the expected 33 entries (locked set); micro-test prevents silent event rename across cycles | bash | 60 |
+| `tests/T_LOG_EVENT_CATALOG_STABILITY.sh` | §6.58: assert `kEventNames` catalog has exactly the expected 34 entries (locked set per §5.32 EDIT-1); micro-test prevents silent event rename across cycles | bash | 60 |
 
 Total NEW source LOC est: ~300 (logger.hpp + logger.cpp). Total NEW test LOC est: ~620.
 
@@ -8676,8 +8676,9 @@ Total NEW source LOC est: ~300 (logger.hpp + logger.cpp). Total NEW test LOC est
 | `src/exporter/stats_reader.cpp` | 3 stderr sites (lines 119, 157, 194) → `logger::emit(...)`. Line 119 is HK-16 WARN — `exporter.warn.bpffs_root_missing`. |
 | `src/exporter/rule_counters_reader.cpp` | 2 stderr sites (lines 116, 137) → `logger::emit(...)`. Line 116 shares event `exporter.warn.cpu_count_invalid` with stats_reader:157 (same prose, same context). |
 | `CMakeLists.txt` | (a) VERSION bump `0.7.0 → 0.8.0` (MINOR — new operator-facing env var + structured-logging surface; HG-3.5 family). (b) Add `src/common/logger.cpp` to `xdpmf_internal` target source list. (c) Add `src/common/logger.cpp` to `xdpmf-exporter` target source list (Q6=B1 dup-TU). (d) NO new compile flags, NO new external deps. |
-| `CHANGELOG.md` | NEW `## [0.8.0] - 2026-05-NN` section (Keep-a-Changelog). **Added** — structured-logging surface via `XDPMF_LOG_FORMAT={text,json}` env var; `src/common/logger.{cpp,hpp}` module; 33-event catalog; 6 new ctests. **Changed** — 40 stderr emission sites converted to `logger::emit` (text-mode byte-equivalent per PI-3.5-1; JSON-mode wraps per HG-3.5-2 envelope). Build-pace table gains an MVP-3.5 row. |
+| `CHANGELOG.md` | NEW `## [0.8.0] - 2026-05-NN` section (Keep-a-Changelog). **Added** — structured-logging surface via `XDPMF_LOG_FORMAT={text,json}` env var; `src/common/logger.{cpp,hpp}` module; 34-event catalog (33 emission-site + 1 logger self-emit); 6 new ctests. **Changed** — 40 stderr emission sites converted to `logger::emit` (text-mode byte-equivalent per PI-3.5-1; JSON-mode wraps per HG-3.5-2 envelope). Build-pace table gains an MVP-3.5 row. |
 | `tests/CMakeLists.txt` | 6 new `add_test(...)` entries (§6.53..§6.58). T_LOG_TEXT_BYTE_EQUIVALENT + T_LOG_JSON_LOADER_EVENTS + T_LOG_JSON_BYPASS_AUDIT require `xdp_fixture` RESOURCE_LOCK (touch veth). T_LOG_JSON_EXPORTER_EVENTS requires `xdp_fixture` + `exporter_port_9417`. T_LOG_JSON_ENVELOPE_INVARIANTS shares `xdp_fixture`. T_LOG_EVENT_CATALOG_STABILITY needs neither lock (binary-grep / nm-style check). ZERO modification of 52 existing `add_test` entries. |
+| `tests/T_EXPORTER_METRICS_FORMAT.sh` | **§5.32 EDIT-2 — HK-8/PI-8-3.5-forced version-literal bump** (mirrors MVP-3.4b cycle 1's same-file EDIT precedent — PI-3.4b-9 catalog). Pre-§5.32 hardcoded `xdpmf-exporter 0.7.0` at 4 sites (line 21 + line 22 comment block; line 100 `[[ "${ver}" != "xdpmf-exporter 0.7.0" ]]` assertion; line 101 FAIL-message literal). Post-§5.32: all 4 sites bumped to `xdpmf-exporter 0.8.0`. NO test logic change; the assertion is the literal-bump's natural verification surface (PI-8-3.5 contract). Body diff = 4 LOC EDIT (version-literal swaps only). |
 
 ##### UNCHANGED-BUT-AFFECTED (zero git-diff fence; behaviour must hold)
 
@@ -8693,7 +8694,7 @@ Total NEW source LOC est: ~300 (logger.hpp + logger.cpp). Total NEW test LOC est
 | `systemd/xdpmacfilter@.service`, `systemd/xdpmf-exporter.service` | UNCHANGED. Default systemd capture of stderr → journald applies in BOTH modes; in JSON mode operators add `--output=json-pretty` to their `journalctl` or hook a JSON shipper. Optional future env-var injection (`Environment=XDPMF_LOG_FORMAT=json`) is documented in CHANGELOG but NOT shipped by default this slice (operators opt-in). |
 | `ansible/xdpmacfilter-deploy.yml`, `ansible/templates/xdpfilter-config.yaml.j2` | UNCHANGED. No Ansible touch (operators add `XDPMF_LOG_FORMAT=json` to their environment template if desired; not baked in). |
 | `docs/FLEET_DEPLOYMENT.md` | UNCHANGED this slice. Future docs pass (separate user-driven scope) MAY add a "structured-logging" section + per-event jq examples. |
-| All 52 pre-§5.32 ctest BODIES | **UNCHANGED — load-bearing PI-3.5-1**. `git diff main -- tests/T_*.sh` shows ZERO modified files (only 6 NEW files). Any ctest body diff = `[INVARIANT-VIOLATED]`. The 12 ctests known to grep stderr text (catalogued in §6.5 PI-3.5-1 invariant block below) pass byte-equivalent without modification under default `XDPMF_LOG_FORMAT=text`. |
+| 51 of 52 pre-§5.32 ctest BODIES | **UNCHANGED — load-bearing PI-3.5-1**. `git diff main -- tests/T_*.sh` shows **1 modified file** (T_EXPORTER_METRICS_FORMAT.sh — 4-LOC version-literal bump per §5.32 EDIT-2 + PI-6-3.5 1-EDIT carve-out) PLUS 6 NEW files. Any OTHER ctest body diff = `[INVARIANT-VIOLATED]`. The 13 ctests known to grep stderr text (catalogued in §6.5 PI-3.5-1 invariant block below) pass byte-equivalent without modification under default `XDPMF_LOG_FORMAT=text`. The 1 EDITed ctest is stdout-bound (version literal), OUTSIDE the PI-3.5-1 stderr-side guarantee. |
 | `tests/lib/common.sh`, `tests/lib/read_stats.py`, `tests/lib/pins.sh.in`, `tests/lib/read_rule_counters.py` | UNCHANGED. Logger is userspace-only; no test helper change. |
 | `tests/fixtures/*` | UNCHANGED. The 6 NEW ctests reuse existing fixtures (config_default.yaml, config_per_rule_counters.yaml, xdp_pass.bpf.o, mac_filter_alt.bpf.o) or construct inputs inline; NO new fixture file. |
 | §5.4 / §5.19 / §5.22 / §5.24 / §5.26 / §5.27 / §5.29 / §5.30 / §5.31 trust+identity gates | UNCHANGED. Logger sits ABOVE the gates (gates raise exceptions OR call `logger::emit` directly); gate codepaths byte-equivalent. PI-1..PI-5 all pass. |
@@ -8760,8 +8761,8 @@ In `src/common/logger.hpp`:
 ```
 namespace xdpmf::logger {
 
-inline constexpr std::array<std::string_view, 33> kEventNames = {
-    /* loader (xdpmacfilter) — 17 events */
+inline constexpr std::array<std::string_view, 34> kEventNames = {
+    /* loader (xdpmacfilter) — 19 events */
     "cli.usage_error",                       /* src/cli/main.cpp:100 */
     "cli.usage_text",                        /* src/cli/main.cpp:101 (multi-line usage dump) */
     "cli.error",                             /* src/cli/main.cpp:136, 142, 146 (generic LoaderError + system_error + std::exception) */
@@ -8782,7 +8783,7 @@ inline constexpr std::array<std::string_view, 33> kEventNames = {
     "sidecar.warn.write_failed",             /* src/lib/sidecar.cpp:305 */
     "sidecar.warn.write_exception",          /* src/lib/sidecar.cpp:312 */
 
-    /* exporter (xdpmf-exporter) — 14 events */
+    /* exporter (xdpmf-exporter) — 15 events */
     "exporter.usage_error",                  /* src/exporter/main.cpp:91, 100, 110, 143, 154 (5 sites share) */
     "exporter.fatal",                        /* src/exporter/main.cpp:176 */
     "exporter.error.all_ifaces_eacces",      /* src/exporter/main.cpp:187 — HK-17 */
@@ -8800,14 +8801,14 @@ inline constexpr std::array<std::string_view, 33> kEventNames = {
     "exporter.scrape.warn.rule_counters_open_failed", /* src/exporter/rule_counters_reader.cpp:137 */
 };
 
-inline constexpr std::size_t kEventCount = kEventNames.size();   // = 33
+inline constexpr std::size_t kEventCount = kEventNames.size();   // = 34
 
 }  // namespace xdpmf::logger
 ```
 
-**Coverage**: 41 emission sites − 1 EXEMPT (`src/cli/bypass.cpp:96` interactive prompt, D-3.5-7) = 40 converted sites. Event-name count = 33 unique (5 exporter usage-error sites share 1 event; 3 cli error sites share 1 event; 2 cpu_count_invalid sites share 1 event = 7 site-collapses). 40 − 7 = 33 unique events. ✓
+**Coverage**: 41 emission sites − 1 EXEMPT (`src/cli/bypass.cpp:96` interactive prompt, D-3.5-7) = 40 converted sites. Emission-site-derived event count = 33 unique (5 exporter usage-error sites share 1 event; 3 cli error sites share 1 event; 2 cpu_count_invalid sites share 1 event = 7 site-collapses; 40 − 7 = 33). PLUS 1 logger-internal self-emit `logger.warn.unknown_log_format` (Q4 R1 edge-case WARN for unknown env-var values — NOT in the 41 pre-existing fprintf sites, but emitted via `logger::emit()` and therefore catalogued per the "if it goes through emit(), it's in kEventNames" invariant). **Total catalogue size = 34**. ✓ (See §5.32 EDIT-1 below for the correction audit-trail — initial publish prose said 33; impl + tester Phase-B-DM'd the inconsistency on 2026-05-25, architect resolved via Option A: bump count to 34, keep self-emit catalogued.)
 
-T_LOG_EVENT_CATALOG_STABILITY asserts `kEventCount == 33` AND each expected literal is present (set equality). Adding a new event in a future cycle = one-line addition to `kEventNames` + bump the array size + update test expectation.
+T_LOG_EVENT_CATALOG_STABILITY asserts `kEventCount == 34` AND each expected literal is present (set equality). Adding a new event in a future cycle = one-line addition to `kEventNames` + bump the array size + update test expectation.
 
 ##### Env-var constant
 
@@ -9115,7 +9116,7 @@ Second negation: bypass via `--reason` containing characters needing JSON-escape
 - Parse as a single JSON object (`jq -e '.' < line`).
 - Have ALL required fields present: `ts`, `level`, `event`, `msg`, `fields`, `iface`.
 - `level` ∈ {`"info"`, `"warn"`, `"error"`} (exact string match).
-- `event` ∈ kEventNames catalog (33 valid values — fetch list at test-time from a compile-time-baked C-string array in a tiny test-only helper, OR hard-coded in the test as a `KNOWN_EVENTS` bash array of 33 strings).
+- `event` ∈ kEventNames catalog (34 valid values per §5.32 EDIT-1 — fetch list at test-time from a compile-time-baked C-string array in a tiny test-only helper, OR hard-coded in the test as a `KNOWN_EVENTS` bash array of 34 strings).
 - `iface` is either a JSON string OR JSON null (NOT absent, NOT object/array/bool).
 - `fields` is a JSON object (possibly empty `{}`; NOT absent, NOT array/scalar).
 - `ts` matches ERE `^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$`.
@@ -9136,14 +9137,14 @@ Second negation: bypass via `--reason` containing characters needing JSON-escape
 ##### §6.58 T_LOG_EVENT_CATALOG_STABILITY — kEventNames set equality
 
 **Trigger**: build the binary; introspect `src/common/logger.hpp` for `kEventNames`. Two mechanisms (impl + tester pick):
-- **Mechanism A (simpler — compile-time-baked test helper)**: tester writes a small C++ helper test binary that links logger.cpp + dumps `kEventNames` to stdout (one event-name per line); ctest compares against `tests/fixtures/log_events_v1.txt` (committed reference of 33 names).
-- **Mechanism B (grep-only — no new test binary)**: tester `grep -E '^\s*"[a-z_.]+",\s*/\*' src/common/logger.hpp | sed -E 's/^\s*"([^"]+)".*/\1/'` extracts the 33 names; sort + cmp against committed reference.
+- **Mechanism A (simpler — compile-time-baked test helper)**: tester writes a small C++ helper test binary that links logger.cpp + dumps `kEventNames` to stdout (one event-name per line); ctest compares against `tests/fixtures/log_events_v1.txt` (committed reference of 34 names per §5.32 EDIT-1).
+- **Mechanism B (grep-only — no new test binary)**: tester `grep -E '^\s*"[a-z_.]+",\s*/\*' src/common/logger.hpp | sed -E 's/^\s*"([^"]+)".*/\1/'` extracts the 34 names; sort + cmp against committed reference.
 
 Tester picks. Mechanism B is simpler (no test-only TU); architect recommends Mechanism B + the committed reference file.
 
 **Observable outcome**:
 - Extracted list of event names from `kEventNames` source matches `tests/fixtures/log_events_v1.txt` exactly (sorted comparison, byte-equivalent).
-- Count is exactly 33.
+- Count is exactly 34 (per §5.32 EDIT-1).
 
 **Negation control**: temporarily inject an extra event-name into the source (or remove one) via `sed` on a copy; re-run extractor; assert MISMATCH. Confirms the comparator isn't a no-op. (This sub-case need NOT modify the real source — operate on a copy.)
 
@@ -9172,7 +9173,7 @@ Reviewer's 5th framework point walks the COMBINED list (PI-1..PI-34 + PI-3.4b-* 
 | # | Invariant | §5.32 check mechanism |
 |---|---|---|
 | PI-1..PI-5 | Trust+identity gates ENFORCED in both modes | Re-run §6.9 / §6.14 / §6.15 / §6.20 / §6.26 sub-cases; all pass (logger is orthogonal to gates; gates emit via logger but enforcement path byte-equivalent). |
-| **PI-6-3.5** | **52 pre-§5.32 ctests pass byte-equivalent OR legitimately SKIP-77 — STRICT SUPERSET with ZERO ctest-body-EDIT carve-out** (loader's text-mode emissions are byte-equivalent per PI-3.5-1; no existing ctest needs body update). | Re-run all 52 tests post-§5.32 → all pass (or SKIP-77); `git diff main -- tests/T_*.sh` shows ZERO modified files; 6 NEW files (§6.53..§6.58). All 52 pre-§5.32 ctest bodies byte-equivalent. PI-6-3.4b had 2-EDIT carve-out (T_RULES_SKELETON_NOT_WIRED + T_EXPORTER_METRICS_FORMAT); PI-6-3.5 has ZERO carve-out (text-mode byte-equivalence eliminates the need for any test-body change). Reviewer asserts the empty-diff statement explicitly. |
+| **PI-6-3.5** | **52 pre-§5.32 ctests pass byte-equivalent OR legitimately SKIP-77 — STRICT SUPERSET with explicit 1-EDIT ctest-body-EDIT carve-out per §5.32 EDIT-2** (T_EXPORTER_METRICS_FORMAT version-literal bump 0.7.0 → 0.8.0; HK-8/PI-8-3.5 forced — see §5.32 EDIT-2 audit-trail below; was "ZERO carve-out" at initial publish, bumped to 1-EDIT post-§5.32 EDIT-2 Phase B adjudication). Loader's text-mode stderr emissions are byte-equivalent per PI-3.5-1 (the 13 stderr-grep ctests under PI-3.5-1 still pass without body modification); the version literal is in stdout (`--version`), OUTSIDE the byte-equivalence guarantee. | Re-run all 52 tests post-§5.32 → all pass (or SKIP-77); `git diff main -- tests/T_*.sh` shows **1 modified file** (T_EXPORTER_METRICS_FORMAT.sh — 4-LOC version-literal bump at lines 21, 22, 100, 101) PLUS 6 NEW files (§6.53..§6.58). 51 of 52 pre-§5.32 ctest bodies byte-equivalent. PI-6-3.4b had 2-EDIT carve-out (T_RULES_SKELETON_NOT_WIRED + T_EXPORTER_METRICS_FORMAT); PI-6-3.5 has 1-EDIT carve-out (narrower — only the version-literal). Reviewer asserts the scoped-EDIT statement explicitly. |
 | **PI-7-3.5-hpp** | **`loader.hpp` ZERO diff — 7TH consecutive slice** (MVP-3.1 +1; MVP-3.2/3.3/3.4/3.4.5/3.4b/3.5 = 0). ALSO: `src/lib/config.hpp` ZERO diff this slice (2nd cycle). | `git diff main -- src/lib/loader.hpp src/lib/config.hpp` shows ZERO output. Any diff = `[INVARIANT-VIOLATED]`. Logger module owns its own header (`src/common/logger.hpp`); the new public symbols (Level, Format, Field, emit, kEventNames) all live there, NOT in loader.hpp. |
 | PI-8-3.5 | `xdpmacfilter --version` reports `xdpmacfilter 0.8.0` AND `xdpmf-exporter --version` reports `xdpmf-exporter 0.8.0` (shared `version.h` per §5.25 P3) | Run both `--version`; both single-line outputs `0.8.0` + newline. MINOR bump from 0.7.0 (operator-facing feature: structured-logging env var). |
 | PI-9 | `--help` / `--version` output FORMAT preserved + optional one-line addition mentioning `XDPMF_LOG_FORMAT={text,json}` in the env-var block | §6.10 T_CLI_HELP_VERSION re-run passes (forward-compatible ERE). The mention IS optional per architect-spec — impl-flexible. Recommended: ADD `XDPMF_LOG_FORMAT` row to the Environment-variables block in BOTH `cli.cpp::usage_text()` AND `exporter/main.cpp::print_usage()` per HK-6 idiom. |
@@ -9198,7 +9199,7 @@ Reviewer's 5th framework point walks the COMBINED list (PI-1..PI-34 + PI-3.4b-* 
 | **PI-3.5-1** | **TEXT-MODE BYTE-EQUIVALENCE — load-bearing MUST.** Every emission site in TEXT mode (default, OR explicit `XDPMF_LOG_FORMAT=text`, OR `XDPMF_LOG_FORMAT=""`) writes byte-identical output to the pre-§5.32 emission. No `[level]` prefix added. No prose modification. No reordering. The 52-ctest baseline (specifically the 12 ctests that grep stderr text — see catalog below) passes WITHOUT modification. | T_LOG_TEXT_BYTE_EQUIVALENT (§6.53 — load-bearing canary): 3-way byte-equivalence across env conditions + byte-equivalence against committed reference. THE 12 stderr-grep ctests pass post-§5.32 byte-equivalent: T_APPLY_VALID_CONFIG (line 64), T_TRUST_MODEL_FLEET_RELAXES_GATE (lines 90, 118, 146, 185), T_APPLY_REJECTS_MALFORMED (line 110), T_APPLY_EXITS_1_ON_MISSING_CONFIG (line 65), T_EXIT_CODE_9_ON_CONFIG_ERROR (line 62), T_LINK_PERSIST_ACROSS_LOADER_EXIT (line 79), T_SYSTEMD_LIFECYCLE (line 240), T_FLEET_DOCS_SUBSTRING (line 66 — docs only, not stderr but cross-PI documentation), T_BYPASS_CMD_DETACHES (lines 86 + 134), T_BYPASS_INTERACTIVE_PROMPT (lines 309, 348, 391), T_RULES_SKELETON_NOT_WIRED (line 92), T_EXPORTER_NO_ATTACHED_IFACE (line 187), T_EXPORTER_EXITS_6_ALL_IFACES_EACCES (line 275). Total = 13 ctests with byte-equivalence dependency on text-mode emissions; all pass without modification. |
 | **PI-3.5-2** | **JSON-MODE ENVELOPE STABILITY** — every emission under `XDPMF_LOG_FORMAT=json` is a single-line JSON object with fixed-field shape `{ts, level, event, iface, msg, fields}`. `ts` is ISO-8601 UTC second-precision. `level` ∈ {info, warn, error}. `event` is from `kEventNames`. `iface` is string-or-null. `msg` is JSON-escaped string. `fields` is object (possibly `{}`). | T_LOG_JSON_ENVELOPE_INVARIANTS (§6.57): per-line `jq -e` validation across the full sweep. T_LOG_JSON_LOADER_EVENTS (§6.54) + T_LOG_JSON_EXPORTER_EVENTS (§6.55) + T_LOG_JSON_BYPASS_AUDIT (§6.56) lock specific event shapes. |
 | **PI-3.5-3** | **`XDPMF_LOG_FORMAT` ENV VAR CONTRACT** — read once at first emit (lazy init under once_flag); cached for process lifetime; unset/empty/`text` → Text; `json` → Json; any other value → WARN + Text fallback. Documented in both binaries' `--help` env-var block. | T_LOG_TEXT_BYTE_EQUIVALENT (§6.53) covers unset/empty/text 3-way equivalence (R1 + edge cases). T_LOG_JSON_LOADER_EVENTS (§6.54) negation control covers JSON vs Text distinguishability. `xdpmacfilter --help` AND `xdpmf-exporter --help` outputs contain `XDPMF_LOG_FORMAT` token under Environment variables block — verified via T_CLI_HELP_VERSION (recommended ERE forward-compat extension; not a hard fail if absent — see PI-9). |
-| **PI-3.5-4** | **EVENT-NAME CATALOG STABILITY** — `kEventNames` constexpr array contains exactly 33 entries; each entry is a dot-delimited lowercase snake_case identifier; adding/removing an entry requires explicit table extension (grep-visible in diff). | T_LOG_EVENT_CATALOG_STABILITY (§6.58): sort + cmp against committed reference `tests/fixtures/log_events_v1.txt`. Any drift = `[INVARIANT-VIOLATED]`. |
+| **PI-3.5-4** | **EVENT-NAME CATALOG STABILITY** — `kEventNames` constexpr array contains exactly **34** entries (33 emission-site-derived + 1 logger self-emit `logger.warn.unknown_log_format`; see §5.32 EDIT-1 for count-correction audit-trail); each entry is a dot-delimited lowercase snake_case identifier; adding/removing an entry requires explicit table extension (grep-visible in diff). | T_LOG_EVENT_CATALOG_STABILITY (§6.58): sort + cmp against committed reference `tests/fixtures/log_events_v1.txt`. Any drift = `[INVARIANT-VIOLATED]`. |
 | **PI-3.5-5** | **HK-4 STRUCTURAL FIELDS IN JSON `bypass.activated.fields:{}`** — uid (int), euid (int), sudo_user (string-or-`<none>`), reason (string, JSON-escaped) all present + correct type. Text-mode byte-equivalent to HK-4 audit line per PI-3.5-1. | T_LOG_JSON_BYPASS_AUDIT (§6.56): jq assertions on each fields entry + text-mode negation cross-check via existing HK-4 regex from T_BYPASS_INTERACTIVE_PROMPT.sh line 309 pattern. |
 | **PI-3.5-6** | **ONE EMISSION SITE EXEMPT** — `src/cli/bypass.cpp:96` (interactive prompt) stays as raw `fprintf(stderr, ...)` per D-3.5-7. NOT converted. NO logger include in that single emission. JSON-mode operators using bypass interactively see one non-JSON line (the prompt); document as known wart. | `grep -nE 'fprintf\(stderr.*BYPASS will detach' src/cli/bypass.cpp` returns line 96; `grep -nE 'logger::emit.*bypass\.prompt' src/cli/bypass.cpp` returns ZERO. Documented in CHANGELOG. |
 | **PI-3.5-7** | **NO NEW EXTERNAL BUILD DEP** — logger.cpp uses only stdlib (`<cstdio>`, `<ctime>`, `<string>`, `<string_view>`, `<variant>`, `<span>`, `<optional>`, `<array>`, `<mutex>`, `<cstdlib>` for getenv). NO `nlohmann/json`, NO `fmt`, NO `spdlog`, NO any logger library. Roll-your-own JSON envelope per D-3.4b-10 precedent extended. | `grep -E '^#include' src/common/logger.{cpp,hpp}` returns ONLY stdlib headers (`<...>`). `find_package` / `target_link_libraries` for logger TU adds NO new library link. CMake diff shows only `target_sources` additions. |
@@ -9216,20 +9217,20 @@ In addition to PI-1..PI-34 + PI-3.4b-* + PI-3.5-* above:
 - `git diff main -- src/lib/loader.hpp src/lib/config.hpp` SHOULD show ZERO output (PI-7-3.5-hpp — 7th consecutive cycle on loader.hpp + 2nd on config.hpp).
 - `git diff main -- src/common/mac_filter.h` SHOULD show ZERO output (PI-10 stricter-than-additive this slice).
 - `git diff main -- src/bpf/mac_filter.bpf.c` SHOULD show ZERO output (PI-28-3.4b continues — userspace-only slice).
-- `git diff main -- tests/T_*.sh` SHOULD show: 6 NEW files (§6.53..§6.58) AND ZERO modified files (PI-6-3.5 strict superset with ZERO carve-out).
+- `git diff main -- tests/T_*.sh` SHOULD show: 6 NEW files (§6.53..§6.58) AND 1 modified file (T_EXPORTER_METRICS_FORMAT.sh — 4 LOC version-literal bump per §5.32 EDIT-2 / PI-6-3.5 1-EDIT carve-out).
 - `git diff main -- tests/CMakeLists.txt` SHOULD show 6 new `add_test` entries; ZERO modification to the 52 existing entries.
 - `git diff main -- tests/fixtures/` SHOULD show: 2 NEW files (`log_text_reference.txt` for §6.53 + `log_events_v1.txt` for §6.58); ZERO modification of existing fixtures.
 - `git diff main -- CMakeLists.txt` SHOULD show: VERSION bump 0.7.0 → 0.8.0; 2 lines added (logger.cpp added to xdpmf_internal AND xdpmf-exporter target_sources).
 - `git diff main -- CHANGELOG.md` SHOULD show NEW `[0.8.0]` entry + Build-pace MVP-3.5 row.
 - NEW files SHOULD exist: `src/common/logger.{cpp,hpp}`, 6 `tests/T_LOG_*.sh`, 2 `tests/fixtures/log_*.txt`.
 - 6 new ctests SHOULD pass (§6.53..§6.58); §6.53 (T_LOG_TEXT_BYTE_EQUIVALENT) is THE load-bearing canary.
-- 52 pre-§5.32 ctests SHOULD still pass byte-equivalent (or legitimately SKIP-77). The 13 stderr-grep ctests catalogued under PI-3.5-1 SHOULD pass byte-equivalent specifically without ctest-body modification.
+- 51 of 52 pre-§5.32 ctests SHOULD pass byte-equivalent (or legitimately SKIP-77); 1 (T_EXPORTER_METRICS_FORMAT.sh) SHOULD pass with the 4-LOC version-literal bump per §5.32 EDIT-2. The 13 stderr-grep ctests catalogued under PI-3.5-1 SHOULD pass byte-equivalent specifically without ctest-body modification (stderr-side; T_EXPORTER_METRICS_FORMAT's EDIT is stdout-bound, OUTSIDE PI-3.5-1's stderr-equivalence guarantee).
 - `xdpmacfilter --version` SHOULD report `xdpmacfilter 0.8.0` AND `xdpmf-exporter --version` SHOULD report `xdpmf-exporter 0.8.0` (PI-8-3.5).
 - `XDPMF_SANITIZERS=ON` build SHOULD be clean for BOTH binaries (no UB / no leaks from new logger code; the `std::once_flag` + `std::variant` + `std::optional` usage is standard).
 - `XDPMF_LOG_FORMAT=text xdpmacfilter --version` AND `XDPMF_LOG_FORMAT=json xdpmacfilter --version` AND unset-env-var `xdpmacfilter --version` SHOULD all produce IDENTICAL stdout `xdpmacfilter 0.8.0` (logger doesn't intercept stdout; --version goes to stdout per existing semantic).
 - `grep -nE 'fprintf\(stderr.*BYPASS will detach' src/cli/bypass.cpp` SHOULD return line 96 (PI-3.5-6 — the EXEMPT site stays raw).
 - `grep -c 'logger::emit' src/` SHOULD return ≥40 (40 converted emission sites; impl may collapse some into helper functions).
-- `kEventNames` constexpr array SHOULD have exactly 33 entries (PI-3.5-4).
+- `kEventNames` constexpr array SHOULD have exactly 34 entries (PI-3.5-4 per §5.32 EDIT-1).
 - Helper duplication SHOULD show: `grep -c 'json_escape' src/lib/sidecar.cpp` == 1 (the existing) + `grep -c 'json_escape' src/common/logger.cpp` == 1 (the new duplicate) — D-3.5-2 contract. (Both call-sites bear the same semantic, byte-equivalent escaping.)
 - Optional: a tiny integration sanity-check: `XDPMF_LOG_FORMAT=json xdpmacfilter attach --iface ${IFACE_A} 2>&1 | head -1 | jq -e '.event == "loader.trust_model"'` SHOULD return success on a kernel that supports BPF.
 
@@ -9239,12 +9240,12 @@ In addition to PI-1..PI-34 + PI-3.4b-* + PI-3.5-* above:
 
 The following item was deferred at §5.30 §7 OOS (carry-forward through 5 cycles 3.4.5 / 3.4b / 3.4c-name / MVP-3.4b cycle 1 / informal pending) and is now CLOSED by this slice:
 
-- ~~**JSON structured logs (MVP-3.5)**~~ **— SHIPPED in §5.32** as `XDPMF_LOG_FORMAT={text,json}` env var + `src/common/logger.{cpp,hpp}` module + 33-event catalog + 6 ctests + 40 emission-site conversions (1 exempt: bypass.cpp:96 interactive prompt). NDJSON envelope per HG-3.5-2; ISO-8601 sec-precision timestamps per Q2 T1; dot-delimited event names per Q3 E1; read-once env-var per Q4 R1; flat-scalars-only fields per Q5 F1; dup-TU compile per Q6 B1.
+- ~~**JSON structured logs (MVP-3.5)**~~ **— SHIPPED in §5.32** as `XDPMF_LOG_FORMAT={text,json}` env var + `src/common/logger.{cpp,hpp}` module + 34-event catalog (33 emission-site-derived + 1 logger self-emit per §5.32 EDIT-1) + 6 ctests + 40 emission-site conversions (1 exempt: bypass.cpp:96 interactive prompt). NDJSON envelope per HG-3.5-2; ISO-8601 sec-precision timestamps per Q2 T1; dot-delimited event names per Q3 E1; read-once env-var per Q4 R1; flat-scalars-only fields per Q5 F1; dup-TU compile per Q6 B1.
 
 ##### Additional MVP-3.5 deliverables (surfaced in this slice)
 
 - **Phase A grep dividend**: 41 emission sites confirmed → 40 converted + 1 EXEMPT (bypass.cpp:96 interactive prompt). Brief's "8 files" enumeration corrected during Phase A: `src/cli/apply.cpp` listed in brief but has ZERO emissions (was a false-positive in brief author's count). Actual 8 files: `src/cli/{main,bypass}.cpp`, `src/lib/{loader,sidecar}.cpp`, `src/exporter/{main,http,stats_reader,rule_counters_reader}.cpp`. Documented in §5.32 FileList prose + D-3.5-7 exempt rationale.
-- **PI-6-3.5 ZERO carve-out** — first multi-source-touch slice since MVP-3.4b cycle 1 with literally ZERO ctest body modifications. Achievable because PI-3.5-1 text-mode byte-equivalence is a strict MUST + the 52 existing ctests are all forward-compatible.
+- **PI-6-3.5 1-EDIT carve-out** (per §5.32 EDIT-2) — narrower than MVP-3.4b cycle 1's 2-EDIT carve-out. The 1 EDIT is T_EXPORTER_METRICS_FORMAT version-literal bump (HK-8/PI-8-3.5-forced; OUTSIDE PI-3.5-1's stderr-equivalence guarantee since the version literal is in stdout). Was "ZERO carve-out" at initial publish; corrected post-§5.32 EDIT-2 Phase B adjudication (impl peer-DM caught the gap via [[impl-role-discipline]] mechanism). All 13 stderr-grep ctests remain byte-equivalent without modification — PI-3.5-1 stderr-side guarantee holds end-to-end.
 - **PI-7-3.5-hpp 7th-cycle ZERO-diff on loader.hpp + 2nd on config.hpp** — extends the streak. Logger module owns its own header per D-3.5-1.
 - **13-stderr-grep ctests catalogued under PI-3.5-1** — explicit list of which existing ctests gate the load-bearing PI. Reviewer's framework point 5 walks this list specifically.
 
@@ -9304,3 +9305,82 @@ This slice carries forward all anti-misdiagnosis guards from prior cycles + adds
 6. **Helper-location decision trap (NEW guard #9, MVP-3.5-specific)** — when a NEW source file (logger.cpp) needs the same helper functions as an EXISTING source file (sidecar.cpp), the temptation is to "DRY it up" by extracting to a new shared header. This pulls the existing source file into the slice's edit surface (sidecar.cpp's helper-section becomes "EDITED"), invalidating regional-diff fences. **Future-cycle architect anti-misdiagnosis rule**: prefer duplication of small (<100 LOC) helpers vs extraction-into-shared-module in brownfield slices. The cost of duplication is small + intentional + scope-contained; the cost of premature abstraction is a touchpoint on existing stable files that destabilizes their per-cycle contracts. **Validated by §5.32 D-3.5-2**: ~50 LOC of `json_escape` + `format_timestamp_utc` duplicated in logger.cpp vs extracted to src/common/json.{cpp,hpp}; the latter would have added 2 new files + a touchpoint on sidecar.cpp + a tester EDIT on T_SIDECAR_JSON_SHAPE's assertion regex (potentially). Duplication keeps the §5.32 slice strictly additive — PI-6-3.5 ZERO carve-out.
 
 Evidence: `mint/task-brief.md` MVP-3.5 brief (HG-3.5-1/2/3/4 + Q1-Q6 + PI-3.5-1 framing); `mint/architecture-v2.md` §"§5.30 §7 OOS" carry-forward fence (5 cycles); §5.13 (project's no-logging-library historical decision — §5.32 re-reads as "no LIBRARY DEPENDENCY; in-tree logger is fine"); §5.26 D-3.4-3 (read-once env-var pattern); §5.29 (exporter stderr-line shapes — PI-32 startup WARN posture); §5.30 HK-4 (bypass audit-line structural fields), HK-16 (PI-32 startup WARN exact format), HK-17 (exit-6 ERROR exact format), HK-8 (version bump pattern); §5.31 D-3.4b-10 (roll-your-own JSON writer, zero-deps), D-3.4b-14 (line-oriented format precedent), D-3.4b-17 (non-fatal sidecar write failures); project memory [[impl-role-discipline]] (Phase B escalation discipline); [[mint-hld-scope-discipline]] (single-architect cycle, no /mint-hld); architect-spec Phase A code-grep discipline (30-minute grep pass — emission catalog + helper-location decision + interactive-vs-log classification).
+
+#### §5.32 EDIT-1 — Phase B catalog-count correction: 33 → 34 (2026-05-25, dialog with mint-dev-impl + mint-dev-tester)
+
+**Trigger**: Phase B near-simultaneous peer-DMs from mint-dev-impl AND mint-dev-tester both flagging the same internal inconsistency in the §5.32 catalog block.
+
+**Evidence (impl + tester both reported identical counts)**:
+- `kEventNames` literal block (the post-EDIT-1 line range of §5.32 DataStructures) lists **34 distinct entries** — walked by impl + tester independently with the same count.
+- Loader section comment originally claimed "17 events" but actual count = 19 (impl's enumeration: cli.usage_error, cli.usage_text, cli.error, config.error, loader.trust_model, loader.warn.rules_skeleton_not_wired, loader.attach.fleet_replace, loader.attach.replace, **logger.warn.unknown_log_format**, bypass.usage_error, bypass.refused.requires_unsafe, bypass.cancelled, bypass.activated, sidecar.warn.{root_symlink,root_not_dir,lstat_failed,mkdir_failed,write_failed,write_exception}).
+- Exporter section comment originally claimed "14 events" but actual count = 15 (exporter.{usage_error, fatal, error.all_ifaces_eacces, bind.{invalid_addr,socket_failed,failed,listen_failed}, listening, accept.{poll_failed,failed}, shutdown, warn.bpffs_root_missing, warn.cpu_count_invalid, scrape.warn.stats_open_failed, scrape.warn.rule_counters_open_failed}).
+- Declared array size `std::array<std::string_view, 33>` + `kEventCount == 33` + PI-3.5-4 "exactly 33 entries" + coverage prose "40 sites − 7 collapses = 33 unique events" all consistently said 33. The mismatch: my prose count was correctly derived from emission-site analysis (40 − 7 = 33) but I added the `logger.warn.unknown_log_format` Q4 R1 edge-case self-emit to the catalogue per the "if it goes through emit(), it's catalogued" intent — without updating the count anywhere. Compile error would have surfaced as `excess elements in struct initializer` for the std::array (34 initializers vs declared size 33).
+
+**Root cause**: arithmetic slip at initial publish. The catalogue invariant (which I intended but didn't state explicitly until this EDIT) is: **"every event emitted via logger::emit() — including logger-internal self-emits — is in kEventNames"**. Under that invariant, the count = 33 emission-site-derived + 1 logger self-emit = 34. The Phase A code-grep discipline + my coverage prose locked the 33-count tightly (5 + 3 + 2 site-collapses = 7; 40 − 7 = 33 unique-from-sites) but didn't add the +1 for the self-emit catalogued by the same invariant.
+
+**Options considered (impl proposed both, recommended A)**:
+- **A (CHOSEN)** — bump all 33-references to 34; keep `logger.warn.unknown_log_format` catalogued. Cleaner contract: "if logger::emit fires for it, it's in kEventNames". Future-cycle drift prevention works for self-emits the same way as for emission-site events. Cost: ~10 inline number-bumps across §5.32 (DataStructures, FileList note, PI-3.5-4, §6.58, OOS shipped-block, etc.).
+- **B** — drop `logger.warn.unknown_log_format` from kEventNames, route the Q4 unknown-value WARN through a raw `fprintf(stderr,...)` in logger.cpp's init_format() instead. Keeps 33-count. Costs the catalogue invariant — special-case carve-out for one emission; future maintainers wouldn't know why this WARN bypasses logger::emit(). Worse design.
+
+**Disposition**: Option A. Updated:
+- `std::array<std::string_view, 33>` → `std::array<std::string_view, 34>` in DataStructures.
+- Comment "17 events" → "19 events" (loader section); "14 events" → "15 events" (exporter section).
+- `kEventCount` // = 33 → // = 34.
+- Coverage prose rewritten to call out the +1 self-emit explicitly + cite this EDIT-1.
+- `T_LOG_EVENT_CATALOG_STABILITY` assertion (§6.58): "33 entries" → "34 entries"; reference file `tests/fixtures/log_events_v1.txt` content expectation updated.
+- PI-3.5-4: "exactly 33 entries" → "exactly 34 entries (33 emission-site-derived + 1 logger self-emit; see §5.32 EDIT-1)".
+- §7 OOS shipped-block + FileList NEW-table row for T_LOG_EVENT_CATALOG_STABILITY + CHANGELOG.md row + verifiable-invariants reviewer-hint: all updated 33 → 34 with cross-reference to §5.32 EDIT-1.
+- §6.57 T_LOG_JSON_ENVELOPE_INVARIANTS: `KNOWN_EVENTS` bash array sized 33 → 34.
+
+**This is a counting correction, not a design change**. The invariant + catalogue intent + impl contract are UNCHANGED. The number was wrong; fixed. Team-lead notified at correction time (tactical; not human-gate-tier). Impl was actively waiting on the catalog header before shipping logger.hpp; this EDIT unblocks. Tester was actively waiting on the count before writing the reference file `log_events_v1.txt`; this EDIT unblocks.
+
+**Concrete catalog invariant** (post-EDIT-1, made explicit for future-cycle reviewers):
+
+> Every event emitted via `xdpmf::logger::emit()` — including logger-internal self-emits — appears in `kEventNames`. The set is closed: `emit()` callers MUST use an event-name from the catalogue; logger.cpp self-emits (e.g. `logger.warn.unknown_log_format` for Q4 R1 unknown env-var WARN) ALSO appear. No magic strings. T_LOG_EVENT_CATALOG_STABILITY locks the set equality.
+
+**PI-3.5-4 amended (post-EDIT-1)**: catalog count = 34 (33 emission-site-derived + 1 logger self-emit). Future-cycle additions (whether emission-site events OR logger self-emits) require a one-line `kEventNames` extension + array-size bump + test reference update. Same one-line workflow as adding a new emission site.
+
+**Anti-misdiagnosis note from §5.32 EDIT-1 (NEW guard #10)**:
+
+10. **Architect arithmetic slip on catalogue counts derived from multiple inputs** — when a catalogue's size is derived from two independent sources (e.g. emission-site count − collapses + self-emit count), the architect MUST cross-check the array literal count against the size declaration BEFORE publish. **Future-cycle rule**: after writing the catalogue literal block, manually count the entries (or `grep -c '^\s*"' <block>`) and assert against the declared size; assert against PI-* invariant count; assert against any prose count statements. Cost: ~60 seconds per published catalogue. Benefit: catches THIS class of arithmetic slip before Phase B impl/tester block on it. **Validated by §5.32 EDIT-1 (2026-05-25)**: impl + tester independently caught it within minutes of receiving the design; cost was ~10 inline number-bumps (small) but ate ~5-10min of impl + tester wall-clock waiting on the resolution. A 60-second self-grep during Phase A would have caught it pre-publish.
+
+**Notifications dispatched (§5.32 EDIT-1 closure)**:
+
+1. mint-dev-impl: SendMessage with Option A pick + line-range edits applied + concrete `std::array<std::string_view, 34>` literal + bumped PI-3.5-4 count. Impl unblocked on `logger.hpp` shipping.
+2. mint-dev-tester: SendMessage with Option A pick + 34-entry `log_events_v1.txt` reference content (sorted) + bumped `kEventCount == 34` assertion. Tester unblocked on §6.58 fixture writing.
+3. team-lead: tactical FYI (not human-gate-tier; counting correction within scope).
+
+#### §5.32 EDIT-2 — Phase B PI-6-3.5 carve-out correction: ZERO → 1-EDIT (T_EXPORTER_METRICS_FORMAT version-literal bump) (2026-05-25, dialog with mint-dev-impl)
+
+**Trigger**: Phase 2.5 ctest smoke run after impl shipped CMakeLists.txt VERSION 0.7.0 → 0.8.0 (per PI-8-3.5 contract). mint-dev-impl peer-DM'd architect: `tests/T_EXPORTER_METRICS_FORMAT.sh` hard-codes `xdpmf-exporter 0.7.0` at 4 sites (lines 21, 22 comment block; line 100 assertion; line 101 FAIL message); test fails post-VERSION-bump with `expected 'xdpmf-exporter 0.7.0', got 'xdpmf-exporter 0.8.0'`.
+
+**Architect Phase A grep verification (post-DM)**: `grep -nE '0\.7\.0' tests/` confirms 4 hit-sites in T_EXPORTER_METRICS_FORMAT.sh, zero elsewhere. Impl's count is correct.
+
+**Root cause** (architect gap at initial §5.32 publish): PI-6-3.5's "ZERO carve-out" claim was over-confident. The PI-3.5-1 stderr-side byte-equivalence guarantee genuinely eliminates the need for stderr-grep ctest updates (the 13 stderr-grep ctests under PI-3.5-1 pass byte-equivalent — verified by impl's Phase 2.5 run). BUT the version literal in T_EXPORTER_METRICS_FORMAT lives in **stdout** (`--version` invocation) — OUTSIDE the byte-equivalence guarantee. There's no logger between `--version` and stdout; the version bump propagates raw. Same class of touchpoint as MVP-3.4b cycle 1's HK-8-forced bump on this same test (T_EXPORTER_METRICS_FORMAT 0.6.1 → 0.7.0 in §5.31 PI-3.4b-9 catalog). I should have grep'd `tests/ -rl '0.7.0'` during Phase A and either pre-listed the EDIT in §5.32's EDITED FileList OR carved it out in PI-6-3.5. Did neither.
+
+**Options considered (impl proposed both, recommended A)**:
+- **A (CHOSEN)** — restate PI-6-3.5 with explicit 1-EDIT carve-out for T_EXPORTER_METRICS_FORMAT version-literal bump. Mirrors MVP-3.4b PI-6-3.4b 2-EDIT precedent (this slice's 1-EDIT is narrower — only the version literal; not the inner-value-shape comment rewrite of the MVP-3.4b case). Documents the carve-out in the invariants block; reviewer's framework-point 5 sees it explicitly.
+- **B** — treat as silent architect-spec adjudication; tester applies the mechanical fix; no PI-6 wording change. Cleaner narrative but relies on reader inferring "version literals don't count against PI-6". Less audit-trail-friendly.
+
+**Disposition**: Option A. Updated:
+- **PI-6-3.5 row** in §6.5 Preserved invariants: "ZERO ctest-body-EDIT carve-out" → "1-EDIT ctest-body-EDIT carve-out per §5.32 EDIT-2 (T_EXPORTER_METRICS_FORMAT version-literal bump 0.7.0 → 0.8.0; HK-8/PI-8-3.5 forced)". Stderr-side byte-equivalence (PI-3.5-1) clarified as covering 13 stderr-grep ctests; the 1 EDIT is stdout-bound.
+- **§5.32 FileList EDITED table**: new row added for `tests/T_EXPORTER_METRICS_FORMAT.sh` with the 4-LOC change description.
+- **§5.32 FileList UNCHANGED-BUT-AFFECTED table** (52 ctest bodies row): "ALL 52 UNCHANGED" → "51 of 52 UNCHANGED + 1 EDITed per §5.32 EDIT-2".
+- **§5.32 verifiable invariants for reviewer**: `git diff main -- tests/T_*.sh` SHOULD show "6 NEW files" → "6 NEW files + 1 MODIFIED file (T_EXPORTER_METRICS_FORMAT.sh; 4 LOC version-literal bump)".
+- **§7 OOS additional deliverables**: "PI-6-3.5 ZERO carve-out" → "PI-6-3.5 1-EDIT carve-out (per §5.32 EDIT-2)".
+
+**Tester-side change** (already in flight per impl's parallel peer-DM to tester): T_EXPORTER_METRICS_FORMAT.sh literals at 4 sites bumped `xdpmf-exporter 0.7.0` → `xdpmf-exporter 0.8.0`. Mechanical; no test logic change; the assertion is the literal-bump's natural verification surface (PI-8-3.5 cross-check). Tester does NOT need to re-DM architect; the fix is unambiguous + matches the MVP-3.4b precedent exactly.
+
+**This is a scope-clarification correction, not a contract change**. The PI-3.5-1 stderr byte-equivalence MUST is unchanged + still holds. PI-6 strict-superset is unchanged in shape; the carve-out narrows from "ZERO" to "1-EDIT" with documented + scope-fenced rationale. PI-8-3.5 (version-bump) is unchanged.
+
+##### Anti-misdiagnosis note from §5.32 EDIT-2 (NEW guard #11)
+
+**Add to §7 OOS anti-misdiagnosis notes after item 10 (architect catalogue arithmetic slip):**
+
+11. **VERSION-bump propagation to test-body version literals** — when a slice bumps `project(... VERSION ...)` in CMakeLists.txt, ALL test bodies that hardcode the OLD version literal as a `--version` stdout assertion break in lockstep. PI-3.5-1-style stderr-side byte-equivalence does NOT cover stdout; the bump propagates raw. **Future-cycle architect anti-misdiagnosis rule**: when introducing a VERSION bump in the FileList EDITED row, IMMEDIATELY run `grep -rl '<OLD-VERSION>' tests/` during Phase A AND for each hit, either (a) pre-list the test file in the EDITED FileList table with the bump described OR (b) carve out the test in the PI-6 strict-superset clause with explicit rationale. Cost: 30 seconds of grep + 30 seconds of FileList/PI-6 prose update per VERSION bump. Benefit: catches THIS class of gap before Phase 2.5 surfaces a red ctest. **Validated by §5.32 EDIT-2 (2026-05-25)**: only T_EXPORTER_METRICS_FORMAT was affected (1 hit per the Phase A grep impl would have eventually run); Phase A would have caught it pre-publish. Combined with guards #5 (Phase A code-grep discipline) + #9 (helper-location decision trap) + #10 (catalogue arithmetic slip): the Phase A discipline now covers literals + filesystem semantics + bpftool-API smokes + interactive-vs-log emission + helper duplication + catalogue counts + VERSION-bump test-literal propagation. The pattern is consistent: 30-60s Phase A grep per class-of-bug avoids 5-10min Phase B coordination loops. **Direct precedent**: MVP-3.4b cycle 1 PI-3.4b-9 catalog explicitly listed T_EXPORTER_METRICS_FORMAT as one of two EDITed ctests for the same reason (0.6.1 → 0.7.0 HK-8 bump); the architect-spec rule was already KNOWN at that cycle but not applied at MVP-3.5 Phase A. Future cycles: this is now codified as guard #11. The cumulative anti-misdiagnosis catalogue now covers 11 distinct classes of architect-side slip, all surfaced through Phase B peer-DMs and now formalized as Phase A grep + smoke discipline.
+
+**Notifications dispatched (§5.32 EDIT-2 closure)**:
+
+1. mint-dev-impl: SendMessage acknowledging the gap-find + Option A pick + design.md edits applied + thanks for the guard #11 suggestion (incorporated verbatim into anti-misdiagnosis catalogue).
+2. mint-dev-tester: no SendMessage from architect needed (impl already peer-DM'd tester with the mechanical fix; tester applies the 4-LOC bump unblocked).
+3. team-lead: tactical FYI dispatch (not human-gate-tier; PI-6 carve-out narrowing within scope; tester-side fix is mechanical + already in flight).

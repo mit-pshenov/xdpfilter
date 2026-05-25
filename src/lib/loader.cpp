@@ -32,6 +32,7 @@
  */
 #include "loader.hpp"
 #include "apply_internal.hpp"
+#include "common/logger.hpp"  // §5.32 (MVP-3.5) structured-logging surface
 #include "config.hpp"
 #include "sidecar.hpp"     // §5.31 (MVP-3.4b) rule_index.json writer
 
@@ -1025,11 +1026,23 @@ enum class TrustModel : std::uint8_t { Strict, Fleet };
 }
 
 /* §5.26 sub-decision: stderr-log the resolved trust_model at attach() entry.
- * Single-line, fixed format, audit-grep-friendly. */
+ * Single-line, fixed format, audit-grep-friendly.
+ *
+ * §5.32 (MVP-3.5): routed through logger as `loader.trust_model` (process-
+ * scoped — iface=nullopt). Text mode byte-equivalent to pre-§5.32 prose
+ * (PI-3.5-1); JSON mode surfaces the model token in `fields.trust_model`. */
 void log_trust_model(TrustModel m) noexcept
 {
-    std::fprintf(stderr, "xdpmacfilter: trust_model=%s\n",
-                 std::string{to_string(m)}.c_str());
+    const std::string model_str{to_string(m)};
+    const std::string msg = std::format("xdpmacfilter: trust_model={}\n",
+                                        model_str);
+    const xdpmf::logger::Field fs[] = {
+        xdpmf::logger::Field{"trust_model", std::string_view{model_str}},
+    };
+    xdpmf::logger::emit(xdpmf::logger::Level::Info,
+                        "loader.trust_model",
+                        msg,
+                        fs);
 }
 
 [[nodiscard]] std::string link_pin_path_for(const std::string& iface)
@@ -1542,11 +1555,23 @@ std::uint32_t apply_request(const ApplyRequest& req)
     // Sits AFTER trust_model log and BEFORE any kernel-touch / completion log
     // per the §5.29 ordering contract. PI-29 operator-facing signature.
     if (!req.config.rules.empty()) {
-        std::fprintf(stderr,
-                     "xdpmacfilter: rules: section parsed (%zu entries) but "
-                     "per-rule action dispatch deferred to MVP-3.4b — datapath "
-                     "uses MAC/CIDR-only matching this cycle\n",
-                     req.config.rules.size());
+        /* §5.32 (MVP-3.5): byte-equivalent text-mode emission (PI-3.5-1);
+         * JSON-mode exposes the rules-count in `fields.entries`. Iface-
+         * scoped — log shippers can correlate by iface across apply runs. */
+        const std::string msg = std::format(
+            "xdpmacfilter: rules: section parsed ({} entries) but "
+            "per-rule action dispatch deferred to MVP-3.4b — datapath "
+            "uses MAC/CIDR-only matching this cycle\n",
+            req.config.rules.size());
+        const xdpmf::logger::Field fs[] = {
+            xdpmf::logger::Field{
+                "entries", static_cast<std::int64_t>(req.config.rules.size())},
+        };
+        xdpmf::logger::emit(xdpmf::logger::Level::Warn,
+                            "loader.warn.rules_skeleton_not_wired",
+                            std::string_view{req.iface},
+                            msg,
+                            fs);
     }
 
     const int ifindex = resolve_ifindex(req.iface, LoaderError::AttachFailed);
@@ -1603,12 +1628,24 @@ std::uint32_t apply_request(const ApplyRequest& req)
             // proceed with a fresh attach. §5.19 + §5.22 hardening already
             // ran BEFORE this branch (we read name/tag to compute is_ours);
             // only §5.4 disposition is relaxed.
-            std::fprintf(stderr,
-                         "xdpmacfilter: trust_model=fleet — bypassing alien-program check; "
-                         "replacing prog id %u (mode=%s, name='%s')\n",
-                         probe.prog_id,
-                         std::string{to_string(probe.mode)}.c_str(),
-                         probe.name.c_str());
+            /* §5.32 (MVP-3.5): byte-equivalent text-mode + structural fields
+             * for JSON. Iface-scoped event. */
+            const std::string mode_str{to_string(probe.mode)};
+            const std::string fleet_msg = std::format(
+                "xdpmacfilter: trust_model=fleet — bypassing alien-program check; "
+                "replacing prog id {} (mode={}, name='{}')\n",
+                probe.prog_id, mode_str, probe.name);
+            const xdpmf::logger::Field fleet_fields[] = {
+                xdpmf::logger::Field{"prog_id",
+                                     static_cast<std::int64_t>(probe.prog_id)},
+                xdpmf::logger::Field{"mode",      std::string_view{mode_str}},
+                xdpmf::logger::Field{"alien_name", std::string_view{probe.name}},
+            };
+            xdpmf::logger::emit(xdpmf::logger::Level::Info,
+                                "loader.attach.fleet_replace",
+                                std::string_view{req.iface},
+                                fleet_msg,
+                                fleet_fields);
             const int rc = bpf_xdp_detach(ifindex,
                                           probed_mode_to_flags(probe.mode), nullptr);
             if (rc < 0) {
@@ -1781,9 +1818,13 @@ std::uint32_t apply_request(const ApplyRequest& req)
         // (Map dentries unchanged; userspace bpftool dumps see the new value.)
         write_active_idx(active_idx_reused_fd, inactive);
 
-        std::fprintf(stderr,
-                     "xdpmacfilter: replacing existing program on %s\n",
-                     req.iface.c_str());
+        /* §5.32 (MVP-3.5): byte-equivalent text-mode + iface field for JSON. */
+        const std::string replace_msg = std::format(
+            "xdpmacfilter: replacing existing program on {}\n", req.iface);
+        xdpmf::logger::emit(xdpmf::logger::Level::Info,
+                            "loader.attach.replace",
+                            std::string_view{req.iface},
+                            replace_msg);
 
         // §5.31 (MVP-3.4b) PI-3.4b-5 + D-3.4b-16: write rule_index.json
         // POST-flip so the sidecar describes the LIVE config (matches the

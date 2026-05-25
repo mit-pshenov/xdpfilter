@@ -14,12 +14,15 @@
  */
 #include "rule_counters_reader.hpp"
 
+#include "common/logger.hpp"   // §5.32 (MVP-3.5) structured-logging surface
+
 #include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <format>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -113,9 +116,16 @@ read_rule_counters(std::string_view bpffs_root) noexcept
 
     const int num_cpus = ::libbpf_num_possible_cpus();
     if (num_cpus <= 0) {
-        std::fprintf(stderr,
-                     "xdpmf-exporter: WARN libbpf_num_possible_cpus returned %d\n",
-                     num_cpus);
+        /* §5.32 (MVP-3.5): byte-equivalent text-mode + num_cpus in JSON.
+         * Shared event-name with stats_reader.cpp's identical site. */
+        const std::string msg = std::format(
+            "xdpmf-exporter: WARN libbpf_num_possible_cpus returned {}\n",
+            num_cpus);
+        const xdpmf::logger::Field fs[] = {
+            xdpmf::logger::Field{"num_cpus", static_cast<std::int64_t>(num_cpus)},
+        };
+        xdpmf::logger::emit(xdpmf::logger::Level::Warn,
+                            "exporter.warn.cpu_count_invalid", msg, fs);
         return out;
     }
 
@@ -133,10 +143,22 @@ read_rule_counters(std::string_view bpffs_root) noexcept
         if (fd < 0) {
             /* ENOENT is the common case for half-attached ifaces or
              * pre-§5.31 ifaces attached by an older loader; squelch
-             * to a single line per scrape (no flood). */
-            std::fprintf(stderr,
-                         "xdpmf-exporter: WARN failed to open rule_counters pin for %s: %s\n",
-                         iface.c_str(), std::strerror(errno));
+             * to a single line per scrape (no flood).
+             *
+             * §5.32 (MVP-3.5): byte-equivalent text-mode + iface/errno
+             * surfaced as JSON fields for per-iface correlation. */
+            const int saved_errno = errno;
+            const std::string errno_str = std::strerror(saved_errno);
+            const std::string msg = std::format(
+                "xdpmf-exporter: WARN failed to open rule_counters pin for {}: {}\n",
+                iface, errno_str);
+            const xdpmf::logger::Field fs[] = {
+                xdpmf::logger::Field{"errno_str", std::string_view{errno_str}},
+                xdpmf::logger::Field{"errno",     static_cast<std::int64_t>(saved_errno)},
+            };
+            xdpmf::logger::emit(xdpmf::logger::Level::Warn,
+                                "exporter.scrape.warn.rule_counters_open_failed",
+                                std::string_view{iface}, msg, fs);
             continue;
         }
 

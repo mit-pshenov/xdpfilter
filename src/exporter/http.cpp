@@ -15,11 +15,13 @@
 #include "sidecar_reader.hpp"         // §5.31 MVP-3.4b
 #include "stats_reader.hpp"
 
+#include "common/logger.hpp"          // §5.32 (MVP-3.5) structured-logging surface
 #include "common/mac_filter.h"        // §5.31 EDIT-1: XDPMF_SIDECAR_ROOT (/run/xdpmacfilter)
 
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <format>
@@ -285,15 +287,28 @@ int run(const HttpConfig& cfg)
 {
     struct in_addr bind_inaddr{};
     if (!parse_bind_addr(cfg.bind_addr, bind_inaddr)) {
-        std::fprintf(stderr, "xdpmf-exporter: invalid --bind address: '%s'\n",
-                     cfg.bind_addr.c_str());
+        /* §5.32 (MVP-3.5): byte-equivalent text-mode + bind_addr in JSON. */
+        const std::string msg = std::format(
+            "xdpmf-exporter: invalid --bind address: '{}'\n", cfg.bind_addr);
+        const xdpmf::logger::Field fs[] = {
+            xdpmf::logger::Field{"bind_addr", std::string_view{cfg.bind_addr}},
+        };
+        xdpmf::logger::emit(xdpmf::logger::Level::Error,
+                            "exporter.bind.invalid_addr", msg, fs);
         return 1;
     }
 
     const int listen_fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (listen_fd < 0) {
-        std::fprintf(stderr, "xdpmf-exporter: socket(): %s\n",
-                     std::strerror(errno));
+        const std::string errno_str = std::strerror(errno);
+        const std::string msg = std::format(
+            "xdpmf-exporter: socket(): {}\n", errno_str);
+        const xdpmf::logger::Field fs[] = {
+            xdpmf::logger::Field{"errno_str", std::string_view{errno_str}},
+            xdpmf::logger::Field{"errno",     static_cast<std::int64_t>(errno)},
+        };
+        xdpmf::logger::emit(xdpmf::logger::Level::Error,
+                            "exporter.bind.socket_failed", msg, fs);
         return 1;
     }
 
@@ -307,21 +322,46 @@ int run(const HttpConfig& cfg)
     addr.sin_port   = ::htons(cfg.port);
     if (::bind(listen_fd, reinterpret_cast<struct sockaddr*>(&addr),
                 sizeof(addr)) < 0) {
-        std::fprintf(stderr, "xdpmf-exporter: bind(%s:%u): %s\n",
-                     cfg.bind_addr.c_str(), cfg.port,
-                     std::strerror(errno));
+        const std::string errno_str = std::strerror(errno);
+        const std::string msg = std::format(
+            "xdpmf-exporter: bind({}:{}): {}\n",
+            cfg.bind_addr, cfg.port, errno_str);
+        const xdpmf::logger::Field fs[] = {
+            xdpmf::logger::Field{"bind_addr", std::string_view{cfg.bind_addr}},
+            xdpmf::logger::Field{"port",      static_cast<std::int64_t>(cfg.port)},
+            xdpmf::logger::Field{"errno_str", std::string_view{errno_str}},
+            xdpmf::logger::Field{"errno",     static_cast<std::int64_t>(errno)},
+        };
+        xdpmf::logger::emit(xdpmf::logger::Level::Error,
+                            "exporter.bind.failed", msg, fs);
         (void)::close(listen_fd);
         return 1;
     }
     if (::listen(listen_fd, 16) < 0) {
-        std::fprintf(stderr, "xdpmf-exporter: listen(): %s\n",
-                     std::strerror(errno));
+        const std::string errno_str = std::strerror(errno);
+        const std::string msg = std::format(
+            "xdpmf-exporter: listen(): {}\n", errno_str);
+        const xdpmf::logger::Field fs[] = {
+            xdpmf::logger::Field{"errno_str", std::string_view{errno_str}},
+            xdpmf::logger::Field{"errno",     static_cast<std::int64_t>(errno)},
+        };
+        xdpmf::logger::emit(xdpmf::logger::Level::Error,
+                            "exporter.bind.listen_failed", msg, fs);
         (void)::close(listen_fd);
         return 1;
     }
 
-    std::fprintf(stderr, "xdpmf-exporter: listening on %s:%u\n",
-                 cfg.bind_addr.c_str(), cfg.port);
+    /* §5.32 (MVP-3.5): the load-bearing operator startup signal. Byte-
+     * equivalent text-mode (PI-3.5-1); JSON exposes bind_addr + port. */
+    const std::string listening_msg = std::format(
+        "xdpmf-exporter: listening on {}:{}\n", cfg.bind_addr, cfg.port);
+    const xdpmf::logger::Field listening_fields[] = {
+        xdpmf::logger::Field{"bind_addr", std::string_view{cfg.bind_addr}},
+        xdpmf::logger::Field{"port",      static_cast<std::int64_t>(cfg.port)},
+    };
+    xdpmf::logger::emit(xdpmf::logger::Level::Info,
+                        "exporter.listening",
+                        listening_msg, listening_fields);
 
     /* §5.30 HK-17: exit the accept loop ALSO when the /metrics handler
      * fires the all-EACCES trigger. run() returns kExitAllEacces below;
@@ -333,8 +373,16 @@ int run(const HttpConfig& cfg)
         const int pr = ::poll(&pfd, 1, 1000 /* ms */);
         if (pr < 0) {
             if (errno == EINTR) continue;
-            std::fprintf(stderr, "xdpmf-exporter: poll(): %s\n",
-                         std::strerror(errno));
+            /* §5.32 (MVP-3.5): byte-equivalent text-mode + errno in JSON. */
+            const std::string errno_str = std::strerror(errno);
+            const std::string msg = std::format(
+                "xdpmf-exporter: poll(): {}\n", errno_str);
+            const xdpmf::logger::Field fs[] = {
+                xdpmf::logger::Field{"errno_str", std::string_view{errno_str}},
+                xdpmf::logger::Field{"errno",     static_cast<std::int64_t>(errno)},
+            };
+            xdpmf::logger::emit(xdpmf::logger::Level::Error,
+                                "exporter.accept.poll_failed", msg, fs);
             break;
         }
         if (pr == 0) {
@@ -350,8 +398,16 @@ int run(const HttpConfig& cfg)
             SOCK_CLOEXEC);
         if (conn_fd < 0) {
             if (errno == EINTR) continue;
-            std::fprintf(stderr, "xdpmf-exporter: accept(): %s\n",
-                         std::strerror(errno));
+            /* §5.32 (MVP-3.5): byte-equivalent text-mode + errno in JSON. */
+            const std::string errno_str = std::strerror(errno);
+            const std::string msg = std::format(
+                "xdpmf-exporter: accept(): {}\n", errno_str);
+            const xdpmf::logger::Field fs[] = {
+                xdpmf::logger::Field{"errno_str", std::string_view{errno_str}},
+                xdpmf::logger::Field{"errno",     static_cast<std::int64_t>(errno)},
+            };
+            xdpmf::logger::emit(xdpmf::logger::Level::Warn,
+                                "exporter.accept.failed", msg, fs);
             continue;
         }
         handle_connection(conn_fd, cfg.bpffs_root);
@@ -359,7 +415,11 @@ int run(const HttpConfig& cfg)
     }
 
     (void)::close(listen_fd);
-    std::fprintf(stderr, "xdpmf-exporter: shutdown\n");
+    /* §5.32 (MVP-3.5): byte-equivalent text-mode (PI-3.5-1) for the
+     * shutdown signal. No fields. */
+    xdpmf::logger::emit(xdpmf::logger::Level::Info,
+                        "exporter.shutdown",
+                        "xdpmf-exporter: shutdown\n");
     /* §5.30 HK-17: communicate the all-EACCES exit code through run()'s
      * return. main.cpp reads the value and (if 6) emits the canonical
      * stderr line with last_exit_six_total() and exits 6 itself. */

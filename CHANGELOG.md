@@ -5,6 +5,49 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-05-25
+
+MVP-3.5 — JSON structured logs in loader + exporter (brownfield amendment §5.32). Operator-facing structured-logging surface deferred from §5.30 §7 OOS for 5 consecutive cycles. New env var `XDPMF_LOG_FORMAT={text,json}` (default `text`) selects rendering for every diagnostic stderr emission in BOTH `xdpmacfilter` + `xdpmf-exporter`. Text mode is byte-equivalent to the pre-§5.32 line (load-bearing **PI-3.5-1** — the 52-ctest baseline is the validation surface). JSON mode emits one NDJSON object per event with a flat envelope `{ts, level, event, iface, msg, fields:{}}` and a stable 33-event catalog. Strictly additive — NO carve-out on the 52 pre-§5.32 ctests, NO touch to BPF datapath, NO new external build dependency.
+
+### Added
+- **Structured-logging module** — new `src/common/logger.{cpp,hpp}` (~300 LOC, stdlib-only per **PI-3.5-7**) ownership: format selector + envelope renderer + 33-event constexpr catalog. Compiled into BOTH `xdpmf_internal` static lib AND `xdpmf-exporter` binary target (Q6=B1 dup-TU; no new CMake target).
+- **`XDPMF_LOG_FORMAT` env var** — read ONCE on first `logger::emit()` call (lazy init under `std::once_flag`; Q4=R1); cached for process lifetime. Values: unset/empty/`text` → `Format::Text` (default); `json` → `Format::Json`; any other value → one-shot WARN (`logger.warn.unknown_log_format`) + Text fallback (per PI-3.5-3 edge cases).
+- **JSON envelope** — per HG-3.5-2: `{"ts":"<iso8601-utc-sec>","level":"<info|warn|error>","event":"<dotted.name>","iface":<"str"|null>,"msg":"<json-escaped>","fields":{...}}` followed by `\n`. ISO-8601 UTC second-precision timestamp (Q2=T1, sidecar.cpp:57 helper duplicated per D-3.5-2). Fixed field order (D-3.5-9). `fields` allows flat scalars only (string / int64 / bool / null, Q5=F1).
+- **33-event catalog** — `kEventNames` constexpr `std::array` in `logger.hpp` locks the operator-visible event surface. Dot-delimited lowercase snake_case identifiers (Q3=E1): `loader.trust_model`, `bypass.activated`, `exporter.listening`, `exporter.warn.bpffs_root_missing`, etc.
+- **6 new ctests** (T_LOG_TEXT_BYTE_EQUIVALENT [load-bearing canary for PI-3.5-1], T_LOG_JSON_LOADER_EVENTS, T_LOG_JSON_EXPORTER_EVENTS, T_LOG_JSON_BYPASS_AUDIT, T_LOG_JSON_ENVELOPE_INVARIANTS, T_LOG_EVENT_CATALOG_STABILITY) + 2 new fixtures (`log_text_reference.txt`, `log_events_v1.txt`).
+
+### Changed
+- **40 stderr emission sites converted** to `logger::emit(...)` across 8 source files: `src/cli/main.cpp` (6 sites), `src/cli/bypass.cpp` (4 converted + 1 EXEMPT), `src/lib/loader.cpp` (4 sites), `src/lib/sidecar.cpp` (6 sites), `src/exporter/main.cpp` (7 sites), `src/exporter/http.cpp` (8 sites), `src/exporter/stats_reader.cpp` (3 sites), `src/exporter/rule_counters_reader.cpp` (2 sites). **Text-mode byte-equivalence** preserved at every site (PI-3.5-1).
+- **HK-4 bypass audit-log structurally exposed** under JSON — `bypass.activated` event surfaces `fields.uid`, `fields.euid`, `fields.sudo_user`, `fields.reason` for log-shipper query (`jq 'select(.event=="bypass.activated" and .fields.sudo_user=="alice")'`); text-mode line byte-equivalent to MVP-3.4.5 HK-4 (PI-3.5-5).
+- VERSION 0.7.0 → 0.8.0 (MINOR — new operator-facing env var + structured-logging surface). Both binaries report `0.8.0` via `--version` per shared `version.h` (PI-8-3.5).
+
+### Internal
+- **`json_escape` + `format_timestamp_utc` duplicated** in `src/common/logger.cpp` anon namespace from `src/lib/sidecar.cpp:38-158` per **D-3.5-2** (NOT extracted to `src/common/json.{cpp,hpp}` — keeps the slice scope-contained; the §5.31 sidecar.cpp regional-diff fence is unaffected by helper-side touches). Future cycle MAY extract if a 3rd JSON emitter surfaces.
+- **`src/cli/bypass.cpp:96` interactive prompt EXEMPT** from logger conversion per **D-3.5-7 / PI-3.5-6** — UI primitive (no trailing `\n`, fflushed, awaits stdin). Converting it would render `}\n` BEFORE the `[y/N]: ` ending in JSON mode, breaking the prompt UX. JSON-mode operators using bypass interactively see one non-JSON line (the prompt); documented wart. Non-interactive `bypass --unsafe` users (the audit-typical path) see pure JSON.
+
+### Preserved invariants
+- **PI-3.5-1 (NEW, load-bearing)**: every emission in text mode is byte-identical to its pre-§5.32 prose. T_LOG_TEXT_BYTE_EQUIVALENT is the focused canary; the 13 pre-§5.32 ctests grep'ing stderr text pass without ANY ctest-body modification — **PI-6-3.5 ZERO carve-out** (first multi-source-touch slice with literally zero ctest body diffs since MVP-3.4b cycle 1).
+- **PI-3.5-2 / PI-3.5-3 / PI-3.5-4 / PI-3.5-5 / PI-3.5-6 / PI-3.5-7** (NEW): JSON envelope stability + env-var contract + event-catalog stability + HK-4 fields surfacing + interactive-prompt exemption + no-external-dep all locked.
+- **PI-7-3.5-hpp**: `src/lib/loader.hpp` ZERO diff — **7th consecutive cycle**. `src/lib/config.hpp` ZERO diff — **2nd consecutive cycle**. Logger module owns its own header (`src/common/logger.hpp`); no public LoaderError addition; no new public symbol in loader.hpp.
+- **PI-10**: `src/common/mac_filter.h` UNCHANGED (stricter than its previous ADDITIVE-ONLY baseline — this slice doesn't add to mac_filter.h at all).
+- **PI-28-3.4b**: `mac_filter.bpf.c` UNCHANGED — JSON logging is userspace-only (D-3.5-10 NEW FENCE).
+- **PI-29-3.4b / PI-31-3.4b / PI-32-3.4b**: exporter read-only + datapath consultation discipline unchanged.
+
+### Out-of-scope fences (per §5.32)
+- `XDPMF_LOG_DEST={file,syslog,journald}` + log rotation — MVP-3.5b candidate. NEW FENCE.
+- `XDPMF_LOG_LEVEL={info,warn,error}` level filtering — MVP-3.5b candidate. NEW FENCE.
+- Live SIGHUP env-var re-read (Q4 R3 rejected) / per-emit getenv (Q4 R2 rejected). NEW FENCES.
+- `schema_version` field in JSON envelope — cycle 1 implicit version=1; added when a breaking change ships. NEW FENCE.
+- `bpf_printk` JSON-ification (kernel-side) — userspace-only this slice. NEW FENCE.
+- Nested objects / arrays in `fields:{}` — flat scalars only. NEW FENCE.
+- `nlohmann/json` or any JSON library build dep — explicitly REJECTED (D-3.4b-10 zero-deps precedent extended).
+- Color/ANSI escape codes in text mode — none; plain bytes byte-equivalent. NEW FENCE.
+
+### Build pace
+| Cycle | Slice | Anchor | Source delta |
+|---|---|---|---|
+| MVP-3.5 | JSON structured logs | §5.32 | ~300 LOC NEW (logger.{cpp,hpp}); ~40 emission-site EDITs across 8 files; tests: 6 NEW + 2 NEW fixtures; ZERO ctest-body modifications |
+
 ## [0.7.0] — 2026-05-25
 
 MVP-3.4b cycle 1 — per-rule observability (brownfield amendment §5.31). First operator-facing feature since MVP-3.4: `xdpfilter_rule_match_total{iface, rule_id, action}` Prometheus series exposing per-rule packet match counts. Lifts the §5.29 PI-13-3.1 inner-allowlist-value defer fence (adjudicated PASS as additive per HG-3.4b-1) and the PI-29 datapath-non-consultation fence (RELAXED with documented carve-out — inner-VALUE's `rule_id` IS read by datapath; `rules` + `action_table` maps STILL NOT consulted). First substantive `mac_filter_prog` body edit since MVP-3.2 (verifier-pass critical).

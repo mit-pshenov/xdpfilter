@@ -16,8 +16,10 @@
  */
 #include "bypass.hpp"
 
+#include "common/logger.hpp"   // §5.32 (MVP-3.5) — structured-logging emit
 #include "lib/loader.hpp"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <format>
@@ -61,11 +63,13 @@ constexpr std::size_t kReasonTruncationBudget = 253;  // 256 - 3 for "…"
     return out;
 }
 
-[[nodiscard]] std::string truncate_reason(std::string_view raw)
+/* Truncate raw operator reason to the 253+3-byte budget WITHOUT applying
+ * the audit-escape. Returns the truncated-only form — caller applies
+ * escape_audit_value separately to build the audit-line msg, OR passes the
+ * raw-truncated form to logger's JSON fields where logger's own json_escape
+ * handles quoting (avoids double-escape — §5.32 PI-3.5-5 contract). */
+[[nodiscard]] std::string truncate_reason_raw(std::string_view raw)
 {
-    /* Truncate if-and-only-if input exceeds the 253-byte budget; ≤253 byte
-     * inputs (including the equal case) pass through untouched. The 3-byte
-     * ellipsis only appears on TRUE truncation per HK-4 contract. */
     std::string truncated;
     if (raw.size() > kReasonTruncationBudget) {
         std::size_t cut = kReasonTruncationBudget;
@@ -85,7 +89,7 @@ constexpr std::size_t kReasonTruncationBudget = 253;  // 256 - 3 for "…"
     if (truncated.size() > kReasonMaxBytes) {
         truncated.resize(kReasonMaxBytes);
     }
-    return escape_audit_value(truncated);
+    return truncated;
 }
 
 /* Interactive y/N prompt — reads ONE line from stdin. Accept exactly 'y',
@@ -126,7 +130,11 @@ int bypass_main(const BypassConfig& cfg)
      * enforces; this is a defense-in-depth check (also documents the
      * function's preconditions for any non-CLI caller). */
     if (cfg.iface.empty()) {
-        std::fprintf(stderr, "xdpmacfilter: bypass: --iface is required\n");
+        /* §5.32 (MVP-3.5) PI-3.5-1 byte-equivalent text-mode emission. */
+        xdpmf::logger::emit(xdpmf::logger::Level::Error,
+                            "bypass.usage_error",
+                            std::nullopt,
+                            "xdpmacfilter: bypass: --iface is required\n");
         return 1;
     }
 
@@ -136,17 +144,29 @@ int bypass_main(const BypassConfig& cfg)
      * pass --unsafe — the audit-safety gate. */
     const bool interactive = ::isatty(STDIN_FILENO) && ::isatty(STDERR_FILENO);
     if (!interactive && !cfg.unsafe) {
-        std::fprintf(stderr,
-                     "xdpmacfilter: refusing to bypass in non-interactive context "
-                     "without --unsafe flag (audit safety)\n");
+        const xdpmf::logger::Field fs[] = {
+            xdpmf::logger::Field{"interactive", false},
+            xdpmf::logger::Field{"unsafe",      cfg.unsafe},
+        };
+        xdpmf::logger::emit(xdpmf::logger::Level::Error,
+                            "bypass.refused.requires_unsafe",
+                            std::string_view{cfg.iface},
+                            "xdpmacfilter: refusing to bypass in non-interactive context "
+                            "without --unsafe flag (audit safety)\n",
+                            fs);
         return 1;
     }
 
     /* Interactive: y/N prompt is the safety gate. Non-y → no-op exit 0
-     * (operator-cancelled; matches §5.29 grammar rule). */
+     * (operator-cancelled; matches §5.29 grammar rule). The prompt itself
+     * at prompt_confirm_y_n (line 96) is EXEMPT from logger conversion per
+     * §5.32 D-3.5-7 / PI-3.5-6 — UI primitive, not a log event. */
     if (interactive && !cfg.unsafe) {
         if (!prompt_confirm_y_n(cfg.iface)) {
-            std::fprintf(stderr, "xdpmacfilter: bypass cancelled by operator\n");
+            xdpmf::logger::emit(xdpmf::logger::Level::Info,
+                                "bypass.cancelled",
+                                std::string_view{cfg.iface},
+                                "xdpmacfilter: bypass cancelled by operator\n");
             return 0;
         }
     }
@@ -162,23 +182,54 @@ int bypass_main(const BypassConfig& cfg)
      * mirrors UNSPECIFIED for reason. Both euid AND sudo_user are emitted
      * ALWAYS so operators grep on stable field positions. reason="..."
      * remains the last structural field for backward-compat regex matchers. */
-    const std::string reason = cfg.reason.empty()
+    /* §5.32 (MVP-3.5) PI-3.5-5: keep TWO views of reason + sudo_user — the
+     * audit-escaped form goes into the text-mode msg (preserving HK-4
+     * byte-equivalence); the RAW-truncated form goes into the JSON
+     * `fields.reason` so logger's json_escape handles quoting on its own
+     * (avoids double-escape: jq-decoded `.fields.reason` matches the
+     * operator's input verbatim per design §6.56). */
+    const std::string reason_raw = cfg.reason.empty()
         ? std::string{"UNSPECIFIED"}
-        : truncate_reason(cfg.reason);
+        : truncate_reason_raw(cfg.reason);
+    const std::string reason_audit = cfg.reason.empty()
+        ? std::string{"UNSPECIFIED"}
+        : escape_audit_value(reason_raw);
     const auto uid  = ::getuid();
     const auto euid = ::geteuid();
     const char* sudo_user_env = std::getenv("SUDO_USER");
-    const std::string sudo_user = (sudo_user_env != nullptr && *sudo_user_env != '\0')
-        ? escape_audit_value(sudo_user_env)
+    const bool        have_sudo_user = sudo_user_env != nullptr
+                                     && *sudo_user_env != '\0';
+    const std::string sudo_user_raw = have_sudo_user
+        ? std::string{sudo_user_env}
         : std::string{"<none>"};
-    std::fprintf(stderr,
-                 "xdpmacfilter: BYPASS activated on %s by uid=%u euid=%u "
-                 "sudo_user=\"%s\" reason=\"%s\"\n",
-                 cfg.iface.c_str(),
-                 static_cast<unsigned int>(uid),
-                 static_cast<unsigned int>(euid),
-                 sudo_user.c_str(),
-                 reason.c_str());
+    const std::string sudo_user_audit = have_sudo_user
+        ? escape_audit_value(sudo_user_raw)
+        : std::string{"<none>"};
+    /* §5.32 (MVP-3.5) HG-3.5-3 + PI-3.5-5: text-mode emits the audit-line
+     * byte-equivalent to MVP-3.4.5 HK-4 (PI-3.5-1); JSON-mode also exposes
+     * the HK-4 structural fields (uid, euid, sudo_user, reason) inside the
+     * envelope's fields:{} so operators can query
+     *   jq 'select(.event=="bypass.activated" and .fields.sudo_user=="alice")'
+     * without prose-grepping. */
+    const std::string audit_msg = std::format(
+        "xdpmacfilter: BYPASS activated on {} by uid={} euid={} "
+        "sudo_user=\"{}\" reason=\"{}\"\n",
+        cfg.iface,
+        static_cast<unsigned int>(uid),
+        static_cast<unsigned int>(euid),
+        sudo_user_audit,
+        reason_audit);
+    const xdpmf::logger::Field activated_fields[] = {
+        xdpmf::logger::Field{"uid",       static_cast<std::int64_t>(uid)},
+        xdpmf::logger::Field{"euid",      static_cast<std::int64_t>(euid)},
+        xdpmf::logger::Field{"sudo_user", std::string_view{sudo_user_raw}},
+        xdpmf::logger::Field{"reason",    std::string_view{reason_raw}},
+    };
+    xdpmf::logger::emit(xdpmf::logger::Level::Info,
+                        "bypass.activated",
+                        std::string_view{cfg.iface},
+                        audit_msg,
+                        activated_fields);
 
     /* Invoke the existing detach codepath. Throws std::system_error{
      * LoaderError::DetachFailed, ...} on real failure; main.cpp's catch

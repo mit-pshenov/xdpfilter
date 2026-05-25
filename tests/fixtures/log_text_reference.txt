@@ -1,0 +1,5 @@
+xdpmacfilter: trust_model=strict
+xdpmacfilter: rules: section parsed (1 entries) but per-rule action dispatch deferred to MVP-3.4b — datapath uses MAC/CIDR-only matching this cycle
+xdpmacfilter: trust_model=strict
+xdpmacfilter: rules: section parsed (2 entries) but per-rule action dispatch deferred to MVP-3.4b — datapath uses MAC/CIDR-only matching this cycle
+xdpmacfilter: replacing existing program on IFACE_A_PLACEHOLDER

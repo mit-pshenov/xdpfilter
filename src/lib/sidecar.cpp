@@ -14,6 +14,7 @@
 #include "sidecar.hpp"
 
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -25,6 +26,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "common/logger.hpp"     // §5.32 (MVP-3.5) structured-logging surface
 #include "common/mac_filter.h"   // xdpmf_mac, xdpmf_cidr_v4
 
 namespace xdpmf::sidecar {
@@ -256,24 +258,48 @@ void write_rule_index(std::string_view iface,
         struct stat st_root{};
         if (::lstat(root.c_str(), &st_root) == 0) {
             if (S_ISLNK(st_root.st_mode)) {
-                std::fprintf(stderr,
-                             "xdpmacfilter: WARN: rule_index.json refusing "
-                             "to write — sidecar root '%s' is a symlink\n",
-                             root.c_str());
+                /* §5.32 (MVP-3.5): byte-equivalent text-mode (PI-3.5-1) + JSON
+                 * field `path`. Iface-scoped — sidecar root errors are
+                 * indirectly per-iface (the apply that triggered them is). */
+                const std::string msg = std::format(
+                    "xdpmacfilter: WARN: rule_index.json refusing "
+                    "to write — sidecar root '{}' is a symlink\n",
+                    root);
+                const xdpmf::logger::Field fs[] = {
+                    xdpmf::logger::Field{"path", std::string_view{root}},
+                };
+                xdpmf::logger::emit(xdpmf::logger::Level::Warn,
+                                    "sidecar.warn.root_symlink",
+                                    std::string_view{iface}, msg, fs);
                 return;
             }
             if (!S_ISDIR(st_root.st_mode)) {
-                std::fprintf(stderr,
-                             "xdpmacfilter: WARN: rule_index.json refusing "
-                             "to write — sidecar root '%s' is not a directory\n",
-                             root.c_str());
+                const std::string msg = std::format(
+                    "xdpmacfilter: WARN: rule_index.json refusing "
+                    "to write — sidecar root '{}' is not a directory\n",
+                    root);
+                const xdpmf::logger::Field fs[] = {
+                    xdpmf::logger::Field{"path", std::string_view{root}},
+                };
+                xdpmf::logger::emit(xdpmf::logger::Level::Warn,
+                                    "sidecar.warn.root_not_dir",
+                                    std::string_view{iface}, msg, fs);
                 return;
             }
         } else if (errno != ENOENT) {
-            std::fprintf(stderr,
-                         "xdpmacfilter: WARN: rule_index.json lstat('%s') "
-                         "failed: %s\n",
-                         root.c_str(), std::strerror(errno));
+            const std::string errno_str = std::strerror(errno);
+            const std::string msg = std::format(
+                "xdpmacfilter: WARN: rule_index.json lstat('{}') "
+                "failed: {}\n",
+                root, errno_str);
+            const xdpmf::logger::Field fs[] = {
+                xdpmf::logger::Field{"path",      std::string_view{root}},
+                xdpmf::logger::Field{"errno_str", std::string_view{errno_str}},
+                xdpmf::logger::Field{"errno",     static_cast<std::int64_t>(errno)},
+            };
+            xdpmf::logger::emit(xdpmf::logger::Level::Warn,
+                                "sidecar.warn.lstat_failed",
+                                std::string_view{iface}, msg, fs);
             return;
         }
 
@@ -286,10 +312,20 @@ void write_rule_index(std::string_view iface,
          * Failure is non-fatal — degrades to exporter's action="unknown"
          * labels per D-3.4b-17. */
         if (const int mrc = mkdir_p(dir); mrc != 0) {
-            std::fprintf(stderr,
-                         "xdpmacfilter: WARN: rule_index.json mkdir-p "
-                         "of '%s' failed: %s\n",
-                         dir.c_str(), std::strerror(mrc));
+            /* §5.32 (MVP-3.5): byte-equivalent text-mode emission. */
+            const std::string errno_str = std::strerror(mrc);
+            const std::string msg = std::format(
+                "xdpmacfilter: WARN: rule_index.json mkdir-p "
+                "of '{}' failed: {}\n",
+                dir, errno_str);
+            const xdpmf::logger::Field fs[] = {
+                xdpmf::logger::Field{"path",      std::string_view{dir}},
+                xdpmf::logger::Field{"errno_str", std::string_view{errno_str}},
+                xdpmf::logger::Field{"errno",     static_cast<std::int64_t>(mrc)},
+            };
+            xdpmf::logger::emit(xdpmf::logger::Level::Warn,
+                                "sidecar.warn.mkdir_failed",
+                                std::string_view{iface}, msg, fs);
             return;
         }
 
@@ -301,17 +337,32 @@ void write_rule_index(std::string_view iface,
         if (rc != 0) {
             /* D-3.4b-17: non-fatal degrade — single WARN line, no throw,
              * no exit. Exporter will degrade to action="unknown" labels
-             * for this iface until the next successful apply. */
-            std::fprintf(stderr,
-                         "xdpmacfilter: WARN: rule_index.json write failed: %s\n",
-                         std::strerror(rc));
+             * for this iface until the next successful apply.
+             *
+             * §5.32 (MVP-3.5): byte-equivalent text-mode (PI-3.5-1) + JSON
+             * surfaces errno + path. */
+            const std::string errno_str = std::strerror(rc);
+            const std::string msg = std::format(
+                "xdpmacfilter: WARN: rule_index.json write failed: {}\n",
+                errno_str);
+            const xdpmf::logger::Field fs[] = {
+                xdpmf::logger::Field{"path",      std::string_view{final_path}},
+                xdpmf::logger::Field{"errno_str", std::string_view{errno_str}},
+                xdpmf::logger::Field{"errno",     static_cast<std::int64_t>(rc)},
+            };
+            xdpmf::logger::emit(xdpmf::logger::Level::Warn,
+                                "sidecar.warn.write_failed",
+                                std::string_view{iface}, msg, fs);
         }
     } catch (...) {
         /* Never-throw contract: any exception (std::bad_alloc, std::format
          * argument-formatting issue, etc.) degrades to silent WARN. */
-        std::fprintf(stderr,
-                     "xdpmacfilter: WARN: rule_index.json write failed: "
-                     "exception during body construction\n");
+        xdpmf::logger::emit(
+            xdpmf::logger::Level::Warn,
+            "sidecar.warn.write_exception",
+            std::string_view{iface},
+            "xdpmacfilter: WARN: rule_index.json write failed: "
+            "exception during body construction\n");
     }
 }
 

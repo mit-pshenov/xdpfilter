@@ -16,12 +16,15 @@
  */
 #include "stats_reader.hpp"
 
+#include "common/logger.hpp"   // §5.32 (MVP-3.5) structured-logging surface
+
 #include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <format>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -116,11 +119,16 @@ void validate_bpffs_root_or_warn(std::string_view bpffs_root) noexcept
     const bool exists = std::filesystem::exists(
         std::filesystem::path{bpffs_root}, ec);
     if (ec || !exists) {
-        std::fprintf(stderr,
-                     "xdpmf-exporter: WARN bpffs root %.*s does not exist; "
-                     "will serve empty metrics\n",
-                     static_cast<int>(bpffs_root.size()),
-                     bpffs_root.data());
+        /* §5.32 (MVP-3.5) HK-16 W1: byte-equivalent text-mode (PI-3.5-1) +
+         * bpffs_root field in JSON. Process-scoped (no iface). */
+        const std::string msg = std::format(
+            "xdpmf-exporter: WARN bpffs root {} does not exist; "
+            "will serve empty metrics\n", bpffs_root);
+        const xdpmf::logger::Field fs[] = {
+            xdpmf::logger::Field{"bpffs_root", bpffs_root},
+        };
+        xdpmf::logger::emit(xdpmf::logger::Level::Warn,
+                            "exporter.warn.bpffs_root_missing", msg, fs);
     }
 }
 
@@ -154,9 +162,17 @@ std::vector<StatsSample> read_all_attached_with_acc(std::string_view     bpffs_r
 
     const int num_cpus = ::libbpf_num_possible_cpus();
     if (num_cpus <= 0) {
-        std::fprintf(stderr,
-                     "xdpmf-exporter: WARN libbpf_num_possible_cpus returned %d\n",
-                     num_cpus);
+        /* §5.32 (MVP-3.5): byte-equivalent text-mode + num_cpus in JSON.
+         * Process-scoped (no iface). Shared event-name with
+         * rule_counters_reader.cpp's identical site. */
+        const std::string msg = std::format(
+            "xdpmf-exporter: WARN libbpf_num_possible_cpus returned {}\n",
+            num_cpus);
+        const xdpmf::logger::Field fs[] = {
+            xdpmf::logger::Field{"num_cpus", static_cast<std::int64_t>(num_cpus)},
+        };
+        xdpmf::logger::emit(xdpmf::logger::Level::Warn,
+                            "exporter.warn.cpu_count_invalid", msg, fs);
         /* §5.30 HK-17: cannot bpf_obj_get without a cpu count; count every
          * iface as other_failure so exit-6 (which requires all == EACCES)
          * does NOT fire on this distinct error path. */
@@ -190,10 +206,21 @@ std::vector<StatsSample> read_all_attached_with_acc(std::string_view     bpffs_r
             }
             /* ENOENT is the common case for half-attached ifaces; squelch
              * to a single line per scrape (no flood). Other errors are
-             * surfaced verbatim so operators can correlate via journalctl. */
-            std::fprintf(stderr,
-                         "xdpmf-exporter: WARN failed to open stats pin for %s: %s\n",
-                         iface.c_str(), std::strerror(e));
+             * surfaced verbatim so operators can correlate via journalctl.
+             *
+             * §5.32 (MVP-3.5): byte-equivalent text-mode + iface/errno
+             * surfaced as JSON fields for per-iface correlation. */
+            const std::string errno_str = std::strerror(e);
+            const std::string msg = std::format(
+                "xdpmf-exporter: WARN failed to open stats pin for {}: {}\n",
+                iface, errno_str);
+            const xdpmf::logger::Field fs[] = {
+                xdpmf::logger::Field{"errno_str", std::string_view{errno_str}},
+                xdpmf::logger::Field{"errno",     static_cast<std::int64_t>(e)},
+            };
+            xdpmf::logger::emit(xdpmf::logger::Level::Warn,
+                                "exporter.scrape.warn.stats_open_failed",
+                                std::string_view{iface}, msg, fs);
             continue;
         }
 

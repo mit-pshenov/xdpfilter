@@ -673,3 +673,106 @@ set_tests_properties(T_EXPORTER_RULE_LABELS PROPERTIES
     TIMEOUT 90
     SKIP_RETURN_CODE 77
 )
+
+# ─────────────────────────────────────────────────────────────────────────
+# MVP-3.5 additions (§5.32 / §6.53–§6.58 — JSON structured logs).
+#
+# T_LOG_TEXT_BYTE_EQUIVALENT (§6.53): LOAD-BEARING canary for PI-3.5-1.
+#   3-way byte-equivalence (unset / "" / text) + cmp against committed
+#   reference fixture; negation = JSON mode produces different stderr.
+#   Takes xdp_fixture (touches veth via attach/apply/detach).
+# T_LOG_JSON_LOADER_EVENTS (§6.54): attach + apply + detach under JSON;
+#   per-line jq parse + loader.trust_model event count==2 + level ∈
+#   {info,warn,error} + fields.trust_model == "strict" + iface==null;
+#   negation = text mode does not parse as JSON.
+#   Takes xdp_fixture.
+# T_LOG_JSON_EXPORTER_EVENTS (§6.55): exporter under JSON;
+#   exporter.warn.bpffs_root_missing (HK-16), exporter.listening,
+#   exporter.shutdown events validated; negation = text-mode HK-16
+#   wording byte-equivalent; HK-17 sub-case (chmod 000 + unpriv user)
+#   SKIP-77 if EACCES not reproducible. Takes xdp_fixture +
+#   exporter_port_9417 (touches both veth AND exporter port range).
+# T_LOG_JSON_BYPASS_AUDIT (§6.56): bypass.activated event under JSON
+#   carries HK-4 structural fields (uid, euid, sudo_user, reason);
+#   negation = text-mode HK-4 audit-line byte-equivalent; escape sub-case
+#   verifies JSON escape correctness for embedded quote. Takes xdp_fixture.
+# T_LOG_JSON_ENVELOPE_INVARIANTS (§6.57): broad sweep across loader +
+#   exporter; per-line envelope validation (ts, level, event, iface, msg,
+#   fields all present + correctly typed); negation = malformed-line
+#   probe must be REJECTED by the validator; PI-3.5-3 edge case (empty
+#   XDPMF_LOG_FORMAT="" → silent Text fallback) sub-case. Takes
+#   xdp_fixture + exporter_port_9417.
+# T_LOG_EVENT_CATALOG_STABILITY (§6.58): static-analysis test on
+#   src/common/logger.hpp's kEventNames constexpr table; sort + cmp
+#   against committed reference; negation = inject extra event into a
+#   COPY of the header, assert comparator catches the drift.
+#   NO ROOT NEEDED, NO RESOURCE_LOCK — can run in parallel with anything.
+add_test(
+    NAME T_LOG_TEXT_BYTE_EQUIVALENT
+    COMMAND bash ${TEST_DIR}/T_LOG_TEXT_BYTE_EQUIVALENT.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_LOG_TEXT_BYTE_EQUIVALENT PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 90
+    SKIP_RETURN_CODE 77
+)
+
+add_test(
+    NAME T_LOG_JSON_LOADER_EVENTS
+    COMMAND bash ${TEST_DIR}/T_LOG_JSON_LOADER_EVENTS.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_LOG_JSON_LOADER_EVENTS PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 60
+    SKIP_RETURN_CODE 77
+)
+
+add_test(
+    NAME T_LOG_JSON_EXPORTER_EVENTS
+    COMMAND bash ${TEST_DIR}/T_LOG_JSON_EXPORTER_EVENTS.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_LOG_JSON_EXPORTER_EVENTS PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK "xdp_fixture;exporter_port_9417"
+    TIMEOUT 90
+    SKIP_RETURN_CODE 77
+)
+
+add_test(
+    NAME T_LOG_JSON_BYPASS_AUDIT
+    COMMAND bash ${TEST_DIR}/T_LOG_JSON_BYPASS_AUDIT.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_LOG_JSON_BYPASS_AUDIT PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 60
+    SKIP_RETURN_CODE 77
+)
+
+add_test(
+    NAME T_LOG_JSON_ENVELOPE_INVARIANTS
+    COMMAND bash ${TEST_DIR}/T_LOG_JSON_ENVELOPE_INVARIANTS.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_LOG_JSON_ENVELOPE_INVARIANTS PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK "xdp_fixture;exporter_port_9417"
+    TIMEOUT 90
+    SKIP_RETURN_CODE 77
+)
+
+add_test(
+    NAME T_LOG_EVENT_CATALOG_STABILITY
+    COMMAND bash ${TEST_DIR}/T_LOG_EVENT_CATALOG_STABILITY.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_LOG_EVENT_CATALOG_STABILITY PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    TIMEOUT 30
+)

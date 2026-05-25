@@ -10,8 +10,8 @@ endif()
 
 project(xdpmacfilter
     LANGUAGES C CXX
-    VERSION   0.7.0
-    DESCRIPTION "MVP-3.4b L2 MAC + L3 src-CIDR allow-list XDP filter (OR-compose) + Prometheus exporter + per-rule counters"
+    VERSION   0.8.0
+    DESCRIPTION "MVP-3.5 L2 MAC + L3 src-CIDR allow-list XDP filter (OR-compose) + Prometheus exporter + per-rule counters + structured logging"
 )
 
 # §5.25 P3: version-string sync — generate include/version.h from the
@@ -115,6 +115,7 @@ add_library(xdpmf_internal STATIC
     src/lib/cidr.cpp          # §5.27 (MVP-3.2) — IPv4 CIDR parser
     src/lib/sidecar.cpp       # §5.31 (MVP-3.4b) — rule_index.json writer
     src/lib/yaml_subset.cpp
+    src/common/logger.cpp     # §5.32 (MVP-3.5) — XDPMF_LOG_FORMAT={text,json} envelope
 )
 target_include_directories(xdpmf_internal PRIVATE
     ${CMAKE_SOURCE_DIR}/src
@@ -142,6 +143,7 @@ add_executable(xdpmf-exporter
     src/exporter/stats_reader.cpp
     src/exporter/rule_counters_reader.cpp  # §5.31 (MVP-3.4b) — PERCPU sum for rule_counters
     src/exporter/sidecar_reader.cpp        # §5.31 (MVP-3.4b) — rule_index.json parser
+    src/common/logger.cpp                  # §5.32 (MVP-3.5) — Q6=B1 dup-TU compile across binaries
 )
 target_include_directories(xdpmf-exporter PRIVATE
     ${CMAKE_SOURCE_DIR}/src

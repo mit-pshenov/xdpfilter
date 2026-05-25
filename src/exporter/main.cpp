@@ -13,14 +13,17 @@
  *   --version           prints "xdpmf-exporter <V>" + exit 0
  */
 #include <charconv>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <format>
 #include <span>
 #include <string>
 #include <string_view>
 
+#include "common/logger.hpp"    // §5.32 (MVP-3.5) structured-logging surface
 #include "common/mac_filter.h"  // XDPMF_BPFFS_ROOT
 #include "http.hpp"
 #include "stats_reader.hpp"     // §5.30 HK-16: validate_bpffs_root_or_warn
@@ -88,8 +91,14 @@ void print_usage(std::FILE* out)
         std::string_view v = tok.substr(with_eq.size());
         ++idx;
         if (v.empty()) {
-            std::fprintf(stderr, "xdpmf-exporter: --%.*s requires a value\n",
-                         static_cast<int>(expected.size()), expected.data());
+            /* §5.32 (MVP-3.5): byte-equivalent text-mode + flag field for JSON. */
+            const std::string msg = std::format(
+                "xdpmf-exporter: --{} requires a value\n", expected);
+            const xdpmf::logger::Field fs[] = {
+                xdpmf::logger::Field{"flag", expected},
+            };
+            xdpmf::logger::emit(xdpmf::logger::Level::Error,
+                                "exporter.usage_error", msg, fs);
             std::exit(kExitUsageErr);
         }
         return v;
@@ -97,8 +106,13 @@ void print_usage(std::FILE* out)
     const std::string plain = std::string{"--"} + std::string{expected};
     if (tok == plain) {
         if (idx + 1 >= args.size()) {
-            std::fprintf(stderr, "xdpmf-exporter: --%.*s requires a value\n",
-                         static_cast<int>(expected.size()), expected.data());
+            const std::string msg = std::format(
+                "xdpmf-exporter: --{} requires a value\n", expected);
+            const xdpmf::logger::Field fs[] = {
+                xdpmf::logger::Field{"flag", expected},
+            };
+            xdpmf::logger::emit(xdpmf::logger::Level::Error,
+                                "exporter.usage_error", msg, fs);
             std::exit(kExitUsageErr);
         }
         ++idx;
@@ -106,9 +120,15 @@ void print_usage(std::FILE* out)
         ++idx;
         return v;
     }
-    /* Unreachable if the caller checked the flag prefix; defensive only. */
-    std::fprintf(stderr, "xdpmf-exporter: unexpected argument: '%.*s'\n",
-                 static_cast<int>(tok.size()), tok.data());
+    /* Unreachable if the caller checked the flag prefix; defensive only.
+     * §5.32 (MVP-3.5): byte-equivalent text-mode + tok in JSON fields. */
+    const std::string msg = std::format(
+        "xdpmf-exporter: unexpected argument: '{}'\n", tok);
+    const xdpmf::logger::Field fs[] = {
+        xdpmf::logger::Field{"arg", tok},
+    };
+    xdpmf::logger::emit(xdpmf::logger::Level::Error,
+                        "exporter.usage_error", msg, fs);
     std::exit(kExitUsageErr);
 }
 
@@ -140,9 +160,17 @@ int main(int argc, char* argv[])
                 const std::string_view v = consume_flag_value(args, i, "port");
                 std::uint16_t port = 0;
                 if (!parse_uint16(v, port)) {
-                    std::fprintf(stderr, "xdpmf-exporter: invalid --port: '%.*s' "
-                                         "(expected uint16, 1..65535)\n",
-                                 static_cast<int>(v.size()), v.data());
+                    /* §5.32 (MVP-3.5): byte-equivalent text-mode + value
+                     * in JSON fields. */
+                    const std::string msg = std::format(
+                        "xdpmf-exporter: invalid --port: '{}' "
+                        "(expected uint16, 1..65535)\n", v);
+                    const xdpmf::logger::Field fs[] = {
+                        xdpmf::logger::Field{"flag",  std::string_view{"port"}},
+                        xdpmf::logger::Field{"value", v},
+                    };
+                    xdpmf::logger::emit(xdpmf::logger::Level::Error,
+                                        "exporter.usage_error", msg, fs);
                     return kExitUsageErr;
                 }
                 cfg.port = port;
@@ -151,8 +179,14 @@ int main(int argc, char* argv[])
             } else if (tok == "--bpffs-root" || tok.starts_with("--bpffs-root=")) {
                 cfg.bpffs_root = std::string{consume_flag_value(args, i, "bpffs-root")};
             } else {
-                std::fprintf(stderr, "xdpmf-exporter: unknown argument: '%.*s'\n",
-                             static_cast<int>(tok.size()), tok.data());
+                /* §5.32 (MVP-3.5): byte-equivalent text-mode + tok in JSON. */
+                const std::string msg = std::format(
+                    "xdpmf-exporter: unknown argument: '{}'\n", tok);
+                const xdpmf::logger::Field fs[] = {
+                    xdpmf::logger::Field{"arg", tok},
+                };
+                xdpmf::logger::emit(xdpmf::logger::Level::Error,
+                                    "exporter.usage_error", msg, fs);
                 print_usage(stderr);
                 return kExitUsageErr;
             }
@@ -173,7 +207,16 @@ int main(int argc, char* argv[])
     try {
         rc = xdpmf::exporter::run(cfg);
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "xdpmf-exporter: fatal: %s\n", e.what());
+        /* §5.32 (MVP-3.5): byte-equivalent text-mode (PI-3.5-1) + JSON
+         * surfaces .what() in fields. Process-scoped (no iface). */
+        const std::string what_str = e.what();
+        const std::string msg = std::format(
+            "xdpmf-exporter: fatal: {}\n", what_str);
+        const xdpmf::logger::Field fs[] = {
+            xdpmf::logger::Field{"what", std::string_view{what_str}},
+        };
+        xdpmf::logger::emit(xdpmf::logger::Level::Error,
+                            "exporter.fatal", msg, fs);
         return kExitUsageErr;
     }
 
@@ -184,10 +227,18 @@ int main(int argc, char* argv[])
      * fired the trigger (always >= 1; the trigger requires it). */
     if (rc == 6) {
         const std::size_t n = xdpmf::exporter::last_exit_six_total();
-        std::fprintf(stderr,
-                     "xdpmf-exporter: ERROR all %zu discovered interfaces failed "
-                     "permission-denied; check CAP_BPF and bpffs read mode (exit 6)\n",
-                     n);
+        /* §5.32 (MVP-3.5) HK-17 stderr line: byte-equivalent text-mode +
+         * total_discovered surfaced as `fields.total_discovered` for JSON. */
+        const std::string msg = std::format(
+            "xdpmf-exporter: ERROR all {} discovered interfaces failed "
+            "permission-denied; check CAP_BPF and bpffs read mode (exit 6)\n",
+            n);
+        const xdpmf::logger::Field fs[] = {
+            xdpmf::logger::Field{"total_discovered",
+                                 static_cast<std::int64_t>(n)},
+        };
+        xdpmf::logger::emit(xdpmf::logger::Level::Error,
+                            "exporter.error.all_ifaces_eacces", msg, fs);
     }
     return rc;
 }
