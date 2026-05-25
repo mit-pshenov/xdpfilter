@@ -4190,6 +4190,8 @@ parser emits `ParsedApply{ApplyConfig}`; dispatch arm calls
 `apply::apply_config(cfg.apply)`. Zero CLI-surface or main-dispatch
 restructure beyond the new `apply` arm.
 
+**[CORRECTION §5.30 HK-15 — see §5.30 (MVP-3.4.5)]**: the prose above + the code block below describe `ParsedAttach` / `ParsedDetach` / `ParsedApply` wrapper structs. Reality (verified during MVP-3.4 + MVP-3.4.5): these wrapper structs NEVER shipped. The CLI uses `ParsedCommand = std::variant<AttachConfig, DetachConfig, ApplyConfig, BypassConfig>` DIRECTLY (no wrapper layer); dispatch is via `std::visit` on the variant arms directly. The wrapper-struct framing was a design-side speculation that impl correctly skipped as unnecessary. **Authoritative current shape** is documented in §5.30 HK-15. The code block below is HISTORICAL ASPIRATIONAL — keep for audit trail but do NOT treat as the contract.
+
 ##### CLI variants (`src/cli/cli.hpp`)
 
 ```
@@ -6883,3 +6885,646 @@ This slice carries two anti-misdiagnosis guards forward from prior rework rounds
 1. **Cap-set declaration on a NEW invocation path** (inherited from §5.28 D-3.3-6 rework round 1): the exporter is a NEW binary with a NEW systemd unit declaring `AmbientCapabilities=CAP_BPF`. Future cycles touching cap declarations on NEW binaries MUST run `capsh --drop=<all-other-caps> -- <binary> <typical-args>` as a Phase-B smoke-check during design dialog BEFORE committing the cap-set. The §5.28 round-1 failure was a 3-cap set that worked under NSEXEC-preserved-caps but failed under systemd-stripped-caps. The §5.29 risk surface is the inverse: declaring TOO MANY caps would dilute the audit story but would not fail-loud. Mitigation: D-3.4-6 explicit cap-set rationale (CAP_BPF only, with explicit "we do NOT need CAP_SYS_ADMIN/NET_ADMIN/SYS_RESOURCE/PERFMON because we do not load/attach/rlimit/perfcount" justification).
 
 2. **Silent-inheritance-pattern recurrence** (inherited from the Open Q #13 RESOLUTION round, architecture-v2.md Hidden Assumption #1): the brief BODY at lines 35-40 of the design-brief contained a factual contradiction with shipped §5.26 schema rule 3 (`id ∈ [0, 63]`). ARRAY + T architects caught it; HASH architect inherited the brief framing silently. **Mitigation for this slice**: the MVP-3.4 task-brief is faithful to the defer posture (Open Q #13 RESOLUTION human-gate Option 1) — the architect (this document) verified against the just-amended architecture-v2.md section before drafting. **Future-cycle guard**: when MVP-3.4b is scoped, the architect drafting that brief MUST cross-check the inner-allowlist-value PI (PI-13-3.4 / PI-27 in this design) against shipped `src/common/mac_filter.h` and `src/bpf/mac_filter.bpf.c` BEFORE assuming any extension; the brief MUST cite the PI's current shape verbatim. If the brief misframes the existing inner-value as anything other than `__u8 / unsigned char`, the synthesizer's "line of defense" must catch it (per arch-v2.md Hidden Assumption #1 register entry).
+
+### §5.30 MVP-3.4.5: housekeeping (defer-posture audit + landmine removal) (brownfield amendment, 2026-05-25)
+
+**Purpose**: pure non-functional cleanup of the backlog accumulated through MVP-3.1..3.4 + the `/mint-review` audit (commit `325e2ee` of `agent-teams-review/runs/mint-review-mint-l2-mac-filter-202605250825/report.md`). 17 housekeeping items in 3 themes: (1) contract-drift fixes HK-1..HK-8 (exit-code triple-drift, `XDPMF_BPF_OBJECT_PATH` compile-gate, bypass audit-trail hardening, perf micro-opt, --help completeness, version bump 0.6.0 → 0.6.1); (2) landmine removal HK-9..HK-10 (3-callsite `LIBBPF_PIN_BY_NAME` lockstep → single `kManagedMaps[]` table; broad `pkill` → iface-scoped); (3) OOT-deferred backlog HK-11..HK-17 (5 items from MVP-3.1/3.3/3.4 deferral queues + 2 "implement-per-design" from MVP-3.4 review.md). **No new operator-facing feature, no new BPF map, no datapath behaviour change, no new public API, no schema change, no new exit code.** Smallest LOC delta of MVP-3.x to date. Documentation pass (13-item doc bucket from `/mint-review` report — README rewrite, FLEET_DEPLOYMENT.md sections, CONFIG_SCHEMA.md, HANDOFF.md move, Ansible Jinja fixes) is EXCLUDED from this slice per user direction (separate manual pass — see task-brief.md "Doc bucket").
+
+**Anchor sections**: §5.29 (MVP-3.4 ancestor — defer-posture; `rules`+`action_table` skeleton; bypass primitive; exporter); §4.1 exit-code table (UNCHANGED — no new codes; HK-1 fixes exit-1 propagation; HK-2 updates `--help` to list code 7; HK-17 surfaces the existing code 6 trigger for exporter); §5.26 D-3.1-1 (`apply_request` lives in `loader.cpp`, NOT `apply_internal.cpp` — HK-1 catch arm lands in `main.cpp`, HK-9 refactor is `loader.cpp`-internal); §5.27 + §5.28 + §5.29 invariant chain (PI-1..PI-34 all preserved); MVP-3.3 §5.28 D-3.3-6 + MVP-3.4 §5.29 D-3.4-6 (anti-misdiagnosis cap-set discipline — HK-3 + HK-17 inherit).
+
+**Scope contract (§5.30 short form)**:
+- NEW (tests only — NO new source files this slice): `tests/T_APPLY_EXITS_1_ON_MISSING_CONFIG.sh` (HK-1), `tests/T_BYPASS_INTERACTIVE_PROMPT.sh` (HK-4 / new-coverage), `tests/T_BYPASS_REASON_TRUNCATE.sh` (HK-4 truncation), `tests/T_EXPORTER_EXITS_6_ALL_IFACES_EACCES.sh` (HK-17).
+- EDITED (source): `src/cli/main.cpp` (HK-1 catch arm), `src/cli/apply.cpp` (HK-1 stale comment), `src/cli/cli.cpp` (HK-2 + HK-6 usage_text), `src/lib/loader.cpp` (HK-3 compile-gate + HK-9 kManagedMaps refactor), `src/cli/bypass.cpp` (HK-4 escape + sudo identity), `src/bpf/mac_filter.bpf.c` (HK-5 unlikely() wraps), `src/exporter/main.cpp` (HK-6 env-var block + HK-17 exit-6), `src/exporter/stats_reader.cpp` (HK-16 WARN + HK-17 trigger), `CMakeLists.txt` (HK-3 option + HK-7 docs install + HK-8 version bump 0.6.0 → 0.6.1).
+- EDITED (tests + meta): `tests/CMakeLists.txt` (HK-3 propagate XDPMF_ENABLE_BPF_OBJECT_OVERRIDE + 4 new add_test entries), `tests/T_LINK_PERSIST_ACROSS_LOADER_EXIT.sh` (HK-10 iface-scoped pkill), `tests/lib/common.sh` (HK-10 kill_loader_keep_link — if PID-track approach chosen), `tests/T_SYSTEMD_RESTART_ON_FAILURE.sh` (HK-11 internal retry), `tests/T_APPLY_ATOMIC_SWAP_NO_DROP.sh` (HK-12 NOTE comment), `tests/T_ATTACH_TAG_MISMATCH.sh` (HK-13 orphan-pin cleanup), `tests/T_EXPORTER_NO_ATTACHED_IFACE.sh` (HK-16 WARN grep), `CHANGELOG.md` (HK-8 new `[0.6.1]` entry + MVP-3.4.5 build-pace row), design.md (HK-15 §5.26 ParsedAttach/Detach/Apply wrapper text correction — inline retraction note).
+- UNCHANGED-BUT-AFFECTED (zero git-diff fence): `src/lib/loader.hpp` (**PI-7-3.4.5-hpp — 5th consecutive ZERO-diff cycle**); all 42 pre-§5.30 ctest BODIES except the 5 EDITED listed above; `src/lib/loader.cpp` outside the two explicit hunks (HK-3 compile-gate + HK-9 refactor) — see PI-7-3.4.5-cpp scope-fence below; `src/bpf/mac_filter.bpf.c` `.maps` block + `mac_filter_prog` function body (HK-5 only touches the 6 verifier null-checks at the listed lines — a leaf branch micro-opt, byte-equivalent JIT semantics; PI-28 holds); `src/common/mac_filter.h` (UNCHANGED — no new constants); `src/lib/{config,yaml_subset,cidr}.{cpp,hpp}` (UNCHANGED); `src/cli/{attach,detach,apply}.{cpp,hpp}` (UNCHANGED except HK-1 comment delete in `apply.cpp`); §5.4 / §5.19 / §5.22 / §5.24 trust+identity gates (UNCHANGED); systemd unit files (UNCHANGED — HK-7 installs the docs FILE, not the units); Ansible playbook (UNCHANGED — Jinja template doc fixes are in the EXCLUDED doc bucket).
+
+**Human-gate decisions (defaults from brief — confirmed by architect, all defaults stand)**:
+
+- **HG-3.4.5-1 — HK-16 PI-32 startup WARN → IMPLEMENT per design (W1 startup-only).** Confirmed. The MVP-3.4 review.md round-1 disposition was "silent graceful return"; per [[impl-role-discipline]] silent divergence from design is forbidden. PI-32 text (§5.29) literally says "logs ONE warning line at startup"; impl now emits it. W1 (one-shot `std::filesystem::exists(bpffs_root)` at exporter start) chosen over W2 (per-scrape rate-limited) — matches PI-32 literal phrasing, simpler impl, matches fleet-ops expectation (startup-time diagnostic, not per-scrape noise). See D-3.4.5-1 below for exact stderr-line wording + emission ordering.
+
+- **HG-3.4.5-2 — HK-17 exporter exit-6 → IMPLEMENT per design (E1: ALL ifaces fail EACCES/EPERM + non-empty discovered set + zero successes).** Confirmed. The MVP-3.4 §5.29 declared exit 6 EXISTS but did NOT specify the trigger condition; this slice fills the gap. E1 chosen over E2 (any-iface fail → fail-loud) and E3 (bind-time only) because: (a) E2 risks unit flapping if one iface gets bpffs permission issue while others read fine — operationally hostile; (b) E3 is a different failure mode (bind-time vs scrape-time) that probably deserves its own exit code anyway; (c) E1 aligns with "if we can't read ANYTHING then permission-denied is the right exit code" while preserving "partial visibility better than no visibility" for normal fleet operation. Empty bpffs root = exit 0 (no-ifaces is a normal state per HK-16/PI-32). Per-iface EACCES with at least one success continues to WARN-and-continue (preserved from MVP-3.4 `stats_reader.cpp:141-145`). See D-3.4.5-2 below for the precise counter accounting.
+
+- **HG-3.4.5-3 — HK-9 `kManagedMaps[]` refactor → SHIP this cycle (Q4 T1 member-pointer).** Confirmed. The 3-callsite landmine (open_skeleton_only `pinned_maps[]` / apply_request `pin_specs[]` / apply_request `reuse_specs[]`) bit during MVP-3.4 EDIT-2 (27/42 ctest fail signature). MVP-3.5+ datapath-map additions will fire it again unless consolidated. T1 (member-pointer) chosen over T2 (name-lookup) and T3 (lambda dispatch) — compile-time-checked, no runtime lookup overhead, mirrors existing literal-array structure. See D-3.4.5-3 below + DataStructures additions.
+
+- **HG-3.4.5-4 — HK-11 T_SYSTEMD_RESTART_ON_FAILURE → S1 (internal 2-attempt retry).** Confirmed. Retains the strict band [4,5] StartLimit-placement-footgun guard (the original purpose of the test). S2 (widen band to [1,50]) is the fallback ONLY if S1 measured-adds >30s to ctest runtime. Surface attempt count in PASS message (`PASS: T_SYSTEMD_RESTART_ON_FAILURE (attempt N/2)`).
+
+#### §5.30 Q-decisions (mechanism)
+
+##### Q1: HK-1 catch placement → **C1 (catch arm to main.cpp's SECOND try, mirroring FIRST)**
+
+Confirmed per brief default. 3 LOC. Mirrors `main.cpp:99-103`'s existing `catch (const xdpmf::CliError& e)` arm on the FIRST try (parser). Apply via the same exception type. C2 (whole-main try/catch with switch on exception type, ~15 LOC) is over-engineering for a single missing arm — and given D-3.1-1 (`apply_request` body lives in `loader.cpp`; main.cpp dispatches via `std::visit`), the SECOND try is the natural fence: catch `CliError` raised during the visit body, return `kExitUsageErr` (= 1). The visited `apply_main` already raises `CliError` on `LoaderError::ConfigError` (= 9) and on `LoaderError::AttachRefused` (= 4), but the missing-file case `LoaderError::ConfigError` from `apply_internal::load_config_file()` was escaping unwrapped — the C1 arm catches it.
+
+##### Q2: HK-16 PI-32 WARN trigger → **W1 (one-shot startup check; stderr; continue)**
+
+Confirmed per brief default + HG-3.4.5-1. Exact mechanism (impl reference, see Interfaces additions for the precise stderr line):
+
+1. `xdpmf-exporter::main()` parses CLI; `cfg.bpffs_root` populated (default `XDPMF_BPFFS_ROOT` macro = `/sys/fs/bpf/xdpmacfilter`).
+2. BEFORE the first `http::run()` invocation, ONE `std::filesystem::exists(cfg.bpffs_root)` check.
+3. If false: emit ONE stderr line per Interfaces below; continue (do NOT exit).
+4. If true: silent (no positive log line — would be noise; the existing `xdpmf-exporter: listening on <bind>:<port>` line at HTTP bind time is the operator's "I started" signal).
+
+No per-scrape check (W2). No rate-limiting (W1 fires at most once per process lifetime).
+
+##### Q3: HK-17 exporter exit-6 trigger → **E1 (ALL ifaces EACCES/EPERM + non-empty discovered set + zero successes)**
+
+Confirmed per brief default + HG-3.4.5-2. Precise trigger semantics (see Interfaces + Decisions below):
+
+- During scrape-loop / discovery pass: `stats_reader::read_all_attached(bpffs_root)` returns a vector of `StatsSample` PLUS (NEW for HK-17) a small accounting struct counting `{total_discovered, eacces_failures, other_failures, successes}` per-iface counters.
+- After ANY scrape (or at end of an explicit "verify discovery" pre-flight if architect prefers), if `total_discovered > 0 AND eacces_failures == total_discovered AND successes == 0` → exit from `main()` with code 6 + ONE stderr line: `xdpmf-exporter: ERROR all <N> discovered interfaces failed permission-denied; check CAP_BPF and bpffs read mode (exit 6)`.
+- Per-iface partial-EACCES (some succeed, some EACCES) → unchanged from MVP-3.4: WARN-and-continue per existing `stats_reader.cpp:141-145` handler (PI-31 preserved).
+- Empty `total_discovered` (bpffs root exists but no per-iface subdirs OR doesn't exist) → exit 0 — no-ifaces is a normal state (HK-16 WARN at startup, then quiet running).
+- See D-3.4.5-2 for the precise counter accounting + "when does the check fire" detail.
+
+##### Q4: HK-9 kManagedMaps[] table representation → **T1 (member-pointer)**
+
+Confirmed per brief default + HG-3.4.5-3. Concrete shape in DataStructures sub-section below. Rationale recap: T1 is compile-time-checked (the member-pointer expression `&mac_filter_bpf::maps::allowlist_a` will fail to compile if libbpf-skel renames the map field, fail-fast at build-time) and has zero runtime overhead (the three loops walk the table once each per apply / open). T2 (name-based `bpf_object__find_map_by_name`) adds a per-iteration name lookup AND defers all rename-failures to runtime. T3 (lambda dispatch table) is over-engineering for a 10-entry table.
+
+##### Q5: HK-11 retry strategy → **S1 (internal 2-attempt retry within test)**
+
+Confirmed per brief default + HG-3.4.5-4. Exact retry shape: after first attempt fails, the test resets systemd state (`systemctl reset-failed xdpmacfilter@${IFACE}.service`; small `sleep 1`; clear any pin-dir residue if present) and re-runs the same probe sequence. PASS message: `PASS: T_SYSTEMD_RESTART_ON_FAILURE (attempt N/2)`. If both attempts fail → FAIL (NOT SKIP — test still gates correctness; the StartLimit-placement-footgun signature is band [4,5], and the band MUST hold). Tester measures end-to-end runtime; if S1 measured-adds >30s to ctest runtime, escalate to architect via SendMessage and the fallback is S2 (widen band [1,50] permanently).
+
+##### Q6: tackle additional MVP-3.4 review findings? → **No additional items** (per brief default)
+
+Confirmed. M5+M6 testing (interactive prompt + reason truncation) are already in scope (HK-4 + new ctest list). H1 perf (`__builtin_expect`) is HK-5. H2 arch (3-callsite refactor) is HK-9. H5 doc (FLEET_DEPLOYMENT.md exporter section) is in the EXCLUDED doc bucket. Adding more items risks scope explosion on a "small housekeeping" cycle that's already 17 items. Doc items deferred to the user's separate manual doc pass.
+
+#### §5.30 DataStructures additions
+
+##### `kManagedMaps[]` (HK-9 refactor; anon-namespace in `src/lib/loader.cpp`)
+
+The 3-callsite literal arrays from MVP-3.4 (`open_skeleton_only`'s `pinned_maps[]` clear-list at line 828; `internal::apply_request`'s `pin_specs[]` per-iface manual-pin list at line 1705; `internal::apply_request`'s `reuse_specs[]` state-b reattach list at line 1566) are consolidated into ONE constexpr table at anon-namespace scope. All three call-sites walk the SAME table; the `legacy_alias` flag filters the `allowlist` entry out of pin/reuse loops (it stays in the clear-list only because LIBBPF auto-pin must be cleared on the alias too, even though its actual per-iface pin happens via the special-pin path at `loader.cpp:1739`).
+
+```cpp
+// src/lib/loader.cpp anon namespace (HK-9 §5.30, MVP-3.4.5)
+namespace {
+
+struct ManagedMapEntry {
+    // Pointer to the bpf_map* member in the libbpf-generated skel's `maps` struct.
+    // Compile-time-checked: any rename in mac_filter.bpf.h auto-fails the build.
+    ::bpf_map* mac_filter_bpf::maps_struct::* member_ptr;
+    const char* name;       // pin file name under ${PIN_DIR}/<iface>/
+    bool legacy_alias;      // true → SKIP from pin_specs and reuse_specs; KEEP in pinned_maps clear-list
+};
+
+// Order matches existing apply_request pin_specs[] for line-diff readability.
+// 10 entries: 9 "real" maps + 1 legacy alias.
+constexpr ManagedMapEntry kManagedMaps[] = {
+    { &mac_filter_bpf::maps_struct::allowlist_a,      "allowlist_a",      false },
+    { &mac_filter_bpf::maps_struct::allowlist_b,      "allowlist_b",      false },
+    { &mac_filter_bpf::maps_struct::cidr_allowlist_a, "cidr_allowlist_a", false },
+    { &mac_filter_bpf::maps_struct::cidr_allowlist_b, "cidr_allowlist_b", false },
+    { &mac_filter_bpf::maps_struct::defaults_map,     "defaults_map",     false },
+    { &mac_filter_bpf::maps_struct::active_idx_map,   "active_idx_map",   false },
+    { &mac_filter_bpf::maps_struct::stats,            "stats",            false },
+    { &mac_filter_bpf::maps_struct::rules,            "rules",            false },  // §5.29 skeleton
+    { &mac_filter_bpf::maps_struct::action_table,     "action_table",     false },  // §5.29 skeleton
+    { &mac_filter_bpf::maps_struct::allowlist,        "allowlist",        true  },  // legacy MVP-1 alias
+};
+
+}  // anon namespace
+```
+
+**Notes on the exact field naming**: impl uses the actual libbpf-skel struct name (`struct mac_filter_bpf::maps` or whatever the codegen emits — verify against existing `pinned_maps[]` literal at line 828 which already uses the same expressions like `skel->maps.allowlist_a`). The pseudo-name `maps_struct` above is illustrative; impl reads the existing pinned_maps[] literal and ports the SAME expressions into `member_ptr` initializers via `&decltype(skel->maps)::<field>`. Test-build verification: zero-diff in `bpftool map show` output before/after for ALL maps (PI-29 hold).
+
+**Three call-sites post-HK-9** (all in `loader.cpp`):
+
+1. **`open_skeleton_only()` clear-list** (was pinned_maps[10] literal; ~12 LOC):
+   ```cpp
+   for (const auto& entry : kManagedMaps) {
+       ::bpf_map_set_pin_path(skel->maps.*entry.member_ptr, nullptr);
+   }
+   // Walks ALL 10 entries including legacy_alias=true.
+   ```
+
+2. **`internal::apply_request()` pin_specs loop** (was pin_specs[9] literal at line 1705; ~10 LOC):
+   ```cpp
+   for (const auto& entry : kManagedMaps) {
+       if (entry.legacy_alias) continue;          // skip the alias from per-iface pinning
+       const std::string p = pin_dir + "/" + entry.name;
+       if (auto rc = ::bpf_map_pin(skel->maps.*entry.member_ptr, p.c_str()); rc < 0) {
+           throw std::system_error(LoaderError::AttachFailed, "pin " + p);
+       }
+   }
+   ```
+
+3. **`internal::apply_request()` reuse_specs loop** (was reuse_specs[9] literal at line 1566; ~10 LOC):
+   ```cpp
+   for (const auto& entry : kManagedMaps) {
+       if (entry.legacy_alias) continue;          // alias is not pin-by-name-reused
+       const std::string p = pin_dir + "/" + entry.name;
+       int fd = ::bpf_obj_get(p.c_str());
+       if (fd < 0) {
+           if (errno == ENOENT) continue;          // state-a path: no prior pin
+           throw std::system_error(LoaderError::AttachFailed, "obj_get " + p);
+       }
+       ::bpf_map_reuse_fd(skel->maps.*entry.member_ptr, fd);  // libbpf manages fd lifetime post-reuse
+   }
+   ```
+
+Net LOC: ~12 + ~10 + ~10 + 12 (table) = ~44 LOC code (replaces ~70 LOC of literals + per-call-site verbose error strings); net delta is roughly **neutral-to-negative** (probably -20 LOC after dedup of the per-site error messages). HK-9's value is NOT LOC reduction — it's eliminating the future-cycle 3-callsite-lockstep landmine.
+
+##### No other DataStructures changes
+
+HK-1..HK-8, HK-10..HK-17 are pure-fix items; no new types, no struct changes, no enum changes. `struct rule_entry`, `struct action_entry`, `enum xdpmf_action_type` from §5.29 stand byte-equivalent. `LoaderError` enum stands byte-equivalent (PI-7-3.4.5-hpp ZERO diff). Existing `exporter::StatsSample` / `HttpConfig` stand byte-equivalent. HK-17 adds a small internal accounting struct (impl-private to `stats_reader.cpp`; NOT in `stats_reader.hpp`):
+
+```cpp
+// src/exporter/stats_reader.cpp (HK-17 §5.30, MVP-3.4.5) — file-static, NOT exported.
+struct DiscoveryAccounting {
+    std::size_t total_discovered = 0;   // per-iface stats-pin paths found under bpffs_root
+    std::size_t eacces_failures = 0;    // bpf_obj_get failed with EACCES or EPERM
+    std::size_t other_failures = 0;     // bpf_obj_get failed with anything else
+    std::size_t successes = 0;          // bpf_obj_get + lookup succeeded
+};
+```
+
+Returned alongside the existing `std::vector<StatsSample>` either via `std::pair` or via an out-parameter — impl picks (Phase B SendMessage if impl wants a new struct type promoted to the header). `read_all_attached()` signature change is acceptable since `stats_reader.hpp` is an INTERNAL header (not shipped, not in `loader.hpp` PI-7 fence). Default expectation: out-parameter form (`read_all_attached(bpffs_root, /* out */ DiscoveryAccounting& acc)`) keeps the return type stable.
+
+#### §5.30 Interfaces additions
+
+##### HK-1 — `xdpmacfilter apply -f <missing> --iface <iface>` exits 1 (NOT 9 — current bug)
+
+After fix: `main.cpp`'s SECOND try block (around `std::visit`) catches `xdpmf::CliError` (raised by `apply_main` when `apply_internal::load_config_file()` throws `LoaderError::ConfigError` on missing file) and returns `kExitUsageErr` (= 1, per §4.1). The exit-code table is UNCHANGED; only the existing entry is now actually reachable on missing-file. Stderr message: existing `xdpmacfilter: config error: open <path>: No such file or directory` line is preserved verbatim. NO new stderr line. Reviewer verifies via T_APPLY_EXITS_1_ON_MISSING_CONFIG (§6.43 below).
+
+##### HK-2 — `xdpmacfilter --help` lists code 7
+
+usage_text edit at `cli.cpp:104-106`: the exit-code list becomes `1 usage, 2 load, 3 attach, 4 attach-refused, 5 detach, 6 permission, 7 kernel-unsupported, 8 path-refused, 9 config`. Insert `7 kernel-unsupported,` between `6 permission,` and `8 path-refused,`. Single-line change; T_CLI_HELP_VERSION ERE is forward-compatible (it does NOT pin the exact list length).
+
+##### HK-3 — `XDPMF_BPF_OBJECT_PATH` is compile-gated behind `XDPMF_ENABLE_BPF_OBJECT_OVERRIDE`
+
+Post-HK-3 contract: in a default release build (`cmake -DCMAKE_BUILD_TYPE=Release`), the env var `XDPMF_BPF_OBJECT_PATH` is IGNORED (the code paths that read it are `#ifdef`'d out at compile time; the var simply has no effect). In a test build (`cmake -DXDPMF_ENABLE_BPF_OBJECT_OVERRIDE=ON`), behaviour is identical to today. CMake mechanism:
+
+```cmake
+# CMakeLists.txt (top-level)
+option(XDPMF_ENABLE_BPF_OBJECT_OVERRIDE
+       "Allow loader to honor XDPMF_BPF_OBJECT_PATH env var (testing-only)" OFF)
+target_compile_definitions(xdpmf_internal PRIVATE
+    $<$<BOOL:${XDPMF_ENABLE_BPF_OBJECT_OVERRIDE}>:XDPMF_ENABLE_BPF_OBJECT_OVERRIDE>)
+```
+
+```cmake
+# tests/CMakeLists.txt
+set(XDPMF_ENABLE_BPF_OBJECT_OVERRIDE ON CACHE BOOL "" FORCE)
+```
+
+The test-side override is set BEFORE `add_subdirectory(tests)` evaluates the top-level option default OR via a CMake `set(... CACHE ... FORCE)` pattern — impl picks the cleanest mechanism per existing CMake idioms; the contract is "default OFF, test ON". `T_VERIFIER_REJECT.sh` (which uses `XDPMF_BPF_OBJECT_PATH` to point loader at a verifier-reject artifact) continues to pass because the test build sets the define. Reviewer asserts: `nm $(which xdpmacfilter) | grep XDPMF_BPF_OBJECT_PATH` in a release build returns ZERO references (string literal optimized out).
+
+##### HK-4 — bypass log-injection escape + sudo identity
+
+`bypass.cpp:38-53` `truncate_reason()` post-fix contract:
+- Input: raw `--reason "<text>"` string (any bytes, any length).
+- Step 1: byte-truncate to 253 bytes (leave room for `…` 3-byte UTF-8 ellipsis). UTF-8 rewind-safety: if byte 253 falls mid-codepoint (lead byte = `0b11xxxxxx` AND the 4 bytes around it form a multi-byte sequence), rewind to the last codepoint boundary before 253.
+- Step 2: append `…` (U+2026, 3 bytes `0xE2 0x80 0xA6`) IFF the input was longer than 253 bytes.
+- Step 3: escape per `prom_format.cpp:34-47` `escape_label_value()`: `\` → `\\`, `"` → `\"`, `\n` → `\\n`, `\r` → `\\r`, `\0` → `\\0`. No other byte-class escaping (matches Prometheus label-value contract).
+- Output: safe-for-embed-in-double-quoted-string-in-stderr.
+
+`bypass.cpp:124-129` audit-log line post-fix contract: AFTER the existing per-§5.29 line format, ADD `SUDO_USER` and `SUDO_UID` env-vars (read via `getenv()`) into the line as additional structural fields:
+
+`xdpmacfilter: BYPASS activated on <iface> by uid=<UID> euid=<EUID> sudo_user="<value or <none>>" reason="<escaped reason or UNSPECIFIED>"`
+
+Fields:
+- `uid=<UID>` — `getuid()` (decimal, no leading zero).
+- `euid=<EUID>` — `geteuid()` (decimal). Both fields are emitted ALWAYS (NOT just when they differ).
+- `sudo_user="<value>"` — `getenv("SUDO_USER")`; if `NULL` OR empty string → emit literal `<none>` (NOT empty quotes, NOT the literal string `null`; the angle-bracket convention mirrors `UNSPECIFIED` for reason).
+- `reason="<escaped>"` — escaped via the §HK-4 escape step above. `UNSPECIFIED` if `--reason` absent.
+
+NO read of `SUDO_UID` (the original brief mentioned it but `SUDO_USER` is the operator-meaningful identity; `SUDO_UID` is just a decimal echo of what `getuid()` already shows for the wrapping shell). Impl MAY include `SUDO_UID` as an OPTIONAL trailing field if it adds operational value; default: skip per design simplicity. Single-line output; no newline within fields.
+
+##### HK-5 — `__builtin_expect` on 6 verifier null-check sites
+
+Add `#define unlikely(x) __builtin_expect(!!(x), 0)` near the top of `src/bpf/mac_filter.bpf.c` (after existing includes). Wrap the 6 null-check sites at lines 188, 204, 211, 229, 236, 254 — these are leaf null-checks that the verifier mandates (e.g. `if (data + sizeof(ethhdr) > data_end) return XDP_PASS;` style or `if (unlikely(!hdr)) return XDP_PASS;`). The contract: source-level annotations are added; JIT semantics are byte-equivalent (the branch direction hint affects the JIT code layout but NOT the functional verdict). Reviewer asserts via T_VERIFIER_REJECT-equivalent pass (PI-28 holds — function-body semantic byte-equivalent).
+
+**Caveat**: the brief lists 6 site line-numbers (188, 204, 211, 229, 236, 254); these were captured against the current `mac_filter.bpf.c`. Impl verifies each site is genuinely a "verifier-mandated null check on a pointer that ALWAYS-OR-USUALLY is non-null at runtime" before wrapping — wrapping a check that's expected to fail (e.g. an actual error-handling branch) is wrong-shape. If any of the 6 sites is genuinely a 50/50 branch, impl skips that site + SendMessages architect; default is wrap all 6.
+
+##### HK-6 — `--unsafe` semantic clarification + `XDPMF_TRUST_MODEL` env-var block in --help
+
+`cli.cpp` usage_text post-fix:
+- `--unsafe` line: `--unsafe    bypass: required in non-interactive context; ALSO suppresses interactive y/N prompt when passed at a tty.` (current wording reads as "non-interactive only", missing the prompt-suppression case).
+- New `Environment variables:` sub-block at the end of the help text:
+  ```
+  Environment variables:
+    XDPMF_TRUST_MODEL={strict|fleet}   Default: strict. fleet relaxes only
+                                        §5.4 alien-program refusal — see
+                                        docs/FLEET_DEPLOYMENT.md for the full
+                                        gate diff between modes.
+  ```
+- Same `Environment variables:` sub-block added to `xdpmf-exporter` print_usage in `src/exporter/main.cpp` (consistent help-text discipline; the exporter does NOT read `XDPMF_TRUST_MODEL` but DOES read `XDPMF_BPFFS_ROOT` implicitly via the `--bpffs-root` default; the env-var block can also list `XDPMF_BPFFS_ROOT` since the exporter respects it). Impl picks: exporter block lists either both env vars or just `XDPMF_BPFFS_ROOT`; default: list both with a note that `XDPMF_TRUST_MODEL` does NOT affect the exporter.
+
+T_CLI_HELP_VERSION ERE is forward-compatible. No new test required (HK-6 is a usage-text expansion; existing T_CLI_HELP_VERSION verifies clean exit, not text length).
+
+##### HK-7 — `docs/FLEET_DEPLOYMENT.md` installed alongside systemd units
+
+`CMakeLists.txt:140-185` post-fix: inside the existing `XDPMF_INSTALL_SYSTEMD_UNIT` block:
+
+```cmake
+install(FILES ${CMAKE_SOURCE_DIR}/docs/FLEET_DEPLOYMENT.md
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/share/doc/xdpmacfilter/)
+```
+
+Pairing rationale: the systemd units' `Documentation=file:///usr/share/doc/xdpmacfilter/FLEET_DEPLOYMENT.md` URI (per §5.28 + §5.29 unit catalogues) now resolves on the operator's host post-install. Gated on the existing systemd-install option (operators not installing units don't need the docs file copied either). NO change to the units themselves.
+
+##### HK-8 — version bump 0.6.0 → 0.6.1 + CHANGELOG `[0.6.1]` entry
+
+`CMakeLists.txt`: `project(xdpmacfilter VERSION 0.6.0 ...)` → `project(xdpmacfilter VERSION 0.6.1 ...)`. Both binaries (`xdpmacfilter --version` AND `xdpmf-exporter --version`) report `0.6.1` post-bump (shared `version.h.in` from §5.25 P3 mechanism — PI-33 extends to 0.6.1).
+
+`CHANGELOG.md`: new `## [0.6.1] - 2026-05-NN` section per Keep-a-Changelog format. Document all HK-1..HK-17 changes grouped under Keep-a-Changelog sub-headers (Fixed / Changed / Added). Build-pace table gains a row for MVP-3.4.5. Impl picks the exact prose; suggested grouping:
+- **Fixed** — HK-1 (apply exit-code triple drift), HK-4 (bypass log-injection escape + sudo identity), HK-10 (iface-scoped pkill), HK-11 (T_SYSTEMD_RESTART_ON_FAILURE flake), HK-12 (T_APPLY_ATOMIC_SWAP_NO_DROP stale comment), HK-13 (orphan map-pin cleanup), HK-16 (PI-32 startup WARN now emitted), HK-17 (exit-6 now reachable on all-iface EACCES).
+- **Changed** — HK-2 (--help exit-code list completeness), HK-3 (`XDPMF_BPF_OBJECT_PATH` compile-gated), HK-5 (`__builtin_expect` perf hint), HK-6 (--unsafe semantic + env-var block), HK-9 (kManagedMaps[] refactor — internal), HK-15 (design.md ParsedAttach wrapper inaccuracy).
+- **Added** — HK-7 (FLEET_DEPLOYMENT.md installed), 4 new ctests (T_APPLY_EXITS_1_ON_MISSING_CONFIG, T_BYPASS_INTERACTIVE_PROMPT, T_BYPASS_REASON_TRUNCATE, T_EXPORTER_EXITS_6_ALL_IFACES_EACCES).
+- **Internal / docs only** — HK-14 (§6.25 step 8 grep — see Decision D-3.4.5-4 below: SKIP), HK-15 (design.md correction).
+
+##### HK-16 — exporter startup WARN exact format
+
+Exact stderr-line wording (W1 mechanism per Q2):
+
+```
+xdpmf-exporter: WARN bpffs root <path> does not exist; will serve empty metrics
+```
+
+Where `<path>` is the resolved `cfg.bpffs_root` (the literal string the operator passed via `--bpffs-root`, OR the default `/sys/fs/bpf/xdpmacfilter` if no flag). Single line, newline-terminated, written to stderr. Fires EXACTLY ONCE per process lifetime, BEFORE the existing `xdpmf-exporter: listening on <bind>:<port>` startup line. No emission if the path exists at startup (even if it later disappears mid-run — that's per-scrape graceful-empty, not WARN-worthy at the W1 design level; PI-32 only mandates the startup-time WARN). Reviewer asserts via T_EXPORTER_NO_ATTACHED_IFACE EDIT (§6.39 sub-case in §5.30 TestStrategy below).
+
+##### HK-17 — exporter exit-6 exact stderr line
+
+Exact stderr-line wording (E1 trigger per Q3):
+
+```
+xdpmf-exporter: ERROR all <N> discovered interfaces failed permission-denied; check CAP_BPF and bpffs read mode (exit 6)
+```
+
+Where `<N>` is the integer `total_discovered`. Single line, newline-terminated, written to stderr. Fires ONCE immediately before `exit(6)` from `main()`. `<N>` is at minimum 1 (the trigger requires `total_discovered > 0`). No emission on the partial-EACCES-with-some-success path (existing WARN-per-iface handler still fires). No emission on empty `total_discovered` (exit 0 path). Reviewer asserts via T_EXPORTER_EXITS_6_ALL_IFACES_EACCES (§6.46 below).
+
+##### CLI grammar — UNCHANGED
+
+Verb set is `attach | detach | apply | bypass` plus `--help | --version`; no new subcommand, no new flag. Exporter grammar `--port | --bind | --bpffs-root | --help | --version` UNCHANGED.
+
+##### `loader.hpp` PUBLIC-API — ZERO diff (PI-7-3.4.5-hpp, 5th cycle)
+
+`AttachConfig` / `DetachConfig` / `attach()` / `detach()` / `LoaderError` enum: ALL UNCHANGED. HK-9 kManagedMaps[] lives in `loader.cpp` anon namespace ONLY. HK-3 compile-gate is `#ifdef` in `loader.cpp` ONLY. No public symbol added / removed / renamed. `git diff main -- src/lib/loader.hpp` MUST show ZERO output.
+
+#### §5.30 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+##### NEW (created this slice — 4 test files, NO new source files)
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `tests/T_APPLY_EXITS_1_ON_MISSING_CONFIG.sh` | §6.43: HK-1 exit-1 fix verification; assert `apply -f /nonexistent --iface lo` exits 1 + stderr message preserved | bash | 50 |
+| `tests/T_BYPASS_INTERACTIVE_PROMPT.sh` | §6.44: HK-4-adjacent / new-coverage; interactive y/N branch via `script -qc` (SKIP-77 if absent); positive (y → detach exit 0), negative (n/EOF → cancel exit 0) | bash | 90 |
+| `tests/T_BYPASS_REASON_TRUNCATE.sh` | §6.45: HK-4 truncation contract; 256B (no trunc), 257B (trunc to 253+`…`), 300B mid-UTF-8 (rewind-safety) | bash | 90 |
+| `tests/T_EXPORTER_EXITS_6_ALL_IFACES_EACCES.sh` | §6.46: HK-17 fix verification; create per-iface bpffs dirs with chmod 000; launch exporter; assert exit 6 within healthz timeout; SKIP-77 if EACCES reproduction not possible in test env | bash | 130 |
+
+**No new source files this slice.** All HK changes are EDITs on existing files; the kManagedMaps[] refactor (HK-9) is a `loader.cpp`-internal consolidation. No new header, no new translation unit, no new binary.
+
+##### EDITED (existing files touched this slice)
+
+| Path | Role (one line) | What changes |
+|---|---|---|
+| `src/cli/main.cpp` | CLI entry-point + dispatch | **HK-1 (Q1 C1)**: ADD `catch (const xdpmf::CliError& e)` arm to the SECOND try block around `std::visit(...)`; in the catch body, `std::cerr << ...e.what()...; return kExitUsageErr;` mirroring the FIRST try block's existing arm. ~3 LOC. No other edits. |
+| `src/cli/apply.cpp` | apply subcommand handler | **HK-1 (comment cleanup)**: DELETE OR REWRITE the stale `ApplyFileIoError` planning comment at `apply.cpp:14-29`. Reality is the missing-file case maps to `LoaderError::ConfigError` (= 9 at the loader; the HK-1 main.cpp catch translates the wrapped `CliError` to exit 1 — see Decision D-3.4.5-5 below). NO logic change, only the comment. ~5 LOC. |
+| `src/cli/cli.cpp` | CLI usage_text + verb dispatch | **HK-2**: insert `7 kernel-unsupported,` in the exit-code list at `cli.cpp:104-106`. **HK-6**: fix `--unsafe` line wording + ADD `Environment variables:` sub-block listing `XDPMF_TRUST_MODEL`. ~10 LOC total. Verb dispatch table UNCHANGED. |
+| `src/lib/loader.cpp` | Loader + apply orchestrator (per D-3.1-1) | **HK-3 compile-gate**: wrap ALL uses of `XDPMF_BPF_OBJECT_PATH` (constant at line 97; error messages at lines 762, 768, 775; consumer at lines 814-818) in `#ifdef XDPMF_ENABLE_BPF_OBJECT_OVERRIDE` / `#endif`. ~10 LOC of `#ifdef` lines added. **HK-9 kManagedMaps[] refactor**: ADD anon-namespace `kManagedMaps[]` constexpr table per DataStructures sub-section above (~12 LOC); REPLACE `open_skeleton_only`'s `pinned_maps[]` literal-array + loop with `for (const auto& entry : kManagedMaps) bpf_map__set_pin_path(...)` (saves ~10 LOC); REPLACE `internal::apply_request`'s `pin_specs[]` literal + loop (~10 LOC saved); REPLACE `internal::apply_request`'s `reuse_specs[]` literal + loop (~10 LOC saved). **NET delta**: ~30 LOC saved on the refactor + ~10 LOC added on the #ifdef = roughly -20 LOC. NO change to: `attach()` / `detach()` public bodies, §5.4 state-machine, §5.19 name-check, §5.22 tag-check + O_PATH path-discipline, §5.24 kernel-version probe, §5.26 trust_model parse+log, §5.27 CIDR populate step, §5.29 apply step 8.5 (rules+action_table populate + WARN), the link-pin P0a logic, any RAII wrapper, any error-translation path. Reviewer applies regional-diff check: allowed hunk scopes = {`open_skeleton_only` (loop refactor only), `internal::apply_request` (pin_specs + reuse_specs sub-blocks only, NOT the step 8 / 8.5 sub-blocks which UNCHANGED), anon-namespace (kManagedMaps[] table + the `#ifdef XDPMF_ENABLE_BPF_OBJECT_OVERRIDE` blocks at the listed line ranges)}. Any hunk outside this set = `[INVARIANT-VIOLATED]` (PI-7-3.4.5-cpp). |
+| `src/cli/bypass.cpp` | bypass subcommand (§5.29 NEW file) | **HK-4 escape**: extend `truncate_reason()` post-truncation to apply `\` → `\\`, `"` → `\"`, `\n` → `\\n`, `\r` → `\\r`, `\0` → `\\0` (mirror `prom_format::escape_label_value`); UTF-8 rewind on mid-codepoint truncation. **HK-4 sudo identity**: extend audit-log line per HK-4 Interfaces sub-section above (add `euid=` and `sudo_user="..."` fields). ~25 LOC. NO change to the tty-check, prompt, `loader::detach()` invocation, exit-code semantics. |
+| `src/bpf/mac_filter.bpf.c` | XDP BPF program | **HK-5**: ADD `#define unlikely(x) __builtin_expect(!!(x), 0)` near top (after existing includes). WRAP 6 verifier null-checks at lines 188, 204, 211, 229, 236, 254. ~8 LOC. **NO** change to `mac_filter_prog` SEC, .maps block, any map declaration. JIT semantics byte-equivalent (PI-28 holds — branch hints, not branch logic). |
+| `src/exporter/main.cpp` | exporter entry-point (§5.29 NEW file) | **HK-6**: ADD `Environment variables:` sub-block to print_usage. **HK-17 exit-6**: after `http::run()` returns OR via a pre-flight discovery pass, read the accounting struct from `stats_reader` and exit 6 with the HK-17 stderr line if the trigger holds (per Q3 E1 / D-3.4.5-2). ~20 LOC total. NO change to signal handling, HTTP binding, default flag values. |
+| `src/exporter/stats_reader.cpp` | exporter stats reader (§5.29 NEW file) | **HK-16 startup WARN**: in `read_all_attached()` first-call OR via a separate startup-helper function called from `main()` BEFORE first `http::run()` — one-shot `std::filesystem::exists(bpffs_root)` check; emit HK-16 WARN line per Interfaces if false. **HK-17 accounting**: populate `DiscoveryAccounting` struct per Q3 E1; thread it back to main() (via out-param OR pair-return — impl picks per DataStructures sub-section). ~25 LOC total. NO change to PERCPU-sum logic, RO discipline (PI-31 holds), value-byte-equivalence (PI-29 holds). |
+| `CMakeLists.txt` | top-level build | **HK-3**: ADD `option(XDPMF_ENABLE_BPF_OBJECT_OVERRIDE "..." OFF)` + `target_compile_definitions(xdpmf_internal PRIVATE $<$<BOOL:${XDPMF_ENABLE_BPF_OBJECT_OVERRIDE}>:XDPMF_ENABLE_BPF_OBJECT_OVERRIDE>)`. **HK-7**: inside `XDPMF_INSTALL_SYSTEMD_UNIT` block, ADD `install(FILES docs/FLEET_DEPLOYMENT.md DESTINATION ${CMAKE_INSTALL_PREFIX}/share/doc/xdpmacfilter/)`. **HK-8**: bump `project(... VERSION 0.6.0 ...)` → `... VERSION 0.6.1 ...`. ~10 LOC total. NO other CMake change. |
+| `tests/CMakeLists.txt` | ctest registration | (a) ADD 4 new `add_test(...)` entries (§6.43..§6.46) with appropriate RESOURCE_LOCK declarations matching §5.29's `xdp_fixture` / `exporter_port_9417` patterns where applicable. (b) **HK-3 propagation**: set `XDPMF_ENABLE_BPF_OBJECT_OVERRIDE=ON` for the test build (impl picks the cleanest mechanism — `set(... CACHE BOOL "" FORCE)` before `add_subdirectory` OR per-test `target_compile_definitions` on the test binary — note tests are shell scripts invoking the loader binary, so the option must be ON at the loader's compile time; impl ensures this by setting the option ON in the top-level CMakeLists when `BUILD_TESTING=ON`, OR via `tests/CMakeLists.txt` setting a cache var BEFORE the top-level option line evaluates). (c) NO modification of the 42 existing add_test entries (PI-34 strict superset extension). |
+| `CHANGELOG.md` | version history | NEW `## [0.6.1] - 2026-05-NN` section per Keep-a-Changelog format; sub-groups per HK-8 Interfaces sub-section above. Build-pace table gains a row for MVP-3.4.5. |
+| `tests/T_LINK_PERSIST_ACROSS_LOADER_EXIT.sh` | persist-across-exit ctest (existing) | **HK-10**: REPLACE `sudo -n pkill -9 -f xdpmacfilter` at `:46, :110` with PID-tracked kill OR `sudo -n pkill -9 -f "xdpmacfilter.*${IFACE_A}"`. Tester picks (PID-tracked preferred — safer; argv-match acceptable if PID capture is awkward in the test fixture flow). ~5 LOC. |
+| `tests/lib/common.sh` | test helpers | **HK-10 (conditional)**: if Tester picked PID-tracked for T_LINK_PERSIST, MAY add a `kill_loader_keep_link_by_pid()` helper. If Tester picked argv-match, common.sh's existing `kill_loader_keep_link()` at `:320-323` is ALREADY iface-scoped — NO change. Tester's discretion. ~5 LOC if added. |
+| `tests/T_SYSTEMD_RESTART_ON_FAILURE.sh` | systemd restart-band ctest (existing) | **HK-11 (Q5 S1)**: ADD internal 2-attempt retry. After first attempt fails, run `systemctl reset-failed xdpmacfilter@${IFACE}.service`, `sleep 1`, clear any pin-dir residue, re-run the probe sequence. PASS message: `PASS: T_SYSTEMD_RESTART_ON_FAILURE (attempt N/2)`. ~20 LOC. Strict band [4,5] assertion UNCHANGED (the StartLimit-placement-footgun guard preserves). |
+| `tests/T_APPLY_ATOMIC_SWAP_NO_DROP.sh` | atomic-swap stat-preservation ctest (existing) | **HK-12**: REWRITE the stale NOTE comment that claims stats reset on apply; reality is D-3.1-4 preserves via `bpf_map__reuse_fd`. New NOTE: `# NOTE: stats counters PRESERVED across apply per §5.26 D-3.1-4 reuse_fd loop`. ~3 LOC (delete + rewrite). NO test logic change. |
+| `tests/T_ATTACH_TAG_MISMATCH.sh` | tag-mismatch alien-refusal ctest (existing) | **HK-13**: ADD orphan map-pin cleanup in trap. The fixture's `bpftool prog load` runs without `pinmaps`, leaving orphan pins at bpffs root after the test; add explicit `rm -f /sys/fs/bpf/<orphan-map-name>` (or `bpftool map show pinned ... | ... bpftool unpin`) in the cleanup trap. ~5 LOC. NO test-body logic change. |
+| `tests/T_EXPORTER_NO_ATTACHED_IFACE.sh` | §6.39 ctest (existing — §5.29 NEW) | **HK-16**: ADD assertion that stderr (captured via temp-redirect at exporter launch) contains the WARN substring `WARN bpffs root .* does not exist; will serve empty metrics` when the test sets `--bpffs-root` to a nonexistent path. ~5 LOC. NO other change. |
+| `mint/design.md` | design (THIS file) | **HK-15**: ADD an inline correction note next to §5.26 prose that claims `ParsedAttach`/`ParsedDetach`/`ParsedApply` wrappers exist — they never existed; reality is `ParsedCommand = std::variant<AttachConfig, DetachConfig, ApplyConfig, BypassConfig>` directly. Insert a `[CORRECTION §5.30 HK-15: see this slice]` marker at the misleading prose location in §5.26 + an authoritative one-paragraph correction here in §5.30 (the inline marker is the audit trail; the §5.30 paragraph is the canonical statement). Architect handles this Edit during Phase A. ~10 LOC. |
+
+##### UNCHANGED-BUT-AFFECTED (zero git-diff; behaviour must hold)
+
+| Path | Why it matters |
+|---|---|
+| `src/lib/loader.hpp` | **PI-7-3.4.5-hpp — 5th consecutive ZERO-diff cycle** (MVP-3.1 +1; MVP-3.2/3.3/3.4/3.4.5 = 0). `git diff main -- src/lib/loader.hpp` MUST show ZERO output. Any diff = `[INVARIANT-VIOLATED]`. The HK-9 kManagedMaps[] table lives in `loader.cpp` anon namespace; no public symbol added/removed/renamed. HK-3 `#ifdef` is `loader.cpp`-internal. |
+| `src/lib/loader.cpp` outside the HK-3 + HK-9 hunks | **PI-7-3.4.5-cpp** scope-fence below. Diff lines confined to: (a) HK-3 `#ifdef XDPMF_ENABLE_BPF_OBJECT_OVERRIDE` blocks wrapping the constant + 3 error-message strings + 1 consumer site; (b) HK-9 anon-namespace `kManagedMaps[]` table addition; (c) HK-9 `open_skeleton_only`'s `pinned_maps[]` literal replaced with `for-each-kManagedMaps` loop (loop body byte-equivalent semantic: walk all entries, call `bpf_map__set_pin_path(..., nullptr)`); (d) HK-9 `internal::apply_request`'s `pin_specs[]` literal replaced with the `for-each-kManagedMaps` loop (skip `legacy_alias`); (e) HK-9 `internal::apply_request`'s `reuse_specs[]` literal replaced with the `for-each-kManagedMaps` loop (skip `legacy_alias`). ZERO diff in: `attach()` / `detach()` public bodies, §5.4 state-machine, §5.19 name-check, §5.22 tag-check + O_PATH path-discipline, §5.24 kernel-version probe, §5.26 trust_model parse+log, §5.27 CIDR populate step, §5.29 apply step 8.5 (rules+action_table populate + WARN), the link-pin P0a logic, any RAII wrapper, any error-translation path, the special-pin path at line 1739 for the legacy `allowlist` alias. Reviewer applies regional-diff check per the listed allowed hunks. |
+| `src/lib/loader.hpp` LoaderError enum | UNCHANGED. No new error code; HK-17 surfaces existing exit 6 via direct `exit(6)` from `xdpmf-exporter::main()`, NOT via `LoaderError`. The exporter does NOT throw `LoaderError`. |
+| `src/common/mac_filter.h` | UNCHANGED. No new constant, no new struct, no new enum (HK-9 is loader-internal; the kManagedMaps[] table references existing skel field names that DERIVE from the existing map declarations in `mac_filter.bpf.c`). |
+| `src/bpf/mac_filter.bpf.c` outside the HK-5 hunk | UNCHANGED `.maps` block (no new map declaration). UNCHANGED `mac_filter_prog` function body LOGIC (HK-5 only adds the `unlikely(x)` macro wrap on 6 leaf null-checks; the branch taken is identical, only the JIT hint differs — PI-28 byte-equivalent semantic holds). |
+| `src/lib/{config,yaml_subset,cidr}.{cpp,hpp}` | UNCHANGED. No schema change, no CIDR change. |
+| `src/lib/raii.hpp` | UNCHANGED. |
+| `src/cli/{attach,detach}.{cpp,hpp}` | UNCHANGED. HK-1 only touches `main.cpp` catch arm + `apply.cpp` comment. |
+| `src/cli/apply.hpp` | UNCHANGED. HK-1 is comment-only on `apply.cpp`. |
+| `src/cli/cli.hpp` | UNCHANGED. HK-2 + HK-6 only touch usage_text in `cli.cpp`. |
+| `src/cli/bypass.hpp` | UNCHANGED. HK-4 is internal to `bypass.cpp` (`truncate_reason()` + audit-log function bodies). |
+| `src/exporter/{http,prom_format}.{cpp,hpp}` | UNCHANGED. HK-16 + HK-17 are localized to `main.cpp` + `stats_reader.cpp`. |
+| `src/exporter/stats_reader.hpp` | EXPECTED UNCHANGED (impl ideally adds `DiscoveryAccounting` as an OUT-parameter to `read_all_attached`, which is a signature change to the INTERNAL header — acceptable, NOT in PI-7 fence). If impl prefers pair-return, the header signature changes; either way, since the header is not in `loader.hpp` and not shipped public, this is impl-discretion per Phase B. |
+| `systemd/xdpmacfilter@.service`, `systemd/xdpmf-exporter.service` | UNCHANGED. HK-7 only installs the docs FILE; no unit change. |
+| Existing 42 ctest BODIES except the 5 explicitly EDITED above | Bodies UNCHANGED. Reviewer asserts `git diff --stat tests/T_*.sh` shows changes confined to: T_LINK_PERSIST_ACROSS_LOADER_EXIT (HK-10), T_SYSTEMD_RESTART_ON_FAILURE (HK-11), T_APPLY_ATOMIC_SWAP_NO_DROP (HK-12), T_ATTACH_TAG_MISMATCH (HK-13), T_EXPORTER_NO_ATTACHED_IFACE (HK-16); plus 4 NEW files (T_APPLY_EXITS_1_ON_MISSING_CONFIG, T_BYPASS_INTERACTIVE_PROMPT, T_BYPASS_REASON_TRUNCATE, T_EXPORTER_EXITS_6_ALL_IFACES_EACCES). All OTHER ctest bodies byte-equivalent. PI-34 strict superset preserved with this scoped 5-file EDIT carve-out. |
+| `tests/lib/read_stats.py` | UNCHANGED. |
+| `tests/fixtures/*` | UNCHANGED. HK-13 cleanup is runtime trap-time work, NOT a fixture change. The new ctests use existing fixtures OR construct their inputs in-line via the test body. T_BYPASS_REASON_TRUNCATE builds its `--reason` strings via `printf` / `head -c` / `python -c` (test body inline) — NO new fixture file. |
+| `ansible/xdpmacfilter-deploy.yml`, `ansible/templates/xdpfilter-config.yaml.j2` | UNCHANGED. Ansible Jinja `action: pass` fix + `xdpfilter_trust_model` template task are in the EXCLUDED doc bucket (separate manual pass). |
+| `docs/FLEET_DEPLOYMENT.md`, `README.md`, `HANDOFF.md`, `docs/CONFIG_SCHEMA.md` (does-not-exist), all README sections | UNCHANGED. ALL 13 doc-bucket items D1..D13 are in the EXCLUDED separate manual pass. |
+| `cmake/BpfBuild.cmake` | UNCHANGED. |
+| `include/version.h.in`, `tests/lib/pins.sh.in` | UNCHANGED (templates from §5.25 still authoritative; CMake reads new `VERSION 0.6.1` into `version.h.in`). Both binaries report `0.6.1` (PI-33 extends). |
+| All §5.4 / §5.19 / §5.22 / §5.24 / §5.26 / §5.27 / §5.29 trust+identity gates | UNCHANGED. HK-3 compile-gate hides a test-only env var; HK-9 is structural-only refactor; HK-4 hardens audit-log without changing detach semantics; HK-5 is JIT-hint-only; HK-1/2/6 are CLI surface. Reviewer re-runs §6.9, §6.14, §6.15, §6.20, §6.26 sub-cases — all still pass. |
+
+#### §5.30 Decisions (additional, with rationale)
+
+##### D-3.4.5-1 — HK-16 startup WARN fires from `stats_reader.cpp` (NOT `main.cpp`) — because
+
+The `bpffs_root` validation is conceptually a stats-reader concern (the stats reader is the consumer that needs the path); putting the check in `stats_reader.cpp` keeps the cohesion. `main.cpp` invokes a small `stats_reader::validate_bpffs_root_or_warn(cfg.bpffs_root)` helper at startup BEFORE `http::run()`. The helper returns void (no error propagation — PI-32 is "WARN and continue"). Impl MAY put it in `main.cpp` instead if preferred (the function is small enough); architect's stronger preference is `stats_reader.cpp` for cohesion + future-extensibility (if we add more bpffs-path checks, they all live in one place). Phase B SendMessage if impl wants to invert the call.
+
+##### D-3.4.5-2 — HK-17 exit-6 fires from `main.cpp` AFTER discovery in `stats_reader.cpp` — because
+
+The decision to exit cannot live inside `stats_reader.cpp` (the reader is a library-style component; `exit(6)` from a library is a code smell). Mechanism:
+
+1. `stats_reader::read_all_attached(bpffs_root, /* out */ DiscoveryAccounting& acc)` populates `acc.{total_discovered, eacces_failures, other_failures, successes}`.
+2. The caller (either `main.cpp` directly OR the HTTP-handler glue) reads `acc` after EVERY scrape.
+3. If trigger holds (`total_discovered > 0 && eacces_failures == total_discovered && successes == 0`), the caller emits the HK-17 stderr line and calls `std::exit(6)` from main thread.
+4. The check fires on EVERY scrape, NOT just the first scrape — if the system transitions from "all-EACCES" to "some-success" between scrapes (e.g. operator fixes bpffs perms), the exporter does NOT die on that gap; if it transitions the other way, it dies on the first all-EACCES scrape after the transition. This is "exit on next scrape that meets condition" semantic.
+
+**Implementation choice for "where exactly does the check fire"**: simplest is inside the HTTP handler's `/metrics` invocation path — after the handler builds the response body, it checks `acc` and if trigger fires, after writing the response, it signals main-thread exit. Impl picks the cleanest mechanism (likely a flag set by the handler, polled by main-thread's accept loop OR a self-pipe trick). Phase B SendMessage if the mechanism choice has design implications.
+
+**Pre-flight discovery alternative** (architect notes for completeness, NOT recommended): a pre-flight discovery pass at startup could exit 6 if the FIRST discovery hits the trigger. Drawback: if all ifaces transiently EACCES at startup (e.g. systemd unit ordering issue with bpffs mount) but recover quickly, the exporter dies in a unit-restart-storm. Per-scrape check is more forgiving for transient startup races. Q3 E1 default fires per-scrape; pre-flight is rejected.
+
+##### D-3.4.5-3 — HK-9 kManagedMaps[] member-pointer (T1) over name-lookup (T2) — because
+
+Member-pointer is compile-time-checked. If MVP-3.5+ renames `mac_filter.bpf.c`'s `rules` map to `rule_table` (say), the kManagedMaps[] table entry `&mac_filter_bpf::maps::rules` fails to compile — the build fails loudly, NOT silently at runtime. Name-lookup (T2) defers all rename-mismatches to runtime (`bpf_object__find_map_by_name(..., "rules")` returns NULL → cryptic libbpf error at pin/reuse time). The CI catches T2 errors via ctest, but T1 catches them at build time which is cheaper + faster.
+
+T3 (lambda dispatch) is over-engineering for a 10-entry static table; rejected outright.
+
+##### D-3.4.5-4 — HK-14 §6.25 step 8 grep stays UNASSERTED in this slice — because
+
+The brief flagged HK-14 as architect-discretion ("architect MAY confirm whether design's 'explicit impl-shape flexibility' comment means this should remain unasserted"). Re-reading §5.26 / §6.25 step 8 prose: the design explicitly says the `replacing existing program` stderr is an impl-shape detail, NOT a contract. Asserting on it would over-constrain impl; if impl rewords the stderr line in a future cycle (legitimate refactor), the test would false-fail. Default: HK-14 stays SKIPPED (not assertion-added). Reviewer accepts; if a future cycle DOES want to lock the stderr line, it gets explicit PI-* status then.
+
+##### D-3.4.5-5 — HK-1 exit-1 path: `LoaderError::ConfigError` from missing-file translates to exit 1 (NOT exit 9) — because
+
+This requires careful reading. `apply_internal::load_config_file()` throws `LoaderError::ConfigError` (= 9 per §4.1) on missing file. The QUESTION is: should `apply -f /nonexistent` exit 1 (CLI usage error: "you gave me a bad arg") OR exit 9 (config error: "the YAML can't be loaded")?
+
+Per the brief framing (HK-1 = "exit-code triple drift fix"; T_APPLY_EXITS_1_ON_MISSING_CONFIG asserts exit 1): the expected exit code on missing file is **1** (CLI usage error). Rationale: a missing-file is a flag-pointed-at-bad-path error, semantically equivalent to "bad MAC" (= 1) or "missing required arg" (= 1) — the operator gave the CLI an invalid argument. ConfigError (= 9) should fire on YAML parse failure or schema validation failure of a file that EXISTS but is malformed. The missing-file case is upstream of YAML/schema and should NOT bundle with ConfigError.
+
+**Mechanism**: `apply_main` catches `LoaderError::ConfigError` raised specifically by `load_config_file`'s `open()` failure path (impl distinguishes via errno OR by inspecting the exception's what() string OR — cleanest — by `load_config_file` throwing a distinct error type for missing-file vs parse-fail). Default impl: `apply_main` wraps the open-failure case in `xdpmf::CliError`, which the HK-1 main.cpp catch arm translates to exit 1; YAML parse / schema validation failures continue to throw `LoaderError::ConfigError` (= 9) and exit 9 via the existing path. Impl picks the cleanest mechanism; default is "open() ENOENT → CliError → exit 1; parse/schema → ConfigError → exit 9".
+
+**Caveat**: if impl finds this exit-code split semantically awkward (e.g. "all config-layer failures should exit 9 uniformly"), peer-DM architect during Phase B. Architect's strong preference is the split per brief framing. The test T_APPLY_EXITS_1_ON_MISSING_CONFIG locks in the split.
+
+##### D-3.4.5-6 — HK-3 compile-gate covers ALL `XDPMF_BPF_OBJECT_PATH` references — because
+
+The brief lists "constant at line 97, error messages at lines 762/768/775, consumer at lines 814-818" — impl wraps ALL these in the `#ifdef` block. Specifically: the string constant declaration, the literal occurrences in any `xdpmacfilter: error: ...XDPMF_BPF_OBJECT_PATH...` error messages, AND the `getenv("XDPMF_BPF_OBJECT_PATH")` call site PLUS the conditional branch that consumes its return value. Reviewer asserts `nm $(which xdpmacfilter) | grep -c XDPMF_BPF_OBJECT_PATH` returns 0 in a release build (string literal absent from binary). If ANY reference leaks (e.g. an error message in `apply_internal.cpp` that mentions the var name), that's [INVARIANT-VIOLATED].
+
+##### D-3.4.5-7 — HK-9 ZERO functional change to byte-shape of pinned maps + reuse semantics — because
+
+The 42-test baseline IS the validation. If HK-9 byte-equivalence is broken (e.g. a typo in the table swaps two member-pointers), at least one of the 42 existing ctests will fail (typically T_ATTACH_TAG_MISMATCH or T_IDEMPOTENT_RELOAD or T_APPLY_ATOMIC_SWAP_NO_DROP — they all exercise the pin/reuse paths). Reviewer treats "42-test baseline still green post-HK-9" as the load-bearing validation; NO new ctest for HK-9 itself (the refactor is mechanical + the existing tests provide the safety net).
+
+##### D-3.4.5-8 — HK-4 audit-log MUST hold `uid=` AND `euid=` AND `sudo_user=` as STRUCTURAL fields — because
+
+Operators grep audit logs for these fields (the §5.29 line already had `uid=`; HK-4 extends with `euid=` and `sudo_user=`). Structural-field consistency means: the order is FIXED (uid → euid → sudo_user → reason), the format is FIXED (`<key>=<value>` for numeric; `<key>="<value>"` for string), the `<none>` sentinel for null `SUDO_USER` is FIXED (NOT empty quotes, NOT the literal string `null`). T_BYPASS_CMD_DETACHES (§6.40) is EXTENDED at the regex level to verify the new fields appear; tester picks whether to extend §6.40's regex OR keep §6.40 byte-equivalent and add the field assertions to a sub-case of T_BYPASS_REASON_TRUNCATE. Architect preference: extend §6.40's regex (one test, one regex, less duplication).
+
+**Caveat for T_BYPASS_CMD_DETACHES extension**: this is a 6th "EDITED ctest body" beyond the 5 enumerated in the FileList EDITED table above (which were the HK-10/11/12/13/16 fixes). To keep the strict-superset accounting clean, EITHER (a) extend §6.40's regex (= 6th ctest body edit; document explicitly in PI-34-3.4.5 fence below) OR (b) put HK-4 audit-line assertion into the new T_BYPASS_REASON_TRUNCATE or T_BYPASS_INTERACTIVE_PROMPT ctest body (= 0 additional EDITED ctest bodies; cleaner accounting). Tester picks; both are acceptable. Architect default preference: option (b) — fewer EDITED ctests, cleaner audit.
+
+#### §5.30 TestStrategy entries
+
+##### §6.43 T_APPLY_EXITS_1_ON_MISSING_CONFIG — HK-1 fix: missing config file exits 1, not 9
+
+**Trigger**: `${LOADER_BIN} apply -f /nonexistent/path/config.yaml --iface lo` (with `lo` always available; alternative `--iface veth-test0` if the fixture is set up).
+
+**Observable outcome**: exit code 1 (`kExitUsageErr`); stderr contains the existing `xdpmacfilter: config error:` prefix (NOT a NEW stderr line — the existing message format is preserved per HK-1 Interfaces above); the process does NOT touch the kernel (no `bpftool prog show id` change in the system; the loader exits BEFORE `bpf_prog_load`).
+
+**Assertion mechanism**: `[[ $rc -eq 1 ]]`; `grep -qE '^xdpmacfilter: config error:' /tmp/stderr.out`; verify NO new BPF prog was loaded (capture `bpftool prog show` count before + after; expect equal). Negation control: re-run with a VALID minimal config file (existing fixture) and assert it does NOT exit 1 (proves the test would catch a regression where ALL apply invocations exit 1).
+
+**SKIP conditions**: none.
+
+**Cleanup**: none (no kernel state mutated).
+
+**Maps to**: HK-1 (exit-code triple drift fix); D-3.4.5-5 (exit-1-vs-9 split rationale). NO new PI required (PI-9 / PI-34 cover help-text + ctest-baseline; HK-1's fix is a bug-fix realizing existing §4.1 exit-code 1 contract).
+
+##### §6.44 T_BYPASS_INTERACTIVE_PROMPT — interactive y/N branch via `script -qc`
+
+**Trigger**: setup veth + attach `xdpmacfilter` per existing T_BYPASS_CMD_DETACHES fixture pattern. Use `script -qc 'echo y | xdpmacfilter bypass --iface veth-test0' /tmp/log.out` (or equivalent `expect` if `script` unavailable; both provide a pseudo-tty) for positive branch. Use `script -qc 'echo n | xdpmacfilter bypass --iface veth-test0' /tmp/log.out` for negative branch. Use `script -qc '< /dev/null xdpmacfilter bypass --iface veth-test0' /tmp/log.out` for EOF branch.
+
+**Observable outcome**:
+- **Positive (`y`)**: exit code 0; XDP detached (`bpftool net show dev veth-test0` shows NO prog); audit-log line per §5.29 + HK-4 (with `sudo_user=...` per HK-4) appears in stderr.
+- **Negative (`n`)**: exit code 0; XDP STILL attached; stderr contains `xdpmacfilter: bypass cancelled by operator`.
+- **EOF / empty input**: exit code 0; XDP STILL attached; stderr contains `xdpmacfilter: bypass cancelled by operator` (EOF treated as non-`y` per §5.29 grammar).
+
+**Assertion mechanism**: per branch, `[[ $rc -eq 0 ]]`; `bpftool net show dev veth-test0` parsed for `prog id` presence/absence; `grep -qE` on the expected stderr line.
+
+**SKIP conditions**: neither `script` (util-linux) NOR `expect` available → SKIP-77 with rationale `T_BYPASS_INTERACTIVE_PROMPT: needs script or expect for pty; neither in PATH`. DEV/CI VMs should have `script`; SKIP is the legitimate escape hatch.
+
+**Cleanup**: explicit re-attach if detached + re-detach via existing helper; `cleanup_veth`.
+
+**Maps to**: HK-4-adjacent (covers the interactive prompt branch that §5.29's T_BYPASS_CMD_DETACHES does NOT exercise — it uses `--unsafe` to skip the prompt). PI-30 (bypass = detach-alias + audit; the prompt is part of the audit-safety contract for interactive context).
+
+##### §6.45 T_BYPASS_REASON_TRUNCATE — HK-4 truncation contract verification
+
+**Trigger**: setup veth + attach per fixture. Three sub-cases:
+1. **256 bytes (no truncation)**: build a 256-byte ASCII reason string via `head -c 256 /dev/urandom | base64 | head -c 256` OR `python -c 'print("a"*256)'`; `xdpmacfilter bypass --iface veth-test0 --unsafe --reason "${REASON}"` capturing stderr; assert the stderr `reason="..."` field contains the FULL 256 bytes (no `…` ellipsis suffix). Wait — re-read HK-4: truncation kicks in at >253 bytes (leaving room for `…`). So 256 bytes WILL trigger truncation. Adjust to 253 bytes (no truncation) and 254 bytes (truncation). The brief said "256 (no truncation), 257 (truncated to 253+`…`)" — that contradicts HK-4 byte budget. Architect amends: case 1 is 253 bytes (boundary), case 2 is 254 bytes (first truncation), case 3 is 300 bytes ending mid-UTF-8.
+2. **254 bytes (first truncation)**: 254-byte ASCII reason → stderr `reason="..."` field is 253 bytes + `…` (3 bytes UTF-8) = 256 bytes total inside the quotes.
+3. **300 bytes ending mid 4-byte UTF-8 codepoint**: build a 300-byte string where byte 253 falls mid a 4-byte UTF-8 codepoint (impl-friendly construction: `python -c 'print("a"*251 + chr(0x1F600))'` produces 251 ASCII + 4-byte 😀 emoji = 255 bytes; pad to 300 with more codepoints). Assert truncation rewinds to the codepoint boundary BEFORE byte 253 (NOT cutting mid-codepoint) + appends `…`. Reviewer verifies the truncated bytes form valid UTF-8 (`python -c 'open("/tmp/stderr").read().encode("utf-8").decode("utf-8")'` succeeds without raising).
+
+**Observable outcome (each sub-case)**: exit code 0 (bypass succeeds); audit-log line per HK-4 format; the `reason="..."` content matches the truncation spec exactly. NO escape-side-effect (none of the test inputs contain `\`, `"`, `\n`, `\r`, `\0` — those are HK-4 escape concerns, covered implicitly by §6.44 + a sub-case if Tester wishes to add one).
+
+**Assertion mechanism**: per sub-case, capture stderr to `/tmp/stderr.out`, extract `reason="..."` via `grep -oE 'reason="[^"]*"'`, compute byte length via `wc -c`, compare against expected. UTF-8 validity check via `python3 -c 'open(...).read()'` (assert no UnicodeDecodeError).
+
+**SKIP conditions**: `python3` absent → use `iconv -f UTF-8 -t UTF-8` (POSIX) as fallback; if neither → SKIP-77 with rationale `needs python3 or iconv for UTF-8 validity check`.
+
+**Cleanup**: `cleanup_veth`; explicit re-attach + detach between sub-cases (or re-attach once + detach per case via the bypass primitive).
+
+**Maps to**: HK-4 (truncation + escape contract); D-3.4.5-8 (HK-4 audit-log structural fields).
+
+##### §6.46 T_EXPORTER_EXITS_6_ALL_IFACES_EACCES — HK-17 fix verification
+
+**Trigger**: setup ≥2 veth interfaces + `xdpmacfilter attach` per existing fixture. After attach + pin creation, `chmod 000` ALL `${PIN_DIR}/<iface>/stats` files (or chmod 000 the per-iface dirs — impl picks the level that REPRODUCIBLY surfaces EACCES on `bpf_obj_get`; per-file is more surgical, per-dir is more sledgehammer). Verify EACCES is reproducible: `sudo -u nobody bpftool map show pinned ${PIN_DIR}/veth-test0/stats` MUST fail with EACCES (or run the test under a non-root user; SKIP-77 if neither approach works in the test env — many CI runners can't drop privileges cleanly). Launch `xdpmf-exporter --port ${EPORT} --bpffs-root ${PIN_DIR}` (background, capture PID + stderr).
+
+**Observable outcome**: within `healthz_timeout` seconds (default 10s — give the first scrape time to fire OR explicitly hit `/metrics` once to force a scrape), the exporter process exits with code 6; stderr contains the HK-17 line matching ERE `^xdpmf-exporter: ERROR all [0-9]+ discovered interfaces failed permission-denied; check CAP_BPF and bpffs read mode \(exit 6\)$`; the `<N>` integer in the line equals the number of attached interfaces.
+
+**Assertion mechanism**: `wait $EPID; rc=$?; [[ $rc -eq 6 ]]`; `grep -qE` on the ERE; extract `<N>` and compare against `ls ${PIN_DIR} | wc -l` (the discovered count). Negation control: re-run the test WITHOUT the chmod step (normal permissions); assert the exporter does NOT exit 6 (kill it manually after a brief scrape window; the negation proves the test isn't false-failing on a different exit path).
+
+**SKIP conditions**: cannot reproduce EACCES in test env (root + Linux Capabilities make EACCES tricky for the BPF subsystem — kernel may bypass DAC checks for root with CAP_DAC_OVERRIDE) → SKIP-77 with rationale `T_EXPORTER_EXITS_6_ALL_IFACES_EACCES: EACCES not reproducible in this test env; needs unprivileged user or DAC_OVERRIDE drop`. Tester MAY use `capsh --drop=cap_dac_override --user=nobody -- xdpmf-exporter ...` OR run the exporter directly under `sudo -u nobody` (if `nobody` has CAP_BPF via `setcap`) — these are TEST-RUNTIME mechanisms; the test SKIPs gracefully if neither works.
+
+**Cleanup**: `chmod` restore on pin files; kill exporter (if still alive); `cleanup_veth`.
+
+**Maps to**: HK-17 (exit-6 trigger condition); D-3.4.5-2 (per-scrape check mechanism); HG-3.4.5-2 (IMPLEMENT per design).
+
+**OPS canary note (per architect-spec)**: this test exercises a NEW invocation context — exporter running with restricted DAC + restricted CAP. The existing exporter ctests (§6.37..§6.39) all run with full root caps preserved via NSEXEC; they CAN'T catch a class of bug where the exit-6 logic only fires correctly under stripped-cap conditions. T_EXPORTER_EXITS_6_ALL_IFACES_EACCES is the OPS canary for HK-17's exit-6 path AND the indirect canary for D-3.4-6's cap-set declaration (if `AmbientCapabilities=CAP_BPF` is wrong, this test fails at the EACCES-reproduction step BEFORE the exit-6 check).
+
+##### §6.39 EDIT — T_EXPORTER_NO_ATTACHED_IFACE gains HK-16 WARN assertion
+
+**Existing trigger (§5.29)**: launch exporter on a system with no attached XDP; query `/metrics`; verify HELP+TYPE only.
+
+**HK-16 EXTENSION**: capture exporter stderr to `/tmp/exporter.stderr`; after the existing `/metrics` assertions, `grep -qE 'WARN bpffs root .* does not exist; will serve empty metrics' /tmp/exporter.stderr`. Sub-case: run with `--bpffs-root /nonexistent/path` → WARN MUST fire; run with the EXISTING (but empty) `${PIN_DIR}` → WARN MUST NOT fire (the dir exists; empty is graceful-empty, NOT WARN-worthy per PI-32 W1 semantic).
+
+**Failure modes new to this EDIT**: missing WARN on nonexistent path = `[INVARIANT-VIOLATED]` (PI-32). Extra WARN on existing-empty path = `[INVARIANT-VIOLATED]` (over-WARN noise; W1 contract is "exists check, not contents check").
+
+##### Surgical fixes to existing ctests (HK-10, HK-11, HK-12, HK-13, HK-15) — no NEW test entries
+
+These are EDITS to existing ctest bodies per the FileList EDITED table above. No new `add_test(...)` entry, no new §6.X numbering. The 42-test baseline post-§5.30 contains the SAME 42 entries with 5 modified bodies (T_LINK_PERSIST_ACROSS_LOADER_EXIT, T_SYSTEMD_RESTART_ON_FAILURE, T_APPLY_ATOMIC_SWAP_NO_DROP, T_ATTACH_TAG_MISMATCH, T_EXPORTER_NO_ATTACHED_IFACE) + 4 NEW entries (§6.43..§6.46) = **46 total ctests post-§5.30**. PI-34-3.4.5 fence below documents the explicit 5-file-EDIT carve-out.
+
+#### §6.5 Preserved invariants (MVP-3.4.5 brownfield) — PI-1..PI-34 hold + PI-7-3.4.5-hpp/cpp continuation; NO NEW PIs
+
+All MVP-3.1..3.4 invariants (PI-1..PI-34 per §5.26 + §5.27 + §5.28 + §5.29 sub-sections) continue to hold post-§5.30. **No new PIs introduced** (housekeeping by nature). PI-7 strengthens further (5th consecutive ZERO-diff cycle on loader.hpp; cpp-leg scope-fence extends to allow the kManagedMaps[] refactor + the XDPMF_BPF_OBJECT_PATH compile-gate hunks). PI-34 (strict-superset 42-ctest baseline from §5.29) generalizes with a small explicit carve-out for the 5 EDITED ctest bodies (HK-10/11/12/13/16 surgical fixes).
+
+Reviewer's 5th framework point walks the COMBINED list (PI-1..PI-34 + PI-7-3.4.5-hpp/cpp) and reports `[INVARIANT-VIOLATED]` per failed check.
+
+**Continuing invariants — restatement for the MVP-3.4.5 namespace**:
+
+| # | Invariant | §5.30 check mechanism |
+|---|---|---|
+| PI-1..PI-5 | Trust+identity gates ENFORCED in both modes (alien-program refusal, name-identity, tag-check, O_PATH path-discipline, kernel-version probe) | Re-run §6.9 / §6.14 / §6.15 / §6.20 / §6.26 sub-cases; all pass. HK-3/4/5/9 do not touch any gate codepath. |
+| **PI-6-3.4.5** | **42 pre-§5.30 ctests pass byte-equivalent OR legitimately SKIP-77 — STRICT SUPERSET with explicit 5-ctest-body EDIT carve-out** | Re-run all 42 tests post-§5.30 → all pass (or SKIP-77); `git diff --stat tests/T_*.sh` shows changes confined to the 5 EDITED ctests (T_LINK_PERSIST_ACROSS_LOADER_EXIT, T_SYSTEMD_RESTART_ON_FAILURE, T_APPLY_ATOMIC_SWAP_NO_DROP, T_ATTACH_TAG_MISMATCH, T_EXPORTER_NO_ATTACHED_IFACE) PLUS 4 NEW files (§6.43..§6.46). All OTHER ctest bodies byte-equivalent (37 of 42 = unchanged). PI-6-3.4 had ZERO-edit STRICT SUPERSET; PI-6-3.4.5 RELAXES to 5-edit-carve-out — this is explicit, NOT a regression. Reviewer accepts the 5 EDITs as scope-fenced surgical fixes. |
+| **PI-7-3.4.5-hpp** | **`loader.hpp` ZERO diff — 5TH consecutive slice** (MVP-3.1 +1; MVP-3.2/3.3/3.4/3.4.5 = 0). Public-API surface byte-equivalent. | `git diff main -- src/lib/loader.hpp` shows ZERO output. Any diff = `[INVARIANT-VIOLATED]`. |
+| **PI-7-3.4.5-cpp** | **`loader.cpp` SCOPED EDIT only** — diff lines confined to: (a) HK-3 `#ifdef XDPMF_ENABLE_BPF_OBJECT_OVERRIDE` blocks wrapping the existing constant + 3 error-message strings + 1 consumer site (line ranges per §5.30 EDITED table); (b) HK-9 anon-namespace `kManagedMaps[]` table addition; (c) HK-9 `open_skeleton_only` loop body replacement (pinned_maps[] literal → for-each-kManagedMaps); (d) HK-9 `internal::apply_request` pin_specs[] loop replacement; (e) HK-9 `internal::apply_request` reuse_specs[] loop replacement. ZERO diff in: `attach()` / `detach()` public bodies, §5.4 state-machine, §5.19 name-check, §5.22 tag-check + O_PATH, §5.24 kernel-version probe, §5.26 trust_model parse+log, §5.27 CIDR populate step, §5.29 apply step 8.5 (rules+action_table populate + WARN), link-pin P0a logic, RAII wrappers, error-translation paths, the special-pin path at line 1739 for the legacy `allowlist` alias. **NOTE on relation to PI-7-3.4-cpp**: PI-7-3.4.5-cpp EXTENDS the prior cpp-leg fence with TWO new allowed scopes (HK-3 #ifdef hunks + HK-9 kManagedMaps[] refactor). The prior MVP-3.4 scope (apply_request step 8.5 + step 4 fd-opening + pin_specs/reuse_specs 9→11 + open_skeleton_only pinned_maps[] 10→12) was the THEN-shipped delta; MVP-3.4.5 BUILDS ON that baseline (the literals are already 11/12 entries from MVP-3.4) and now REPLACES the literals with table-walking loops (HK-9). The cumulative cpp-leg invariant for MVP-3.4.5 is "diff-confined to the union of {MVP-3.4-shipped scope, MVP-3.4.5-NEW scope}"; for reviewer-clarity, the MVP-3.4.5 incremental scope is what's enumerated in (a)-(e) above. | `git diff <MVP-3.4-baseline> -- src/lib/loader.cpp` shows changes confined to (a)-(e). Reviewer applies regional-diff: classify each hunk by enclosing function name; allowed function names = {`open_skeleton_only`, `internal::apply_request`, anon-namespace (kManagedMaps[] table + #ifdef blocks)}. Any hunk outside this set = `[INVARIANT-VIOLATED]`. **Cross-cycle baseline note**: reviewer compares against the MVP-3.4-shipped HEAD (not the project's pristine main), because PI-7-3.4-cpp already permitted the MVP-3.4 hunks; this slice's invariant is the MVP-3.4.5-incremental diff on top of MVP-3.4. |
+| PI-8-3.4.5 | `xdpmacfilter --version` reports `xdpmacfilter 0.6.1` AND `xdpmf-exporter --version` reports `xdpmf-exporter 0.6.1` (shared `version.h` per §5.25 P3) | Run both `--version`; both single-line outputs `0.6.1` + newline. Bump from 0.6.0. |
+| PI-9 | `--help` / `--version` output FORMAT unchanged modulo HK-2 (exit-code list completeness) + HK-6 (--unsafe wording + Environment block) | §6.10 T_CLI_HELP_VERSION re-run passes (forward-compatible ERE). HK-2/6 are content additions, not format changes. |
+| PI-10-3.4.5 | `src/common/mac_filter.h` UNCHANGED this slice | `git diff main -- src/common/mac_filter.h` shows ZERO output (no new constant, no new struct, no new enum). |
+| PI-11 | Internal directory layout UNCHANGED | `find src -type d` UNCHANGED from §5.29 (same `src/lib/`, `src/cli/`, `src/common/`, `src/bpf/`, `src/exporter/`). No new dir. |
+| PI-12 | Pin paths host-global per `nsenter --net` | UNCHANGED (HK-9 refactor preserves pin paths byte-equivalent; the table entries match the existing pinned_maps[] literal exactly). |
+| **PI-13-3.4.5 = PI-27** | **inner-allowlist-value byte-equivalent** (the LOAD-BEARING DEFER PI) — `allowlist_*` HASH value `__u8 present`; `cidr_allowlist_*` LPM_TRIE value `__u8`. UNTOUCHED. | `git diff main -- src/bpf/mac_filter.bpf.c` shows ZERO modification to inner-value types. `bpftool map show pinned ${PIN_DIR}/allowlist_a` reports `value_size 1`. **MVP-3.4.5 contributes NO change here**; the defer continues. |
+| PI-14 | `--mode {generic,native,offload}` UNCHANGED | §6.16/§6.17/§6.19 still pass. |
+| PI-15..PI-18 | CIDR axis + STAT_PASS_CIDR + schema_version 1 + MAC atomic-swap | UNCHANGED. HK items don't touch these. |
+| PI-19 | systemd-analyze verify passes on unit files | UNCHANGED. HK-7 only installs the docs FILE, not unit content. |
+| PI-20 | systemd lifecycle for `xdpmacfilter@.service` | UNCHANGED. |
+| PI-21..PI-25 | Ansible playbook + syntax-check + FLEET_DEPLOYMENT.md cites + directive catalogue + systemd-restart flake carve-out | UNCHANGED. T_SYSTEMD_RESTART_ON_FAILURE flake handling MOVES from "PI-25 carve-out" to "HK-11 internal retry" (still a carve-out flavour; the test now retries internally rather than being SKIP-77'd by external decision). PI-25 STRENGTHENS: fewer SKIPs expected on this test post-HK-11. |
+| PI-26 | MVP-3.3 historical "no C++/BPF source change" check | UNCHANGED (PI-26 fires on the MVP-3.3 commit set, not the MVP-3.4.5 commit set). |
+| PI-27 = PI-13-3.4.5 | inner-allowlist-value byte-equivalent (cross-referenced — IDENTICAL invariant) | Same check. |
+| PI-28 | `mac_filter_prog` BPF function body BYTE-EQUIVALENT to MVP-3.2 modulo new `.maps` declarations | UNCHANGED BUT HK-5 EXTENDS: the source-level `unlikely()` macro wraps add `__builtin_expect` hints on 6 leaf null-checks. JIT-emitted code MAY differ slightly (branch reordering), but the FUNCTIONAL semantic is byte-equivalent (same verdicts for same inputs). PI-28 generalizes to "function body semantic byte-equivalent; source-level annotations + compiler hints permitted". Reviewer verifies via the 42-ctest baseline (which IS the functional verdict test). If any of the 42 ctests change verdict due to HK-5, that's `[INVARIANT-VIOLATED]`. |
+| PI-29 | `rules` + `action_table` POPULATED on apply but NOT consulted by datapath | UNCHANGED. HK-9 refactor preserves the populate-step semantic (the kManagedMaps[] table includes `rules` and `action_table`; the pin/reuse semantics for these maps are byte-equivalent — verified by §6.42 T_RULES_SKELETON_NOT_WIRED re-running green). |
+| PI-30 | `bypass` primitive = `detach`-alias + audit-log + `--unsafe` gate | UNCHANGED in shape; HK-4 EXTENDS the audit-log line with `euid=` + `sudo_user=` structural fields (additive — operators grepping for old format still find the line; new format is a superset). |
+| PI-31 | Exporter is READ-ONLY by construction | UNCHANGED. HK-16/17 are read-side only (existence check, accounting); no `bpf_map_update_elem` introduced. Reviewer's `grep -rE 'bpf_(map_(update|delete)_elem|obj_pin|link_create|...)' src/exporter/` STILL returns ZERO matches post-§5.30. |
+| PI-32 | Exporter handles missing/empty bpffs gracefully | UNCHANGED in shape; HK-16 REALIZES the WARN-emission side of PI-32 (previously the implementation was "silent graceful return"; now matches design literal "logs ONE warning line at startup"). PI-32 STRENGTHENS: T_EXPORTER_NO_ATTACHED_IFACE now asserts the WARN substring (was unasserted at §5.29). |
+| PI-33 | Both binaries report same version (shared version.h) | UNCHANGED in shape; bump to 0.6.1 (PI-8-3.4.5). |
+| **PI-34 = PI-6-3.4.5** | 42 pre-§5.30 ctests strict-superset with 5-EDIT carve-out (cross-referenced) | Same check. |
+
+**No deletions/relaxations** of PI-1..PI-34 in this slice. PI-7-3.4.5-hpp STRENGTHENS PI-7-3.4-hpp (5th consecutive ZERO-diff cycle). PI-7-3.4.5-cpp EXTENDS PI-7-3.4-cpp with TWO new allowed-hunk scopes (HK-3 #ifdef + HK-9 kManagedMaps[] refactor), all other scopes preserved. PI-6-3.4.5 / PI-34 RELAXES PI-6-3.4 / PI-34 from "ZERO ctest body edits" to "5 specifically-enumerated EDITED ctest bodies + 4 NEW ctests"; this is explicit, documented, and scope-fenced (not a silent regression). PI-10-3.4.5 STRENGTHENS PI-10-3.4 from "additive-only" to "ZERO diff" (no header change this slice). PI-13-3.4.5 / PI-27 PRESERVED untouched (the load-bearing defer PI; MVP-3.4.5 contributes nothing to it).
+
+#### §5.30 verifiable invariants for reviewer
+
+(Per architect-spec §6.5 "Verification-hints discipline": these are GUIDANCE for the reviewer, NOT contracts for impl. Default MAY. Reserve MUST only for true PI-* contracts (PI-1..PI-34 + PI-7-3.4.5-hpp/cpp ARE MUSTs by definition; the items below MAY be relaxed by impl if a contract elsewhere demands it). Resolution rule for prose-vs-invariants conflicts: invariants block wins, prose loses; if impl deviates on a hint to satisfy a PI-* contract, reviewer's correct disposition is `inline-merge` on the hint text, NOT `[UNRELATED-EDIT]` on impl.)
+
+In addition to PI-1..PI-34 + PI-7-3.4.5-hpp/cpp above:
+
+- `git diff main -- src/lib/loader.hpp` SHOULD show ZERO output (PI-7-3.4.5-hpp, 5th consecutive cycle).
+- `git diff <MVP-3.4-HEAD> -- src/lib/loader.cpp` SHOULD show changes confined to the HK-3 #ifdef line ranges (5 sites) + HK-9 kManagedMaps[] table + 3 loop replacements (open_skeleton_only, pin_specs, reuse_specs). No diff in attach()/detach() bodies or any gate codepath (PI-7-3.4.5-cpp).
+- `git diff main -- src/common/mac_filter.h` SHOULD show ZERO output (PI-10-3.4.5).
+- `git diff main -- src/bpf/mac_filter.bpf.c` SHOULD show ONLY the HK-5 `#define unlikely(x)` macro definition + 6 `unlikely()` wraps on the listed null-check lines. ZERO modification to `.maps` block, ZERO modification to `mac_filter_prog` function-body logic (the wraps are source-annotations on existing conditions). Functional semantic byte-equivalent per PI-28.
+- `git diff main -- src/cli/main.cpp` SHOULD show ONLY the HK-1 catch-arm addition (3 LOC).
+- `git diff main -- src/cli/apply.cpp` SHOULD show ONLY the HK-1 stale-comment deletion/rewrite (5 LOC, comment-only).
+- `git diff main -- src/cli/cli.cpp` SHOULD show ONLY HK-2 + HK-6 usage_text edits (10 LOC).
+- `git diff main -- src/cli/bypass.cpp` SHOULD show HK-4 escape + sudo identity edits (~25 LOC); ZERO change to tty-check, prompt, `loader::detach()` invocation.
+- `git diff main -- src/exporter/main.cpp` SHOULD show HK-6 env-var block + HK-17 exit-6 (~20 LOC); ZERO change to signal handling, HTTP binding, default flag values.
+- `git diff main -- src/exporter/stats_reader.cpp` SHOULD show HK-16 WARN + HK-17 DiscoveryAccounting (~25 LOC); ZERO change to PERCPU-sum logic.
+- `git diff main -- CMakeLists.txt` SHOULD show HK-3 + HK-7 + HK-8 (~10 LOC).
+- `git diff main -- tests/CMakeLists.txt` SHOULD show 4 NEW `add_test` entries + HK-3 propagation; ZERO modification of the 42 existing add_test entries.
+- `git diff main -- tests/T_*.sh` SHOULD show: 4 NEW files (§6.43..§6.46) + 5 EDITED files (HK-10/11/12/13/16); 37 of 42 existing ctests byte-equivalent.
+- `git diff main -- CHANGELOG.md` SHOULD show NEW `[0.6.1]` entry + build-pace row.
+- `git diff main -- mint/design.md` SHOULD show §5.30 amendment addition + HK-15 inline correction marker in §5.26.
+- 4 new ctests SHOULD pass (§6.43..§6.46); the load-bearing pair is §6.43 (HK-1 fix) + §6.46 (HK-17 fix).
+- 5 EDITED ctests SHOULD pass with their new bodies (HK-10/11/12/13/16).
+- 37 unchanged existing ctests SHOULD still pass (or legitimately SKIP-77) — PI-6-3.4.5 strict-superset with carve-out.
+- `xdpmacfilter --version` SHOULD report `xdpmacfilter 0.6.1` AND `xdpmf-exporter --version` SHOULD report `xdpmf-exporter 0.6.1` (PI-8-3.4.5).
+- `XDPMF_SANITIZERS=ON` build SHOULD be clean for BOTH binaries.
+- `CHANGELOG.md` entry `[0.6.1] - 2026-05-NN` (Keep-a-Changelog format).
+- Build-pace table SHOULD gain a row for MVP-3.4.5.
+- `nm $(which xdpmacfilter) | grep -c XDPMF_BPF_OBJECT_PATH` SHOULD return 0 in a release build (HK-3 compile-gate evidence; the string literal is absent from the binary).
+- `nm $(which xdpmacfilter) | grep -c XDPMF_BPF_OBJECT_PATH` SHOULD return ≥1 in a test build (HK-3 propagation evidence; the symbol IS present when override is enabled).
+- `xdpmacfilter apply -f /nonexistent --iface lo; echo $?` SHOULD output `1` (HK-1 fix).
+- `xdpmacfilter --help | grep -c '7 kernel-unsupported'` SHOULD return 1 (HK-2 fix).
+- `xdpmf-exporter --bpffs-root /nonexistent` SHOULD emit the HK-16 WARN line within the first 1s of startup, then continue running (HK-16 fix).
+- 6 `unlikely()` macro wraps SHOULD appear in `mac_filter.bpf.c` at the listed line numbers (HK-5 verification — line numbers MAY shift slightly due to the `#define` insertion; reviewer checks `grep -cE '\bunlikely\(' src/bpf/mac_filter.bpf.c` returns 6).
+- `grep -E 'pkill -9 -f xdpmacfilter\s*$' tests/T_LINK_PERSIST_ACROSS_LOADER_EXIT.sh` SHOULD return ZERO matches (HK-10 — the unscoped pkill is gone; either PID-tracked OR argv-scoped form replaces it).
+- HK-12 NOTE comment in T_APPLY_ATOMIC_SWAP_NO_DROP.sh SHOULD cite §5.26 D-3.1-4 (the corrected attribution).
+- HK-13 orphan-pin cleanup SHOULD appear in T_ATTACH_TAG_MISMATCH.sh's trap (visible via `grep -E 'bpftool.*unpin|rm.*sys/fs/bpf' tests/T_ATTACH_TAG_MISMATCH.sh` ≥1 match).
+- HK-15 design-text correction SHOULD appear in §5.30 + an inline `[CORRECTION §5.30 HK-15]` marker SHOULD appear in §5.26.
+
+#### §7 OOS — MVP-3.4.5 components SHIPPED + close OOT-deferred queue + surface MVP-3.5
+
+##### Moved from deferred to SHIPPED (per MVP-3.4.5)
+
+The following items were OOT-deferred in prior cycles' OOS sections and are now CLOSED by this slice:
+
+- ~~**T_SYSTEMD_RESTART_ON_FAILURE flake (MVP-3.3 OOT-1, per `5a4760c` addendum)**~~ **— SHIPPED in §5.30** as HK-11 (Q5 S1 internal 2-attempt retry).
+- ~~**Orphan map pins from T_ATTACH_TAG_MISMATCH (MVP-3.1 OOT)**~~ **— SHIPPED in §5.30** as HK-13 (cleanup trap added).
+- ~~**T_APPLY_ATOMIC_SWAP_NO_DROP stale NOTE comment (MVP-3.1 OOT)**~~ **— SHIPPED in §5.30** as HK-12 (NOTE rewritten to cite §5.26 D-3.1-4).
+- ~~**cli.hpp ParsedAttach wrapper design-text inaccuracy (MVP-3.1 OOT)**~~ **— SHIPPED in §5.30** as HK-15 (design.md correction + inline marker in §5.26).
+- ~~**§6.25 step 8 grep for "replacing existing program" stderr (MVP-3.1 OOT)**~~ **— DELIBERATELY CLOSED-AS-WONT-DO in §5.30** as HK-14 / D-3.4.5-4 (architect ruling: stays UNASSERTED per §5.26's "impl-shape flexibility" prose; if a future cycle wants to lock it, gets explicit PI-* status then).
+- ~~**PI-32 exporter startup WARN (MVP-3.4 OOT-1 per `review.md:82-85`)**~~ **— SHIPPED in §5.30** as HK-16 (per HG-3.4.5-1 IMPLEMENT-per-design + Q2 W1).
+- ~~**Exporter exit-6 unreachable (MVP-3.4 OOT-2 per `review.md:84-86`)**~~ **— SHIPPED in §5.30** as HK-17 (per HG-3.4.5-2 IMPLEMENT-per-design + Q3 E1).
+
+All 7 previously-OOT-deferred items are now in their dispositions: 6 SHIPPED (HK-11, HK-13, HK-12, HK-15, HK-16, HK-17), 1 CLOSED-AS-WONT-DO (HK-14). The MVP-3.x OOT-deferred queue is **EMPTY post-§5.30** — no carry-forward to MVP-3.5.
+
+##### Additional MVP-3.4.5 deliverables (NOT in prior OOT queues; surfaced in this slice)
+
+- **HK-1 apply exit-1 fix** — surfaced by `/mint-review` KC-A (commit `325e2ee`). Not previously OOT-tracked. SHIPPED.
+- **HK-2 --help exit-code list completeness** — surfaced by `/mint-review` (no specific KC reference in brief; minor doc-of-help fix). SHIPPED.
+- **HK-3 XDPMF_BPF_OBJECT_PATH compile-gate** — surfaced by `/mint-review` KC-C. SHIPPED.
+- **HK-4 bypass log-escape + sudo identity** — surfaced by `/mint-review` KC-B partial. SHIPPED.
+- **HK-5 __builtin_expect** — surfaced by `/mint-review` perf H1. SHIPPED.
+- **HK-6 --unsafe + env-var block** — surfaced by `/mint-review` (operator-clarity finding). SHIPPED.
+- **HK-7 FLEET_DEPLOYMENT.md install** — surfaced by `/mint-review` (pairing with systemd unit Documentation= URI). SHIPPED.
+- **HK-8 version bump 0.6.0 → 0.6.1** — standard housekeeping per Keep-a-Changelog discipline. SHIPPED.
+- **HK-9 kManagedMaps[] refactor** — surfaced by project-memory landmine [[libbpf-pin-by-name-three-callsites]] + `/mint-review` arch H2. SHIPPED.
+- **HK-10 iface-scoped pkill** — surfaced by `/mint-review` (test-hygiene finding). SHIPPED.
+- **NEW ctests (4)** — testing M5/M6/L-coverage from `/mint-review`. SHIPPED (§6.43..§6.46).
+
+##### Closed-as-WONT-DO (architect ruling this slice)
+
+- **HK-14 — §6.25 step 8 grep for "replacing existing program" stderr** — see D-3.4.5-4 above. Design §5.26 explicitly permits impl-shape flexibility on the stderr line wording; asserting on it would over-constrain impl + risk false-fails on future legitimate refactors. CLOSED.
+
+##### Surfaced as next-natural slice
+
+**MVP-3.5 — JSON structured logs in loader + exporter** (NOT in MVP-3.4.5 scope; next architectural slice per `architecture-v2.md` post-MVP-3.4-row sequencing):
+
+- Loader (`xdpmacfilter`) emits structured JSON log lines (one per significant event) to stderr when `XDPMF_LOG_FORMAT=json` env var is set; default `XDPMF_LOG_FORMAT=text` (current shape preserved for operator-grep compatibility).
+- Exporter (`xdpmf-exporter`) emits structured JSON log lines (startup, accept errors, scrape errors, HK-16 WARN, HK-17 ERROR) under the same env-var contract.
+- Log schema TBD at MVP-3.5 architect phase; likely shape per event: `{"ts":"<iso8601>","level":"<info|warn|error>","event":"<name>","iface":"<iface or null>","msg":"<existing prose>","fields":{...}}`.
+- This is candidate scope; brief at MVP-3.5 start.
+
+**MVP-3.4b — per-rule counter wiring** (already surfaced as next-natural at §5.29; UNCHANGED by §5.30):
+
+- per-rule counter map (Option 2 default per arch-v2.md §"§MVP-3.4 Open Question #13 RESOLUTION" Recommendation)
+- inner-allowlist-value extension gated on PI-13-3.1 adjudication
+- datapath wiring of `rules` → `action_table` lookup chain
+- atomic-swap promotion of `rules` to parallel-outer (D-3.4-4 surfaced Open Q)
+- exporter `xdpfilter_rule_match_total{iface, rule_id}` series
+
+**Documentation pass (13 items D1..D13 from `/mint-review` report.md)** — see task-brief.md "Doc bucket" section. NOT a /mint-dev slice; user-driven manual writing pass. ~8-10 hours sustained. Includes README rewrite, FLEET_DEPLOYMENT.md sections, CONFIG_SCHEMA.md, HANDOFF.md move, Ansible Jinja fixes. **DO NOT include in any /mint-dev slice without explicit user request.**
+
+##### NEW out-of-scope fences (per §5.30; carry-forward unchanged from §5.29 unless noted)
+
+- **Per-rule counters / labels in exporter output** — MVP-3.4b (carry-forward).
+- **Inner-allowlist-value extension** — MVP-3.4b gated on PI-13-3.1 (carry-forward — PI-13-3.4.5 = PI-27 is the LOAD-BEARING DEFER PI, untouched this slice).
+- **Datapath wiring of `rules` or `action_table`** — MVP-3.4b (carry-forward).
+- **Action types beyond {PASS, DROP}** — MVP-3.8+ (carry-forward).
+- **JSON structured logs** — MVP-3.5 candidate (now SURFACED explicitly as next-natural; was "MVP-3.5 candidate" at §5.29 OOS, now explicit).
+- **sFlow integration** — MVP-3.6 conditional (carry-forward).
+- **Exporter HTTPS / TLS** — operator wraps with reverse-proxy (carry-forward).
+- **Exporter authentication** — operator wraps (carry-forward).
+- **Exporter histograms / new labels** — MVP-3.5+ (carry-forward).
+- **Bypass via BPF map flag** — MVP-3.6+ optional (carry-forward).
+- **Library extraction `libxdpmf.so.0`** — MVP-3.6+ optional (carry-forward).
+- **Daemon `xdpmfd`** — MVP-3.6+ optional (carry-forward).
+- **L4 ports / VLAN / IPv6 CIDR** — fenced per MVP-3.2 §7 OOS (carry-forward).
+- **Binary rename `xdpmacfilter` → `xdpfilter`** — MVP-3.12 (carry-forward).
+- **Exporter listening on IPv6 / dual-stack** — v1 IPv4-only (carry-forward).
+- **Exporter inotify on bpffs root** — MVP-3.5+ candidate (carry-forward).
+- **Ansible installs of `xdpmf-exporter`** — MVP-3.5+ candidate (carry-forward).
+- **`docs/EXPORTER.md` operator docs** — MVP-3.5+ candidate; part of the EXCLUDED doc bucket (carry-forward).
+- **Atomic-swap on `rules` map (parallel-outer)** — MVP-3.4b scoping question (carry-forward).
+- **Systemd sandbox directives (ProtectSystem strict, PrivateTmp, etc.)** — defense-in-depth; deferable to MVP-3.5 OR dedicated security cycle. NEW FENCE this slice (was security M3 from `/mint-review` report).
+- **`std::format_to` / writev microopts in exporter (perf M1-M4)** — performance scope; not contract-drift housekeeping. NEW FENCE this slice.
+- **TSAN build (testing H2)** — coverage scope; not housekeeping. NEW FENCE this slice.
+- **CO-RE field-probe failure test (testing L3)** — known coverage gap; not housekeeping. NEW FENCE this slice.
+- **README full rewrite + FLEET_DEPLOYMENT.md sections + CONFIG_SCHEMA.md + HANDOFF.md move + Ansible Jinja fixes (doc bucket D1..D13)** — separate manual pass per user direction. NEW FENCE this slice.
+- **PI-32 W2 (per-scrape rate-limited WARN)** — explicitly REJECTED at Q2; HK-16 ships W1 only. NEW FENCE.
+- **HK-17 E2 (any-iface EACCES → exit 6)** — explicitly REJECTED at Q3; HK-17 ships E1 only. NEW FENCE.
+- **HK-17 E3 (bind-time EACCES → exit 6)** — explicitly REJECTED at Q3; would warrant its own exit code if surfaced. NEW FENCE.
+- **HK-1 C2 (whole-main try/catch refactor)** — explicitly REJECTED at Q1; HK-1 ships C1 (catch-arm only). NEW FENCE.
+- **HK-9 T2 (name-lookup table) / T3 (lambda dispatch)** — explicitly REJECTED at Q4; HK-9 ships T1 (member-pointer). NEW FENCE.
+- **HK-11 S2 (widen-band [1,50] permanently) / S3 (SKIP-77 on first flake)** — Q5 default S1; S2 is fallback ONLY if S1 runtime cost >30s. NEW FENCE.
+
+##### Anti-misdiagnosis notes (institutional learning, per architect-spec §6.6)
+
+This slice carries forward all anti-misdiagnosis guards from prior cycles + adds two specific to MVP-3.4.5:
+
+1. **Cap-set declaration on a NEW invocation path** (inherited from §5.28 D-3.3-6 + §5.29 D-3.4-6 rework rounds): unchanged. T_EXPORTER_EXITS_6_ALL_IFACES_EACCES (§6.46) is an OPS canary for both HK-17 AND the §5.29 D-3.4-6 cap-set declaration — if the cap-set is wrong, this test fails at the EACCES-reproduction step before reaching the exit-6 check.
+
+2. **Silent-divergence-from-design pattern** (inherited from MVP-3.4 review.md OOT-1/OOT-2 misdiagnosis pair, formalized as [[impl-role-discipline]]): impl follows design; disagreement is OK but ONLY via explicit Phase B escalation (peer SendMessage to architect). Silent "implementation chose silent graceful return" without escalation is forbidden. MVP-3.4 OOT-1 (PI-32 silent) AND OOT-2 (exit-6 unreachable) BOTH instances of this silent-divergence pattern; this slice flips both back to "implement per design" (HK-16 + HK-17). **Future-cycle guard for any impl agent**: if you read the design and disagree with a contract, SendMessage architect during Phase B with your rationale; do NOT silently implement a different behaviour. The reviewer's correct disposition on silent divergence is `[CONTRACT-VIOLATED]`, NOT `[ACCEPTABLE-VARIATION]` — even if the divergence is "arguably more conservative".
+
+3. **Three-callsite lockstep landmine** (project memory [[libbpf-pin-by-name-three-callsites]]): SHIPPED-FIX via HK-9 kManagedMaps[] refactor. **Future-cycle guard for any architect agent**: when adding a NEW BPF map declared with `LIBBPF_PIN_BY_NAME`, the kManagedMaps[] table MUST be extended (one line) AND that's it — the three loops (open_skeleton_only clear, apply_request pin, apply_request reuse) walk the table automatically. NO more per-callsite literal-array maintenance. If a future cycle's MAP is NOT `LIBBPF_PIN_BY_NAME` (e.g. a global non-per-iface map), it does NOT belong in kManagedMaps[]; the architect documents the exception in the new slice's Decisions section.
+
+4. **Verification-hints discipline trap** (inherited from MVP-3.1/3.2/3.3 verification-hints rework cycles): the §5.30 verifiable invariants section above is GUIDANCE for the reviewer, NOT contracts for impl. Items default to SHOULD/MAY; MUST is reserved for PI-* contracts. If impl deviates on a SHOULD/MAY hint to satisfy a PI-* contract, reviewer disposition is `inline-merge` on the hint text — NOT `[UNRELATED-EDIT]` on impl. Resolution rule for prose-vs-invariants conflicts within this amendment: invariants block wins, prose loses (stated once per the amendment template; this single statement covers all §5.30 prose vs. PI-* conflicts).
+
+Evidence: `mint/task-brief.md` MVP-3.4.5 brief (HK-1..HK-17 + Q1-Q6 + HG-3.4.5-1/2/3/4); `mint/review.md` MVP-3.4 round-1 (OOT-1 PI-32 silent → HK-16; OOT-2 exit-6 unreachable → HK-17); `/agent-teams-review/runs/mint-review-mint-l2-mac-filter-202605250825/report.md` (15 Critical+High citations + the 13-item doc bucket EXCLUDED); `architecture-v2.md` MVP-3.4 → MVP-3.5 row sequencing (no MVP-3.4.5 row added; this is an inserted maintenance slice that does NOT alter the dependency graph); §5.29 (MVP-3.4 ancestor — all PI-1..PI-34 preserved); §5.26 D-3.1-1 (apply_request lives in loader.cpp); project memory [[libbpf-pin-by-name-three-callsites]] (HK-9 landmine source); [[impl-role-discipline]] (HK-16 + HK-17 rationale).
