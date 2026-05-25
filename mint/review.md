@@ -1,98 +1,86 @@
-# Review — MVP-3.3: systemd + Ansible + fleet docs (mint triangulation, brownfield 5-point) — ROUND 2
+# Review — MVP-3.4 observability exporter + bypass + skeleton (mint triangulation)
 
 ## Verdict
 `pass`
-
-Rationale: rework converged cleanly across all three parties. Round 1's two fail-conditions (PI-20 INVARIANT-VIOLATED + T_SYSTEMD_LIFECYCLE test-failure) are both resolved. The architect's EDIT-6 (5-cap catalogue) and EDIT-8 (prog_id contract correction) restored Spec↔Code↔Tests alignment; impl's unit-file sync is byte-faithful to the amended §5.28 catalogue; tester's T_SYSTEMD_LIFECYCLE edit correctly tracks the amended §6.33 + PI-20 contract. Full ctest run: **34/36 PASS + 2 SKIP, 0 FAIL**. PI-1..PI-26 ALL HOLD. Zero src/ diff for the THIRD consecutive cycle. Round 1's OOT-1 (Jinja2 prose ordering) inline-merged via EDIT-7 — design.md:5866 now matches impl + PI-17. No new OOT findings.
 
 ## Triangulation matrix
 
 | Framework point | Findings | Tags |
 |---|---|---|
 | 1. Spec ↔ Code | 0 | — |
-| 2. Spec ↔ Tests | 0 | (5/5 TestStrategy entries mapped; negation controls in 3 of 5; PI-25 carve-out vacuous — §6.34 PASSED, no SKIP to validate citation on) |
-| 3. Code ↔ Tests | 0 | (34/36 PASS, 2 legitimate SKIP, 0 FAIL) |
+| 2. Spec ↔ Tests | 0 | — |
+| 3. Code ↔ Tests | 0 (42/42 — 40 PASS + 2 SKIP, matches tester's run byte-for-byte) | — |
 | 4. Out-of-Scope Drift | 0 | — |
-| 5. Behaviour preserved (brownfield) | 0 | (PI-1..PI-26 all hold; PI-20 was VIOLATED round 1, now PASSES; PI-26 zero src/ diff verified bit-for-bit) |
+| 5. Behaviour preserved (brownfield) | 0 | — |
+| Out-of-triangulation | 2 | — |
 
-## Triangulation walk — round 2 evidence
+## Triangulation evidence (key checks)
 
-### Point 1 — Spec ↔ Code (post-rework)
+**Point 1 — Spec ↔ Code (signature/contract match):**
+- `xdpmf-exporter` binary: 4 .cpp+.hpp pairs present per FileList NEW (`src/exporter/main.cpp:109..162`, `http.cpp:232..309`, `prom_format.cpp:51..72`, `stats_reader.cpp:108..157`). Routes `/metrics`, `/healthz`, `*→404`, `Content-Type: text/plain; version=0.0.4` (`http.cpp:191`).
+- `bypass` subcommand: `src/cli/bypass.cpp:87..141` honours tty-check (`isatty` AND on stdin+stderr, line 101), `--unsafe` gate (102-107), interactive `[y/N]` (111-116), pre-detach audit-log (118-129), `loader::detach()` delegation (134). Reason 256-byte cap with U+2026 (line 36-53).
+- `rules` + `action_table` BPF maps DECLARED at `src/bpf/mac_filter.bpf.c:140-170` (NEW `.maps` block only); POPULATED in `src/lib/loader.cpp:1102-1170` (new `populate_rules_skeleton` + `populate_action_table` anon-namespace helpers) called from both fresh-attach (1775-1799) and state-b reattach (1638-1660) paths in `internal::apply_request()`.
+- WARN emission: `src/lib/loader.cpp:1430-1437` — fires after `log_trust_model`, before kernel-touch, when `req.config.rules.size() > 0`. Per impl-notes D-3.4-2 it ALSO fires on the `attach --allow` synth path (architect-flagged disposition: design-literal).
+- Negotiated deviations both documented: D-3.4-1 (apply_internal.cpp → loader.cpp resolved via §5.29 EDIT-1; `mint/impl-notes.md:343..425`), D-3.4-2 (WARN universal vs synth-suppressed; `mint/impl-notes.md:427..445`).
 
-- **systemd unit `systemd/xdpmacfilter@.service`** — every directive in amended §5.28 catalogue (design.md:5752-5776) present byte-equivalent. 5-cap set at lines 68+69 verbatim per Q4 RT2 + D-3.3-6.
-- **D-3.3-6 audit trail** at design.md:5683-5685 + :5969-5974 — comprehensive evolution + kernel BPF verifier trusted-mode gate + "why 31 ctests don't catch" + `capsh --drop=` future-cycle prevention guard.
-- **§6.33 prog_id contract correction (EDIT-8)** at design.md:6019-6031 + PI-20 at :6122 — all 3 differential signals enumerated (active_idx flip, link-pin persistence, xdp_prog_id non-empty), explicitly noting prog_id value is NOT a discriminator. Text-consistency across §6.33 + PI-20 + anti-theatricality block coherent.
-- All other artifacts (Ansible, Jinja2, fleet docs, README, CMakeLists, CHANGELOG) unchanged from round 1 — no regressions.
+**Point 2 — Spec ↔ Tests (assertion targets stated outcomes):**
+- §6.37 → `tests/T_EXPORTER_METRICS_FORMAT.sh:188-224` — asserts HELP/TYPE/sample EREs verbatim; PI-33 smoke (line 95-102).
+- §6.38 → `tests/T_EXPORTER_VALUES_MATCH_STATS.sh:197-201` — strict per-verdict equality vs `read_stats.py`, not function shape.
+- §6.39 → `tests/T_EXPORTER_NO_ATTACHED_IFACE.sh:131-176` — graceful empty (HELP+TYPE only, 0 samples, alive across two requests).
+- §6.40 → `tests/T_BYPASS_CMD_DETACHES.sh:81-100` — audit-line ERE + XDP detached + link pin removed; sub-case at 129-133 covers `UNSPECIFIED` default.
+- §6.41 NEGATION CONTROL → `tests/T_BYPASS_REQUIRES_UNSAFE_NONINTERACTIVE.sh:85-121` — non-tty without `--unsafe` MUST exit 1 + XDP still attached. Explicit fail-open regression guard.
+- §6.42 LOAD-BEARING DEFER → `tests/T_RULES_SKELETON_NOT_WIRED.sh:223-300` — direct map-dump approach (architect-preferred): rules+action_table populated AND drop-MAC ABSENT from active inner allowlist; assertion (fC) at 294-299 cites BOTH the PI-29 violation AND the PI-27/PI-13-3.4 violation in the diagnostic.
+- Negation control coverage: T_BYPASS_REQUIRES_UNSAFE_NONINTERACTIVE explicitly named as such + T_NEGATION_CONTROL (baseline) still green.
 
-### Point 2 — Spec ↔ Tests (post-rework)
+**Point 3 — Code ↔ Tests:**
+- Re-ran `cd /home/user/mint-l2-mac-filter/build && ctest --output-on-failure -j$(nproc)` independently → 42/42 entries; 40 PASS + 2 SKIP. Matches tester's `test-run.log` byte-for-byte. Log: `/tmp/mint-review-tests-mvp34-1779667370.log`.
+- UNEXERCISED-EXPORT spot-check: all new exports reachable from binary surface that ctest exercises. No dead exports.
 
-- T_SYSTEMD_LIFECYCLE.sh:303-313 — removed wrong FAIL[7c] prog_id-constancy; added (7c-i) XDP still attached + (7c-ii) link pin persists per amended PI-20.
-- Test comment block :283-302 records correction audit trail + cites loader.cpp:1466-1473 as source-of-truth.
-- 5/5 §6.32-§6.36 TestStrategy entries mapped 1:1; negation controls in 3 of 5.
+**Point 4 — Out-of-Scope Drift:**
+- `grep -nE 'bpf_map_lookup_elem\(\s*&?(rules|action_table)\W' src/bpf/mac_filter.bpf.c` → ZERO matches. Datapath does NOT consult either new skeleton map. `mac_filter_prog` body lookups (lines 174..253) untouched: `stats`, `active_idx`, `rulesets`, `inner`, `cidr_rulesets`, `cidr_inner`, `defaults`. No `per_rule_counters` / `rule_id` references anywhere in `src/` or `include/`.
 
-### Point 3 — Code ↔ Tests (re-ran)
-
-Captured to /tmp/mint-review-tests-202605242030.log:
-```
-100% tests passed, 0 tests failed out of 36
-Total Test time (real) = 356.16 sec
-```
-Byte-equivalent to tester's round 2 report. Both round 1 fail-conditions resolved: T_SYSTEMD_LIFECYCLE@33 PASSED (4.26 s); T_SYSTEMD_RESTART_ON_FAILURE@34 PASSED (30.47 s).
-
-### Point 4 — Out-of-Scope Drift
-
-Rework touched ONLY: mint/design.md (architect EDITs 6/7/8), systemd/xdpmacfilter@.service (impl unit sync), tests/T_SYSTEMD_LIFECYCLE.sh (tester correction). All authorized by amended §5.28 + §6.33 + PI-20. No new directives, no hardening creep.
-
-### Point 5 — Brownfield PI walk (PI-1..PI-26)
-
-All 26 PIs hold. PI-20 was VIOLATED round 1, now PASSES. PI-7-3.3 ZERO src/ diff continues (third consecutive cycle). PI-26 verified: `git diff 3d15473..HEAD -- src/ include/ cmake/` = 0 lines; CMakeLists.txt diff only version bump + XDPMF_INSTALL_SYSTEMD_UNIT option per D-3.3-9. PI-6-3.3 strict superset holds (30/31 pre-existing PASS + 1 legit SKIP).
-
-## Round-2-specific cross-checks
-
-1. **5-cap set verbatim in unit lines 68+69** — confirmed (lines shifted from round-1's 54+57 by inline comment expansion at 52-67, part of impl's authorized rework).
-2. **T_SYSTEMD_LIFECYCLE.sh matches amended §6.33 + PI-20** — confirmed.
-3. **Multi-party convergence (architect + impl + tester)** — confirmed; all 3 artifacts reference SAME contract: 5 caps (incl. CAP_SYS_ADMIN for verifier trusted-mode), prog_id NECESSARILY CHANGES across R1 reload, link pin + active_idx flip are the discriminators.
-4. **D-3.3-6 future-cycle prevention guard present** — confirmed at design.md:5685 + :5974.
-5. **PI-26 src/ zero-diff held across rework** — confirmed.
-6. **Round-1 OOT-1 inline-merged** — confirmed at design.md:5865-5867 + :5886.
+**Point 5 — Brownfield invariants (PI-1..PI-34, with focus on PI-27..PI-34 NEW + PI-7-3.4 split):**
+- **PI-7-3.4-hpp**: `git diff 7ac2d06 -- src/lib/loader.hpp` = empty. 4th consecutive ZERO-diff cycle. ✓
+- **PI-7-3.4-cpp** (regional-diff check): 9 hunks in `loader.cpp`. By enclosing-function classification:
+   - hunk @836 (+2 lines): `open_skeleton_only`'s `pinned_maps[]` literal additive 10→12 — allowed per §5.29 EDIT-2 scope (iv). Loop body byte-equivalent.
+   - hunk @1102 (+67 lines): NEW anon-namespace helpers — allowed scope (b).
+   - hunks @1425, @1556, @1573, @1638, @1698, @1712, @1775 (all inside `internal::apply_request`): step 8.5 WARN, `reuse_specs[]` 9→11, step 8.5 reattach populate, `pin_specs[]` 9→11, step 8.5 fresh-attach populate — all allowed scope (a). ✓
+- **PI-10-3.4 / PI-13-3.4 / PI-27**: `mac_filter.h` diff (`src/common/mac_filter.h:93..125`) is pure additive (struct rule_entry, struct action_entry, enum xdpmf_action_type, 2 name macros). Existing constants / inner-value `__u8/unsigned char present` shape byte-equivalent. ✓
+- **PI-28**: `mac_filter.bpf.c` single hunk at line 140 (+28 lines) inside `.maps` block only; `mac_filter_prog` function body (lines 181..255) ZERO diff. ✓
+- **PI-29**: rules+action_table POPULATED on apply; NOT consulted by datapath (Point 4 grep above). WARN line is operator-facing signature. ✓
+- **PI-30**: bypass = detach-alias only. No new BPF map flag; no new XDP verdict; lives entirely in `src/cli/bypass.{cpp,hpp}` (NEW files); invokes `xdpmf::detach()` at bypass.cpp:134. ✓
+- **PI-31**: `grep -rE 'bpf_(map_(update|delete)_elem|obj_pin|link_create|link_destroy|xdp_(attach|detach)|prog_load)' src/exporter/` — only comment-line matches (stats_reader.cpp:10-11, documenting the constraint). Zero non-comment matches. ✓
+- **PI-32**: §6.39 confirms graceful empty + no crash + alive across two requests. ✓ (See OOT #1 for "additionally logs WARN" sub-clause.)
+- **PI-33**: `xdpmacfilter --version` → `xdpmacfilter 0.6.0`; `xdpmf-exporter --version` → `xdpmf-exporter 0.6.0`. ✓
+- **PI-34 / PI-6-3.4**: `git diff --stat 7ac2d06 -- tests/T_*.sh` shows 6 NEW files only, ZERO existing test bodies touched. 36 baseline tests strict superset honoured. ✓
+- **PI-19 extension**: `systemd-analyze verify systemd/xdpmf-exporter.service` exits 0 with zero stderr.
+- **No [UNRELATED-EDIT]**: every "UNCHANGED-BUT-AFFECTED" file in §5.29 FileList confirmed ZERO diff.
+- **No [REGRESSION]**: all 34 pre-existing non-skip tests still PASS post-§5.29.
 
 ## Test execution
 
-Last 20 lines of /tmp/mint-review-tests-202605242030.log:
-
-```
-      Start 32: T_SYSTEMD_UNIT_SYNTAX
-32/36 Test #32: T_SYSTEMD_UNIT_SYNTAX ...............   Passed    0.24 sec
-      Start 33: T_SYSTEMD_LIFECYCLE
-33/36 Test #33: T_SYSTEMD_LIFECYCLE .................   Passed    4.26 sec
-      Start 34: T_SYSTEMD_RESTART_ON_FAILURE
-34/36 Test #34: T_SYSTEMD_RESTART_ON_FAILURE ........   Passed   30.47 sec
-      Start 35: T_ANSIBLE_PLAYBOOK_SYNTAX
-35/36 Test #35: T_ANSIBLE_PLAYBOOK_SYNTAX ...........***Skipped   0.00 sec
-      Start 36: T_FLEET_DOCS_SUBSTRING
-36/36 Test #36: T_FLEET_DOCS_SUBSTRING ..............   Passed    0.02 sec
-
-100% tests passed, 0 tests failed out of 36
-
-Total Test time (real) = 356.16 sec
-
-The following tests did not run:
-        5 - T_DROP_MALFORMED (Skipped)
-       35 - T_ANSIBLE_PLAYBOOK_SYNTAX (Skipped)
-```
-
-## Rework assignments
-
-None — verdict is `pass`. No rework needed.
+`100% tests passed, 0 tests failed out of 42` — full ctest run, 270.04 sec wall-clock. Two legitimate SKIPs (T_DROP_MALFORMED kernel-pad; T_ANSIBLE_PLAYBOOK_SYNTAX ansible absent — both inherited from prior cycles, neither a regression).
 
 ## Out-of-triangulation findings
 
-Round 1's only OOT (Jinja2 prose ordering) was inline-merged via Phase B EDIT-7 — resolved.
+### [OOT-1] PI-32 "additionally logs ONE warning line at startup" sub-clause not implemented and not asserted
+**Location**: `src/exporter/stats_reader.cpp:54-58` (silent ec-return when bpffs root absent) vs `mint/design.md:6792` (PI-32 table cell prose).
+**Recommended disposition**: `defer`
+**Rationale**: PI-32 core contract (bind+serve+not-crash+stay-alive) honoured + tested; the "additionally" prose attaches an auxiliary operator-friendly hint, not a load-bearing signature. Silent graceful return is arguably MORE conservative than emitting a startup line for a transient bpffs absence in fleet ops. MVP-3.4b housekeeping pickup.
+
+### [OOT-2] Exporter exit-code 6 (permission denied) per §5.29 CLI grammar has no reachable code path
+**Location**: `src/exporter/main.cpp:32` declares only `kExitOk`/`kExitUsageErr`; per-iface EACCES/EPERM logged WARN + continue (`stats_reader.cpp:141-145`) — no path returns 6.
+**Recommended disposition**: `defer`
+**Rationale**: Consistent with PI-32 graceful-continuation preference (partial-permission bpffs state degrades to "scrape returns only the accessible ifaces" rather than crashing the daemon). MVP-3.4b housekeeping — either impl surfaces exit 6 when ALL ifaces fail with EACCES, OR architect retracts the exit-6 row from §5.29 exporter exit codes.
+
+## Notes
+
+Architect's §5.29 EDIT-2 disposition note ("if you flag `open_skeleton_only` diff as [UNRELATED-EDIT] the correct disposition is `inline-merge`") was anticipated; I checked the hunk against the (iv) scope-fence and it qualifies under the EDIT-2 amendment, so no UNRELATED-EDIT raised. Pre-emptive disposition resolution worked cleanly — anti-misdiagnosis guard fires.
+
+Total review wall-clock: ~30 minutes. 5-point brownfield framework all green. Verdict: **pass**.
 
 ### Deferred to next slice
 
-**T_SYSTEMD_RESTART_ON_FAILURE transient flake under back-to-back stress** (surfaced by round-1 reviewer's independent re-run during cleanup-phase activity; 1/5 known runs hit NRestarts=1 instead of 4-5 under reviewer's back-to-back ctest stress pattern; tester's run-of-record + reviewer-2's primary run both PASS at ~30s with NRestarts in band; flake rate ≤20% under stress, ~0% under clean-run pattern). Root cause appears to be systemd state-leak between T_SYSTEMD_LIFECYCLE's cleanup and T_SYSTEMD_RESTART_ON_FAILURE's pre-cleanup when run consecutively. PI-25 SKIP-77 carve-out explicitly anticipates this category of timing flake. Polish options for a future housekeeping cycle: (a) implement PI-25 SKIP-77 fallback in test (NRestarts < 4 + deadline expired + missing journal pattern → exit 77 with verbatim carve-out citation); (b) stronger inter-test isolation via `systemctl reset-failed --all` + `sleep 5` in defensive pre-cleanup; (c) increase polling deadline 60s → 90s. NOT a round-2 fail — verdict stands pass.
-
----
-
-**Summary**: cleanest round-2 close possible. The rework executed exactly as Phase 5 re-spawn discipline prescribes: (a) honest round-1 reviewer caught a real spec defect via T_SYSTEMD_LIFECYCLE canary; (b) architect amended spec authoritatively with audit trail + anti-misdiagnosis-recurrence note + future-cycle prevention guard; (c) impl synced byte-equivalent; (d) tester surfaced a SECONDARY spec defect (prog_id contract) mid-rework, which architect promptly amended (EDIT-8); (e) all 3 artifacts converged on the same contract; (f) 34/36 PASS + 2 legitimate SKIP + 0 FAIL; (g) all 26 PIs hold; (h) PI-26 zero src/ diff invariant preserved across the entire rework. This is the textbook "honor-the-canary, fix-the-spec, re-converge" loop. Ship MVP-3.3.
+Both OOT items deferred to MVP-3.4b housekeeping (verdict pass; neither blocks):
+- **OOT-1**: PI-32 startup WARN line for absent bpffs root — design wants it; impl chose silent graceful return; verdict prefers impl choice but design prose remains as written. Pick during MVP-3.4b: either add the WARN (cheap impl ask) or amend PI-32 prose to drop the auxiliary clause.
+- **OOT-2**: exporter exit code 6 (permission denied) — declared in §5.29 CLI grammar, no reachable path. Pick during MVP-3.4b: either surface exit 6 when ALL ifaces fail EACCES, or architect retract the row.
