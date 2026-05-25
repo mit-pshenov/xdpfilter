@@ -120,8 +120,11 @@ set_tests_properties(T_NEGATION_CONTROL PROPERTIES WILL_FAIL TRUE)
 # end-to-end attach+inject+stats+detach via the asan-instrumented binary
 # against the veth fixture, and greps captured stderr for sanitizer
 # reports.  Takes the same xdp_fixture RESOURCE_LOCK as §6.3-§6.6 because
-# it touches veth_a/veth_b.  TIMEOUT 180 because the embedded cmake
-# configure + sanitizer build dominates the runtime.
+# it touches veth_a/veth_b.  TIMEOUT 240: the embedded cmake configure +
+# sanitizer build dominates the runtime; observed 171-181s under -j4
+# contention with T_BUILD (margin-flake under prior 180s ceiling across
+# MVP-3.4.5 + MVP-3.4b cycles). 240s gives ~33% headroom against the
+# observed-peak run.
 add_test(
     NAME T_SANITIZER_BUILD
     COMMAND bash ${TEST_DIR}/T_SANITIZER_BUILD.sh
@@ -130,7 +133,7 @@ add_test(
 set_tests_properties(T_SANITIZER_BUILD PROPERTIES
     ENVIRONMENT "${TEST_ENV}"
     RESOURCE_LOCK xdp_fixture
-    TIMEOUT 180
+    TIMEOUT 240
     SKIP_RETURN_CODE 77
 )
 
