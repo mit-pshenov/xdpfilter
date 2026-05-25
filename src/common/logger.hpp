@@ -94,7 +94,7 @@ inline constexpr std::array<std::string_view, 34> kEventNames = {
     "sidecar.warn.write_failed",             /* src/lib/sidecar.cpp:305 */
     "sidecar.warn.write_exception",          /* src/lib/sidecar.cpp:312 */
 
-    /* exporter (xdpmf-exporter) — 14 events */
+    /* exporter (xdpmf-exporter) — 15 events */
     "exporter.usage_error",                  /* src/exporter/main.cpp:91, 100, 110, 143, 154 (5 sites share) */
     "exporter.fatal",                        /* src/exporter/main.cpp:176 */
     "exporter.error.all_ifaces_eacces",      /* src/exporter/main.cpp:187 — HK-17 */

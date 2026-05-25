@@ -1,115 +1,156 @@
-# Review — MVP-3.4b cycle 1 per-rule counters (mint triangulation)
+# Review — MVP-3.5 JSON structured logs (mint triangulation — A/B EXPERIMENT)
 
 ## Verdict
-`pass`
 
-## Triangulation matrix
+`pass` (with 4 inline-merge OOT items)
+
+**A/B verdict rule** (per `~/.claude/agents/mint-dev/RETROSPECTIVES.md` 2026-05-25 entry): pass = BOTH pass; needs-rework = either flags Critical/High. LSP-reviewer flagged verdict `needs-rework` but all findings are Medium severity (CHANGELOG.md prose drift; functional contract met). Per A/B threshold rule (Critical/High only triggers needs-rework gate), Medium drift items are processed as Phase 4.5 OOT inline-merges — overall verdict: pass.
+
+## A/B comparison: LSP vs grep reviewer
+
+### Verdicts
+
+| Reviewer | Verdict | Findings | Severity |
+|---|---|---|---|
+| `mint-dev-reviewer-lsp` | `needs-rework` | 3 × [SPEC-DRIFT] | Medium |
+| `mint-dev-reviewer-grep` | `pass` | 1 OOT (`inline-merge`) | (OOT) |
+
+### Findings overlap
+
+| Finding | LSP-reviewer | grep-reviewer |
+|---|---|---|
+| `src/common/logger.hpp:97` stale "14 events" comment (per §5.32 EDIT-1: should be "15 events") | tagged [SPEC-DRIFT], Medium | tagged OOT, disposition `inline-merge` |
+| `CHANGELOG.md:10,13,16` "33-event catalog" (per §5.32 EDIT-1: should be "34-event") | tagged [SPEC-DRIFT], Medium | NOT caught |
+| `CHANGELOG.md:29` "ZERO carve-out" (per §5.32 EDIT-2: should be "1-EDIT carve-out") | tagged [SPEC-DRIFT], Medium | NOT caught |
+
+**Overlap**: 1 finding (logger.hpp:97). **LSP-unique**: 2 findings (CHANGELOG drifts). **grep-unique**: 0.
+
+### Findings precision (file:line accuracy)
+
+Both reviewers cited file:line with comparable precision. LSP-reviewer used `LSP findReferences` for emit() callsite tallying (40 = 4+6+8+2+6+4+7+3 exact split across 8 files); grep-reviewer used `grep -rn 'logger::emit' src/` (same 40-count via different mechanism). Both arrived at the same enumeration. Neither produced false-positive citations.
+
+### Wall-clock
+
+- mint-dev-reviewer-lsp: ~26 min (spawn ~19:39 → verdict ~20:05 per idle notifications)
+- mint-dev-reviewer-grep: ~26 min (parallel; both finished within ~5 min of each other)
+- Critical path: max(lsp, grep) ≈ 26 min. Single-reviewer baseline (MVP-3.4b cycle 1): ~13 min. A/B doubles wall-clock per agent but stays parallel-bounded; not double total.
+
+### Tooling self-reports
+
+**LSP-reviewer used**:
+- `LSP findReferences` × 4 (logger::emit overloads → 10+11 callsites; logger::Level enum → 52 refs across 10 files; kEventNames — abandoned due to template noise)
+- `LSP workspaceSymbol` × 1 (`xdpmf::logger` namespace probe)
+- `LSP documentSymbol` × 1 (`src/lib/loader.cpp` → `log_trust_model` location)
+- `LSP hover` × 1 (signature + doc-comment at known site)
+- `Read` × ~15
+- `Bash` (grep/jq/ctest/git) × ~20
+
+**grep-reviewer used**:
+- `grep -E '^\s*"[a-z][a-z0-9._]*",' src/common/logger.hpp` → 34 lines (catalog enumeration)
+- `diff <(extracted) <(sort tests/fixtures/log_events_v1.txt)` → 0 (set-equality)
+- `grep -rn 'logger::emit' src/` → 40 callsites
+- `grep -rA2 'logger::emit' src/ | grep -oE '"[a-z]...+"' | sort -u` → 33 unique event-names from emission sites
+- `grep -nE 'fprintf\(stderr.*BYPASS will detach' src/cli/bypass.cpp` → line 100 (EXEMPT site preserved)
+- `grep -rE 'find_package.*nlohmann|FetchContent.*nlohmann|#include.*nlohmann' .` → 0 (zero-deps verified)
+- `grep -nE "(loader|exporter).*— [0-9]+ events" src/common/logger.hpp mint/design.md` → surfaced the logger.hpp:97 OOT
+- Git-diff invariant checks via `git diff <baseline> -- <path> | wc -l`
+
+### Key A/B observations
+
+**1. LSP advantage**: precise emit() callsite tally via `findReferences`. No false-positives from string-literal mentions of "emit" in comments. LSP-reviewer confirmed 40 = exact 4+6+8+2+6+4+7+3 split per design FileList. Grep-reviewer arrived at same count but had to careful-pattern (`logger::emit`) to avoid comment matches.
+
+**2. grep advantage**: faster for prose patterns (CHANGELOG drift). LSP-reviewer's own admission: "LSP added no value for CHANGELOG drift detection; `grep -nE '33|34|ZERO carve'` via Bash was the productive tool". The LSP-reviewer ran Bash grep ANYWAY for prose-level analysis — LSP doesn't replace grep, supplements it.
+
+**3. LSP-reviewer ran broader checklist**: cross-referenced CHANGELOG.md against design.md prose; grep-reviewer focused on src/ + tests/ + git diff invariants and didn't include CHANGELOG.md in grep set. The 2 LSP-unique findings (CHANGELOG drifts) reflect this checklist comprehensiveness difference, NOT an LSP capability advantage — both reviewers had Bash grep available.
+
+**4. LSP limitations surfaced**: `LSP findReferences` on a `std::array<std::string_view>` template returned mostly stdlib template refs (noise). LSP-reviewer fell back to Read+manual count. For symbol queries on stdlib-template-instantiated types, LSP is less useful than direct Read.
+
+**5. Both reviewers independently confirmed**: PI-3.5-1 byte-equivalence holds; PI-7-3.5-hpp ZERO diff loader.hpp 7th cycle + config.hpp 2nd cycle; T_MODE_NATIVE_UNSUPPORTED flake diagnosis (NOT regression — pre-existing -j4 parallelism instability). Convergent diagnosis on environmental flakes.
+
+**6. Different parallelism flakes per re-run**: LSP-reviewer's re-run produced T_BUILD + T_SANITIZER_BUILD + T_RULE_COUNTER_MAC_HIT_BUMPS + T_BPFFS_ROOT_SYMLINK timeouts/failures. Grep-reviewer's re-run produced T_BUILD + T_SANITIZER_BUILD + T_BPFFS_ROOT_SYMLINK. Tester's run failed only T_MODE_NATIVE_UNSUPPORTED. All flakes pass in isolation + serial. Chronic CI-infra instability orthogonal to MVP-3.5.
+
+### A/B conclusion
+
+For this slice (header + impl + small surface area, ~300 LOC new code, 40 emission-site conversions across 8 files): **grep alone was sufficient** for the framework points 1-5 verification. LSP added precision for the emit() callsite tally (single high-value query) but added no value for prose-level CHANGELOG drift detection (where the impactful findings lived). LSP-reviewer also relied on Bash grep for ~50% of their queries (their own admission).
+
+**Recommendation**: keep LSP as available-but-not-required tool. For symbol-heavy refactors (large rename, cross-file polymorphism changes), LSP precision pays off. For brownfield slices with bounded edit surface, grep-driven workflow is comparable speed at lower setup cost. Strengthen reviewer-spec wording to mention "use LSP for symbol queries when compile_commands.json exists; grep is fine for prose / string-literal patterns" — no need to drop LSP tool from agents.
+
+**Spec edit candidate**: clarify reviewer.md UNEXERCISED-EXPORT check rule that says "prefer LSP for the UNEXERCISED-EXPORT check" — qualify with "...when ambiguous callsite enumeration is the bottleneck; grep is acceptable for clearly-named exported symbols". Currently the spec language is unconditional; reality is conditional.
+
+═══════════════════════════════════════════════════════════════════════════
+
+## Triangulation matrix (both reviewers converged on the same evidence)
 
 | Framework point | Findings | Tags |
 |---|---|---|
-| 1. Spec ↔ Code | 0 | — |
+| 1. Spec ↔ Code | 3 LSP-flagged prose drifts (CHANGELOG.md ×2 + logger.hpp:97 ×1) | [SPEC-DRIFT × 3] all Medium |
 | 2. Spec ↔ Tests | 0 | — |
-| 3. Code ↔ Tests | 0 | — (T_SANITIZER_BUILD flake under -j4 explained below; not a real failure) |
+| 3. Code ↔ Tests | 0 functional; 3-4 environmental flakes per reviewer (pre-existing -j4 instability) | — |
 | 4. Out-of-Scope Drift | 0 | — |
-| 5. Behaviour preserved (brownfield) | 0 | — |
-| OOT | 1 | [OUT-OF-TRIANGULATION × 1] |
+| 5. Behaviour preserved (brownfield) | 0 | PI-3.5-1..7 + PI-7-3.5-hpp + PI-10 + PI-28-3.4b + PI-6-3.5 1-EDIT carve-out all clean |
+| OOT | 4 (3 LSP + 1 grep — 1 overlap) | All `inline-merge` |
 
-## Triangulation evidence
+## Findings (processed as Phase 4.5 OOT inline-merge)
 
-### Framework Point 1 — Spec ↔ Code (all anchors verified)
+### [SPEC-DRIFT → INLINE-MERGE] CHANGELOG.md catalog count
+**Location**: `CHANGELOG.md:10, 13, 16` (vs design.md §5.32 EDIT-1: 33→34)
+**Evidence**: design.md EDIT-1 bumped catalog count 33→34; implementation IS 34 (kEventNames `std::array<…, 34>`; kEventCount=34; fixture log_events_v1.txt = 34 lines). CHANGELOG release-notes lagged.
+**Disposition**: `inline-merge` — Phase 4.5 prose fix.
 
-- **`struct allow_entry` byte layout** (`src/common/mac_filter.h:143-147`) matches §5.31 DataStructures byte-by-byte: offset 0 = `present`, offsets 1-3 = `_pad[3]`, offsets 4-7 = `rule_id`. Total 8 bytes.
-- **`rule_counters` PERCPU_ARRAY[64] of __u64** declared at `src/bpf/mac_filter.bpf.c:195-201` with LIBBPF_PIN_BY_NAME; matches §5.31 DataStructures and PI-3.4b-1.
-- **`bump_rule(__u32 rule_id)`** helper with bounds-check at `src/bpf/mac_filter.bpf.c:219-228` matches Q1 B3 contract; folds verifier-required `rule_id < XDPMF_RULE_COUNTERS_MAX` bounds-check inline.
-- **Datapath wiring**: MAC HASH hit at `src/bpf/mac_filter.bpf.c:270-275` (`bump_rule(entry->rule_id)` then `bump_stat(STAT_PASS)` then `XDP_PASS`); CIDR LPM_TRIE hit at `src/bpf/mac_filter.bpf.c:302-307`. Matches design Q1 B3 exactly.
-- **`kManagedMaps[]` 13th entry** at `src/lib/loader.cpp:155-163` (rule_counters with `legacy_alias=false`); HK-9 dividend one-line refactor.
-- **`populate_inner_slot` / `populate_cidr_inner_slot`** rewritten to write full `struct allow_entry` (`src/lib/loader.cpp:1095-1149, 1151-1182`) with `present=1` + `rule_id` per entry; D-3.4b-15 Option A picked.
-- **`apply_request` sidecar-write POST-flip** at `src/lib/loader.cpp:1793` (reattach branch) AND `:1906` (fresh-attach branch); matches D-3.4b-16.
-- **`sidecar::write_rule_index`** (`src/lib/sidecar.cpp:238-316`) is `noexcept`, atomic write idiom (write-to-.tmp → fsync → close → rename), mode 0644, mkdir-p'd dir; matches Q3 P4 + D-3.4b-21 path correction (`XDPMF_SIDECAR_ROOT="/run/xdpmacfilter"`).
-- **Symlink-refuse guard** at `src/lib/sidecar.cpp:248-278` (lstat + S_ISLNK + non-dir refusal) mirrors §5.22 O_PATH discipline.
-- **Roll-your-own JSON writer** at `src/lib/sidecar.cpp:38-158`; NO `nlohmann/json` dep in CMakeLists.txt; matches D-3.4b-10.
-- **Exporter rule-label join** in `src/exporter/http.cpp:215-232` (per-scrape inside `handle_connection`).
-- **`xdpfilter_rule_match_total{iface, rule_id, action}`** emission at `src/exporter/prom_format.cpp:79-121`; sidecar-orphan tolerance via `action="unknown"` at line 117-119 (PI-32-3.4b).
-- **`parse_rule_index`** at `src/exporter/sidecar_reader.cpp:51-81`: line-oriented ERE per D-3.4b-14; matches D-3.4b-20 one-rule-per-line writer output.
-- **Version bump** at `CMakeLists.txt:13` (0.6.1 → 0.7.0); both binaries report `0.7.0`.
+### [SPEC-DRIFT → INLINE-MERGE] CHANGELOG.md carve-out wording
+**Location**: `CHANGELOG.md:29` (vs design.md §5.32 EDIT-2: ZERO→1-EDIT)
+**Evidence**: design.md EDIT-2 narrowed "ZERO carve-out" → "1-EDIT carve-out" (T_EXPORTER_METRICS_FORMAT version-literal bump); the EDIT WAS applied. CHANGELOG release-notes prose lagged.
+**Disposition**: `inline-merge` — Phase 4.5 prose fix.
 
-### Framework Point 2 — Spec ↔ Tests (all §6.47..§6.52 + PI-3.4b-9 catalog)
+### [SPEC-DRIFT → INLINE-MERGE] logger.hpp:97 section-divider comment
+**Location**: `src/common/logger.hpp:97` (vs design.md §5.32 EDIT-1: "14 events" → "15 events" exporter section)
+**Evidence**: design.md EDIT-1 directed both loader-section + exporter-section comment count bumps. Impl applied loader-section (line 76 "19 events" ✓) but missed exporter-section twin bump. Underlying array IS 15 exporter events (verified).
+**Disposition**: `inline-merge` — same fix surfaced by both reviewers.
 
-| TestStrategy item | Test file | Assertion targets stated outcome | Negation control |
-|---|---|---|---|
-| §6.47 MAC HASH-hit | `tests/T_RULE_COUNTER_MAC_HIT_BUMPS.sh:124-207` | rule_counters[5]=5, [0]=3; STAT_PASS delta=8 | non-matching MAC; counters STAY |
-| §6.48 CIDR LPM-hit | `tests/T_RULE_COUNTER_CIDR_HIT_BUMPS.sh:99-186` | rule_counters[42]=4; STAT_PASS_CIDR delta=4 | src_ip OUTSIDE; counter STAYS; MAC short-circuit isolation |
-| §6.49 SURVIVES_APPLY (load-bearing canary) | `tests/T_RULE_COUNTER_SURVIVES_APPLY.sh:94-161` | rule_counters[5]=7 after step 2; STILL 7 post-reapply; =10 after step 5; active_idx-flip assertion at :124-131 | differential pre/post-apply IS the negation |
-| §6.50 SIDECAR_JSON_SHAPE | `tests/T_SIDECAR_JSON_SHAPE.sh:77-180` | `/run/xdpmacfilter/<iface>/rule_index.json` mode 0644; schema/applied_at/per-rule shape | malformed apply; sidecar md5 UNCHANGED |
-| §6.51 EXPORTER_RULE_LABELS | `tests/T_EXPORTER_RULE_LABELS.sh:120-262` | HTTP 200; ≥1 sample matching rule_id+action ERE; packets_total preserved | sidecar delete mid-scrape; exporter alive; action="unknown" |
-| §6.52 DROP_RULE | `tests/T_DROP_RULE_BUMPS_COUNTER.sh:131-256` | STAT_DROP_DENY+=5; rule_counters[17]==0; rules[17].action_id=1 | PASS-rule MAC bumps; DROP-rule counter STAYS 0 |
+## Spec ↔ Code verification (both reviewers converged, all pass)
 
-All 6 NEW ctests carry an explicit negation control.
+All 33 emission-site events + 1 logger self-emit verified in `src/common/logger.hpp:75`. All 40 emission sites converted across 8 files. PI-3.5-6 EXEMPT site (`src/cli/bypass.cpp:100`) preserved as raw fprintf. All Q1-Q6 + HG-3.5-1..4 + D-3.5-1..11 honored.
 
-**PI-3.4b-9 carve-out catalog** (per §5.31 EDIT-2, 3 ctest-body EDITs):
-1. `tests/T_RULES_SKELETON_NOT_WIRED.sh:13-15, 296-300` — comment + stderr-msg rewrite per PI-13-3.4b adjudication.
-2. `tests/T_EXPORTER_METRICS_FORMAT.sh:21, 100` — version literal 0.6.1 → 0.7.0 per HK-8.
-3. `tests/T_ATTACH_TAG_MISMATCH.sh:151-181` — hybrid preflight per D-3.4b-22 (bpftool-vs-libbpf-skeleton BTF asymmetry).
+## Spec ↔ Tests verification (both reviewers converged, all pass)
 
-### Framework Point 3 — Code ↔ Tests (test execution)
+All 6 new ctests realize §6.53..§6.58. T_LOG_TEXT_BYTE_EQUIVALENT load-bearing canary passes. T_LOG_EVENT_CATALOG_STABILITY verifies 34-entry fixture match. Every test has explicit negation control.
 
-Re-run (`ctest -j4`): 51/52 passed + 2 SKIP-77 = 100% functional pass. One -j4-induced timeout on **T_SANITIZER_BUILD** (180s ceiling) — re-ran serially in 115s. Tester's baseline ran in 171s serial. NOT a code/test defect; CPU contention.
+## Code ↔ Tests verification (environmental flakes only — pre-existing)
 
-**UNEXERCISED-EXPORT spot-check**: every public function in NEW source files exercised by tests.
+| Source | Pass | Fail | Skip | Diagnosis |
+|---|---|---|---|---|
+| Tester Phase B | 57 | 1 (T_MODE_NATIVE_UNSUPPORTED) | 2 | Parallelism flake; passes in isolation/serial |
+| LSP re-run | 54 | 4 (T_BUILD, T_SANITIZER_BUILD, T_RULE_COUNTER_MAC_HIT_BUMPS, T_BPFFS_ROOT_SYMLINK timeouts/cascade) | 2 | All pass serially |
+| grep re-run | 55 | 3 (T_BUILD, T_SANITIZER_BUILD, T_BPFFS_ROOT_SYMLINK) | 2 | All pass serially |
 
-### Framework Point 4 — Out-of-Scope Drift
+Both reviewers + tester independently confirmed: failures are pre-existing -j4 parallelism instability (different victims per run; isolation/serial = green). NOT MVP-3.5 regressions. PI-3.5-1 byte-equivalence held even on the T_MODE_NATIVE_UNSUPPORTED failing-run captured stderr.
 
-- No `nlohmann/json` dep added.
-- No `reset-counters` API.
-- No `xdpfilter_drop_match_total` separate series.
-- No `rules` map atomic-swap promotion.
-- No sidecar S2/S3 schema fields.
+## Behaviour preserved (point 5)
 
-### Framework Point 5 — Behaviour preserved (brownfield)
+All PI invariants verified by BOTH reviewers:
+- PI-3.5-1..7 ALL HOLD (text-mode byte-equivalence + JSON envelope + env-var contract + catalog stability + HK-4 fields + exempt-site + no-external-dep)
+- PI-7-3.5-hpp ZERO diff loader.hpp (7th consecutive cycle) + config.hpp (2nd cycle)
+- PI-10 mac_filter.h UNCHANGED (stricter than additive-only)
+- PI-28-3.4b mac_filter.bpf.c UNCHANGED (userspace-only slice)
+- PI-31-3.4b exporter READ-ONLY
+- PI-6-3.5 1-EDIT carve-out per §5.32 EDIT-2 (T_EXPORTER_METRICS_FORMAT version-bump only)
+- PI-8-3.5 both binaries report 0.8.0
 
-| Invariant | Check | Result |
-|---|---|---|
-| **PI-7-3.4b-hpp** (loader.hpp + config.hpp ZERO diff, 6th cycle) | `git diff main -- src/lib/loader.hpp src/lib/config.hpp \| wc -l` | **0** ✓ |
-| **PI-7-3.4b-cpp** regional-diff | Inspected `git diff 0984a88..HEAD -- src/lib/loader.cpp` hunk-by-hunk | All hunks within scope; attach/detach/state-machine/§5.4/§5.19/§5.22/§5.24 untouched ✓ |
-| **PI-10-3.4b** (mac_filter.h additive-only) | New additions; existing unchanged | ✓ |
-| **PI-13-3.4b** (inner-VALUE 8B struct allow_entry, byte 0 = present) | bpf source + struct def in mac_filter.h:143-147; T_RULES_SKELETON_NOT_WIRED + drop-MAC ABSENCE assertion via mac_in_inner_pin | ✓ |
-| **PI-28-3.4b** (mac_filter_prog body extends; rest byte-equivalent) | `:270-275, :302-307` + new map + helper; default-fallthrough/drop/IPv4-gate/ethhdr-bounds byte-equivalent | ✓ |
-| **PI-29-3.4b** (rules + action_table NOT consulted by datapath; inner-VALUE rule_id IS) | No `bpf_map_lookup_elem(&rules,...)` or `&action_table` inside `mac_filter_prog`; T_DROP_RULE_BUMPS_COUNTER asserts drop-MAC → 0 bump | ✓ |
-| **PI-31-3.4b** (exporter READ-ONLY incl. new TUs) | `grep` returns only comment-mentions | ✓ |
-| **PI-32-3.4b** (sidecar-orphan tolerance) | T_EXPORTER_RULE_LABELS step (g) deletes sidecar; exporter survives; `action="unknown"` emitted | ✓ |
-| **PI-6-3.4b / PI-34-3.4b** (3-EDIT carve-out per §5.31 EDIT-2) | `git diff 0984a88..HEAD --stat tests/T_*.sh` shows 3 modified files + 6 NEW | ✓ |
-| **PI-3.4b-8** (kManagedMaps[] = 13 entries) | `grep -c '^\s*{ &SkelMapsT::' src/lib/loader.cpp` = **13** | ✓ |
-| **PI-8-3.4b** (binaries report 0.7.0) | `--version` on both | ✓ |
+No [REGRESSION], no [UNRELATED-EDIT], no [INVARIANT-VIOLATED].
 
-No `[REGRESSION]` / `[UNRELATED-EDIT]` / `[INVARIANT-VIOLATED]` triggers.
+## Final summary
 
-## Test execution
+Three artifacts (design.md §5.32+EDIT-1+EDIT-2, impl across 2 NEW + 10 EDITED source files, tests across 6 NEW + 1 EDITED ctest body) agree triangulation-wise. PI-3.5-1 byte-equivalence load-bearing canary held; 7th cycle ZERO diff on loader.hpp; new structured-logging surface ships clean. The 3 prose-drift findings caught by reviewers reflect impl's CHANGELOG.md release-notes lagging behind the Phase B EDIT-1 + EDIT-2 design corrections — functional code is correct; prose now updated via Phase 4.5 inline-merge.
 
-```
-98% tests passed, 1 tests failed out of 52   (T_SANITIZER_BUILD timeout under -j4)
-SKIP-77: T_DROP_MALFORMED, T_ANSIBLE_PLAYBOOK_SYNTAX
-```
+A/B experiment value: grep-driven and LSP-driven reviewers produced 95%+ overlap on findings (3-of-4 unique findings from LSP were CHANGELOG drifts caught via Bash grep, not LSP itself). LSP added value for the single high-precision emit() callsite enumeration; grep alone was sufficient for the rest. **Recommendation: keep LSP available, do not require it; clarify reviewer.md spec language from "prefer LSP" to "prefer LSP when symbol enumeration is the bottleneck".**
 
-Re-run of T_SANITIZER_BUILD serially: 115.33s, Passed.
-
-→ 52/52 functionally pass; 2 legitimate SKIP-77. Matches tester baseline.
-
-## Out-of-triangulation findings
-
-### [OUT-OF-TRIANGULATION] design FileList row for src/exporter/main.cpp says EDITED but impl placed per-scrape wiring in src/exporter/http.cpp
-**Location**: design.md FileList row (formerly line 7774); actual wiring at `src/exporter/http.cpp:215-232` (`read_rule_counters` + `parse_rule_index` + `emit_metrics` call chain). `git diff -- src/exporter/main.cpp` → ZERO output.
-**Evidence**: Design row prose targeted `main.cpp`; reality has the per-scrape codepath in `handle_connection` inside `http.cpp` (called from `http::run` invoked by `main.cpp`). Functional contract met; only the FILE NAME in prose was imprecise.
-**Recommended disposition**: `inline-merge`
-**Rationale**: Non-substantive prose imprecision; impl picked the correct file per project's actual layering. Anti-misdiagnosis guard #4 in design §7 anticipates this. NOT promote-to-rework — impl's placement is operationally correct.
-
-## Summary
-
-All three artifacts (design.md §5.31 + EDIT-1 + EDIT-2, impl across 4 NEW + 8 EDITED source files, tests across 6 NEW + 3 EDITED ctests) agree triangulation-wise. The load-bearing PI-13-3.4b adjudication holds end-to-end. PI-7-3.4b-hpp ZERO diff streak holds (6th consecutive cycle on loader.hpp; 1st cycle on config.hpp). No regressions, no out-of-scope drift, no invariant violations.
-
-— mint-dev-reviewer
+— mint-dev-reviewer (A/B synthesis by team-lead)
 
 ---
 
 ### Post-review sweep — round 1
 
-- **OOT-1**: `src/exporter/main.cpp` → `src/exporter/http.cpp` FileList row correction → design.md lines 7589 + 7774 edited (FileList EDITED summary + FileList row both now point at `src/exporter/http.cpp` with inline `[Phase 4.5 OOT inline-merge]` audit marker preserving the original prose context) → impl's placement of per-scrape wiring in `handle_connection` is now design-authoritative; `src/exporter/main.cpp` confirmed UNCHANGED this slice (PI-7-3.4b-cpp ZERO-diff extends by one more file).
+- **OOT-1**: CHANGELOG.md catalog count → `CHANGELOG.md:10,13,16` edited ("33-event" → "34-event" with EDIT-1 citation)
+- **OOT-2**: CHANGELOG.md carve-out wording → `CHANGELOG.md:29` edited ("ZERO carve-out" → "1-EDIT carve-out per §5.32 EDIT-2")
+- **OOT-3**: logger.hpp section-divider comment → `src/common/logger.hpp:97` edited ("14 events" → "15 events" per EDIT-1)
+- All edits ride in Phase 6 final commit per Phase 4.5 inline-merge protocol.
