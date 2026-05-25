@@ -7556,3 +7556,867 @@ This slice carries forward all anti-misdiagnosis guards from prior cycles + adds
 4. **Verification-hints discipline trap** (inherited from MVP-3.1/3.2/3.3 verification-hints rework cycles): the §5.30 verifiable invariants section above is GUIDANCE for the reviewer, NOT contracts for impl. Items default to SHOULD/MAY; MUST is reserved for PI-* contracts. If impl deviates on a SHOULD/MAY hint to satisfy a PI-* contract, reviewer disposition is `inline-merge` on the hint text — NOT `[UNRELATED-EDIT]` on impl. Resolution rule for prose-vs-invariants conflicts within this amendment: invariants block wins, prose loses (stated once per the amendment template; this single statement covers all §5.30 prose vs. PI-* conflicts).
 
 Evidence: `mint/task-brief.md` MVP-3.4.5 brief (HK-1..HK-17 + Q1-Q6 + HG-3.4.5-1/2/3/4); `mint/review.md` MVP-3.4 round-1 (OOT-1 PI-32 silent → HK-16; OOT-2 exit-6 unreachable → HK-17); `/agent-teams-review/runs/mint-review-mint-l2-mac-filter-202605250825/report.md` (15 Critical+High citations + the 13-item doc bucket EXCLUDED); `architecture-v2.md` MVP-3.4 → MVP-3.5 row sequencing (no MVP-3.4.5 row added; this is an inserted maintenance slice that does NOT alter the dependency graph); §5.29 (MVP-3.4 ancestor — all PI-1..PI-34 preserved); §5.26 D-3.1-1 (apply_request lives in loader.cpp); project memory [[libbpf-pin-by-name-three-callsites]] (HK-9 landmine source); [[impl-role-discipline]] (HK-16 + HK-17 rationale).
+
+### §5.31 MVP-3.4b cycle 1: per-rule counters + inner-allowlist-value extension + datapath wiring + exporter rule labels (brownfield amendment, 2026-05-25)
+
+**Purpose**: ship the per-rule observability surface deferred from MVP-3.4 (§5.29 + Open Q #13 RESOLUTION). Operator gains `xdpfilter_rule_match_total{iface, rule_id, action}` Prometheus series via `/metrics` showing per-rule match counts. The slice composes Option 2 from `architecture-v2.md` §"§MVP-3.4 Open Question #13 RESOLUTION":
+- NEW BPF map `rule_counters` PERCPU_ARRAY[XDPMF_ALLOWLIST_MAX=64] of `__u64` — per-rule packet counts.
+- Inner-allowlist-value EXTENSION from `__u8 present` (1 byte) to `struct allow_entry { __u8 present; __u8 _pad[3]; __u32 rule_id; }` (8 bytes total) — SYMMETRIC across MAC HASH `allowlist_a/b` AND CIDR LPM_TRIE `cidr_allowlist_a/b` (T.5 OQ #3).
+- Datapath `bump_rule(rule_id)` wiring at the MAC HASH-hit AND CIDR LPM_TRIE-hit branches in `mac_filter_prog` (Q1=B3 unified per-match semantic — first substantive datapath body edit since MVP-3.2).
+- Loader-written `rule_index.json` sidecar at `${PIN_DIR}/<iface>/rule_index.json` (Q3=P1 per-iface bpffs path).
+- Exporter joins `rule_counters` (BPF) with `rule_index.json` (sidecar) → emits `xdpfilter_rule_match_total{iface, rule_id, action}` (Q4=A3 action-as-label).
+- `kManagedMaps[]` gains a 13th entry for `rule_counters` (LIBBPF_PIN_BY_NAME + bpf_map__reuse_fd discipline so counters SURVIVE `apply -f` per Prometheus counter-monotonicity semantic; HG-3.4b-2). This is the second-cycle dividend on the MVP-3.4.5 HK-9 landmine refactor.
+
+This slice LIFTS two fences from MVP-3.4 §5.29:
+- (1) **PI-13-3.1 defer fence** on inner-allowlist-value byte shape — adjudicated PASS-as-additive per HG-3.4b-1 (full byte-layout rationale in §6.5 PI-13-3.4b below).
+- (2) **PI-29 "rules+action_table populated NOT consulted"** fence is RELAXED with a documented carve-out: `rules` map is STILL NOT consulted by datapath this cycle (HG-3.4b-4); `action_table` is STILL NOT consulted (action dispatch via existing PASS/DROP branches retained); BUT the inner-allowlist-value's `rule_id` field IS now read on every match. New PI-29-3.4b restates this precisely.
+
+PI-7-3.4b-hpp continues the additive-only streak on `loader.hpp` (6th consecutive cycle). PI-13-3.4b is the LOAD-BEARING NEW PI (the byte-by-byte adjudication of the inner-value extension).
+
+**Anchor sections**: §5.26 (config harness + Config::Rule `id` field with [0, XDPMF_ALLOWLIST_MAX-1] range validation — the rule_id source per Q5 R1); §5.27 (CIDR LPM_TRIE — parallel-swap mechanism preserved; inner-value extension is SYMMETRIC with the MAC HASH branch); §5.29 (MVP-3.4 ancestor — defer posture; `rules`+`action_table` skeleton declared+populated but NOT consulted; bypass primitive; exporter); §5.30 (MVP-3.4.5 housekeeping — HK-9 `kManagedMaps[]` table is the foundation this slice extends; PI-13-3.4.5 = PI-27 was preserved untouched, now formally LIFTED by PI-13-3.4b); §4.1 exit-code table (UNCHANGED — no new exit code; sidecar write failures map to existing LoaderError::AttachFailed); §4.3 LoaderError enum (UNCHANGED — PI-7-3.4b-hpp additive-only); `mint/architecture-v2.md` §"§MVP-3.4 Open Question #13 RESOLUTION" Option 2 + Caveat (b) human-gate Caveat-held (committed `2d4b31a` 2026-05-24).
+
+**Scope contract (§5.31 short form)**:
+- NEW (source files): `src/lib/sidecar.hpp` + `src/lib/sidecar.cpp` (rule_index.json writer; ~150 LOC roll-your-own per D-3.4b-10 — NO new build dep this slice).
+- NEW (BPF map declaration): `rule_counters` PERCPU_ARRAY[XDPMF_ALLOWLIST_MAX=64] of `__u64`, LIBBPF_PIN_BY_NAME → `${PIN_DIR}/<iface>/rule_counters`.
+- NEW (BPF datapath helper): `static __always_inline void bump_rule(__u32 rule_id)` adjacent to existing `bump_stat`.
+- NEW (BPF struct): `struct allow_entry { __u8 present; __u8 _pad[3]; __u32 rule_id; }` in `src/common/mac_filter.h` (BPF + userspace shared, additive only per PI-10-3.4b).
+- NEW (exporter helpers): `src/exporter/rule_counters_reader.{cpp,hpp}` (PERCPU sum across CPUs for the new map — sister to existing `stats_reader`); `src/exporter/sidecar_reader.{cpp,hpp}` (line-oriented regex extraction from rule_index.json per D-3.4b-14 — sidesteps full-JSON-parser need).
+- NEW (exporter Prometheus series): `xdpfilter_rule_match_total{iface, rule_id, action}` counter emitted from `src/exporter/prom_format.cpp`.
+- NEW (6 ctests): `T_RULE_COUNTER_MAC_HIT_BUMPS.sh`, `T_RULE_COUNTER_CIDR_HIT_BUMPS.sh`, `T_RULE_COUNTER_SURVIVES_APPLY.sh`, `T_SIDECAR_JSON_SHAPE.sh`, `T_EXPORTER_RULE_LABELS.sh`, `T_DROP_RULE_BUMPS_COUNTER.sh`. Tests/CMakeLists.txt entries.
+- EDITED (BPF source): `src/bpf/mac_filter.bpf.c` — inner-value `__type(value, struct allow_entry)` on BOTH `xdpmf_allowlist_inner` (line 55) AND `xdpmf_cidr_inner` (line 95); MAC hit branch (line 226) reads `entry->rule_id` then calls `bump_rule`; CIDR hit branch (line 254) reads `cidr_entry->rule_id` then calls `bump_rule`; NEW `rule_counters` map declaration in `.maps` block; NEW `bump_rule` helper.
+- EDITED (loader): `src/lib/loader.cpp` — `populate_inner_slot` + `populate_cidr_inner_slot` write the new struct shape (write `{.present=1, ._pad={0,0,0}, .rule_id=<rule.id>}` per entry, NOT a 1-byte literal); the existing functions' signatures EXTEND to carry rule_id alongside the key (impl-flexible — Decisions D-3.4b-15); `kManagedMaps[]` gains 13th entry `{ &SkelMapsT::rule_counters, XDPMF_MAP_RULE_COUNTERS_NAME, false }` (line 158 area); apply_request body gains a sidecar-write step (post-flip OR post-populate — D-3.4b-16) that invokes `sidecar::write_rule_index(...)`.
+- EDITED (shared header): `src/common/mac_filter.h` — ADD `struct allow_entry`, `XDPMF_MAP_RULE_COUNTERS_NAME`, `XDPMF_RULE_COUNTERS_MAX` (alias for XDPMF_ALLOWLIST_MAX=64); existing struct/enum/constants UNCHANGED (PI-10-3.4b additive-only).
+- EDITED (exporter main): `src/exporter/main.cpp` — wire in `rule_counters_reader` + `sidecar_reader` consumption per scrape; emit the new series.
+- EDITED (CMakeLists.txt): version bump `0.6.1 → 0.7.0`; new library deps for `src/lib/sidecar.{cpp,hpp}`; new translation units for `src/exporter/rule_counters_reader.{cpp,hpp}` + `src/exporter/sidecar_reader.{cpp,hpp}`.
+- EDITED (CHANGELOG.md): NEW `## [0.7.0] - 2026-05-NN` section; Build-pace table gains MVP-3.4b row.
+- EDITED (ctest fixtures — minimal PI-3.4b-9 ripple per Phase A grep finding): `T_RULES_SKELETON_NOT_WIRED.sh` ONLY (comments at line 14 + 297 reference "1-byte values" and "extended to embed rule_id (PI-27/PI-13-3.4 violation)" — both STALE post-§5.31 PI-13-3.4b PASS adjudication; comments rewritten; assertions byte-equivalent — see PI-3.4b-9 catalog in §6.5 below). `T_EXPORTER_METRICS_FORMAT.sh` line 100 pins literal `xdpmf-exporter 0.6.1` — HK-8-forced bump to `0.7.0` (Cf. MVP-3.4.5 EDIT-3 precedent — version-literal in test bodies is HK-bump-forced; precedent is stable). Total: 2 EDITED ctest bodies — significantly less than brief's ~5 estimate due to **Phase A grep finding: ZERO tests write a literal `present=1` payload via `bpf_map_update_elem` from userspace** (all such writes live inside `loader.cpp:1097, 1137`). Brief's 5-fixture-touch ceiling is upper bound; actual cost is 2 surgical-fix EDITs.
+- UNCHANGED-BUT-AFFECTED (zero git-diff fence): `src/lib/loader.hpp` (**PI-7-3.4b-hpp — 6th consecutive ZERO-diff cycle**); `src/lib/config.hpp` (PI-7-3.4b-hpp extends — `Config::Rule` already carries `id` field per §5.26; Q5 R1 uses `id` directly; NO field addition needed — see D-3.4b-11); existing exporter `stats_reader.cpp` (`xdpfilter_packets_total` series preserved byte-equivalent — the NEW series is additive); the 44 non-EDITED ctest bodies; `src/lib/cidr.cpp`, `src/lib/cidr.hpp`, `src/lib/yaml_subset.cpp`, `src/cli/*` (no CLI surface change this slice — `xdpmacfilter apply -f <path>` semantics byte-equivalent; only the apply BODY extends to write rule_index.json sidecar); systemd unit `xdpmf-exporter.service` (UNCHANGED — exporter discovers new map via existing bpffs scan); the bypass primitive (UNCHANGED — PI-30 preserved); §5.4 / §5.19 / §5.22 / §5.24 trust+identity gates (UNCHANGED — no `attach`/`detach` path change).
+
+#### §5.31 Human-gate decisions (confirmed)
+
+- **HG-3.4b-1 — PI-13-3.1 inner-allowlist-value adjudication = PASS as additive.** **Confirmed by architect at Phase A.** Byte-layout documented byte-by-byte:
+
+  ```
+  struct allow_entry {           offset  size  semantic
+      unsigned char present;     // 0     1     PI-27-byte-equivalent: 0x01 = occupied; 0x00 = empty.
+                                 //              `bpftool map dump ... format c | head -c 1` still
+                                 //              returns 0x01 for occupied slots — old single-byte
+                                 //              readers observe the SAME byte at the same offset.
+      unsigned char _pad[3];     // 1-3   3     EXPLICIT padding for u32 alignment of `rule_id`.
+                                 //              Verifier-friendly: the padding bytes are zero-initialized
+                                 //              by C ABI struct-init (`{}`); userspace writes always
+                                 //              memcpy a fully-initialized `struct allow_entry` (no
+                                 //              uninitialized-byte verifier-pessimism concern).
+      __u32 rule_id;             // 4-7   4     NEW: identifies which Config::Rule produced this entry.
+                                 //              Range [0, XDPMF_ALLOWLIST_MAX-1] = [0, 63] per Q5 R1
+                                 //              (operator's YAML `id:` IS the BPF key directly; rule.id
+                                 //              already validated to this range at config.cpp:204).
+  };                             // total: 8 bytes
+  ```
+
+  **Rationale for PASS adjudication** (cross-references §5.29 PI-27 / PI-13-3.4 prior strict reading + §5.30 PI-13-3.4.5 = PI-27 5th-cycle preservation):
+  - **Operator-observable byte 0 is PI-27-byte-equivalent**: a `bpftool map dump ... format c | head -c 1` on the value still returns `0x01` (the `present` byte at offset 0). The MVP-3.4 PI-27 contract was "occupied-or-not visible at offset 0"; that contract HOLDS post-§5.31. The defer's `bpftool map show ... | grep value_size` answer changes (`1 → 8`) — but PI-27's TEXT, re-read literally, was about offset-0 byte semantics, not about total `value_size`. PI-13-3.4b formalizes the offset-0 byte invariant + explicitly declares the `value_size 1 → 8` change as ADDITIVE not VIOLATE. See §6.5 PI-13-3.4b for the full check mechanism.
+  - **BPF datapath verifier-acceptance**: existing reads at offset 0 (line 226 + 254) are byte-equivalent: `__u8 *present` becomes `struct allow_entry *entry`, and `if (present)` becomes `if (entry)` — same pointer-null-check shape. New read at offset 4 (`entry->rule_id`) is a 4-byte aligned load on a successfully looked-up pointer — verifier-trivial. The bounded `rule_id` (verifier-required range check before using as array index) lives in `bump_rule` per the datapath wiring contract below.
+  - **PI-3.4b-9 fixture-ripple cost is LOW** (Phase A grep finding): only T_RULES_SKELETON_NOT_WIRED.sh and T_EXPORTER_METRICS_FORMAT.sh ctest bodies need surgical fixes (2 ctest EDITs vs brief's ≤5 estimate). NO test writes a 1-byte literal payload via `bpf_map_update_elem` from userspace; all writes happen inside `loader.cpp` populate paths.
+  - **Symmetric MAC HASH + CIDR LPM_TRIE** (T.5 OQ #3): the inner-value extension applies to BOTH `xdpmf_allowlist_inner` (MAC HASH) AND `xdpmf_cidr_inner` (CIDR LPM_TRIE). NOT extending CIDR would put MAC and CIDR rule_ids in different shape-spaces — bug-shaped, rejected.
+
+  If verifier rejects (impl smoke-tests during Phase 2; T_VERIFIER_GREEN canary surfaces it): impl peer-DMs architect; fall-back is Option 3 (two-map shadow `mac_to_rule_id` HASH + `cidr_to_rule_id` LPM_TRIE). Option 3 inflates the slice ~1 cycle larger; documented in §7 OOS as the contingent fallback.
+
+- **HG-3.4b-2 — Counter survival across `apply -f` = PRESERVE (Prometheus counter-monotonicity semantic).** **Confirmed.** `rule_counters` is `LIBBPF_PIN_BY_NAME`; pinned at `${PIN_DIR}/<iface>/rule_counters`; on state-b reattach loop, `bpf_map__reuse_fd` opens the existing fd and the kernel-side PERCPU values are preserved. Matches D-3.1-4 reuse_fd discipline (preserves global `stats` PERCPU_ARRAY across `apply -f`). NOT matching MVP-1 global `stats` "reset on attach" semantic — but global `stats` predates the reuse_fd discipline; the consistent post-§5.26 contract is PRESERVE.
+
+  Mechanically: `rule_counters` is the 13th entry in `kManagedMaps[]` (HK-9 dividend); the open_skeleton_only clear-list, the apply_request pin loop, and the apply_request reuse loop all walk the same table — adding the entry is the ONLY refactor cost. Confirms the MVP-3.4.5 HK-9 landmine-removal pays off in this cycle.
+
+- **HG-3.4b-3 — `rule_index.json` sidecar = INCLUDE in cycle 1.** **Confirmed.** Cycle 1 ships the sidecar so the exporter can emit `xdpfilter_rule_match_total{iface, rule_id, action}` with human-readable `action` labels. Sidecar shape per Q2 S1 (defaults-only). Sidecar path per Q3 P1 (`${PIN_DIR}/<iface>/rule_index.json`). Writer: `src/lib/sidecar.{cpp,hpp}` ~150 LOC roll-your-own (D-3.4b-10); NO `nlohmann/json` build dep cycle 1 (brownfield discipline).
+
+- **HG-3.4b-4 — `rules` map atomic-swap (D-3.4-4) = STAY SHARED with clear-and-rewrite.** **Confirmed.** `rules` map is STILL NOT consulted by datapath this cycle (PI-29-3.4b carve-out below). The per-rule counter pipeline reads `rule_id` from the inner-allowlist-value (which is already parallel-swapped via the §5.26/§5.27 `rulesets`/`cidr_rulesets` ARRAY_OF_MAPS mechanism), NOT from the `rules` map. So `rules` needs no atomic-swap. MVP-3.4c future cycle (action-table dispatch) will revisit if datapath consultation makes it load-bearing.
+
+#### §5.31 Q-decisions (mechanism)
+
+##### Q1: `bump_rule(rule_id)` datapath call-site placement → **B3 (unified per-match semantic)**
+
+Confirmed per brief recommendation. **Semantic contract**: each successful match (MAC HASH OR CIDR LPM_TRIE) results in ONE `bump_rule(rule_id)` call, using `rule_id` read from the inner-value of whichever inner-map produced the hit. The `rule_id` value comes from `struct allow_entry::rule_id` at offset 4 of the looked-up inner-value pointer.
+
+**Verifier-friendly C-level layout** (impl picks the exact shape — the SEMANTIC is the contract):
+
+```
+// MAC HASH hit branch (replaces existing line 226-230):
+struct allow_entry *entry = bpf_map_lookup_elem(inner, &key);
+if (entry) {
+    bump_rule(entry->rule_id);          // PER-RULE COUNT
+    bump_stat(STAT_PASS);                // EXISTING GLOBAL COUNT (preserved)
+    return XDP_PASS;
+}
+
+// CIDR LPM_TRIE hit branch (replaces existing line 254-258):
+struct allow_entry *cidr_hit = bpf_map_lookup_elem(cidr_inner, &cidr_key);
+if (cidr_hit) {
+    bump_rule(cidr_hit->rule_id);       // PER-RULE COUNT (SAME counter map; symmetric)
+    bump_stat(STAT_PASS_CIDR);           // EXISTING GLOBAL COUNT (preserved)
+    return XDP_PASS;
+}
+```
+
+This is the verifier-friendly relaxation of "single call expression" — `bump_rule` is invoked from TWO source-line call-sites that share the SAME inline helper and produce semantically symmetric per-rule counts. If a future cycle refactors to a true single tail call (e.g. via a `pass_with_rule:` label and a shared stack-local `rule_id` variable), it's a refactor that does NOT change the contract.
+
+**`bump_rule` inline helper definition** (adjacent to `bump_stat`):
+```
+static __always_inline void bump_rule(__u32 rule_id) {
+    /* Verifier-required bounds check on ARRAY index (verifier rejects
+     * unbounded user-supplied keys into ARRAY maps). XDPMF_ALLOWLIST_MAX=64
+     * matches max_entries of rule_counters. */
+    if (rule_id >= XDPMF_ALLOWLIST_MAX) return;
+    __u64 *v = bpf_map_lookup_elem(&rule_counters, &rule_id);
+    if (v) {
+        *v += 1;     /* PERCPU: pointer returned is to THIS CPU's slot; no atomic. */
+    }
+}
+```
+
+**Default-action PASS path does NOT bump rule_counters**: a frame that misses BOTH MAC HASH AND CIDR LPM_TRIE and falls through to `defaults[active]=PASS` has no rule_id (there's no rule that matched it) — only `STAT_PASS` increments. Document this explicitly: per-rule counters track per-rule MATCH counts, NOT per-rule decision counts. Operators querying "total passes" via `sum(xdpfilter_packets_total{verdict="pass"}) by (iface)` get the full count; per-rule sum (`sum(xdpfilter_rule_match_total) by (iface)`) is a SUBSET (matched-by-some-rule).
+
+##### Q2: Sidecar JSON schema fields beyond the default → **S1 (defaults-only)**
+
+Confirmed per brief recommendation. Cycle 1 ships exactly the default shape:
+```json
+{
+  "iface": "eth0",
+  "schema_version": 1,
+  "applied_at": "2026-05-25T10:30:00Z",
+  "rules": [
+    {"rule_id": 0, "match": {"mac": "aa:bb:cc:dd:ee:ff"}, "action": "pass"},
+    {"rule_id": 1, "match": {"cidr": "10.0.0.0/24"}, "action": "pass"},
+    {"rule_id": 2, "match": {"mac": "11:22:33:44:55:66"}, "action": "drop"}
+  ]
+}
+```
+
+Field semantics:
+- `iface`: string, the operator's `--iface` argument (NOT the optional YAML `interface:` field — they reconcile pre-apply per §5.26).
+- `schema_version`: integer literal `1` (hard-coded; future schema changes increment).
+- `applied_at`: ISO-8601 UTC timestamp at apply time, format `YYYY-MM-DDTHH:MM:SSZ` (single trailing `Z`; no fractional seconds — for human readability + grep-friendliness in fleet ops).
+- `rules`: array of rule objects in source-order (matches the YAML `rules:` block order; useful for human inspection alongside the source config).
+- Per-rule object: `rule_id` integer in [0, 63] per Q5 R1; `match` object with EITHER `mac` OR `cidr` (whichever the YAML rule specified — if a rule had BOTH per the §5.27 schema, both keys appear); `action` string `"pass"` or `"drop"`.
+
+S2 (free-form `description`) + S3 (loader/kernel/bpffs metadata) explicitly REJECTED for cycle 1 — additive in future cycles if operator demand surfaces. See §7 OOS NEW FENCE block.
+
+##### Q3: `rule_index.json` sidecar path → **P1 (`${PIN_DIR}/<iface>/rule_index.json`)**
+
+Confirmed per brief recommendation. **Per-iface sidecar pairs with per-iface bpffs pin layout.** The exporter already scans `${XDPMF_BPFFS_ROOT}/<iface>/` for the `stats` map (existing `stats_reader.cpp`); discovering `rule_index.json` and `rule_counters` in the SAME directory is the natural fleet operations pattern. Reviewer's HK-16 startup discovery codepath is the precedent.
+
+**Lifecycle**: rule_index.json survives loader restart (file persists in `tmpfs`-mounted bpffs as long as bpffs is mounted — SAME lifecycle as the pinned BPF maps). On bpffs unmount, both pins and sidecar disappear together — consistent operator mental model.
+
+**Permissions**: written with mode 0644 (operator-readable; needed for `--bpffs-root` non-root scan from exporter). Loader runs as root (CAP_BPF + CAP_NET_ADMIN); the sidecar inherits root ownership but world-read mode 0644 so the CAP_BPF-only exporter (D-3.4-6) can read it.
+
+**Atomic-write idiom**: write to `${PIN_DIR}/<iface>/rule_index.json.tmp`, `fsync(fd)`, `rename(tmp, final)`. Same pattern as the existing `pin_fd` idiom inside loader.cpp for BPF map pins. Ensures partial-write atomicity vs concurrent exporter scrape.
+
+P2 (`/var/lib/xdpmacfilter/<iface>/`) REJECTED for cycle 1 — would require new mkdir + chown + ansible playbook touch + systemd `StateDirectory=` update — coordination cost without clear value over P1. P3 (`/etc/xdpmacfilter/...`) is wrong-shape (config-adjacent is for operator-edited input, not loader-written output).
+
+##### Q4: Action label on `xdpfilter_rule_match_total` → **A3 (action as label)**
+
+Confirmed per brief recommendation. Single series `xdpfilter_rule_match_total{iface, rule_id, action}`. Action is read from the sidecar's `action` field per scrape.
+
+**Prometheus series shape**:
+```
+# HELP xdpfilter_rule_match_total Total per-rule packet matches by iface and rule_id, labelled with action.
+# TYPE xdpfilter_rule_match_total counter
+xdpfilter_rule_match_total{iface="eth0",rule_id="0",action="pass"} 12345
+xdpfilter_rule_match_total{iface="eth0",rule_id="1",action="pass"} 567
+xdpfilter_rule_match_total{iface="eth0",rule_id="2",action="drop"} 89
+```
+
+**Cardinality bound**: at most XDPMF_ALLOWLIST_MAX × #ifaces × #actions = 64 × N × 2 series. For a typical fleet (N ≤ 4 ifaces), worst-case 512 series per host — negligible Prometheus storage.
+
+**Sidecar-orphan tolerance** (per /mint-hld Option 3 OQ): if BPF `rule_counters` has a non-zero value at index R but `rule_index.json` does NOT list rule_id R (race window across apply: counter from prior config persists across apply, BUT old rule R is no longer in the new config) → emit `xdpfilter_rule_match_total{iface="<iface>",rule_id="<R>",action="unknown"} <value>`. The `action="unknown"` label is the load-bearing signal: exporter does NOT crash, does NOT loud-warn-per-orphan, does NOT skip the data point. Drop-and-reconcile next scrape; operator alerts can target `action="unknown"` if they want to surface the race window. **Symmetric**: sidecar lists rule_id R but BPF counter is 0 (newly-added rule, no traffic yet) → emit `xdpfilter_rule_match_total{...,action="<from-sidecar>"} 0` (Prometheus convention: emit zeroes for known series).
+
+A1 (separate `xdpfilter_rule_meta` series) REJECTED — pushes join work to operator; metric-relabeling at scrape time is brittle. A2 (split series by action) REJECTED — multiplies metric count, hostile to alert aggregation.
+
+##### Q5: Rule_id allocation policy in loader → **R1 (operator's `id` IS the BPF key directly)**
+
+Confirmed per brief recommendation. **Phase A grep evidence**: `src/lib/config.cpp:204` already validates `rule.id >= XDPMF_ALLOWLIST_MAX` and rejects with ConfigError (= 9). Range [0, 63] is enforced at config-validation time. The `rule_counters[k]` ARRAY index space and the operator's YAML `id:` namespace are IDENTICAL. Sparse usage (operator uses `id: 0, 5, 17`) is the normal case; the unused slots stay at counter value 0 (PERCPU init).
+
+**Datapath implication**: when a packet matches via inner-allowlist HASH or CIDR LPM_TRIE, the looked-up `struct allow_entry::rule_id` is written by the loader to be exactly `config.rules[i].id` for the matching rule. `bump_rule(rule_id)` then bumps `rule_counters[rule_id]`. Operator's mental model is: "id 5 in my YAML maps to `rule_counters[5]` in `bpftool map dump`".
+
+**Counter-survival semantic (HG-3.4b-2)**: across applies, if operator's rule with `id: 5` is REMOVED, the next apply's `rule_counters[5]` is NOT reset by the loader (only the inner-allowlist's slot for that MAC/CIDR is removed). `rule_counters[5]` continues to carry its prior count value. Operators querying `xdpfilter_rule_match_total{rule_id="5"}` after the rule's removal see the orphan-label (`action="unknown"`) until next apply OR until counter is explicitly zeroed (out of scope — counter-zeroing API is MVP-3.5+).
+
+R2 (source-order allocation) REJECTED — violates counter-monotonicity on YAML re-ordering (operator surprise). R3 (sort-by-name) REJECTED — schema-v2 / Option 4 / MVP-future scope.
+
+#### §5.31 FileList (brownfield DIFF)
+
+##### NEW (created this slice)
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `src/lib/sidecar.hpp` | rule_index.json writer API (one public function: `write_rule_index(iface, bpffs_root, cfg)`) | C++23 | 30 |
+| `src/lib/sidecar.cpp` | rule_index.json writer impl: roll-your-own JSON emitter + atomic write idiom + ISO-8601 timestamp (D-3.4b-10) | C++23 | 150 |
+| `src/exporter/sidecar_reader.hpp` | sidecar parser API: `parse_rule_index(path) → std::vector<RuleMeta>` (or per-rule_id map) | C++23 | 25 |
+| `src/exporter/sidecar_reader.cpp` | line-oriented regex extraction of `{rule_id, action, match}` from rule_index.json (D-3.4b-14 — sidesteps full-JSON-parser) | C++23 | 80 |
+| `src/exporter/rule_counters_reader.hpp` | PERCPU sum reader for `rule_counters` map: `read_rule_counters(bpffs_root)` overload | C++23 | 25 |
+| `src/exporter/rule_counters_reader.cpp` | scan `${bpffs_root}/<iface>/rule_counters` pins; libbpf PERCPU lookup + sum-across-CPUs for all 64 slots | C++23 | 100 |
+| `tests/T_RULE_COUNTER_MAC_HIT_BUMPS.sh` | §6.47 test: MAC-HASH-hit increments `rule_counters[rule_id]`; negation: other rule_ids stay 0 | bash | 100 |
+| `tests/T_RULE_COUNTER_CIDR_HIT_BUMPS.sh` | §6.48 test: CIDR-LPM_TRIE-hit increments `rule_counters[cidr_rule_id]`; negation: MAC-only hit leaves CIDR rule_id counter at 0 | bash | 110 |
+| `tests/T_RULE_COUNTER_SURVIVES_APPLY.sh` | §6.49 test: apply config A; bump counters; apply same config (swap); assert counters PRESERVED (HG-3.4b-2 canary) | bash | 110 |
+| `tests/T_SIDECAR_JSON_SHAPE.sh` | §6.50 test: apply known config; cat rule_index.json; jq-validate per-rule shape + top-level fields | bash | 90 |
+| `tests/T_EXPORTER_RULE_LABELS.sh` | §6.51 test: exporter scrapes /metrics; assert `xdpfilter_rule_match_total{iface,rule_id,action}` series present with valid Prometheus label syntax + sidecar-orphan tolerance | bash | 130 |
+| `tests/T_DROP_RULE_BUMPS_COUNTER.sh` | §6.52 test: config with PASS + DROP rules; verify per-rule counter for drop rule is bumped via inner-value's rule_id (drop rule is in inner-allowlist via §5.26 schema cycle 2 carry-through if MAC matches) | bash | 100 |
+| `tests/fixtures/config_per_rule_counters.yaml` | NEW test fixture: 4 rules with explicit `id:` values (sparse: 0, 5, 17, 42), mix of MAC-only + CIDR-only + mixed | YAML | 30 |
+
+##### EDITED (existing files touched this slice)
+
+| Path | Role (one line) | What changes |
+|---|---|---|
+| `src/bpf/mac_filter.bpf.c` | XDP BPF program + .maps block | (i) Replace `__type(value, __u8)` at line 55 with `__type(value, struct allow_entry)` for `xdpmf_allowlist_inner` (MAC HASH inner template). (ii) Replace `__type(value, __u8)` at line 95 with `__type(value, struct allow_entry)` for `xdpmf_cidr_inner` (CIDR LPM_TRIE inner template). (iii) ADD new `rule_counters` PERCPU_ARRAY[XDPMF_ALLOWLIST_MAX=64] of `__u64`, LIBBPF_PIN_BY_NAME, in `.maps` block. (iv) ADD `static __always_inline void bump_rule(__u32 rule_id)` helper adjacent to `bump_stat` (per Q1 contract above). (v) Replace `__u8 *present = bpf_map_lookup_elem(inner, &key)` at line 226 with `struct allow_entry *entry = bpf_map_lookup_elem(inner, &key); if (entry) { bump_rule(entry->rule_id); bump_stat(STAT_PASS); return XDP_PASS; }`. (vi) Replace `__u8 *cidr_hit = bpf_map_lookup_elem(cidr_inner, &cidr_key)` at line 254 with `struct allow_entry *cidr_hit = bpf_map_lookup_elem(cidr_inner, &cidr_key); if (cidr_hit) { bump_rule(cidr_hit->rule_id); bump_stat(STAT_PASS_CIDR); return XDP_PASS; }`. NO change to default-fallthrough path (line 263-273); NO change to STAT_DROP_DENY / STAT_DROP_MALFORMED counters; NO new XDP verdict. **First substantive `mac_filter_prog` function-body edit since MVP-3.2.** PI-28 RELAXES with documented carve-out (PI-28-3.4b — adds bump_rule calls + inner-value field access at offset 4 — see §6.5). |
+| `src/common/mac_filter.h` | Shared header (BPF + userspace) | ADD `struct allow_entry { unsigned char present; unsigned char _pad[3]; unsigned int rule_id; }` (note: `unsigned int` not `__u32` for shared-header convention per §5.29 D-3.4-3); ADD `#define XDPMF_MAP_RULE_COUNTERS_NAME "rule_counters"`; ADD `#define XDPMF_RULE_COUNTERS_MAX XDPMF_ALLOWLIST_MAX` (=64, alias). NO modification to existing `struct rule_entry`, `struct action_entry`, `enum xdpmf_action_type`, `struct xdpmf_mac`, `struct xdpmf_cidr_v4`, `enum mac_filter_stat`, or any existing `XDPMF_MAP_*_NAME` / `XDPMF_*_MAX` constants. PI-10-3.4b additive-only. |
+| `src/lib/loader.cpp` | Apply orchestrator + kManagedMaps table + populate helpers | (a) `kManagedMaps[]` literal-array at line 145-158 gains 13th entry: `{ &SkelMapsT::rule_counters, XDPMF_MAP_RULE_COUNTERS_NAME, false }` (inserted alphabetically OR at end before legacy-alias — impl picks). Table comment count updates 12 → 13. (b) `populate_inner_slot` signature CHANGES to carry rule_id per entry: caller passes `std::vector<MacRulePair>` (or similar — impl picks shape per D-3.4b-15) instead of `std::vector<xdpmf_mac>`; body writes `struct allow_entry{.present=1, ._pad={}, .rule_id=pair.rule_id}` per entry. (c) `populate_cidr_inner_slot` symmetric signature change: carries rule_id per entry; writes `struct allow_entry` per entry. (d) `apply_request` body extends the existing rule-extraction step to ALSO produce per-rule rule_id values alongside the deduplicated MAC + CIDR vectors (rule_id IS `rule.id` per Q5 R1). (e) `apply_request` adds a NEW step after the active_idx flip (or before — impl picks per D-3.4b-16): invoke `sidecar::write_rule_index(req.iface, ${BPFFS_ROOT}, req.config)` to emit/refresh rule_index.json. Sidecar-write failure is non-fatal (LOG to stderr with `WARN: rule_index.json write failed: <errno>`; apply continues + exits 0 — sidecar's absence degrades exporter to `action="unknown"` labels, NOT a fatal apply error per D-3.4b-17). (f) Drop the legacy `populate_rules_skeleton` + `populate_action_table` if architect chooses (D-3.4b-18 — they were skeleton-only per §5.29; this slice does NOT consult rules/action_table from datapath, but per HG-3.4b-4 the `rules` map STAYS populated for forward-compat with cycle 2/3). **Default: KEEP `populate_rules_skeleton` + `populate_action_table` calls UNCHANGED** — `rules` + `action_table` maps continue to be populated identically to §5.29 (per HG-3.4b-4 confirmation). NO change to: §5.4 state-machine, §5.19 name-check, §5.22 tag-check + O_PATH, §5.24 kernel-version probe, §5.26 trust_model parse+log, attach()/detach() public bodies, the special-pin legacy alias path. Reviewer's regional-diff fence: allowed scopes = {kManagedMaps[] table 12→13 entries, populate_inner_slot body + signature, populate_cidr_inner_slot body + signature, apply_request rule-extraction step, apply_request sidecar-write step, optional new private helpers for the rule_id-carrying intermediate vectors}. |
+| `src/lib/config.cpp` | Config validator | **VERIFY** (not modify): existing `rule.id >= XDPMF_ALLOWLIST_MAX` check at line 204 is preserved + load-bearing for Q5 R1. NO modification. If impl finds a code path where `rule.id` is silently clipped or remapped, SendMessage architect (would invalidate Q5 R1). Expected: ZERO diff in config.cpp. |
+| `src/lib/config.hpp` | Config types | UNCHANGED (PI-7-3.4b-hpp ZERO diff continues — Phase A grep confirms `Rule::id` field already present at line 42; brief's "Config::Rule gains rule_id loader-internal field" was OVERSTATED — see D-3.4b-11). |
+| `src/lib/loader.hpp` | Loader public API | UNCHANGED. `AttachConfig` / `DetachConfig` / `attach()` / `detach()` / `LoaderError` enum: ALL byte-equivalent. **PI-7-3.4b-hpp — 6th consecutive ZERO-diff cycle**. |
+| `src/exporter/stats_reader.cpp` | Existing PERCPU sum reader for global `stats` | EXTEND ONLY if impl chooses to share PERCPU-sum scaffolding with new `rule_counters_reader.cpp`. Default: keep `stats_reader.cpp` byte-equivalent; new `rule_counters_reader.cpp` duplicates the PERCPU-sum scaffolding (~60 LOC), which is cycle 1 budget-acceptable. If impl factors out a shared helper (e.g. `percpu_sum_pinned_map(path, max_entries, cpu_count)`), it lives in a NEW translation unit (`src/exporter/percpu_sum.{cpp,hpp}`); SendMessage architect for sign-off. Default expectation: ZERO change to `stats_reader.cpp`. |
+| `src/exporter/main.cpp` | Exporter main loop | ADD per-scrape calls: `read_rule_counters(bpffs_root)` + `parse_rule_index(${bpffs_root}/<iface>/rule_index.json)` for each discovered iface; pass to `emit_metrics()` for the new series. Existing `xdpfilter_packets_total` emission preserved. ADD `--version` literal bump (0.6.1 → 0.7.0 via shared `version.h` mechanism per §5.25 P3). ADD usage-text mention of new `xdpfilter_rule_match_total` series (one line per `--help` output). |
+| `src/exporter/prom_format.cpp` | Prometheus text-format emitter | EXTEND `emit_metrics()` signature to accept `const std::vector<RuleCountersSample>&` and `const std::map<std::string, std::vector<RuleMeta>>&` (or analogous shapes — impl picks per D-3.4b-19) alongside the existing `std::vector<StatsSample>`. Output gains the new HELP+TYPE+samples block for `xdpfilter_rule_match_total` after the existing `xdpfilter_packets_total` block. Empty case (no rules in any sidecar) → emit ONLY HELP+TYPE for the new series, no samples; symmetric to existing empty-fleet behavior. |
+| `src/exporter/prom_format.hpp` | Emitter declaration | EXTEND signature per .cpp change. |
+| `CMakeLists.txt` | Top-level build | (a) `project(xdpmacfilter VERSION 0.6.1 ...)` → `project(xdpmacfilter VERSION 0.7.0 ...)`; (b) `xdpmf_internal` target list extends with `src/lib/sidecar.cpp`; (c) `xdpmf-exporter` target extends with `src/exporter/sidecar_reader.cpp` + `src/exporter/rule_counters_reader.cpp`; (d) NO other CMake changes (no new compile flags, no new external deps). |
+| `CHANGELOG.md` | Version history | NEW `## [0.7.0] - 2026-05-NN` section per Keep-a-Changelog. Sub-groups: **Added** — per-rule counters (`rule_counters` PERCPU_ARRAY[64]); inner-allowlist-value `struct allow_entry` with embedded `rule_id`; datapath `bump_rule(rule_id)` wiring; loader-written `rule_index.json` sidecar; exporter `xdpfilter_rule_match_total{iface, rule_id, action}` Prometheus series; 6 new ctests + 1 new fixture. **Changed** — `xdpmf_allowlist_inner` / `xdpmf_cidr_inner` inner-value `__u8 → struct allow_entry` (PI-13-3.4b adjudication: PASS as additive; `value_size 1 → 8`; offset-0 byte byte-equivalent to PI-27); `kManagedMaps[]` table grows 12 → 13 entries (HK-9 landmine refactor dividend). **Internal** — `populate_inner_slot` + `populate_cidr_inner_slot` signatures carry rule_id alongside the key; `apply_request` writes sidecar after each apply. Build-pace table gains a row for MVP-3.4b. |
+| `tests/CMakeLists.txt` | ctest registration | 6 new `add_test(...)` entries (§6.47..§6.52); RESOURCE_LOCK `xdp_fixture` for the 4 tests that touch veth (T_RULE_COUNTER_MAC_HIT_BUMPS, T_RULE_COUNTER_CIDR_HIT_BUMPS, T_RULE_COUNTER_SURVIVES_APPLY, T_DROP_RULE_BUMPS_COUNTER); RESOURCE_LOCK `xdp_fixture` + `exporter_port_9417` for T_EXPORTER_RULE_LABELS; T_SIDECAR_JSON_SHAPE shares xdp_fixture lock OR runs against mocked bpffs root (tester's call); ZERO modification of the 44 non-PI-3.4b-9-EDITED `add_test` entries; the 2 EDITED ctest BODIES (T_RULES_SKELETON_NOT_WIRED, T_EXPORTER_METRICS_FORMAT) keep their existing CMakeLists entries byte-equivalent. |
+| `tests/T_RULES_SKELETON_NOT_WIRED.sh` | §6.42 — `rules` + `action_table` populated but datapath byte-equivalent to MVP-3.2 | **PI-3.4b-9 surgical fix #1** (HG-3.4b-1 PASS-adjudication-forced edit): line 14 comment "(the bpftool dump of the active allowlist returns 1-byte values)" → "(the bpftool dump of the active allowlist returns 8-byte `struct allow_entry` values per §5.31 PI-13-3.4b adjudication)". Line 297 stderr message in the FAIL[fC] branch — the prose "(ii) the inner-value shape was extended to embed rule_id (PI-27/PI-13-3.4 violation, defer broken)" becomes a NO-OP scenario post-§5.31 — rewrite to: "(ii) the apply path INCORRECTLY added the drop-rule MAC to the inner allowlist (per §5.26 schema cycle 2 'drop rules do NOT populate inner-allowlist' contract — that contract is preserved post-§5.31)". The ASSERTION on MAC_C absence from the inner-allowlist is BYTE-EQUIVALENT (no test logic change). Body diff is comment-only + one stderr-string rewrite (~5 LOC EDIT). |
+| `tests/T_EXPORTER_METRICS_FORMAT.sh` | §6.37 — `/metrics` Prometheus format | **PI-3.4b-9 surgical fix #2** (HK-8-forced version-literal bump per MVP-3.4.5 EDIT-3 precedent): line 100 literal `"xdpmf-exporter 0.6.1"` → `"xdpmf-exporter 0.7.0"`. Line 21-22 comment updates the version-bump epoch reference (§5.30 → §5.31). Body diff is 2 LOC EDIT (the literal + comment). |
+
+##### UNCHANGED-BUT-AFFECTED (zero git-diff fence; behaviour must hold)
+
+| Path | Why it matters |
+|---|---|
+| `src/lib/loader.hpp` | **PI-7-3.4b-hpp — 6th consecutive ZERO-diff cycle** (MVP-3.1 +1; MVP-3.2/3.3/3.4/3.4.5/3.4b = 0). `git diff main -- src/lib/loader.hpp` MUST show ZERO output. Any diff = `[INVARIANT-VIOLATED]`. |
+| `src/lib/config.hpp` | UNCHANGED. `Config::Rule::id` already present at line 42 (`std::uint32_t`); Q5 R1 uses this field directly. NO new field. Brief's wording overstated; D-3.4b-11 documents the correction. |
+| `src/lib/loader.cpp` outside the EDITED regions enumerated above | UNCHANGED. `attach()` / `detach()` public-API function bodies; §5.4 state-machine; §5.19 name-check; §5.22 tag-check + O_PATH path-discipline; §5.24 kernel-version probe; §5.26 trust_model parse+log; §5.27 CIDR-axis active_idx flip mechanism; the special legacy-alias pin at line 1761-1778; §5.29 `populate_rules_skeleton` + `populate_action_table` calls (HG-3.4b-4 — these maps STAY populated unchanged this cycle); §5.30 HK-3 compile-gate, HK-9 kManagedMaps[] table structure (only ONE entry added; existing 12 entries byte-equivalent), HK-4 bypass audit line. Reviewer's regional-diff fence per PI-7-3.4b-cpp below. |
+| `src/lib/cidr.cpp`, `src/lib/cidr.hpp` | UNCHANGED. CIDR-axis match logic unchanged; only the LPM_TRIE inner-VALUE shape changed (in mac_filter.bpf.c + loader.cpp populate path). |
+| `src/lib/yaml_subset.cpp`, `src/lib/yaml_subset.hpp` | UNCHANGED. Schema is byte-equivalent (Q5 R1: rule.id is already in [0, 63] schema; no new keys). |
+| `src/cli/*` (attach.cpp, detach.cpp, apply.cpp, bypass.cpp, cli.cpp, main.cpp) | UNCHANGED. No CLI surface change. `xdpmacfilter apply -f <path>` and `xdpmacfilter attach` semantics byte-equivalent; the only new effect is the implicit `rule_index.json` write during apply (D-3.4b-17 — non-fatal warn-and-continue if write fails). |
+| `src/exporter/stats_reader.{cpp,hpp}` | UNCHANGED. The new `rule_counters_reader.{cpp,hpp}` is sister-shape, NOT a modification of stats_reader. Existing `xdpfilter_packets_total` series byte-equivalent. PI-31-3.4b — exporter READ-ONLY contract preserved. |
+| `src/exporter/http.{cpp,hpp}` | UNCHANGED. HTTP routing + bind + accept loop preserved. The new metric series is emitted as additional lines in the `/metrics` response body; HTTP framing unchanged. |
+| `src/bpf/mac_filter.bpf.c` outside the EDITED regions (lines 55, 95, 226, 254, .maps block) | UNCHANGED. `bump_stat` helper, defaults-map fallthrough, STAT_DROP_DENY / STAT_DROP_MALFORMED branches, ETH_P_IP check, the existing 6 `unlikely()` annotations from MVP-3.4.5 HK-5. **NEW `bump_rule` is ADDITIVE.** `mac_filter_prog` body BYTE-EQUIVALENT to MVP-3.4.5 EXCEPT the 4 enumerated edit-points (PI-28-3.4b carve-out). |
+| `systemd/xdpmacfilter@.service` + `systemd/xdpmf-exporter.service` | UNCHANGED. Exporter discovers new `rule_counters` pin via existing `${XDPMF_BPFFS_ROOT}/<iface>/` scan; no unit edit required. |
+| `ansible/xdpmacfilter-deploy.yml`, `ansible/templates/xdpfilter-config.yaml.j2` | UNCHANGED. The Jinja template already emits `id:` for each rule (§5.28 §5.27-compat template); the loader picks it up per Q5 R1 with NO Ansible touch. |
+| `docs/FLEET_DEPLOYMENT.md` | UNCHANGED this slice. The new metric series is documented in CHANGELOG `[0.7.0]` entry. A future docs pass (separate manual user-driven scope) may add a Prometheus-alert-semantic section for `xdpfilter_rule_match_total`. |
+| The 44 non-EDITED pre-§5.31 ctest BODIES (out of 46 total) | UNCHANGED. `git diff main -- tests/T_*.sh` shows 2 EDITED files (T_RULES_SKELETON_NOT_WIRED, T_EXPORTER_METRICS_FORMAT) + 6 NEW files. The other 44 ctest bodies byte-equivalent. PI-34-3.4b strict-superset with 2-ctest-body-EDIT carve-out per PI-3.4b-9. |
+| `tests/lib/common.sh`, `tests/lib/read_stats.py`, `tests/lib/pins.sh.in` | UNCHANGED. `read_stats.py` is for global `stats` map (4-slot); new `rule_counters` reader is a sister tool — impl picks whether to add `tests/lib/read_rule_counters.py` as a NEW helper (additive) OR have each ctest do `bpftool map dump pinned ${PIN_DIR}/<iface>/rule_counters --json | jq` inline. Default: NEW helper script `tests/lib/read_rule_counters.py` (parallels read_stats.py; ~50 LOC; counts as NEW file, not an EDIT). Tester's call. |
+| §5.4 / §5.19 / §5.22 / §5.24 trust+identity gates | UNCHANGED. The new map declaration + inner-value extension are detected and verified by all existing gate codepaths transparently (libbpf handles the map-shape diff at load time; tag-check is byte-equivalent at the per-iface attach because the BPF object's tag is recomputed from the new bytecode). PI-1..PI-5 all still pass. |
+
+#### §5.31 DataStructures
+
+##### Inner-allowlist value shape (BPF + userspace shared)
+
+In `src/common/mac_filter.h`:
+```
+struct allow_entry {
+    unsigned char present;        /* offset 0, size 1: 0x01 = occupied, 0x00 = empty.
+                                     PI-27 byte-equivalent: byte-for-byte same as
+                                     the prior `__u8 present` at offset 0. */
+    unsigned char _pad[3];        /* offsets 1-3, size 3: explicit padding. Zero-init
+                                     by ABI on struct-init `{}`; loader writes via
+                                     fully-initialized struct (no uninitialized-byte
+                                     verifier concern). */
+    unsigned int  rule_id;        /* offsets 4-7, size 4: rule_id in [0, 63]. Read
+                                     by datapath for bump_rule. `unsigned int` (not
+                                     `__u32`) for shared-header BPF+userspace convention
+                                     per §5.29 D-3.4-3. */
+};                                /* total: 8 bytes */
+```
+
+Used as the inner-VALUE for BOTH `xdpmf_allowlist_inner` (MAC HASH) AND `xdpmf_cidr_inner` (CIDR LPM_TRIE) per T.5 OQ #3.
+
+##### `rule_counters` BPF map declaration
+
+In `src/bpf/mac_filter.bpf.c` (`.maps` block, adjacent to existing `stats` map):
+```
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __type(key, __u32);
+    __type(value, __u64);
+    __uint(max_entries, XDPMF_ALLOWLIST_MAX);     /* = 64; mirrors rule.id range */
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} rule_counters SEC(".maps");
+```
+
+Pinned at `${PIN_DIR}/<iface>/rule_counters`. PERCPU semantics: 64 slots × N CPUs × 8 bytes = ~16 KiB per attached iface (negligible).
+
+##### `rule_index.json` schema (sidecar — written by loader, read by exporter)
+
+```json
+{
+  "iface": "<string; same as --iface>",
+  "schema_version": 1,
+  "applied_at": "<ISO-8601 UTC: YYYY-MM-DDTHH:MM:SSZ>",
+  "rules": [
+    {
+      "rule_id": <int in [0, 63]>,
+      "match": { "mac": "<lowercase-hex MAC AA:BB:...>" }
+               or { "cidr": "<dotted-quad IPv4/prefixlen>" }
+               or BOTH keys (if the rule had both),
+      "action": "pass" | "drop"
+    },
+    ...
+  ]
+}
+```
+
+**Stable ordering**: `rules` array is in source-order of the operator's YAML (preserves `Config::rules` vector order); within each rule object, key order is `rule_id, match, action` — useful for the line-oriented exporter regex extraction (D-3.4b-14). Per-line one-rule format is preferred but not strictly required (jq-validators accept multi-line too).
+
+##### `kManagedMaps[]` table growth (loader.cpp line 145-158)
+
+Post-§5.31: 13 entries (was 12 per §5.30 HK-9):
+```cpp
+constexpr ManagedMapEntry kManagedMaps[] = {
+    { &SkelMapsT::allowlist_a,      XDPMF_MAP_INNER_A_NAME,             false },
+    { &SkelMapsT::allowlist_b,      XDPMF_MAP_INNER_B_NAME,             false },
+    { &SkelMapsT::rulesets,         XDPMF_MAP_RULESETS_OUTER_NAME,      false },
+    { &SkelMapsT::cidr_allowlist_a, XDPMF_MAP_CIDR_INNER_A_NAME,        false },
+    { &SkelMapsT::cidr_allowlist_b, XDPMF_MAP_CIDR_INNER_B_NAME,        false },
+    { &SkelMapsT::cidr_rulesets,    XDPMF_MAP_CIDR_RULESETS_OUTER_NAME, false },
+    { &SkelMapsT::active_idx,       XDPMF_MAP_ACTIVE_IDX_NAME,          false },
+    { &SkelMapsT::defaults,         XDPMF_MAP_DEFAULTS_NAME,            false },
+    { &SkelMapsT::stats,            XDPMF_MAP_STATS_NAME,               false },
+    { &SkelMapsT::rules,            XDPMF_MAP_RULES_NAME,               false },
+    { &SkelMapsT::action_table,     XDPMF_MAP_ACTION_TABLE_NAME,        false },
+    { &SkelMapsT::rule_counters,    XDPMF_MAP_RULE_COUNTERS_NAME,       false },  // §5.31 NEW
+    { &SkelMapsT::allowlist,        XDPMF_MAP_ALLOWLIST_NAME,           true  },
+};
+```
+
+Position is at index 11 (before the legacy alias). Insertion line is 1; all 3 call-site loops (clear, pin, reuse) walk the table automatically. **The MVP-3.4.5 HK-9 dividend is this one-line insertion.**
+
+##### Exporter-internal data shape (sister to existing `stats_reader::StatsSample`)
+
+```cpp
+// src/exporter/rule_counters_reader.hpp
+namespace xdpmf::exporter {
+
+struct RuleCountersSample {
+    std::string   iface;
+    std::uint64_t counters[XDPMF_ALLOWLIST_MAX] = {};   /* index k = rule_id; value = PERCPU-summed count */
+};
+
+[[nodiscard]] std::vector<RuleCountersSample> read_rule_counters(std::string_view bpffs_root) noexcept;
+
+}  // namespace xdpmf::exporter
+```
+
+```cpp
+// src/exporter/sidecar_reader.hpp
+namespace xdpmf::exporter {
+
+struct RuleMeta {
+    std::uint32_t rule_id;
+    std::string   action;     /* "pass" | "drop" */
+    std::string   match_kind; /* "mac" | "cidr" | "both" — informational, not currently used by exporter */
+};
+
+/* Reads rule_index.json at <path>; returns empty vector if file missing or
+ * unreadable (PI-32-3.4b sidecar-orphan tolerance — exporter degrades to
+ * action="unknown" labels, NOT a crash). Logs ONE stderr WARN line on
+ * first-time-per-process missing-sidecar discovery per iface. */
+[[nodiscard]] std::vector<RuleMeta> parse_rule_index(std::string_view path) noexcept;
+
+}  // namespace xdpmf::exporter
+```
+
+#### §5.31 Interfaces
+
+##### `bump_rule(rule_id)` datapath contract (per Q1 B3)
+
+Per-match per-rule counter bump. Signature: `static __always_inline void bump_rule(__u32 rule_id)` in `src/bpf/mac_filter.bpf.c`. Verifier-required range check on `rule_id < XDPMF_ALLOWLIST_MAX` before PERCPU map lookup. PERCPU pointer returned → `*v += 1` (no atomic, per-CPU local). NULL-check on the PERCPU lookup result is verifier-required and folded into the helper. **Call-sites**: TWO syntactic call-sites (MAC HASH-hit branch + CIDR LPM_TRIE-hit branch); SEMANTICALLY a single per-match contract.
+
+##### `sidecar::write_rule_index()` contract (loader-side)
+
+```cpp
+// src/lib/sidecar.hpp
+namespace xdpmf::sidecar {
+
+/* Writes rule_index.json atomically under ${bpffs_root}/<iface>/rule_index.json.
+ *
+ * Idempotent: overwrites prior file in-place via rename-into-place. Atomic
+ * write: write to <path>.tmp, fsync(fd), close, rename(<path>.tmp, <path>).
+ * NEVER throws — sidecar-write failures are non-fatal per D-3.4b-17:
+ * loader logs `xdpmacfilter: WARN: rule_index.json write failed: <errno>`
+ * on stderr and returns silently. Exporter degrades to action="unknown"
+ * labels for the affected iface (PI-32-3.4b orphan tolerance).
+ *
+ * Schema_version emitted = 1. Timestamp uses CLOCK_REALTIME ISO-8601 UTC.
+ * File mode 0644 (operator + exporter readable). */
+void write_rule_index(std::string_view iface,
+                      std::string_view bpffs_root,
+                      const Config&    cfg) noexcept;
+
+}  // namespace xdpmf::sidecar
+```
+
+Roll-your-own JSON emitter per D-3.4b-10 (no `nlohmann/json` dep this slice).
+
+##### `sidecar_reader::parse_rule_index()` contract (exporter-side)
+
+Per D-3.4b-14: line-oriented regex extraction, NOT full JSON parse. Reads file content; for each line that matches an ERE like `^\s*\{"rule_id":\s*([0-9]+),\s*"match":\s*\{[^\}]*\},\s*"action":\s*"(pass|drop)"\s*\}\s*,?\s*$`, captures `(rule_id, action)`. The `match` object is parsed naively into `match_kind` (looks for `"mac"` substring → `"mac"`, `"cidr"` substring → `"cidr"`, both → `"both"`). The top-level `iface`, `schema_version`, `applied_at` fields are NOT consumed by the exporter cycle 1 (informational; future cycle MAY add a per-scrape staleness alert if `applied_at` > N hours old).
+
+Cycle 1 budget discipline: ~80 LOC regex-extract is significantly less than a full JSON parser (~300+ LOC) and is robust against the stable writer's output shape. The writer's contract (D-3.4b-20) is "one-rule-per-line shape" — the regex assumes it. If a future cycle adds nested fields per rule, the writer + reader can co-evolve.
+
+##### Prometheus output shape
+
+Per Q4 A3 above. The exporter's `/metrics` output post-§5.31 grows with a NEW block:
+```
+# HELP xdpfilter_rule_match_total Total per-rule packet matches by iface and rule_id, labelled with action.
+# TYPE xdpfilter_rule_match_total counter
+xdpfilter_rule_match_total{iface="eth0",rule_id="0",action="pass"} 12345
+xdpfilter_rule_match_total{iface="eth0",rule_id="5",action="pass"} 67
+xdpfilter_rule_match_total{iface="eth0",rule_id="17",action="drop"} 89
+xdpfilter_rule_match_total{iface="eth0",rule_id="42",action="unknown"} 3   # orphan
+```
+
+Block ordering: existing `xdpfilter_packets_total` HELP+TYPE+samples FIRST, then `xdpfilter_rule_match_total` HELP+TYPE+samples (Prometheus tolerates either order; emitting global-stats first preserves byte-equivalence of the existing prefix for any operator scrapers that pin head-of-output substring matches).
+
+##### Loader API (`src/lib/loader.hpp`) — ZERO diff (PI-7-3.4b-hpp 6th consecutive cycle)
+
+`AttachConfig` / `DetachConfig` / `attach()` / `detach()` / `LoaderError` enum: ALL UNCHANGED. The new sidecar-write happens INSIDE `apply_request` body — no public symbol added. The new exporter helpers live in `src/exporter/` and do NOT include `loader.hpp` (they include `common/mac_filter.h` for `XDPMF_RULE_COUNTERS_MAX` + `XDPMF_MAP_RULE_COUNTERS_NAME` only).
+
+##### Config API (`src/lib/config.hpp`) — ZERO diff (Phase A correction)
+
+`Config::Rule::id` field at line 42 already serves Q5 R1's needs. No new struct field, no new validator (the `rule.id >= XDPMF_ALLOWLIST_MAX` check at config.cpp:204 is load-bearing + preserved). D-3.4b-11 documents the brief's overstatement.
+
+#### §5.31 Decisions (with rationale)
+
+##### D-3.4b-1 — PI-13-3.1 adjudication: PASS as additive — because
+
+Per HG-3.4b-1 confirmation. The byte-by-byte layout (`present` at offset 0; `_pad[3]` at offsets 1-3; `rule_id` at offsets 4-7; total 8 bytes) preserves PI-27's prior contract at offset 0: a `bpftool map dump ... format c | head -c 1` still returns `0x01` for occupied slots. The strict-byte-shape reading of PI-27 was about offset-0 byte semantics, not about total `value_size`. Extending `value_size` from 1 → 8 with offset-0 byte-equivalence is ADDITIVE under any reasonable reading. **Verifier acceptance**: 4-byte read at offset 4 on a successfully-looked-up inner pointer is verifier-trivial; the bounded `rule_id` range check happens in `bump_rule` before any ARRAY index use. Phase A grep confirms ZERO tests write a literal `present=1` payload from userspace (all such writes happen inside loader.cpp); fixture-ripple cost is bounded to 2 ctest body EDITs (T_RULES_SKELETON_NOT_WIRED comment + T_EXPORTER_METRICS_FORMAT version literal).
+
+##### D-3.4b-2 — Counter survival across apply via PIN_BY_NAME + reuse_fd — because
+
+Per HG-3.4b-2 confirmation + D-3.1-4 reuse_fd discipline. `rule_counters` joins the 12 existing maps in `kManagedMaps[]`; all 3 call-site loops (clear, pin, reuse) walk the table. State-b reattach preserves the PERCPU values intact via `bpf_map__reuse_fd` — Prometheus counter-monotonicity holds. Tester locks this contract via T_RULE_COUNTER_SURVIVES_APPLY (load-bearing canary per /mint-hld Hidden Assumption #4).
+
+##### D-3.4b-3 — rule_index.json sidecar INCLUDED in cycle 1 — because
+
+Per HG-3.4b-3 confirmation. Without sidecar, exporter's `xdpfilter_rule_match_total` labels can only carry bare integer `rule_id="N"` — no human-readable `action` or `match` context. Operators would have to join with their external config to interpret. Cycle 1 cost (~150 LOC writer + ~80 LOC line-regex reader = ~230 LOC) is modest and pays off immediately at the operator UX layer. The sidecar PATH (Q3 P1) + SHAPE (Q2 S1) + READER (D-3.4b-14 line-regex) are all decided concretely — impl has no Open Qs to escalate.
+
+##### D-3.4b-4 — `rules` map STAYS SHARED with clear-and-rewrite — because
+
+Per HG-3.4b-4 confirmation. The per-rule counter pipeline reads `rule_id` from the inner-allowlist-value (which IS parallel-swapped via §5.26/§5.27 `rulesets`/`cidr_rulesets`). `rules` map remains skeleton-only — populated for forward-compat with MVP-3.4c action-dispatch, NOT consulted by datapath. PI-29-3.4b carve-out states this explicitly. MVP-3.4c future cycle will revisit if action_table lookup becomes load-bearing.
+
+##### D-3.4b-5 — Unified bump_rule per-match semantic (Q1 B3) — because
+
+Two source-line call-sites (MAC HASH-hit branch + CIDR LPM_TRIE-hit branch) calling the SAME `bump_rule` helper with the SAME rule_id-extraction shape. Verifier-friendly: each call-site dereferences a freshly-looked-up inner pointer + reads rule_id at offset 4 in the local stack-allocated copy chain. Symmetric MAC/CIDR from cycle 1, no follow-up needed, no behavior asymmetry. B1 (two literally-duplicate call expressions) is the worse readable shape; B2 (only MAC, defer CIDR) is the "ship half the feature" anti-pattern.
+
+##### D-3.4b-6 — Sidecar defaults-only schema (Q2 S1) — because
+
+Cycle 1 ships the minimum the exporter needs (rule_id + action label). S2 description-field is operator-UX nice-to-have; gating on demand. S3 deployment-metadata is debug-tool nice-to-have; gating on demand. Cycle 1 brownfield budget discipline prefers narrow scope; future cycles widen as use cases surface.
+
+##### D-3.4b-7 — Per-iface bpffs sidecar path (Q3 P1) — because
+
+`${PIN_DIR}/<iface>/rule_index.json` pairs naturally with the existing `${PIN_DIR}/<iface>/stats`, `${PIN_DIR}/<iface>/allowlist_a/b`, etc. Exporter discovery via the EXISTING per-iface scan loop — zero new filesystem touchpoints. bpffs tmpfs lifecycle is consistent with the pinned maps' lifecycle (both disappear on bpffs unmount; both survive loader restart). P2 (/var/lib) adds mkdir + chown + systemd `StateDirectory=` coordination cost without clear value; gate on future operator demand.
+
+##### D-3.4b-8 — Action as label, single series (Q4 A3) — because
+
+Prometheus-idiomatic; sidecar already carries action; exporter joins both at scrape time. Operator queries like `sum(xdpfilter_rule_match_total) by (action, iface)` work directly. Sidecar-orphan tolerance via `action="unknown"` label is graceful + alertable. A1 (separate _meta series + scrape-time join) pushes work to operator; A2 (separate pass/drop series names) multiplies metric count + complicates query rules.
+
+##### D-3.4b-9 — Operator's `id` IS the BPF key (Q5 R1) — because
+
+Phase A grep evidence: `Rule::id` field already validated to [0, XDPMF_ALLOWLIST_MAX-1] = [0, 63] at config.cpp:204. The BPF ARRAY (`rule_counters[64]`) AND the operator's YAML `id:` namespace are IDENTICAL. Operator's mental model is direct: "id 5 in my YAML → `rule_counters[5]` in bpftool dump → `xdpfilter_rule_match_total{rule_id=\"5\"}` in Prometheus". Counter-monotonicity holds across YAML edits as long as operator keeps `id` assignments stable. R2 (source-order) violates this; R3 (sort-by-name) is schema-v2 / Option 4 / out of scope.
+
+##### D-3.4b-10 — Roll-your-own JSON writer, NO `nlohmann/json` dep — because
+
+Brief noted the dep choice. ~150 LOC for the writer (well-bounded; the schema has only 3 top-level fields + a homogeneous `rules` array of 3-field objects + simple string/integer literals). NO new external dep this slice — cycle 1 brownfield discipline + `cli.cpp:1-3` zero-deps project value (cited in §5.29 D-3.4-3 HTTP-server-no-deps decision; this is the symmetric decision for JSON). Future cycles can adopt `nlohmann/json` if a 2nd/3rd sidecar emission point (e.g. exporter metrics summary export, structured-log JSON output) demands a robust parser/serializer.
+
+##### D-3.4b-11 — Config::Rule.id field already exists; NO struct change — because
+
+Phase A grep: `src/lib/config.hpp:42` already declares `std::uint32_t id = 0;` inside `struct Rule`. Brief's wording "Config::Rule struct gains rule_id loader-internal field" was OVERSTATED — the field exists. Q5 R1 uses `Rule::id` directly without any rename / additional field. This is a positive surprise: PI-7-3.4b-hpp / config.hpp ZERO-diff continuation is automatic, no additional carve-out needed.
+
+##### D-3.4b-12 — `rule_counters` declared in mac_filter.bpf.c, PERCPU_ARRAY, max_entries=XDPMF_ALLOWLIST_MAX — because
+
+Mirrors the existing `stats` map's PERCPU_ARRAY shape (line 145-151). PERCPU semantics ensure no cross-CPU race + no atomic-add overhead. max_entries = 64 = XDPMF_ALLOWLIST_MAX (alias `XDPMF_RULE_COUNTERS_MAX` for clarity) matches the rule.id range. LIBBPF_PIN_BY_NAME so libbpf auto-pins to bpffs root (cleared via `kManagedMaps[]` open_skeleton_only loop, then per-iface pinned via `kManagedMaps[]` pin_specs loop) — same idiom as all 12 prior managed maps.
+
+##### D-3.4b-13 — `kManagedMaps[]` gains 13th entry; MVP-3.4.5 HK-9 dividend — because
+
+Single one-line table extension. All 3 call-site loops automatically pick it up. NO new literal-array maintenance. **Validation of MVP-3.4.5 HK-9 landmine refactor**: this slice would have needed 3 lockstep updates (open_skeleton_only `pinned_maps[]`, apply_request `pin_specs[]`, apply_request `reuse_specs[]`) pre-MVP-3.4.5. Now it's 1 line.
+
+##### D-3.4b-14 — Sidecar reader uses line-oriented regex extraction, NOT full JSON parse — because
+
+Cycle 1 budget discipline. The writer's output shape is stable + controlled (D-3.4b-20); a simple ERE captures the `(rule_id, action)` tuple per rule with high reliability. ~80 LOC reader vs ~300+ LOC JSON parser. If a future cycle needs nested object extraction (e.g. richer `match` queries), the reader can co-evolve OR pull in `nlohmann/json` then.
+
+##### D-3.4b-15 — `populate_inner_slot` / `populate_cidr_inner_slot` signatures carry rule_id — because
+
+Each entry must be written as a full `struct allow_entry{.present=1, ._pad={}, .rule_id=R}`. The existing signatures pass `std::vector<xdpmf_mac>` / `std::vector<xdpmf_cidr_v4>` — without the rule_id, the populate functions can't write the new struct. Impl picks the exact shape:
+- **Option A (preferred)**: vector of struct: `struct MacRule { xdpmf_mac mac; std::uint32_t rule_id; };` and `struct CidrRule { xdpmf_cidr_v4 cidr; std::uint32_t rule_id; };` declared in loader.cpp's anon-namespace.
+- **Option B**: refactor the caller to walk `const Config& cfg` directly and inline the populate (eliminates the deduplicated-vector intermediate; ~10 LOC apply_request extension).
+- **Option C**: vector of `std::pair<xdpmf_mac, std::uint32_t>` — simpler but less self-documenting.
+
+Impl SendMessages architect if a non-trivial refactor is forced; otherwise picks A by default. The CONTRACT is: each `bpf_map_update_elem` writes a full 8-byte `struct allow_entry` with rule_id populated from the matching `Config::Rule::id`.
+
+##### D-3.4b-16 — Sidecar write location in apply_request flow — because
+
+The sidecar write can happen:
+- **Pre-flip** (right after step 8.5 rules+action_table populate, before active_idx flip): rule_index.json reflects the about-to-be-applied config. If the apply path subsequently fails BEFORE the flip, the sidecar is stale (refers to a config that wasn't committed). Operator visible inconsistency window.
+- **Post-flip** (right after active_idx flip): rule_index.json reflects the committed config. Apply-time failures BEFORE the sidecar write are clean (no inconsistency); failures AFTER the sidecar write are also clean (sidecar matches the flipped config). **Preferred** for the "rule_index.json describes the LIVE config" semantic.
+
+Impl picks **post-flip** by default. Sidecar-write failures are non-fatal (D-3.4b-17). Reviewer verifies via T_SIDECAR_JSON_SHAPE: the sidecar content matches the LIVE active_idx-selected ruleset.
+
+##### D-3.4b-17 — Sidecar-write failures are NON-FATAL — because
+
+If `sidecar::write_rule_index` fails (disk full, permission denied, transient filesystem error), the apply ALREADY committed the new config via active_idx flip. Failing the apply at this point would leave the operator in a confusing state: "I asked for apply, the kernel filter changed, but the CLI reported an error". Better: log a stderr WARN line (`xdpmacfilter: WARN: rule_index.json write failed: <errno> — exporter rule labels will show action=unknown until next successful apply`) + return exit 0. The exporter gracefully degrades to `action="unknown"` labels per PI-32-3.4b. Operator notices via Prometheus alert on `action="unknown"` (recommended fleet alert per future docs).
+
+##### D-3.4b-18 — `populate_rules_skeleton` + `populate_action_table` calls PRESERVED — because
+
+§5.29 introduced these for forward-compat with MVP-3.4b. This slice does NOT remove them. The `rules` + `action_table` maps continue to be populated with `{present, action_id}` / `{action_type}` entries. PI-29 carve-out (PI-29-3.4b) explicitly states: `rules` map is still populated, still NOT consulted by datapath this cycle. MVP-3.4c future cycle will wire action_dispatch via these maps. Removing them now would be a regression on the §5.29 forward-compat scaffold.
+
+##### D-3.4b-19 — `emit_metrics` signature growth — because
+
+The existing signature takes `const std::vector<StatsSample>&`. Adding two new parameters (`const std::vector<RuleCountersSample>&` + `const std::map<...>&` or equivalent for per-iface rule meta) is the natural extension. Impl picks the exact arg shapes (struct-aggregate vs separate vector params); CONTRACT is: the function emits BOTH the existing `xdpfilter_packets_total` block AND the new `xdpfilter_rule_match_total` block per scrape. Empty cases handled gracefully (HELP+TYPE only, no samples).
+
+##### D-3.4b-20 — Sidecar writer outputs ONE rule per line — because
+
+Stable + grep-friendly + line-regex-friendly. The writer's contract: each `{rule_id, match, action}` rule object lives on its own line; outer `{`, `"iface"`, `"schema_version"`, `"applied_at"`, `"rules": [`, `]`, outer `}` are on separate lines too. Total file structure (illustrative):
+```
+{
+  "iface": "eth0",
+  "schema_version": 1,
+  "applied_at": "2026-05-25T10:30:00Z",
+  "rules": [
+    {"rule_id": 0, "match": {"mac": "aa:bb:cc:dd:ee:ff"}, "action": "pass"},
+    {"rule_id": 1, "match": {"cidr": "10.0.0.0/24"}, "action": "pass"},
+    {"rule_id": 2, "match": {"mac": "11:22:33:44:55:66"}, "action": "drop"}
+  ]
+}
+```
+
+This is valid JSON (jq accepts it) AND line-oriented (the exporter regex matches per-rule lines independently). `T_SIDECAR_JSON_SHAPE.sh` validates with jq; `src/exporter/sidecar_reader.cpp` extracts per-rule with regex.
+
+#### §5.31 TestStrategy entries
+
+##### §6.47 T_RULE_COUNTER_MAC_HIT_BUMPS — MAC HASH-hit increments rule_counters[rule_id]
+
+**Trigger**: attach via `apply -f tests/fixtures/config_per_rule_counters.yaml` (fixture has 4 rules with sparse `id:` values 0, 5, 17, 42 — mix of MAC-only and CIDR-only). Inject N=5 frames matching rule_id=5's MAC; inject K=3 frames matching rule_id=17's MAC. Both rules are PASS rules.
+
+**Observable outcome**:
+- `bpftool map dump pinned ${PIN_DIR}/<iface>/rule_counters --json` shows: slot[5] = 5 (PERCPU-summed); slot[17] = 3; all other slots (incl. 0, 1..4, 6..16, 18..41, 43..63) = 0.
+- `STAT_PASS` global stat advances by 8 (existing global counter still bumps, byte-equivalent to MVP-3.4.5).
+- Negation control: re-inject 1 frame matching rule_id=0's MAC; `rule_counters[5]` STILL equals 5 (unchanged); `rule_counters[0]` equals 1 (NEW).
+
+**Assertion mechanism**: `tests/lib/read_rule_counters.py` (NEW helper script — parallels `read_stats.py` for `rule_counters`) PERCPU-sums per slot; bash `[[ "${count_5}" == "5" ]]`-style comparisons per slot; `read_stats.py` for global PASS sanity.
+
+**SKIP conditions**: `bpftool`, `jq` already required. No new SKIP-77 conditions.
+
+**Cleanup**: `cleanup_veth`.
+
+**Maps to**: PI-3.4b-1 (rule_counters map exists + populated correctly), PI-3.4b-4 (bump_rule wiring on MAC HASH-hit), HG-3.4b-1 (PI-13-3.4b PASS confirmation — datapath reads rule_id from inner-value), Q1 B3, Q5 R1.
+
+##### §6.48 T_RULE_COUNTER_CIDR_HIT_BUMPS — CIDR LPM_TRIE-hit increments rule_counters[rule_id]
+
+**Trigger**: same fixture as §6.47 (config_per_rule_counters.yaml has rule_id=42 as a CIDR rule, e.g. `src_cidr: 10.0.0.0/24`). Inject N=4 IPv4 frames with src IP in 10.0.0.0/24 range (e.g. 10.0.0.5) and src MAC NOT in any other rule.
+
+**Observable outcome**:
+- `rule_counters[42]` = 4 (PERCPU-summed).
+- `STAT_PASS_CIDR` global counter advances by 4.
+- Negation control: inject 1 frame matching rule_id=5's MAC (MAC-only PASS); `rule_counters[5]` advances; `rule_counters[42]` UNCHANGED (CIDR branch short-circuited by MAC-hit-first per §5.27 OR1 ordering — symmetric MAC/CIDR semantic).
+- Additional negation: inject 1 IPv4 frame with src IP OUTSIDE 10.0.0.0/24 (e.g. 192.168.1.1) and src MAC NOT in any rule; `rule_counters[42]` stays 4 (no CIDR match); STAT_DROP_DENY advances by 1.
+
+**Assertion mechanism**: same as §6.47.
+
+**SKIP conditions**: none new.
+
+**Cleanup**: `cleanup_veth`.
+
+**Maps to**: PI-3.4b-4 (bump_rule wiring on CIDR LPM_TRIE-hit), PI-13-3.4b CIDR symmetry (T.5 OQ #3), Q1 B3.
+
+##### §6.49 T_RULE_COUNTER_SURVIVES_APPLY — counters PRESERVED across apply -f (HG-3.4b-2 canary)
+
+**Trigger**:
+1. Attach via `apply -f config_per_rule_counters.yaml`.
+2. Inject 7 frames matching rule_id=5's MAC; assert `rule_counters[5]` = 7.
+3. RE-apply the SAME `config_per_rule_counters.yaml` (forces an active_idx swap_count++; same rules, same ids).
+4. Assert `rule_counters[5]` STILL equals 7 (PRESERVED across apply per HG-3.4b-2 Prometheus counter-monotonicity).
+5. Inject 3 more frames matching rule_id=5's MAC; assert `rule_counters[5]` = 10 (continued from 7).
+
+**Observable outcome**: post-step-3 `rule_counters[5]` = 7 (NOT 0); post-step-5 = 10.
+
+**Assertion mechanism**: `read_rule_counters.py` between each step; bash `[[ "${count_5}" == "7" ]]` after step 3 (load-bearing) + `[[ "${count_5}" == "10" ]]` after step 5.
+
+**SKIP conditions**: none.
+
+**Cleanup**: `cleanup_veth`.
+
+**Maps to**: PI-3.4b-2 (counter survival), HG-3.4b-2, D-3.4b-2 (PIN_BY_NAME + reuse_fd discipline + kManagedMaps[] 13th entry).
+
+**Load-bearing**: this test is the canary for D-3.1-4 reuse_fd discipline applied to the new map. If it fails post-step-3 with `rule_counters[5]` = 0, the kManagedMaps[] 13th entry was likely added but NOT carrying through to the reuse_fd loop — impl peer-DM architect to root-cause.
+
+##### §6.50 T_SIDECAR_JSON_SHAPE — rule_index.json correctness
+
+**Trigger**: attach via `apply -f config_per_rule_counters.yaml`.
+
+**Observable outcome**:
+- File `${PIN_DIR}/<iface>/rule_index.json` exists, mode 0644, non-empty.
+- `jq -e '.iface == "<expected iface>"' rule_index.json` succeeds.
+- `jq -e '.schema_version == 1' rule_index.json` succeeds.
+- `jq -e '.applied_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")' rule_index.json` succeeds (ISO-8601 UTC pattern).
+- `jq -e '.rules | length == 4' rule_index.json` succeeds (fixture has 4 rules).
+- For each rule_id in {0, 5, 17, 42}: `jq -e ".rules[] | select(.rule_id == ${id}) | .action == \"<expected>\""` succeeds.
+- Match-kind sanity per rule per fixture.
+
+**Negation control**: invoke `apply -f /dev/null` or a malformed config; assert sidecar is NOT written / NOT truncated (the prior sidecar from a successful apply persists; new failed apply does NOT corrupt it). Exit code from apply is 9 (existing ConfigError path).
+
+**Assertion mechanism**: `jq -e` for shape + value asserts; `test -f` for existence; `stat -c %a` for mode 0644.
+
+**SKIP conditions**: `jq` is already required.
+
+**Cleanup**: `cleanup_veth`.
+
+**Maps to**: PI-3.4b-5 (sidecar exists + correct shape), Q2 S1, Q3 P1, D-3.4b-10 (writer correctness), D-3.4b-20 (one-rule-per-line shape).
+
+##### §6.51 T_EXPORTER_RULE_LABELS — exporter emits xdpfilter_rule_match_total
+
+**Trigger**: attach + apply config_per_rule_counters.yaml; inject mixed traffic so multiple rule_ids advance; start xdpmf-exporter in background on `EXPORTER_PORT`; `curl http://127.0.0.1:${EXPORTER_PORT}/metrics`.
+
+**Observable outcome**:
+- HTTP 200 OK; Content-Type contains `text/plain; version=0.0.4`.
+- Body contains `# HELP xdpfilter_rule_match_total ...` line AND `# TYPE xdpfilter_rule_match_total counter` line (exactly once each).
+- For each rule_id with non-zero traffic: `xdpfilter_rule_match_total{iface="<iface>",rule_id="<N>",action="<pass|drop>"} <count>` line present, matching ERE `^xdpfilter_rule_match_total\{iface="[^"]+",rule_id="[0-9]+",action="(pass|drop|unknown)"\} [0-9]+$`.
+- The `action` label value matches the sidecar's `action` field for each rule_id (no drift between BPF + sidecar).
+- Existing `xdpfilter_packets_total` series UNCHANGED (PI-31-3.4b — additive series, not modification of existing).
+
+**Sidecar-orphan tolerance sub-test**: artificially delete `rule_index.json` (between scrapes); re-scrape `/metrics`; for any rule_id with non-zero `rule_counters[]` value, the emitted label MUST be `action="unknown"`. Exporter MUST NOT crash; subsequent scrapes (after re-apply) MUST show real labels again.
+
+**Assertion mechanism**: `curl -s` + `grep -qE` on the Prometheus pattern; `jq`-free regex on each rule's series; `kill -0 $EXPORTER_PID` for liveness across scrapes.
+
+**SKIP conditions**: `curl` absent → SKIP-77.
+
+**Cleanup**: kill exporter; `cleanup_veth`.
+
+**Maps to**: PI-3.4b-6 (exporter emits new series), PI-31-3.4b (exporter READ-ONLY), PI-32-3.4b (sidecar-orphan graceful), Q4 A3, D-3.4b-8.
+
+##### §6.52 T_DROP_RULE_BUMPS_COUNTER — drop-rule's inner-allowlist absence + counter behavior
+
+**Trigger**: fixture `config_per_rule_counters.yaml` has rule_id=17 as `action: drop match.mac=...`. Per §5.26 schema cycle 2: drop rules do NOT populate the inner allowlist (the MAC is NOT added to `allowlist_<active>`). Inject 5 frames matching the drop-rule's MAC. Per §5.27 + §5.31 datapath: the MAC misses inner-HASH; if MAC is not also in CIDR; falls through to defaults[active] — default `drop` → STAT_DROP_DENY bumps; per-rule counter for rule_id=17 STAYS 0 because the MAC was never in the inner-allowlist (no bump_rule call site reached for that MAC).
+
+**Observable outcome**:
+- `STAT_DROP_DENY` advances by 5.
+- `rule_counters[17]` STAYS 0 (the inner-allowlist absence is what generates the drop behavior; per-rule counters only fire on MATCH).
+- `bpftool map dump pinned ${PIN_DIR}/<iface>/rules --json | jq '.[] | select(.key == 17) | .formatted.value.action_id'` returns 1 (DROP — confirms `rules` map is POPULATED with the drop-rule entry per §5.29 forward-compat; just not consulted by datapath).
+- Sidecar `rule_index.json` for rule_id=17 shows `"action": "drop"`.
+
+**Negation control**: same fixture, inject 2 frames matching rule_id=5's PASS MAC; `rule_counters[5]` advances; `rule_counters[17]` STAYS 0; STAT_PASS advances; STAT_DROP_DENY UNCHANGED.
+
+**Assertion mechanism**: `read_rule_counters.py`; `read_stats.py`; `bpftool map dump pinned ${PIN_DIR}/rules --json | jq` for rules-map verification; `jq -e` on rule_index.json.
+
+**SKIP conditions**: none.
+
+**Cleanup**: `cleanup_veth`.
+
+**Maps to**: PI-29-3.4b (drop rules in `rules` map populated NOT consulted; rule_id NOT bumped because inner-allowlist absent), HG-3.4b-4 (rules map shared NOT swapped — drop rule entry persists across applies as long as the rule is in the config), Q5 R1 (rule_id correspondence to YAML id).
+
+**Note**: this test confirms the §5.29 + §5.31 boundary — `rules` map carries the drop-rule's metadata for future MVP-3.4c action-dispatch, but the bump_rule pipeline ONLY fires on actual MAC/CIDR matches. The drop-rule's MAC produces no match (it's not in the inner-allowlist by §5.26 design). MVP-3.4c will wire action-dispatch via `rules[i].action_id → action_table[action_id]` to make drop rules operative — at which point `rule_counters[17]` WOULD bump for actual drop-rule activations. **For cycle 1, `rule_counters[drop_rule_id]` stays at 0 — this is the operationally-observable signature of "datapath wiring is for PASS rules only, drop semantics via existing defaults[active]=drop fallthrough"**.
+
+##### Optional: §6.53 T_RULE_COUNTER_VERIFIER_GREEN — BPF object loads cleanly post-extension
+
+**Status**: OPTIONAL, tester's call. The 5-6 tests above already exercise the verifier indirectly (any one of them failing on BPF object load = verifier-reject signal). A dedicated micro-test would: invoke `xdpmacfilter attach --iface lo` (or fixture iface) with default attach config; assert exit 0; assert `bpftool prog show name mac_filter_prog` lists the prog. If verifier rejects, exit 2 (LoadFailed). Per /mint-hld T_VERIFIER_REJECT-equivalent.
+
+Architect's recommendation: **NOT required** as a separate ctest unless impl reports verifier turbulence during Phase 2 — in which case impl peer-DMs architect and tester adds it then.
+
+##### PI-3.4b-9 fixture-ripple catalog (per Phase A grep + impl Phase 2.5 smoke)
+
+**Confirmed touch sites** (2 ctests, ZERO library/helper changes):
+
+| Path | Line(s) | Change kind | Reason |
+|---|---|---|---|
+| `tests/T_RULES_SKELETON_NOT_WIRED.sh` | 14 (comment) | comment rewrite | "1-byte values" → "8-byte struct allow_entry values per §5.31 PI-13-3.4b" |
+| `tests/T_RULES_SKELETON_NOT_WIRED.sh` | 297 (stderr-msg) | comment rewrite | "(ii) the inner-value shape was extended to embed rule_id (PI-27/PI-13-3.4 violation, defer broken)" → "(ii) the apply path INCORRECTLY added the drop-rule MAC to the inner allowlist (per §5.26 schema cycle 2 'drop rules do NOT populate inner' contract — that contract is preserved post-§5.31)" |
+| `tests/T_EXPORTER_METRICS_FORMAT.sh` | 21-22 (comments), 100-101 (assertion) | version-literal bump | `xdpmf-exporter 0.6.1` → `xdpmf-exporter 0.7.0`; HK-8-forced per MVP-3.4.5 EDIT-3 precedent |
+
+**Tests that REMAIN BYTE-EQUIVALENT despite touching `allowlist_*` / `cidr_allowlist_*` pins** (these check KEY shape or per-iface pin existence, NOT inner-value byte shape):
+
+| Path | Why byte-equivalent |
+|---|---|
+| `tests/T_APPLY_VALID_CONFIG.sh` | `mac_in_inner_pin()` queries `.key.octets`, NOT inner-value. Value byte shape changes (1 → 8) but query path is key-only. |
+| `tests/T_APPLY_REPLACES_RULESET.sh` | Same — checks key presence (MAC octets), not value byte shape. |
+| `tests/T_PASS_CIDR.sh`, `tests/T_PASS_MAC_OR_CIDR.sh` | Check `length` of inner-map (count of entries) or active_idx value, NOT inner-value byte shape. |
+| `tests/T_APPLY_ATOMIC_SWAP_NO_DROP.sh`, `tests/T_CIDR_ATOMIC_SWAP_NO_DROP.sh` | Check active_idx flip behavior + traffic counters, NOT inner-value byte shape. |
+| `tests/T_PERCPU_STATS_SUM.sh` | Operates on `stats` PERCPU_ARRAY (value_size 8 unchanged), NOT on allowlist inner-values. |
+| `tests/T_RULES_SKELETON_NOT_WIRED.sh` (assertion body lines 283-299) | Tests MAC PRESENCE in inner-allowlist (key match), NOT inner-value byte shape. Assertion is byte-equivalent; ONLY comments need updating (above). |
+
+**Phase A grep summary**: `grep -rE 'value_size.*1\b\|__u8.*present\|bpf_map_update_elem.*allowlist' tests/` returned ZERO matches for value_size literals + ZERO matches for userspace `bpf_map_update_elem` writes against allowlist pins. The only writes happen inside `loader.cpp:1097, 1137` (which this slice modifies). **Fixture-ripple cost: 2 ctest body EDITs total** — significantly less than brief's ~5 ceiling.
+
+**Brief's "the 4 ctests that explicitly inspect inner-value bytes" enumeration was speculative** — Phase A grep confirms NONE of T_DROP_NOT_IN_ALLOWLIST (doesn't exist as named — likely T_DROP_DENY), T_DROP_CIDR_NOT_IN_RANGE, T_APPLY_ATOMIC_SWAP_NO_DROP, T_PERCPU_STATS_SUM inspect inner-value bytes (they all check key/active_idx/stats counters). Architect explicitly LISTS them as byte-equivalent in the table above so impl + tester don't waste cycles re-investigating.
+
+#### §6.5 Preserved invariants (MVP-3.4b brownfield) — PI-1..PI-34 hold (with adjudications) + PI-3.4b-* NEW
+
+All MVP-3.1..3.4.5 invariants (PI-1..PI-34 + PI-7-3.4.5-hpp/cpp per §5.26 + §5.27 + §5.28 + §5.29 + §5.30 sub-sections) continue to hold post-§5.31 EXCEPT where this slice explicitly ADJUDICATES (PI-13: now PASS-as-additive per HG-3.4b-1) OR carves out (PI-29: rules+action_table still NOT consulted, but inner-value's rule_id IS read). PI-7-3.4b-hpp continues the streak. PI-13-3.4b is the LOAD-BEARING NEW PI of this slice.
+
+Reviewer's 5th framework point walks the COMBINED list (PI-1..PI-34 + PI-3.4b-*) and reports `[INVARIANT-VIOLATED]` per failed check.
+
+**Continuing invariants — restatement for the MVP-3.4b namespace**:
+
+| # | Invariant | §5.31 check mechanism |
+|---|---|---|
+| PI-1..PI-5 | Trust+identity gates ENFORCED in both modes (alien-program refusal, name-identity, tag-check, O_PATH path-discipline, kernel-version probe) | Re-run §6.9 / §6.14 / §6.15 / §6.20 / §6.26 sub-cases; all pass. The new BPF map declaration + new inner-value shape do NOT touch any gate codepath. The bpf object tag CHANGES (bytecode differs), but tag-check at `T_ATTACH_TAG_MISMATCH` is about REFUSING ALIEN tags — our own self-tag is recomputed each cycle, byte-equivalent to MVP-3.4.5's recomputation. |
+| **PI-6-3.4b** | **46 pre-§5.31 ctests pass byte-equivalent OR legitimately SKIP-77 — STRICT SUPERSET with explicit 2-ctest-body EDIT carve-out** (T_RULES_SKELETON_NOT_WIRED comment-rewrite + T_EXPORTER_METRICS_FORMAT version-literal bump per PI-3.4b-9 catalog above) | Re-run all 46 tests post-§5.31 → all pass (or SKIP-77); `git diff --stat tests/T_*.sh` shows changes confined to the 2 EDITED ctests PLUS 6 NEW files (§6.47..§6.52) PLUS 1 NEW fixture (`config_per_rule_counters.yaml`) PLUS 1 NEW helper (`tests/lib/read_rule_counters.py`). The 2 EDITED ctest BODIES are scope-fenced + documented. All 44 other ctest bodies byte-equivalent. PI-6-3.4.5 had 7-EDIT carve-out; PI-6-3.4b has 2-EDIT carve-out (narrower). Reviewer accepts both EDITs as scope-fenced. |
+| **PI-7-3.4b-hpp** | **`loader.hpp` ZERO diff — 6TH consecutive slice** (MVP-3.1 +1; MVP-3.2/3.3/3.4/3.4.5/3.4b = 0). Public-API surface byte-equivalent. ALSO: `src/lib/config.hpp` ZERO diff this slice (D-3.4b-11 — `Rule::id` field already serves Q5 R1; no new field needed). | `git diff main -- src/lib/loader.hpp src/lib/config.hpp` shows ZERO output. Any diff = `[INVARIANT-VIOLATED]`. |
+| **PI-7-3.4b-cpp** | **`loader.cpp` SCOPED EDIT only** — diff lines confined to: (a) kManagedMaps[] table 12 → 13 entries (one-line insertion + table-comment count update); (b) `populate_inner_slot` body + signature (rule_id-carrying); (c) `populate_cidr_inner_slot` body + signature (rule_id-carrying); (d) `apply_request` rule-extraction step extension (produces rule_id-tagged vectors alongside the existing dedup vectors); (e) `apply_request` new sidecar-write step (post-flip per D-3.4b-16, calling `sidecar::write_rule_index`); (f) optional new private helpers in anon-namespace for the rule_id-tagged-vector intermediate (`MacRule`, `CidrRule` structs per D-3.4b-15 Option A). ZERO diff in: `attach()` / `detach()` public bodies, §5.4 state-machine, §5.19 name-check, §5.22 tag-check + O_PATH, §5.24 kernel-version probe, §5.26 trust_model parse+log, §5.27 CIDR-axis active_idx flip mechanism, link-pin P0a logic, RAII wrappers, error-translation paths, the special-pin legacy-alias path (lines 1761-1778), §5.29 `populate_rules_skeleton` + `populate_action_table` body bytes (UNCHANGED — they still write `rule_entry` / `action_entry` to `rules` / `action_table` maps per HG-3.4b-4). | `git diff <MVP-3.4.5-HEAD> -- src/lib/loader.cpp` shows changes confined to scopes (a)-(f). Reviewer applies regional-diff: classify each hunk by enclosing function name; allowed function names = {`populate_inner_slot`, `populate_cidr_inner_slot`, `apply_request`, anon-namespace (kManagedMaps[] table + new MacRule/CidrRule struct definitions)}. Any hunk outside this set = `[INVARIANT-VIOLATED]`. Cross-cycle baseline: reviewer compares against MVP-3.4.5-shipped HEAD (not project's pristine main). |
+| PI-8-3.4b | `xdpmacfilter --version` reports `xdpmacfilter 0.7.0` AND `xdpmf-exporter --version` reports `xdpmf-exporter 0.7.0` (shared `version.h` per §5.25 P3) | Run both `--version`; both single-line outputs `0.7.0` + newline. MINOR bump from 0.6.1 (operator-facing feature: per-rule observability). |
+| PI-9 | `--help` / `--version` output FORMAT unchanged modulo optional one-line addition mentioning the new `xdpfilter_rule_match_total` series in exporter's --help | §6.10 T_CLI_HELP_VERSION re-run passes (forward-compatible ERE). The mention IS optional — impl-flexible. |
+| **PI-10-3.4b** | `src/common/mac_filter.h` additions purely ADDITIVE; existing constants + struct layouts UNCHANGED | `git diff main -- src/common/mac_filter.h` shows ONLY additions: `struct allow_entry`, `XDPMF_MAP_RULE_COUNTERS_NAME`, `XDPMF_RULE_COUNTERS_MAX`. ZERO modifications to `struct xdpmf_mac`, `struct xdpmf_cidr_v4`, `enum mac_filter_stat`, `struct rule_entry`, `struct action_entry`, `enum xdpmf_action_type`, or any existing `XDPMF_MAP_*_NAME` / `XDPMF_*_MAX` / `XDPMF_BPFFS_ROOT`. |
+| PI-11 | Internal directory layout UNCHANGED | `find src -type d` shows the SAME 5 dirs as MVP-3.4.5 (`src/lib/`, `src/cli/`, `src/common/`, `src/bpf/`, `src/exporter/`). No new dir; new files live within existing dirs. |
+| PI-12 | Pin paths host-global per `nsenter --net` | NEW pin `${PIN_DIR}/<iface>/rule_counters` + NEW sidecar file `${PIN_DIR}/<iface>/rule_index.json` visible from `nsenter --net` per existing mechanism. The new map's LIBBPF_PIN_BY_NAME flag is the same idiom as the existing 12 managed maps. |
+| **PI-13-3.4b** | **Inner-allowlist-value byte shape EXTENDS from `__u8 present` (1 byte) to `struct allow_entry { __u8 present; __u8 _pad[3]; __u32 rule_id; }` (8 bytes)** — adjudicated PASS-AS-ADDITIVE per HG-3.4b-1 + D-3.4b-1. **THE load-bearing NEW PI of this slice. Cross-references PI-27 STRICT-byte-shape-reading from §5.29: PI-27's text was about offset-0 byte semantics (`bpftool map dump format c | head -c 1` returns 0x01); PI-13-3.4b PRESERVES that offset-0 byte invariant + EXTENDS with bytes 1-7. The change in `value_size` (1 → 8) is documented + intended.** Applied SYMMETRICALLY to `allowlist_a/b` (MAC HASH) AND `cidr_allowlist_a/b` (CIDR LPM_TRIE). | (a) `git diff <MVP-3.4.5-HEAD> -- src/bpf/mac_filter.bpf.c` shows `__type(value, __u8)` → `__type(value, struct allow_entry)` at lines 55 (MAC HASH template) AND 95 (CIDR LPM_TRIE template). (b) `bpftool map show pinned ${PIN_DIR}/<iface>/allowlist_a` reports `value_size 8`; same for `allowlist_b`, `cidr_allowlist_a`, `cidr_allowlist_b`. (c) `bpftool map dump pinned ${PIN_DIR}/<iface>/allowlist_<active> --json | jq '.[0].formatted.value.present'` returns `1` for occupied slots (NEW BTF-aware reading); `bpftool map dump pinned ${PIN_DIR}/<iface>/allowlist_<active> format c | head -c 1` returns `0x01` for occupied slots (PI-27 byte-equivalent — old single-byte readers still see the SAME byte at offset 0). (d) `bpftool map dump pinned ${PIN_DIR}/<iface>/allowlist_<active> --json | jq '.[0].formatted.value.rule_id'` returns the rule.id of the matched-against rule (NEW); for the apply with `id: 5` MAC rule the value reads 5. **Negation check**: a write to inner-allowlist with `value_size != 8` would fail with EINVAL at kernel (libbpf-side validates against map's declared value_size). |
+| PI-14 | `--mode {generic,native,offload}` UNCHANGED | §6.16/§6.17/§6.19 still pass. |
+| PI-15 | CIDR axis purely additive | UNCHANGED — CIDR LPM_TRIE inner-VALUE extends (PI-13-3.4b SYMMETRIC), but the AXIS itself (LPM_TRIE matching, src_ip extraction, IPv4 ETH_P_IP gate) is byte-equivalent. |
+| PI-16 | STAT_PASS_CIDR additive enum slot | UNCHANGED. The new `bump_rule` is ALSO bumped on CIDR-hit, BUT STAT_PASS_CIDR continues to bump independently per the existing call-site. Both increment together on each CIDR match. |
+| PI-17 | `schema_version: 1` accepted; Jinja2 template emits schema_version: 1 | UNCHANGED. No YAML schema change this slice. The Q5 R1 contract is met by the EXISTING `id:` field per `Rule::id`. |
+| PI-18 | §6.23 MAC-axis atomic-swap continues | UNCHANGED. The active_idx flip mechanism is preserved; inner-value extension does NOT affect the swap atomicity (the kernel-side u32 store at active_idx[0] commits BOTH MAC and CIDR axes; the inner-value's struct shape is per-entry, not per-swap). |
+| PI-19 | systemd-analyze verify passes on unit files | UNCHANGED. No unit-file change this slice. |
+| PI-20 | systemd lifecycle for `xdpmacfilter@.service` | UNCHANGED. |
+| PI-21..PI-25 | Ansible playbook + syntax-check + FLEET_DEPLOYMENT.md + directive catalogue + systemd-restart flake handling | UNCHANGED. |
+| PI-26 | MVP-3.3 historical "no C++/BPF source change" check | UNCHANGED (PI-26 fires on the MVP-3.3 commit set, not the MVP-3.4b commit set). |
+| PI-27 ≡ PI-13-3.4b adjudicated | inner-allowlist-value offset-0 byte semantics PRESERVED (occupied slots return 0x01 at byte 0); `value_size` EXTENDED 1 → 8 (PI-13-3.4b PASS-as-additive adjudication) | See PI-13-3.4b above for the full check mechanism. The PRIOR strict-byte-shape reading of PI-27 is SUPERSEDED by PI-13-3.4b for slices post-§5.31. PI-27's "load-bearing defer PI" status from §5.29 is REPLACED by PI-13-3.4b's "load-bearing PASS-as-additive PI" — the defer ends here, with byte-level evidence the offset-0 byte is preserved. |
+| PI-28 → **PI-28-3.4b** | **`mac_filter_prog` BPF function body EXTENDS (no longer byte-equivalent to MVP-3.2/3.4.5)**: adds `bump_rule(entry->rule_id)` call in the MAC HASH-hit branch (line ~228 area, was just `bump_stat(STAT_PASS); return XDP_PASS;`); adds `bump_rule(cidr_hit->rule_id)` call in the CIDR LPM_TRIE-hit branch (line ~256 area, was just `bump_stat(STAT_PASS_CIDR); return XDP_PASS;`); adds `struct allow_entry *entry` typed-pointer (vs `__u8 *present`) reads at lines 226 + 254. **First substantive `mac_filter_prog` body change since MVP-3.2.** All OTHER body lines (default fallthrough, drop branches, IPv4 ethertype check, ethhdr bounds check) BYTE-EQUIVALENT. Functional semantic: same verdicts for same inputs PLUS rule_counters bump per hit. | `git diff main -- src/bpf/mac_filter.bpf.c` shows the EDITED line-set per the FileList table above + new `bump_rule` helper + new `rule_counters` map declaration. All other diff lines (default fallthrough, drop branches, etc.) zero. Reviewer's regional-diff check on the function-body: allowed hunks = {line 55 inner-VALUE typedef, line 95 inner-VALUE typedef, line 226 typed-pointer + bump_rule call, line 254 typed-pointer + bump_rule call, NEW `rule_counters` map decl in .maps block, NEW `bump_rule` helper definition}. Any hunk outside this set in the function body = `[INVARIANT-VIOLATED]`. |
+| PI-29 → **PI-29-3.4b** | **`rules` map STILL NOT consulted by datapath**; **`action_table` map STILL NOT consulted by datapath**; **inner-allowlist-value's `rule_id` IS read by datapath** (NEW). | `bpftool map dump pinned ${PIN_DIR}/<iface>/rules` shows occupied slots matching applied config (UNCHANGED from MVP-3.4 — still populated by `populate_rules_skeleton` per D-3.4b-18); `bpftool map dump pinned ${PIN_DIR}/<iface>/action_table` shows two entries (UNCHANGED). **Datapath non-consultation of `rules` + `action_table` verified via PI-28-3.4b regional-diff**: no `bpf_map_lookup_elem(&rules, ...)` or `bpf_map_lookup_elem(&action_table, ...)` calls inside `mac_filter_prog` function body. **Datapath read of inner-VALUE rule_id IS the only NEW datapath map-related read this slice** (a struct-field deref on a successfully-looked-up inner pointer, NOT a separate `bpf_map_lookup_elem` call). T_DROP_RULE_BUMPS_COUNTER + T_RULES_SKELETON_NOT_WIRED jointly confirm the carve-out: drop-rule entry in `rules` map populated but `rule_counters[drop_rule_id]` stays 0 because the drop-rule's MAC is NOT in inner-allowlist (datapath never executes bump_rule for that MAC). |
+| PI-30 | `bypass` primitive UNCHANGED | UNCHANGED. Bypass invokes `detach`; no map change; no datapath change for bypass. |
+| PI-31 → **PI-31-3.4b** | **Exporter is READ-ONLY by construction** — extends to cover NEW `rule_counters_reader.cpp` + `sidecar_reader.cpp`. NO `bpf_map_update_elem`, no `bpf_map_delete_elem`, no map mutations; sidecar_reader is filesystem-READ-ONLY (no write to rule_index.json). | `grep -rE 'bpf_(map_(update\|delete)_elem\|obj_pin\|link_create\|link_destroy\|xdp_(attach\|detach)\|prog_load)' src/exporter/` returns ZERO matches post-§5.31. `grep -rE '\b(fopen\|fwrite\|open).*rule_index' src/exporter/` returns ZERO writes (only reads). Reviewer asserts during framework point 5 walk. |
+| PI-32 → **PI-32-3.4b** | **Exporter handles missing/empty bpffs gracefully + missing-sidecar gracefully** — extends PI-32 to include sidecar-orphan tolerance. Missing rule_index.json → degrade to `action="unknown"` labels (NOT crash, NOT skip series). Missing rule_counters pin → exporter emits NO rule_match samples for that iface (graceful). | T_EXPORTER_RULE_LABELS sidecar-orphan sub-test (above) — delete rule_index.json mid-scrape; assert exporter survives + labels become `action="unknown"`. PI-32-3.4b STRENGTHENS PI-32 with two new degradation paths. |
+| PI-33 | Both binaries report same version (shared version.h) | UNCHANGED in shape; bump to 0.7.0 (PI-8-3.4b). |
+| PI-34 ≡ PI-6-3.4b | 46 pre-§5.31 ctests strict-superset with 2-EDIT carve-out (T_RULES_SKELETON_NOT_WIRED comment-rewrite + T_EXPORTER_METRICS_FORMAT version-literal bump per PI-3.4b-9 catalog) | Same check as PI-6-3.4b above. |
+
+**NEW invariants** (MVP-3.4b-specific):
+
+| # | Invariant | Check mechanism |
+|---|---|---|
+| **PI-3.4b-1** | **`rule_counters` PERCPU_ARRAY[64] of __u64 EXISTS + PINNED at `${PIN_DIR}/<iface>/rule_counters`** for every attached iface. Pinning via LIBBPF_PIN_BY_NAME (matches `kManagedMaps[]` discipline). | `bpftool map show pinned ${PIN_DIR}/<iface>/rule_counters` reports `type percpu_array`, `max_entries 64`, `value_size 8`, `key_size 4`. Existence verified via `test -e ${PIN_DIR}/<iface>/rule_counters` post-apply. |
+| **PI-3.4b-2** | **Counter survival across apply -f** — PIN_BY_NAME + reuse_fd discipline preserves PERCPU values across re-apply. Prometheus counter-monotonicity holds. | T_RULE_COUNTER_SURVIVES_APPLY (§6.49). If counters reset on re-apply, this PI is VIOLATED — root cause is likely the 13th kManagedMaps[] entry missing from the reuse loop (which would be impossible if HK-9 refactor is intact). |
+| **PI-3.4b-3** | **`struct allow_entry` is the INNER-VALUE type for both `xdpmf_allowlist_inner` (MAC HASH) AND `xdpmf_cidr_inner` (CIDR LPM_TRIE)** — symmetric per T.5 OQ #3. Total size 8 bytes. PI-13-3.4b documents the byte-by-byte layout. | `bpftool map show pinned ${PIN_DIR}/<iface>/allowlist_a` reports `value_size 8`; same for `allowlist_b` (MAC). `bpftool map show pinned ${PIN_DIR}/<iface>/cidr_allowlist_a` reports `value_size 8`; same for `cidr_allowlist_b` (CIDR). |
+| **PI-3.4b-4** | **`bump_rule(rule_id)` is called per-match from BOTH MAC HASH-hit and CIDR LPM_TRIE-hit branches in `mac_filter_prog`** — Q1 B3 contract. rule_id read from `struct allow_entry::rule_id` (offset 4) of the looked-up inner-value pointer. NO bump_rule call in default-fallthrough or drop branches. | (a) `git diff` of `mac_filter.bpf.c` shows TWO new `bump_rule` call-sites (lines ~228 and ~256 areas). (b) T_RULE_COUNTER_MAC_HIT_BUMPS + T_RULE_COUNTER_CIDR_HIT_BUMPS verify per-hit increment. (c) T_DROP_RULE_BUMPS_COUNTER negation: drop-rule MAC produces NO bump_rule call (MAC not in inner-allowlist; fallthrough to defaults). |
+| **PI-3.4b-5** | **`rule_index.json` sidecar exists at `${PIN_DIR}/<iface>/rule_index.json` after every successful apply** — Q3 P1 path. Schema per Q2 S1. File mode 0644. Atomic-write via rename-into-place. | T_SIDECAR_JSON_SHAPE (§6.50). Sidecar-write failure is non-fatal (D-3.4b-17) — apply still exits 0 + WARN logged. |
+| **PI-3.4b-6** | **Exporter emits `xdpfilter_rule_match_total{iface, rule_id, action}` Prometheus series** for each iface with non-empty `rule_counters` AND/OR non-empty sidecar — Q4 A3 + D-3.4b-8. Sidecar-orphan tolerance: `action="unknown"` label for rule_id present in counters but absent from sidecar. | T_EXPORTER_RULE_LABELS (§6.51). |
+| **PI-3.4b-7** | **`Config::Rule::id` field is the rule_id source for both inner-VALUE `rule_id` AND `rule_counters` ARRAY index AND sidecar JSON `rule_id`** — Q5 R1 + D-3.4b-9 + D-3.4b-11. Range [0, XDPMF_ALLOWLIST_MAX-1] = [0, 63] enforced at `config.cpp:204`. | T_RULE_COUNTER_MAC_HIT_BUMPS + T_RULE_COUNTER_CIDR_HIT_BUMPS verify rule_id correspondence end-to-end (YAML `id: 5` → inner-VALUE.rule_id = 5 → rule_counters[5] bumps → sidecar `"rule_id": 5` → Prometheus `rule_id="5"` label). Negation: rule_id out of range would FAIL config validation (existing path; not a new check). |
+| **PI-3.4b-8** | **`kManagedMaps[]` table has 13 entries post-§5.31** — `rule_counters` joins the table; all 3 call-site loops walk it automatically. | `grep -c '^\s*{ &SkelMapsT::' src/lib/loader.cpp` returns 13 (was 12 pre-§5.31). The new entry's `member_ptr` is `&SkelMapsT::rule_counters`; `name` is `XDPMF_MAP_RULE_COUNTERS_NAME`; `legacy_alias` is `false`. |
+| **PI-3.4b-9** | **PI-13-3.4b fixture-ripple cost is 2 ctest body EDITs ONLY** (T_RULES_SKELETON_NOT_WIRED comment-rewrite + T_EXPORTER_METRICS_FORMAT version-literal bump). All 44 other ctest bodies BYTE-EQUIVALENT. Documented + scope-fenced. | `git diff <MVP-3.4.5-HEAD> --stat tests/T_*.sh` shows 2 modified files (plus 6 NEW files). The 2 MODIFIED files have diffs confined to: T_RULES_SKELETON_NOT_WIRED — 2 lines of comment-rewrite (lines 14 + 297 ranges); T_EXPORTER_METRICS_FORMAT — 2 lines of version-literal-bump (lines 21-22 comment + line 100-101 assertion literal). Any additional diff = `[INVARIANT-VIOLATED]` (impl SendMessages architect for any third EDIT). |
+
+**No deletions/relaxations** of PI-1..PI-34 in this slice EXCEPT:
+- **PI-13 ADJUDICATED** (PASS-as-additive per HG-3.4b-1 + D-3.4b-1; offset-0 byte preserved; value_size 1 → 8 documented + intended).
+- **PI-28 EXTENDED** (PI-28-3.4b — `mac_filter_prog` body adds `bump_rule` calls + typed-pointer reads; first substantive body change since MVP-3.2; all OTHER body lines byte-equivalent; functional verdict for same inputs unchanged + per-rule counter bump per match).
+- **PI-29 CARVE-OUT** (PI-29-3.4b — `rules` + `action_table` maps STILL NOT consulted; inner-VALUE's `rule_id` IS read; carve-out is explicit + scope-fenced).
+- **PI-31 STRENGTHENED** (PI-31-3.4b — extends to new exporter translation units; READ-ONLY contract preserved).
+- **PI-32 STRENGTHENED** (PI-32-3.4b — extends to sidecar-orphan tolerance).
+- **PI-6 / PI-34 RELAXED** (PI-6-3.4b — 2-ctest-body-EDIT carve-out per PI-3.4b-9; narrower than PI-6-3.4.5's 7-EDIT carve-out; explicit + documented).
+
+PI-7-3.4b-hpp STRENGTHENS PI-7-3.4.5-hpp (6th consecutive ZERO-diff cycle on loader.hpp AND config.hpp). PI-10-3.4b STRENGTHENS PI-10-3.4.5 (additive-only on mac_filter.h continues — though MVP-3.4.5 had ZERO diff on the header; this slice has ADDITIVE-ONLY, which is a relaxation from MVP-3.4.5's stricter ZERO).
+
+#### §5.31 verifiable invariants for reviewer
+
+(Per architect-spec §6.5 "Verification-hints discipline": these are GUIDANCE for the reviewer, NOT contracts for impl. Default MAY. Reserve MUST only for true PI-* contracts (PI-1..PI-34 + PI-3.4b-* + PI-7-3.4b-hpp/cpp ARE MUSTs by definition; the items below MAY be relaxed by impl if a contract elsewhere demands it). **Resolution rule for prose-vs-invariants conflicts within this amendment: invariants block wins, prose loses; if impl deviates on a SHOULD/MAY hint to satisfy a PI-* contract, reviewer's correct disposition is `inline-merge` on the hint text — NOT `[UNRELATED-EDIT]` on impl.**)
+
+In addition to PI-1..PI-34 + PI-3.4b-* + PI-7-3.4b-hpp/cpp above:
+
+- `git diff main -- src/lib/loader.hpp src/lib/config.hpp` SHOULD show ZERO output (PI-7-3.4b-hpp, 6th consecutive cycle on loader.hpp + 1st cycle on config.hpp).
+- `git diff <MVP-3.4.5-HEAD> -- src/lib/loader.cpp` SHOULD show changes confined to the 6 enumerated scopes (a)-(f) in PI-7-3.4b-cpp.
+- `git diff main -- src/common/mac_filter.h` SHOULD show ONLY additions (PI-10-3.4b additive-only).
+- `git diff <MVP-3.4.5-HEAD> -- src/bpf/mac_filter.bpf.c` SHOULD show the PI-28-3.4b enumerated edit-set (inner-VALUE typedef × 2, MAC hit branch + bump_rule, CIDR hit branch + bump_rule, new `rule_counters` map decl, new `bump_rule` helper). ZERO diff to default-fallthrough / drop branches / IPv4 gate / ethhdr bounds-check.
+- `git diff main -- tests/T_*.sh` SHOULD show: 6 NEW files (§6.47..§6.52) + 2 EDITED files (T_RULES_SKELETON_NOT_WIRED + T_EXPORTER_METRICS_FORMAT) per PI-3.4b-9 catalog. 44 of 46 pre-§5.31 ctest bodies byte-equivalent.
+- `git diff main -- tests/CMakeLists.txt` SHOULD show 6 new `add_test` entries; ZERO modification to the 46 existing entries.
+- `git diff main -- tests/fixtures/` SHOULD show: NEW `config_per_rule_counters.yaml` (for §6.47..§6.49 + §6.52); existing fixtures byte-equivalent.
+- `git diff main -- tests/lib/` SHOULD show: NEW `read_rule_counters.py` (parallels read_stats.py); existing helpers byte-equivalent.
+- `git diff main -- CMakeLists.txt` SHOULD show: VERSION bump 0.6.1 → 0.7.0 + 3-line addition (sidecar.cpp to xdpmf_internal + sidecar_reader.cpp + rule_counters_reader.cpp to xdpmf-exporter target sources).
+- `git diff main -- CHANGELOG.md` SHOULD show NEW `[0.7.0]` entry + build-pace row.
+- New files SHOULD exist: `src/lib/sidecar.{cpp,hpp}` (writer), `src/exporter/sidecar_reader.{cpp,hpp}` (parser), `src/exporter/rule_counters_reader.{cpp,hpp}` (PERCPU sum), 6 T_*.sh under `tests/`, 1 fixture under `tests/fixtures/`, 1 new helper under `tests/lib/`.
+- 6 new ctests SHOULD pass (§6.47..§6.52); §6.49 (counter survival) + §6.51 (exporter labels) are the load-bearing pair.
+- 44 of 46 pre-§5.31 ctests SHOULD still pass byte-equivalent (or legitimately SKIP-77).
+- 2 PI-3.4b-9-EDITED ctests SHOULD pass with their updated bodies (T_RULES_SKELETON_NOT_WIRED comment-rewrite preserves assertion semantic; T_EXPORTER_METRICS_FORMAT version-literal bump aligns with PI-8-3.4b).
+- `xdpmacfilter --version` SHOULD report `xdpmacfilter 0.7.0` AND `xdpmf-exporter --version` SHOULD report `xdpmf-exporter 0.7.0` (PI-8-3.4b).
+- `XDPMF_SANITIZERS=ON` build SHOULD be clean for BOTH binaries (no UB / no leaks from new code).
+- BPF object SHOULD verifier-load cleanly: `xdpmacfilter attach` on a fixture iface exits 0 (T_LOAD_ATTACH or equivalent existing test).
+- `bpftool map show pinned ${PIN_DIR}/<iface>/rule_counters` SHOULD report `type percpu_array max_entries 64 value_size 8 key_size 4`.
+- `bpftool map show pinned ${PIN_DIR}/<iface>/allowlist_a` SHOULD report `value_size 8` post-§5.31 (was 1 pre-§5.31 — PI-13-3.4b adjudicated extension).
+- `bpftool map show pinned ${PIN_DIR}/<iface>/cidr_allowlist_a` SHOULD report `value_size 8` post-§5.31 (was 1 pre-§5.31 — PI-13-3.4b symmetric CIDR extension).
+- `bpftool map dump pinned ${PIN_DIR}/<iface>/allowlist_a format c | head -c 1` for an occupied slot SHOULD return `0x01` (PI-13-3.4b offset-0 byte-equivalence to PI-27).
+- `bpftool map dump pinned ${PIN_DIR}/<iface>/allowlist_a --json | jq '.[0].formatted.value.rule_id'` SHOULD return the rule.id of the matching applied rule (PI-13-3.4b new offset-4 field).
+- `test -f ${PIN_DIR}/<iface>/rule_index.json` SHOULD return success after every successful apply (PI-3.4b-5).
+- `jq -e '.schema_version == 1' ${PIN_DIR}/<iface>/rule_index.json` SHOULD return success (PI-3.4b-5).
+- `curl -s http://127.0.0.1:9417/metrics | grep -cE '^xdpfilter_rule_match_total\{'` SHOULD return ≥1 for an exporter against a non-empty fleet (PI-3.4b-6).
+- `grep -c '^\s*{ &SkelMapsT::' src/lib/loader.cpp` SHOULD return 13 (PI-3.4b-8 — kManagedMaps[] grew 12 → 13).
+- `grep -rE 'bpf_(map_(update\|delete)_elem\|obj_pin\|link_create\|link_destroy\|xdp_(attach\|detach)\|prog_load)' src/exporter/` SHOULD return ZERO matches (PI-31-3.4b — exporter READ-ONLY extended to NEW exporter translation units).
+- Optional verifier-canary: `xdpmacfilter attach --iface lo` exits 0 on a kernel that supports BPF (sanity check that PI-13-3.4b inner-VALUE extension + PI-28-3.4b new bump_rule reads do NOT trigger verifier-reject).
+
+#### §7 OOS — MVP-3.4b cycle 1 components SHIPPED + new fences + cycle 2/3 surfaced
+
+##### Moved from deferred to SHIPPED (per MVP-3.4b cycle 1)
+
+The following items were deferred at §5.29 OOS (MVP-3.4) + carried forward through §5.30 OOS (MVP-3.4.5) and are now CLOSED by this slice:
+
+- ~~**Per-rule counter map (`per_rule_counters` BPF_MAP_TYPE_PERCPU_*)** — MVP-3.4b slice per Open Q #13 RESOLUTION.~~ **— SHIPPED in §5.31** as `rule_counters` PERCPU_ARRAY[64] of __u64 (Q1 B3 + D-3.4b-12 + PI-3.4b-1).
+- ~~**Inner-allowlist-value extension (`__u8` → `struct {__u8 present; __u32 rule_id;}`)** — MVP-3.4b. Gated by PI-13-3.1 adjudication.~~ **— SHIPPED in §5.31** as `struct allow_entry` (HG-3.4b-1 PASS-as-additive adjudication + D-3.4b-1 + PI-13-3.4b). Byte layout `present` at offset 0, `_pad[3]` at offsets 1-3, `rule_id` at offsets 4-7 — total 8 bytes. SYMMETRIC across MAC HASH + CIDR LPM_TRIE.
+- ~~**Datapath wiring of `rules` via inner-value's rule_id** — MVP-3.4b.~~ **— SHIPPED in §5.31** as `bump_rule(entry->rule_id)` calls in MAC HASH-hit and CIDR LPM_TRIE-hit branches (Q1 B3 + PI-3.4b-4 + PI-28-3.4b). The `rules` map ITSELF is still NOT consulted by datapath (PI-29-3.4b carve-out) — only the inner-allowlist-value's rule_id is read; full action-dispatch via rules+action_table is MVP-3.4c future.
+- ~~**Prometheus `xdpfilter_rule_match_total{iface, rule_id}` series in exporter** — MVP-3.4b.~~ **— SHIPPED in §5.31** as `xdpfilter_rule_match_total{iface, rule_id, action}` (Q4 A3 — action added as label per D-3.4b-8 + PI-3.4b-6).
+- ~~**Sidecar JSON `${PIN_DIR}/rule_index.json`** — MVP-3.4b optional per arch-v2.md Option 2.~~ **— SHIPPED in §5.31** as `${PIN_DIR}/<iface>/rule_index.json` per Q3 P1 + Q2 S1 + D-3.4b-3 + PI-3.4b-5.
+- ~~**PI-13-3.1 adjudication BEFORE the slice starts** — Open Q gating MVP-3.4b.~~ **— SHIPPED in §5.31** as HG-3.4b-1 + D-3.4b-1 PASS-as-additive ruling (cross-references PI-27 strict reading + offset-0 byte-equivalence proof). PI-13-3.4b documents the byte-by-byte adjudication.
+
+##### Additional MVP-3.4b cycle 1 deliverables (NOT in prior OOT queues; surfaced in this slice)
+
+- **PI-3.4b-9 surgical fix catalog** — Phase A grep finding shrinks brief's ~5-fixture estimate to 2 actual EDITs. Confirms [[impl-role-discipline]] dividend from MVP-3.4.5 (Phase A code-grep discipline catches scope-fence accurately).
+- **`kManagedMaps[]` 13th entry** — MVP-3.4.5 HK-9 landmine refactor dividend. One-line table extension instead of 3-callsite lockstep updates.
+- **Sidecar writer + reader (roll-your-own JSON, no new build dep)** — cycle 1 brownfield discipline preserves zero-deps project value.
+
+##### Surfaced as next-natural slice
+
+**MVP-3.4b cycle 2 — atomic-swap promotion of `rules` map + counter management API** (gating on operator demand):
+
+- Promote `rules` map from SHARED ARRAY to parallel-outer via `rules_outer` ARRAY_OF_MAPS (mirrors §5.27 CIDR axis pattern). Required IF MVP-3.4c action-dispatch wires `rules` consumption from datapath (per HG-3.4b-4 surfaced Open Q).
+- `xdpmacfilter` subcommand `reset-counters --iface X [--rule-id N]` for explicit counter zero (currently no API; operators must `detach` + re-`attach` to clear).
+- Atomic-swap of `rule_counters` IF a future use case demands "counters reflect ONLY the currently-applied config" (today PI-3.4b-2 PRESERVES across apply — operator-grade Prometheus monotonicity).
+
+**MVP-3.4c — action-table dispatch (drop rules operative)**:
+
+- `mac_filter_prog` extends to read `rules[rule_id].action_id` then `action_table[action_id].action_type` and DISPATCH (PASS / DROP based on action_type — currently DROP is via defaults[active]=drop fallthrough; cycle 2/3 makes drop rules per-rule-operative).
+- Allows drop rules with `match.mac` (or CIDR) that's ALSO in the inner-allowlist via a PASS rule — currently §5.26 schema's "drop rules don't populate inner" means drop is via absence-from-allowlist; cycle 2/3 enables explicit drop semantics.
+- Requires MVP-3.4b cycle 2 (`rules` atomic-swap) OR copy-on-write rules-map semantics.
+
+**MVP-3.5 — JSON structured logs in loader + exporter** (carry-forward from §5.30 surfaced-next-natural; UNCHANGED by §5.31):
+
+- Loader (`xdpmacfilter`) emits structured JSON log lines when `XDPMF_LOG_FORMAT=json` env var is set; default `XDPMF_LOG_FORMAT=text`.
+- Exporter (`xdpmf-exporter`) emits structured JSON log lines under same env-var contract.
+- Likely shape per event: `{"ts":"<iso8601>","level":"<info|warn|error>","event":"<name>","iface":"<iface or null>","msg":"<existing prose>","fields":{...}}`.
+- Sidecar `rule_index.json`'s `applied_at` field forward-compats with this slice (loader already emits ISO-8601 timestamps).
+
+##### NEW out-of-scope fences (per §5.31; carry-forward unchanged from §5.30 unless noted)
+
+- **`action_table` datapath consultation (action-dispatch)** — MVP-3.4c future cycle. PI-29-3.4b explicitly: action_table is still NOT consulted by datapath this cycle. Action dispatch via existing PASS/DROP branches retained.
+- **`rules` map atomic-swap promotion (D-3.4-4 close-out)** — MVP-3.4b cycle 2 / MVP-3.4c. `rules` stays SHARED with clear-and-rewrite this slice (HG-3.4b-4 + D-3.4b-4). Lifting this fence requires the datapath to consult `rules` map (which cycle 1 explicitly does NOT do).
+- **Action types beyond {PASS, DROP}** — MVP-3.8+ (carry-forward).
+- **Cap-lift beyond 64 rules** — permanent product contract per /mint-hld Option 5 + Open Q #13 Q5 human-gate (carry-forward; XDPMF_ALLOWLIST_MAX = XDPMF_RULE_COUNTERS_MAX = 64).
+- **Named rules schema-v2 (Option 4 from /mint-hld)** — deferred indefinitely. Operator's `id:` IS the canonical identifier per Q5 R1 (carry-forward).
+- **Sidecar JSON history / versioning** — single rule_index.json, overwritten on apply; no rotation, no .prev backup, no audit log of past rule sets (carry-forward fence).
+- **Sidecar JSON path under FHS /var/lib (P2)** — staying with bpffs-adjacent P1 per Q3 default (carry-forward; future-cycle if operator demand surfaces).
+- **`xdpfilter_drop_match_total` as separate series (Q4 A2)** — action as label per A3 default (carry-forward; future-cycle if operator demand surfaces).
+- **Sidecar schema S2 description-field + S3 deployment-metadata** — explicitly REJECTED at Q2 + D-3.4b-6; future-cycle if operator demand surfaces. NEW FENCE.
+- **`nlohmann/json` as build dep** — explicitly REJECTED at D-3.4b-10; roll-your-own writer + line-regex reader for cycle 1. Future cycles MAY adopt if 2nd-3rd JSON emission point surfaces. NEW FENCE.
+- **Full JSON parser in sidecar_reader** — explicitly REJECTED at D-3.4b-14; line-oriented regex extraction sufficient for cycle 1 schema. NEW FENCE.
+- **Counter zero / reset API (`xdpmacfilter reset-counters`)** — MVP-3.4b cycle 2 candidate; cycle 1 has no zeroing primitive (operators must detach + re-attach to clear). NEW FENCE.
+- **rule_counter atomic-swap** — MVP-3.4b cycle 2 candidate if "counters reflect ONLY current config" semantic surfaces. Cycle 1 preserves across apply (PI-3.4b-2). NEW FENCE.
+- **Q1 B1 (two-call-site bump_rule, literally duplicate)** — REJECTED at Q1; cycle 1 ships B3 unified per-match semantic (still two source-line call-sites for verifier acceptance; semantically B3). NEW FENCE.
+- **Q1 B2 (MAC-only bump_rule, defer CIDR)** — REJECTED at Q1; symmetric MAC/CIDR from cycle 1. NEW FENCE.
+- **Q5 R2 (source-order allocation) + Q5 R3 (sort-by-name)** — REJECTED at Q5; R1 operator-id is canonical. NEW FENCE.
+- **Option 3 fallback (two-map shadow `mac_to_rule_id` + `cidr_to_rule_id`)** — contingent fallback ONLY IF PI-13-3.4b verifier-rejects during Phase 2 impl. Cycle 1 ships Option 2; Option 3 is the documented contingency per arch-v2.md §"§MVP-3.4 Open Question #13 RESOLUTION" Convergence. If verifier-rejects: impl peer-DMs architect; architect re-scopes to Option 3 + the slice budget inflates ~1 cycle.
+- **Optional sub-test §6.53 T_RULE_COUNTER_VERIFIER_GREEN** — REJECTED at Phase A; existing tests exercise verifier indirectly. If impl reports verifier turbulence during Phase 2, tester adds it then. NEW FENCE.
+- **Documentation pass (Prometheus alert semantics for `xdpfilter_rule_match_total`, FLEET_DEPLOYMENT.md exporter section)** — separate manual pass per user direction. NOT in this slice. NEW FENCE.
+- **TSAN build / CO-RE field-probe failure test** — coverage scope, NOT in this slice (carry-forward from §5.30 NEW FENCE).
+- **Systemd sandbox directives (ProtectSystem strict, PrivateTmp, etc.)** — defense-in-depth security cycle; deferable to MVP-3.5+ (carry-forward).
+- **Library extraction `libxdpmf.so.0` (MVP-3.6+)** — carry-forward.
+- **Daemon `xdpmfd` (MVP-3.6+)** — carry-forward.
+- **Binary rename `xdpmacfilter` → `xdpfilter` (MVP-3.12)** — carry-forward.
+- **L4 ports / VLAN / IPv6 CIDR** — carry-forward per MVP-3.2 §7 OOS.
+- **JSON structured logs (MVP-3.5)** — carry-forward (surfaced explicitly as next-natural; no scope change).
+- **sFlow (MVP-3.6 conditional)** — carry-forward.
+
+##### Anti-misdiagnosis notes (institutional learning, per architect-spec §6.6)
+
+This slice carries forward all anti-misdiagnosis guards from prior cycles + adds three specific to MVP-3.4b:
+
+1. **Cap-set declaration on a NEW invocation path** (inherited from §5.28 D-3.3-6 + §5.29 D-3.4-6 + §5.30 anti-misdiagnosis carry): unchanged. Exporter cap-set (`AmbientCapabilities=CAP_BPF`) unchanged this slice. New BPF map `rule_counters` is `BPF_OBJ_GET`-readable with CAP_BPF only (same as existing `stats` map) — no new cap requirement.
+
+2. **Silent-divergence-from-design pattern** (inherited from MVP-3.4 review.md OOT-1/OOT-2 misdiagnosis pair, formalized as [[impl-role-discipline]]): impl follows design; disagreement is OK but ONLY via explicit Phase B escalation. Specific to this slice: PI-13-3.4b adjudication is the load-bearing call; **if impl encounters verifier-reject AT ANY POINT during Phase 2, impl MUST SendMessage architect BEFORE attempting workarounds**. The default workaround surface is broad (rewrap `bump_rule` differently, change `struct allow_entry` layout, use `BPF_CORE_READ`, etc.) and silent workarounds could mask a fundamental Option 2 vs Option 3 question. Architect Open Q to re-evaluate; impl does NOT decide unilaterally.
+
+3. **Three-callsite lockstep landmine** (project memory [[libbpf-pin-by-name-three-callsites]]): RESOLVED in MVP-3.4.5 HK-9; **dividend collected in §5.31** (kManagedMaps[] gains 13th entry — one-line edit instead of 3 lockstep literal-array updates). Anti-misdiagnosis note: this slice is the validation that the HK-9 refactor was the correct architecture. **Future-cycle guard for any architect agent**: when adding a NEW BPF map declared with `LIBBPF_PIN_BY_NAME`, the kManagedMaps[] table MUST be extended (one line) AND that's it — the three loops walk the table automatically. If a future cycle's MAP is NOT `LIBBPF_PIN_BY_NAME` (e.g. a global non-per-iface map), it does NOT belong in kManagedMaps[]; the architect documents the exception in the new slice's Decisions section.
+
+4. **Verification-hints discipline trap** (inherited from MVP-3.1/3.2/3.3 verification-hints rework cycles + MVP-3.4.5 reinforcement): the §5.31 verifiable invariants section above is GUIDANCE for the reviewer, NOT contracts for impl. Items default to SHOULD/MAY; MUST is reserved for PI-* contracts. If impl deviates on a SHOULD/MAY hint to satisfy a PI-* contract, reviewer disposition is `inline-merge` on the hint text — NOT `[UNRELATED-EDIT]` on impl. Resolution rule for prose-vs-invariants conflicts within this amendment: invariants block wins, prose loses (stated once per the amendment template; this single statement covers all §5.31 prose vs. PI-* conflicts).
+
+5. **Phase A code-grep discipline pays off** (NEW anti-misdiagnosis note): the Phase A grep of inner-value touch sites + fixture-ripple sites + version-literal sites caught (a) the actual fixture-ripple count is 2 EDITs NOT 5, (b) `Config::Rule::id` field already exists (brief's overstatement on `Config::Rule gains rule_id`), (c) the `kManagedMaps[]` table is at 12 entries (not 9 or 10 per prior cycle counts) and grows to 13. **Future-cycle guard for any architect agent**: BEFORE publishing brownfield design.md, grep the literal field counts / table sizes / version strings the brief mentions. The 15-minute Phase A pass during this slice's architecture phase reduced expected Phase B EDITs from ~3 (MVP-3.4.5 average) to ~0 expected (TBD pending impl). Citation: this anti-misdiagnosis note IS the Phase A discipline rule from architect spec, validated by this slice.
+
+Evidence: `mint/task-brief.md` MVP-3.4b cycle 1 brief (HG-3.4b-1/2/3/4 + Q1-Q5 + PI-3.4b-1..PI-3.4b-10); `mint/architecture-v2.md` §"§MVP-3.4 Open Question #13 RESOLUTION" Option 2 + Caveat (b) human-gate (committed 2d4b31a 2026-05-24 — the load-bearing pre-decision); §5.29 (MVP-3.4 ancestor — `rules` + `action_table` skeleton declared, PI-27/PI-13-3.4 STRICT-byte-shape defer fence, PI-28 mac_filter_prog byte-equivalent fence — BOTH LIFTED this slice with documented adjudications); §5.30 (MVP-3.4.5 ancestor — HK-9 kManagedMaps[] refactor SHIPPED + landmine resolved, PI-7-3.4.5-hpp 5th-cycle ZERO-diff); §5.26 D-3.1-1 (apply_request lives in loader.cpp); §5.26 schema rule 4 + rule 3 (id ∈ [0, 63], action ∈ {pass, drop} — preserved); §5.27 Q1 AS1 (CIDR-axis active_idx flip mechanism — preserved + SYMMETRIC inner-VALUE extension); project memory [[libbpf-pin-by-name-three-callsites]] (HK-9 dividend collected); [[impl-role-discipline]] (Phase B escalation discipline); architect-spec Phase A code-grep discipline (15-minute grep pass during this slice — fixture-ripple count corrected, Config::Rule pre-existing-field finding, kManagedMaps[] 12-entry baseline).
