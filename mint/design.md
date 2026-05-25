@@ -8576,3 +8576,731 @@ For each hit, smoke-test the load with `sudo -n bpftool prog load <built-obj.o> 
 1. team-lead notified via SendMessage with the EDIT-2 carve-out bump 2 → 3 (not human-gate worthy; tactical Q within PI-3.4b-9 scope).
 2. mint-dev-tester notified with Option B pick + concrete preflight rewrite shape + cite of D-3.4b-22 + PI-3.4b-9 catalog 3rd-row text.
 3. mint-dev-impl notified via cc on the tester DM (audit-trail; no impl-side action needed — the fix is test-body, not impl-body).
+
+### §5.32 MVP-3.5: JSON structured logs in loader + exporter (brownfield amendment, 2026-05-25)
+
+**Purpose**: ship the structured-logging surface deferred from §5.30 §7 OOS (5 consecutive cycles' carry-forward). New env var `XDPMF_LOG_FORMAT={text,json}` (default `text`) selects the rendering for ALL diagnostic stderr lines in BOTH binaries (`xdpmacfilter` + `xdpmf-exporter`). In `text` mode, every emission is byte-equivalent to the pre-§5.32 line (load-bearing PI-3.5-1 — 52-ctest baseline IS the validation). In `json` mode, each emission becomes a single-line NDJSON object with a stable flat envelope `{ts, level, event, iface, msg, fields:{}}`. One NEW shared module `src/common/logger.{cpp,hpp}` owns the format selector + envelope renderer + event-name catalog as a compile-time constexpr table (operator log-shipping pipelines depend on stable event names).
+
+The slice CLOSES the carry-forward fence on JSON logs. It LIFTS nothing — strictly additive. PI-7-3.5-hpp continues the loader.hpp/config.hpp ZERO-diff streak (7th consecutive cycle on loader.hpp; 2nd on config.hpp — the logger module owns its own header, not loader.hpp).
+
+**Anchor sections**: §5.13 (no-logging-library decision — historically "no library at all"; §5.32 builds a TINY in-tree logger with NO external dep, preserving the spirit); §5.26 (`XDPMF_TRUST_MODEL` env-var read-once-at-startup idiom — `XDPMF_LOG_FORMAT` follows identical pattern); §5.29 (exporter stderr-line shapes — `exporter.listening` startup line, per-scrape WARN per-iface, exit-6 ERROR); §5.30 HK-4 (bypass audit-log structural fields uid/euid/sudo_user/reason — under JSON these become `fields:{}` of the `bypass.activated` event), HK-16 (exporter startup WARN — `exporter.warn.bpffs_root_missing`), HK-17 (exit-6 ERROR — `exporter.error.all_ifaces_eacces`); §5.31 D-3.4b-10 (roll-your-own JSON writer + zero-deps discipline — extends to logger.cpp), D-3.4b-14 (line-oriented format precedent), `src/lib/sidecar.cpp:38-158` (`json_escape` + `format_timestamp_utc` helpers — duplicated in logger.cpp per D-3.5-2 below, NOT extracted to shared module).
+
+**Scope contract (§5.32 short form)**:
+- NEW (source files): `src/common/logger.hpp` + `src/common/logger.cpp` (~280-320 LOC total; cross-binary shared per Q1=M3 + Q6=B1 dup-TU compile).
+- NEW (env var): `XDPMF_LOG_FORMAT={text,json}` default `text`. Read ONCE at first `logger::emit()` call (lazy init under a `std::once_flag`); cached in module-static `Format g_format`.
+- NEW (event-name catalog): 33 unique event names (40 emission sites; 31 unique events for loader-side + 2 events for events shared across multiple sites). Catalogued as `constexpr std::array<std::string_view, kEventCount> kEventNames` in `logger.hpp`; T_LOG_EVENT_CATALOG_STABILITY locks the set.
+- EDITED (8 stderr-emission files): convert each `fprintf(stderr, "<prose>", args)` → `logger::emit(Level::<L>, "<event>", "<prose>", {Field{...},...})`. 40 sites converted; 1 site EXEMPT (`src/cli/bypass.cpp:96` interactive `BYPASS will detach... [y/N]:` prompt — UI primitive, not a log event; stays as raw fprintf — see D-3.5-7).
+- EDITED (CMakeLists.txt): add `src/common/logger.cpp` to BOTH `xdpmf_internal` lib AND `xdpmf-exporter` binary target (Q6=B1); VERSION bump 0.7.0 → 0.8.0 (MINOR — new operator-facing env var + structured-logging surface).
+- EDITED (CHANGELOG.md): new `[0.8.0]` Keep-a-Changelog entry.
+- NEW (6 ctests): T_LOG_TEXT_BYTE_EQUIVALENT (load-bearing canary for PI-3.5-1), T_LOG_JSON_LOADER_EVENTS, T_LOG_JSON_EXPORTER_EVENTS, T_LOG_JSON_BYPASS_AUDIT, T_LOG_JSON_ENVELOPE_INVARIANTS, T_LOG_EVENT_CATALOG_STABILITY.
+- UNCHANGED-BUT-AFFECTED: `loader.hpp` (7th consecutive ZERO-diff cycle — PI-7-3.5-hpp), `config.hpp` (2nd consecutive ZERO-diff), all 52 pre-§5.32 ctest bodies (PI-3.5-1 byte-equivalence MUST in text mode — ANY ctest grep'ing stderr text passes WITHOUT modification).
+
+#### §5.32 Human-gate decisions (confirmed; brief defaults stand)
+
+- **HG-3.5-1 — text-mode byte-equivalence = MUST.** Confirmed (no architect override). PI-3.5-1 contract: every text-mode emission is byte-identical to the pre-§5.32 line (same prose, same level-keyword embedding if any, same newline). Logger in text mode writes `<msg>\n` and nothing else — no `[level]` prefix, no decoration, no reordering. 52-ctest baseline (specifically the 12 ctests that grep stderr text — catalogued in §6.5 invariant block below) IS the validation surface. T_LOG_TEXT_BYTE_EQUIVALENT is the focused canary that runs a known stderr-producing sequence under `XDPMF_LOG_FORMAT=text` (default) AND under empty/unset env-var AND under explicit `XDPMF_LOG_FORMAT=text`, captures stderr each way, byte-compares all three against a captured reference. Any drift = `[REGRESSION]`.
+
+- **HG-3.5-2 — JSON envelope = flat NDJSON with required + conditional fields.** Confirmed. Shape per emission:
+  ```json
+  {"ts":"<iso8601>","level":"<info|warn|error>","event":"<dotted.name>","iface":<"<iface>"|null>,"msg":"<original-prose>","fields":{<k>:<v>,...}}
+  ```
+  **Required (always present, never null/absent)**: `ts`, `level`, `event`, `msg`, `fields`. **`iface`**: ALWAYS present; type is string-or-null (null for events not iface-scoped — e.g. `cli.usage_error`, `exporter.listening`). **`fields`**: ALWAYS object (possibly empty `{}`, never absent, never null, never scalar). **Schema_version**: NO explicit field in cycle 1 (implicit schema_version=1; future breaking shipped with explicit `schema_version` field).
+
+- **HG-3.5-3 — bypass.activated event with HK-4 structural fields.** Confirmed. `src/cli/bypass.cpp:174` converts to `logger::emit(Level::Info, "bypass.activated", "<full original audit-line prose>", {Field{"uid", uid_int}, Field{"euid", euid_int}, Field{"sudo_user", sudo_user_or_none}, Field{"reason", escaped_reason}})`. In text mode, byte-equivalent to MVP-3.4.5 HK-4 line (PI-3.5-1). In JSON mode, structural fields appear in `fields:{}` for log-shipping query (operators query `jq '.event=="bypass.activated" and .fields.sudo_user=="alice"'`). NOTE: the `iface` is ALSO emitted as the top-level `iface` field (operator's `--iface` arg) — convenient for cross-event correlation by iface — AND duplicated in the prose `msg`. Slight redundancy is acceptable per HG-3.5-2's flat-envelope convenience rationale (`jq 'select(.iface=="veth_v0")'` works for ANY iface-scoped event without reaching into prose).
+
+- **HG-3.5-4 — architect catalogs all event names.** Confirmed. §5.32 Decisions sub-section "Event-name catalog (full)" below lists all 33 unique events with file:line cross-reference + Level + iface-scoped flag + fields keys. The catalog mirrors `kEventNames` in `logger.hpp`; T_LOG_EVENT_CATALOG_STABILITY asserts the set matches.
+
+#### §5.32 Q-decisions (mechanism)
+
+##### Q1: Logger module location → **M3 (`src/common/logger.{cpp,hpp}`)**
+
+Confirmed per brief recommendation. `src/common/` is the established home for cross-binary shared code (mirrors `mac_filter.h` precedent). Compiled into BOTH `xdpmf_internal` static lib (linked by loader) AND `xdpmf-exporter` binary target (Q6=B1 dup-TU compile — one TU compiled twice, negligible cost vs. introducing a new static lib target). NOT in `src/lib/` (which is loader-internal; exporter would have to take a dependency on `xdpmf_internal` it doesn't currently have). NOT in `src/cli/` (CLI-specific). M2 (inline in each cli/main.cpp + exporter/main.cpp) rejected — duplicate logic across binaries violates DRY for a non-trivial module.
+
+##### Q2: Timestamp format → **T1 (ISO-8601 UTC second-precision)**
+
+Confirmed. `"2026-05-25T17:30:00Z"` (single trailing `Z`; no fractional seconds; no timezone offset). Matches `src/lib/sidecar.cpp::format_timestamp_utc` precedent (§5.31 D-3.4b-3 / D-3.4b-20). Operator-friendly (`grep '2026-05-25T17:'` for hourly windows). Second precision is sufficient for operator-action event rates (attach/apply/bypass/scrape — at most one-per-second; never packet-rate). Microsecond precision (T2) is over-engineering. Epoch-seconds (T3) is operator-hostile (must convert for human reading). Helper `format_timestamp_utc()` is DUPLICATED in logger.cpp anon namespace per D-3.5-2 (NOT promoted to shared `src/common/json.{cpp,hpp}` — see D-3.5-2 rationale).
+
+##### Q3: Event-name convention → **E1 (dot-delimited `<subsystem>.<action>[.<outcome>][.<reason>]`)**
+
+Confirmed. Examples: `attach.success`, `attach.fail.tag_mismatch`, `apply.complete`, `bypass.activated`, `exporter.scrape.warn.stats_open_failed`, `loader.warn.rules_skeleton_not_wired`. Hierarchical (operators write `jq 'select(.event | startswith("bypass."))'`); matches ECS / OpenTelemetry conventions. Lowercase snake_case within each segment (`stats_open_failed`, NOT `statsOpenFailed`). Catalogued in `kEventNames` constexpr table per HG-3.5-4. E2 (snake_case flat) rejected — loses hierarchical filtering. E3 (camelCase) rejected — inconsistent with project's snake_case convention.
+
+##### Q4: Env-var read timing → **R1 (read once at first emit; cached for process lifetime)**
+
+Confirmed. `XDPMF_LOG_FORMAT` is read on the FIRST call to `logger::emit()` (lazy init under `std::once_flag`); the parsed `Format` enum value is cached in module-static `Format g_format`; every subsequent emit uses the cached value. **Process restart required to switch format.** Matches `XDPMF_TRUST_MODEL` / `XDPMF_BPFFS_ROOT` precedent — both read-once. R2 (per-emit getenv) rejected — per-line syscall cost is negligible BUT live-toggleable logging is over-engineering for operator workflows (if they want to switch they restart the binary; cheap). R3 (SIGHUP re-read) rejected — adds signal handling for a marginal use case.
+
+Edge cases:
+- Env var unset OR empty string OR exact literal `"text"` → `Format::Text`.
+- Exact literal `"json"` → `Format::Json`.
+- Any other value (e.g. `"JSON"`, `"yaml"`, `"on"`) → emit a ONE-SHOT warning to stderr on first emit (`xdpmacfilter: WARN: unknown XDPMF_LOG_FORMAT value '<val>', defaulting to 'text'`) THEN default to `Format::Text`. The warning itself is a logger event (`logger.warn.unknown_log_format`) — chicken-and-egg avoided because text-mode emits raw prose so the WARN is human-readable regardless. Catalogued.
+
+##### Q5: `fields:{}` value types → **F1 (flat scalars only)**
+
+Confirmed. Allowed value types in `fields`:
+- string (JSON-escaped per logger's internal `json_escape` helper).
+- 64-bit signed integer.
+- bool (`true` / `false`).
+- null.
+
+NO nested objects. NO arrays. Matches §5.31 sidecar one-rule-per-line shape. Minimal JSON writer complexity (no recursive nesting). Operators reconstruct nested structures from multiple correlated events if needed (e.g. for per-iface apply summary: one `apply.start` event + one `apply.complete` event with summary fields). F2 (nested objects) rejected — adds writer recursion + parse complexity. F3 (arrays) rejected — same.
+
+##### Q6: Build inclusion → **B1 (dup-TU compile into both targets)**
+
+Confirmed. `src/common/logger.cpp` added to BOTH `xdpmf_internal` (existing static lib linked by loader) AND `xdpmf-exporter` (existing executable target). One TU compiled twice. NO new CMake target. NO new static library. B2 (extract to new `xdpmf_common` static lib) rejected — adds a target for a single 280-LOC TU, over-engineering for cycle 1; can refactor in a future cycle if a 2nd shared TU surfaces (e.g. if D-3.5-2 reverses and `src/common/json.cpp` joins).
+
+#### §5.32 FileList (brownfield DIFF)
+
+##### NEW (created this slice)
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `src/common/logger.hpp` | Public API: `enum Level`, `enum Format`, `struct Field`, `void emit(...)`, `kEventNames` constexpr catalog | C++23 (header) | 80 |
+| `src/common/logger.cpp` | Impl: format selector via env (lazy-init under `once_flag`), text-mode raw write, JSON envelope renderer, duplicated `json_escape` + `format_timestamp_utc` helpers (D-3.5-2) | C++23 | 220 |
+| `tests/T_LOG_TEXT_BYTE_EQUIVALENT.sh` | §6.53 LOAD-BEARING canary for PI-3.5-1: known stderr sequence under text mode (default, unset env, explicit "text") all byte-identical to captured reference | bash | 110 |
+| `tests/T_LOG_JSON_LOADER_EVENTS.sh` | §6.54: attach + apply + detach under `XDPMF_LOG_FORMAT=json`; jq-validate each stderr line; assert event-name + level + iface + fields per catalog | bash | 130 |
+| `tests/T_LOG_JSON_EXPORTER_EVENTS.sh` | §6.55: exporter startup + listening + HK-16 WARN (missing bpffs root) + HK-17 ERROR (all-iface EACCES); jq-validate; assert event names | bash | 130 |
+| `tests/T_LOG_JSON_BYPASS_AUDIT.sh` | §6.56: bypass under `XDPMF_LOG_FORMAT=json`; assert `bypass.activated` event with HK-4 structural fields in `fields:{}` (uid/euid/sudo_user/reason); negation = text mode preserves audit line byte-equivalent | bash | 100 |
+| `tests/T_LOG_JSON_ENVELOPE_INVARIANTS.sh` | §6.57: across ALL events emitted in a sweep run, assert envelope invariants (required fields always present; iface null-or-string; fields always object; level ∈ {info,warn,error}) | bash | 90 |
+| `tests/T_LOG_EVENT_CATALOG_STABILITY.sh` | §6.58: assert `kEventNames` catalog has exactly the expected 33 entries (locked set); micro-test prevents silent event rename across cycles | bash | 60 |
+
+Total NEW source LOC est: ~300 (logger.hpp + logger.cpp). Total NEW test LOC est: ~620.
+
+##### EDITED (existing files touched this slice)
+
+| Path | What changes |
+|---|---|
+| `src/cli/main.cpp` | 6 stderr sites (lines 100, 101, 136, 140, 142, 146) → `logger::emit(...)`. Line 101 `fputs(usage_text, stderr)` is special — usage-text is multi-line; converts to ONE `logger::emit(Level::Info, "cli.usage_text", usage_text, {})` event (NOT 100s of per-line events). Text mode preserves the multi-line `\n`-embedded usage text byte-equivalent (PI-3.5-1). JSON mode produces ONE line with the embedded `\n` JSON-escaped inside `msg`. See D-3.5-5 below for multi-line msg discipline. |
+| `src/cli/bypass.cpp` | 5 stderr sites: lines 129, 139, 149, 174 → `logger::emit(...)`. **EXEMPT**: line 96 (interactive `BYPASS will detach... [y/N]:` prompt) stays as raw `fprintf(stderr, ...)` per D-3.5-7 (UI primitive, not log event). |
+| `src/lib/loader.cpp` | 4 stderr sites (lines 1031, 1545, 1606, 1784) → `logger::emit(...)`. Existing comments referencing the literal stderr-prefix (e.g. "audit log per §5.26") preserved (logger preserves the literal prose byte-equivalent). |
+| `src/lib/sidecar.cpp` | 6 stderr sites (lines 259, 266, 273, 289, 305, 312) → `logger::emit(...)`. All 6 are `sidecar.warn.*` events (write failures); fields include `errno_str` (text via `std::strerror`) and `path` where relevant. Existing §5.31 D-3.4b-17 non-fatal contract preserved: emit + return; do NOT throw. |
+| `src/exporter/main.cpp` | 7 stderr sites (lines 91, 100, 110, 143, 154, 176, 187) → `logger::emit(...)`. Site 91 + 100 collapse into shared event `exporter.usage_error` (5 sites total share this event; arg `flag` carries the offending `--flag` name in `fields`). |
+| `src/exporter/http.cpp` | 8 stderr sites (lines 288, 295, 310, 317, 323, 336, 353, 362) → `logger::emit(...)`. Line 323 (`listening on`) is the startup INFO event — load-bearing operator signal. |
+| `src/exporter/stats_reader.cpp` | 3 stderr sites (lines 119, 157, 194) → `logger::emit(...)`. Line 119 is HK-16 WARN — `exporter.warn.bpffs_root_missing`. |
+| `src/exporter/rule_counters_reader.cpp` | 2 stderr sites (lines 116, 137) → `logger::emit(...)`. Line 116 shares event `exporter.warn.cpu_count_invalid` with stats_reader:157 (same prose, same context). |
+| `CMakeLists.txt` | (a) VERSION bump `0.7.0 → 0.8.0` (MINOR — new operator-facing env var + structured-logging surface; HG-3.5 family). (b) Add `src/common/logger.cpp` to `xdpmf_internal` target source list. (c) Add `src/common/logger.cpp` to `xdpmf-exporter` target source list (Q6=B1 dup-TU). (d) NO new compile flags, NO new external deps. |
+| `CHANGELOG.md` | NEW `## [0.8.0] - 2026-05-NN` section (Keep-a-Changelog). **Added** — structured-logging surface via `XDPMF_LOG_FORMAT={text,json}` env var; `src/common/logger.{cpp,hpp}` module; 33-event catalog; 6 new ctests. **Changed** — 40 stderr emission sites converted to `logger::emit` (text-mode byte-equivalent per PI-3.5-1; JSON-mode wraps per HG-3.5-2 envelope). Build-pace table gains an MVP-3.5 row. |
+| `tests/CMakeLists.txt` | 6 new `add_test(...)` entries (§6.53..§6.58). T_LOG_TEXT_BYTE_EQUIVALENT + T_LOG_JSON_LOADER_EVENTS + T_LOG_JSON_BYPASS_AUDIT require `xdp_fixture` RESOURCE_LOCK (touch veth). T_LOG_JSON_EXPORTER_EVENTS requires `xdp_fixture` + `exporter_port_9417`. T_LOG_JSON_ENVELOPE_INVARIANTS shares `xdp_fixture`. T_LOG_EVENT_CATALOG_STABILITY needs neither lock (binary-grep / nm-style check). ZERO modification of 52 existing `add_test` entries. |
+
+##### UNCHANGED-BUT-AFFECTED (zero git-diff fence; behaviour must hold)
+
+| Path | Why it matters |
+|---|---|
+| `src/lib/loader.hpp` | **PI-7-3.5-hpp — 7TH consecutive ZERO-diff cycle** (MVP-3.1 +1; MVP-3.2/3.3/3.4/3.4.5/3.4b/3.5 = 0). `git diff main -- src/lib/loader.hpp` MUST show ZERO output. Logger module owns its own header (`src/common/logger.hpp`); NO public LoaderError addition; NO new public symbol in loader.hpp. Any diff = `[INVARIANT-VIOLATED]`. |
+| `src/lib/config.hpp` | **PI-7-3.5-hpp — 2ND consecutive ZERO-diff cycle**. No schema change. `git diff main -- src/lib/config.hpp` MUST show ZERO output. |
+| `src/common/mac_filter.h` | UNCHANGED. Logger constants live in `src/common/logger.hpp` (separate file). `mac_filter.h` byte-equivalent. PI-10 continues. |
+| `src/bpf/mac_filter.bpf.c` | UNCHANGED. JSON logging is userspace-only; no kernel-side BPF code touch. `bpf_printk` (if used) stays text. PI-28-3.4b continues byte-equivalent for `mac_filter_prog` body. |
+| `src/lib/cidr.{cpp,hpp}`, `src/lib/yaml_subset.{cpp,hpp}`, `src/lib/config.cpp`, `src/lib/raii.hpp` | UNCHANGED. None of these emit stderr in the current codebase (Phase A grep confirmed — see catalog above). |
+| `src/cli/attach.{cpp,hpp}`, `src/cli/detach.{cpp,hpp}`, `src/cli/apply.{cpp,hpp}`, `src/cli/cli.{cpp,hpp}` | UNCHANGED. None of these emit stderr directly (Phase A grep confirmed). Errors propagate via exceptions caught in `src/cli/main.cpp`. `cli.cpp` `usage_text()` is a string GENERATOR; its stderr write is via main.cpp:101. |
+| `src/exporter/prom_format.{cpp,hpp}`, `src/exporter/sidecar_reader.{cpp,hpp}` | UNCHANGED. Neither emits stderr (Phase A grep). |
+| `systemd/xdpmacfilter@.service`, `systemd/xdpmf-exporter.service` | UNCHANGED. Default systemd capture of stderr → journald applies in BOTH modes; in JSON mode operators add `--output=json-pretty` to their `journalctl` or hook a JSON shipper. Optional future env-var injection (`Environment=XDPMF_LOG_FORMAT=json`) is documented in CHANGELOG but NOT shipped by default this slice (operators opt-in). |
+| `ansible/xdpmacfilter-deploy.yml`, `ansible/templates/xdpfilter-config.yaml.j2` | UNCHANGED. No Ansible touch (operators add `XDPMF_LOG_FORMAT=json` to their environment template if desired; not baked in). |
+| `docs/FLEET_DEPLOYMENT.md` | UNCHANGED this slice. Future docs pass (separate user-driven scope) MAY add a "structured-logging" section + per-event jq examples. |
+| All 52 pre-§5.32 ctest BODIES | **UNCHANGED — load-bearing PI-3.5-1**. `git diff main -- tests/T_*.sh` shows ZERO modified files (only 6 NEW files). Any ctest body diff = `[INVARIANT-VIOLATED]`. The 12 ctests known to grep stderr text (catalogued in §6.5 PI-3.5-1 invariant block below) pass byte-equivalent without modification under default `XDPMF_LOG_FORMAT=text`. |
+| `tests/lib/common.sh`, `tests/lib/read_stats.py`, `tests/lib/pins.sh.in`, `tests/lib/read_rule_counters.py` | UNCHANGED. Logger is userspace-only; no test helper change. |
+| `tests/fixtures/*` | UNCHANGED. The 6 NEW ctests reuse existing fixtures (config_default.yaml, config_per_rule_counters.yaml, xdp_pass.bpf.o, mac_filter_alt.bpf.o) or construct inputs inline; NO new fixture file. |
+| §5.4 / §5.19 / §5.22 / §5.24 / §5.26 / §5.27 / §5.29 / §5.30 / §5.31 trust+identity gates | UNCHANGED. Logger sits ABOVE the gates (gates raise exceptions OR call `logger::emit` directly); gate codepaths byte-equivalent. PI-1..PI-5 all pass. |
+
+#### §5.32 DataStructures
+
+##### `logger::Level` enum
+
+In `src/common/logger.hpp`:
+```
+namespace xdpmf::logger {
+
+enum class Level : std::uint8_t {
+    Info  = 0,
+    Warn  = 1,
+    Error = 2,
+};
+
+}  // namespace xdpmf::logger
+```
+
+Renders to JSON `"level"` field as lowercase string `"info"` / `"warn"` / `"error"`. Renders to text mode as: NOTHING (text mode emits raw msg + `\n` — the level enum is JSON-only metadata). The historical embedded "WARN" / "ERROR" / "error:" tokens in some existing prose lines (e.g. `"xdpmf-exporter: WARN bpffs root..."`) STAY EMBEDDED IN PROSE per PI-3.5-1 (byte-equivalence); the JSON `"level"` field is the structural mirror, not a replacement.
+
+##### `logger::Format` enum
+
+```
+namespace xdpmf::logger {
+
+enum class Format : std::uint8_t {
+    Text = 0,   // default; byte-equivalent to pre-§5.32 emissions
+    Json = 1,   // NDJSON envelope per HG-3.5-2
+};
+
+}  // namespace xdpmf::logger
+```
+
+Cached in module-static `Format g_format` in logger.cpp after first emit (lazy init under `std::once_flag`). NOT exposed via getter (logger is fire-and-forget; callers don't need to query the format).
+
+##### `logger::FieldValue` variant
+
+```
+namespace xdpmf::logger {
+
+using FieldValue = std::variant<
+    std::string_view,   // string scalar (JSON-escaped at render time)
+    std::int64_t,       // integer scalar (signed 64-bit; covers u32/u64-as-i64 sufficient)
+    bool,
+    std::nullptr_t      // explicit null
+>;
+
+struct Field {
+    std::string_view key;       // must be a stable literal or owned by caller for the call duration
+    FieldValue       value;
+};
+
+}  // namespace xdpmf::logger
+```
+
+Q5 F1 flat-scalars-only contract. Caller owns the lifetime of any `string_view` (key OR value) — logger reads-then-writes synchronously within `emit()`; no async / no copy / no allocation beyond `std::string` for JSON rendering. Integer choice = `int64_t` (signed) covers all natural emitter cases (uid, euid, prog_id, port, errno, count). Unsigned values up to `INT64_MAX` (~9.2 × 10^18) round-trip safely; values above (extremely rare for our use case) would wrap — flagged in D-3.5-3.
+
+##### `logger::kEventNames` constexpr catalog
+
+In `src/common/logger.hpp`:
+```
+namespace xdpmf::logger {
+
+inline constexpr std::array<std::string_view, 33> kEventNames = {
+    /* loader (xdpmacfilter) — 17 events */
+    "cli.usage_error",                       /* src/cli/main.cpp:100 */
+    "cli.usage_text",                        /* src/cli/main.cpp:101 (multi-line usage dump) */
+    "cli.error",                             /* src/cli/main.cpp:136, 142, 146 (generic LoaderError + system_error + std::exception) */
+    "config.error",                          /* src/cli/main.cpp:140 (ConfigError variant) */
+    "loader.trust_model",                    /* src/lib/loader.cpp:1031 (audit log — PI-23) */
+    "loader.warn.rules_skeleton_not_wired",  /* src/lib/loader.cpp:1545 (HG-3.4-1 WARN) */
+    "loader.attach.fleet_replace",           /* src/lib/loader.cpp:1606 (trust_model=fleet replace) */
+    "loader.attach.replace",                 /* src/lib/loader.cpp:1784 (existing program replace) */
+    "logger.warn.unknown_log_format",        /* src/common/logger.cpp self-emit (Q4 edge case) */
+    "bypass.usage_error",                    /* src/cli/bypass.cpp:129 (--iface missing) */
+    "bypass.refused.requires_unsafe",        /* src/cli/bypass.cpp:139 (non-tty without --unsafe) */
+    "bypass.cancelled",                      /* src/cli/bypass.cpp:149 (operator typed 'n') */
+    "bypass.activated",                      /* src/cli/bypass.cpp:174 — HK-4 audit log */
+    "sidecar.warn.root_symlink",             /* src/lib/sidecar.cpp:259 */
+    "sidecar.warn.root_not_dir",             /* src/lib/sidecar.cpp:266 */
+    "sidecar.warn.lstat_failed",             /* src/lib/sidecar.cpp:273 */
+    "sidecar.warn.mkdir_failed",             /* src/lib/sidecar.cpp:289 */
+    "sidecar.warn.write_failed",             /* src/lib/sidecar.cpp:305 */
+    "sidecar.warn.write_exception",          /* src/lib/sidecar.cpp:312 */
+
+    /* exporter (xdpmf-exporter) — 14 events */
+    "exporter.usage_error",                  /* src/exporter/main.cpp:91, 100, 110, 143, 154 (5 sites share) */
+    "exporter.fatal",                        /* src/exporter/main.cpp:176 */
+    "exporter.error.all_ifaces_eacces",      /* src/exporter/main.cpp:187 — HK-17 */
+    "exporter.bind.invalid_addr",            /* src/exporter/http.cpp:288 */
+    "exporter.bind.socket_failed",           /* src/exporter/http.cpp:295 */
+    "exporter.bind.failed",                  /* src/exporter/http.cpp:310 */
+    "exporter.bind.listen_failed",           /* src/exporter/http.cpp:317 */
+    "exporter.listening",                    /* src/exporter/http.cpp:323 — startup signal */
+    "exporter.accept.poll_failed",           /* src/exporter/http.cpp:336 */
+    "exporter.accept.failed",                /* src/exporter/http.cpp:353 */
+    "exporter.shutdown",                     /* src/exporter/http.cpp:362 */
+    "exporter.warn.bpffs_root_missing",      /* src/exporter/stats_reader.cpp:119 — HK-16 */
+    "exporter.warn.cpu_count_invalid",       /* src/exporter/stats_reader.cpp:157 + rule_counters_reader.cpp:116 (2 sites share) */
+    "exporter.scrape.warn.stats_open_failed",         /* src/exporter/stats_reader.cpp:194 */
+    "exporter.scrape.warn.rule_counters_open_failed", /* src/exporter/rule_counters_reader.cpp:137 */
+};
+
+inline constexpr std::size_t kEventCount = kEventNames.size();   // = 33
+
+}  // namespace xdpmf::logger
+```
+
+**Coverage**: 41 emission sites − 1 EXEMPT (`src/cli/bypass.cpp:96` interactive prompt, D-3.5-7) = 40 converted sites. Event-name count = 33 unique (5 exporter usage-error sites share 1 event; 3 cli error sites share 1 event; 2 cpu_count_invalid sites share 1 event = 7 site-collapses). 40 − 7 = 33 unique events. ✓
+
+T_LOG_EVENT_CATALOG_STABILITY asserts `kEventCount == 33` AND each expected literal is present (set equality). Adding a new event in a future cycle = one-line addition to `kEventNames` + bump the array size + update test expectation.
+
+##### Env-var constant
+
+In `src/common/logger.cpp` (anon namespace):
+```
+constexpr std::string_view kLogFormatEnv{"XDPMF_LOG_FORMAT"};
+constexpr std::string_view kLogFormatTextValue{"text"};
+constexpr std::string_view kLogFormatJsonValue{"json"};
+```
+
+Mirrors §5.26's `kTrustModelEnv` constant at loader.cpp:1000.
+
+#### §5.32 Interfaces
+
+##### `logger::emit` signature (public)
+
+In `src/common/logger.hpp`:
+```
+namespace xdpmf::logger {
+
+/* Emit one log event to stderr. Format selected by XDPMF_LOG_FORMAT env var
+ * (read once at first call; cached for process lifetime per Q4 R1):
+ *   text mode (default) — writes <msg> + '\n' byte-equivalent to pre-§5.32
+ *                         emission site (PI-3.5-1 contract);
+ *   json mode           — writes one NDJSON line per HG-3.5-2 envelope.
+ *
+ * THREAD SAFETY: emit() is async-signal-unsafe (uses std::fprintf + std::string
+ * for JSON rendering). Callers from signal handlers MUST use raw write(2) on
+ * stderr instead (no logger sites in current codebase emit from signal handlers
+ * — Phase A grep verified: all sites are sync caller-thread).
+ *
+ * MULTI-LINE msg: msg MAY contain embedded '\n'. In text mode, written
+ * byte-equivalent (the embedded newlines surface as separate lines, mirroring
+ * pre-§5.32 behaviour — e.g. cli.usage_text which dumps the multi-line
+ * usage block). In JSON mode, embedded '\n' is JSON-escaped to "\\n"
+ * inside the "msg" string field (one JSON line; reader's view of embedded
+ * newlines is via jq -r '.msg').
+ *
+ * iface: pass std::nullopt for events not scoped to an interface (cli usage,
+ * exporter startup); pass the iface name otherwise (attach, apply, bypass,
+ * per-iface scrape warnings). In JSON mode, std::nullopt renders as
+ * "iface": null; a non-nullopt iface renders as "iface": "<value>".
+ *
+ * Logger NEVER throws. Failures to write to stderr are silently ignored
+ * (consistent with fprintf(stderr,...) semantics — there's no recovery path
+ * for a stderr write failure).
+ */
+void emit(Level                              level,
+          std::string_view                   event,
+          std::optional<std::string_view>    iface,
+          std::string_view                   msg,
+          std::span<const Field>             fields = {}) noexcept;
+
+/* Convenience overload for events without iface (renders iface:null in JSON;
+ * omits iface concept in text). Equivalent to emit(level, event, std::nullopt,
+ * msg, fields). */
+void emit(Level                  level,
+          std::string_view       event,
+          std::string_view       msg,
+          std::span<const Field> fields = {}) noexcept;
+
+}  // namespace xdpmf::logger
+```
+
+**Caller idiom** (per emission site):
+```
+// Pre-§5.32 (current):
+std::fprintf(stderr, "xdpmacfilter: trust_model=%s\n",
+             std::string{to_string(m)}.c_str());
+
+// Post-§5.32:
+auto trust_str = std::string{to_string(m)};
+logger::emit(logger::Level::Info,
+             "loader.trust_model",
+             /* no iface — trust_model is process-scoped */
+             "xdpmacfilter: trust_model=" + trust_str,
+             {{ logger::Field{"trust_model", std::string_view{trust_str}} }});
+```
+
+Note that `msg` carries the FULL prose including the `xdpmacfilter:` prefix — preserved byte-equivalent for text mode (PI-3.5-1). The `fields` carry the same value structurally for JSON consumers.
+
+##### `XDPMF_LOG_FORMAT` env var contract (operator-facing)
+
+| Value | Effect |
+|---|---|
+| unset OR empty | `Format::Text` (default) |
+| `text` (exact, case-sensitive) | `Format::Text` |
+| `json` (exact, case-sensitive) | `Format::Json` |
+| any other value (e.g. `JSON`, `yaml`, `on`, `1`) | one-shot WARN emitted (event `logger.warn.unknown_log_format`); defaults to `Format::Text` |
+
+Read ONCE on the first `logger::emit()` call (lazy init under `std::once_flag`; thread-safe). Cached for process lifetime. Documented in `xdpmacfilter --help` Environment-variables block + `xdpmf-exporter --help` Environment-variables block (HK-6 idiom; extends to `XDPMF_LOG_FORMAT={text|json}   Default: text. json emits NDJSON envelope per event.`).
+
+##### JSON envelope render contract (Format::Json)
+
+Per event, one line (terminated by `\n`):
+```
+{"ts":"<iso8601>","level":"<info|warn|error>","event":"<dotted.name>","iface":<"string"|null>,"msg":"<json-escaped>","fields":{<k>:<v>,...}}
+```
+
+Field order: **fixed** for grep-friendliness AND test-assertion stability:
+1. `ts` — `format_timestamp_utc(time(nullptr))` per D-3.5-2 (duplicated helper).
+2. `level` — `"info" | "warn" | "error"` per Level enum.
+3. `event` — literal from `kEventNames` (caller passes the string_view; logger does NOT validate it's in the catalog at runtime — that's compile-time-ish via T_LOG_EVENT_CATALOG_STABILITY).
+4. `iface` — `"string"` if `optional` is set; `null` otherwise.
+5. `msg` — JSON-escaped per `json_escape` helper (duplicated from sidecar.cpp:38-XX per D-3.5-2).
+6. `fields` — object with keys in caller-supplied order (preserved); EMPTY `{}` if `fields.empty()`.
+
+Fixed-order rationale: T_LOG_JSON_ENVELOPE_INVARIANTS asserts via `jq -e '.ts and .level and .event and (.iface != null or .iface == null) and .msg and .fields'` — order is jq-irrelevant for value assertion, BUT operators writing grep-style tooling (e.g. `grep '"event":"bypass.activated"'`) benefit from stable field position. Fixed order = future-cycle stability.
+
+##### Text envelope render contract (Format::Text)
+
+Per event, one OR more lines:
+- `<msg>\n` written byte-for-byte to stderr.
+- NO level prefix. NO event prefix. NO field decoration. NO `ts`. NOTHING wrapping.
+- Embedded `\n` in msg → surfaces as multiple lines (mirrors pre-§5.32 multi-line `usage_text` dump from cli/main.cpp:101).
+
+This is the load-bearing PI-3.5-1 contract. ANY decoration = breaking change requiring its own slice.
+
+##### Loader public API (`src/lib/loader.hpp`) — ZERO diff (PI-7-3.5-hpp, 7th consecutive cycle)
+
+`AttachConfig` / `DetachConfig` / `attach()` / `detach()` / `LoaderError` enum: ALL UNCHANGED. Logger module owns its own header (`src/common/logger.hpp`); NO public LoaderError addition; NO new public symbol in loader.hpp. The logger module is included from `loader.cpp` + `sidecar.cpp` + `cli/main.cpp` + `cli/bypass.cpp` + `exporter/main.cpp` + `exporter/http.cpp` + `exporter/stats_reader.cpp` + `exporter/rule_counters_reader.cpp` directly (8 `#include "common/logger.hpp"` lines added).
+
+##### Config API (`src/lib/config.hpp`) — ZERO diff (2nd consecutive cycle)
+
+`Config::Rule` / `Config` / parsers / validators: ALL UNCHANGED. No schema change; logger is orthogonal to config.
+
+#### §5.32 Decisions (with rationale)
+
+##### D-3.5-1 — Logger module in `src/common/`, dup-TU compile (Q1=M3 + Q6=B1) — because
+
+`src/common/` is the established home for cross-binary shared code (mirror `mac_filter.h` precedent). Adding `logger.cpp` to BOTH `xdpmf_internal` AND `xdpmf-exporter` CMake target source lists costs one extra compile of a ~220-LOC TU — negligible vs. introducing a new static library target (B2) that adds an empty wrapper for one TU. Future cycle CAN refactor to a `xdpmf_common` static lib if a 2nd shared TU surfaces (e.g. if D-3.5-2 reverses and `src/common/json.cpp` joins as a 2nd shared TU); cycle 1 stays minimal.
+
+##### D-3.5-2 — `json_escape` + `format_timestamp_utc` DUPLICATED in logger.cpp, NOT extracted to shared module — because
+
+The existing helpers at `src/lib/sidecar.cpp:38-158` (~50 LOC combined) work and are stable. Extracting to `src/common/json.{cpp,hpp}` would:
+- Add 2 new files + 1 CMake target dependency wiring (sidecar.cpp would need to include common/json.hpp; logger.cpp same).
+- Touch sidecar.cpp (PI-7-3.4b-cpp scope-fence implications — sidecar.cpp is not in the regional-diff fence per §5.31, but altering its file-static helpers is a non-zero diff).
+- Add library-extraction scope creep cycle 1 (architect-spec brownfield discipline).
+
+Duplicating ~50 LOC in logger.cpp anon namespace keeps the slice contained. Both copies are simple (escape map for 5 control chars + strftime call). Future cycle MAY extract if a 3rd JSON emitter surfaces (e.g. exporter-side structured metrics summary export); the refactor is local + obvious. **The cost of duplication is intentional and small; the cost of premature abstraction would be a touchpoint on sidecar.cpp that destabilizes its §5.31 contracts.** Reviewer's regional-diff check on `src/lib/sidecar.cpp` post-§5.32 should show diffs CONFINED to the 6 emission-site conversions (line 259-312 area) — the helpers at lines 38-158 stay byte-equivalent. (Logger's COPY of those helpers in logger.cpp is byte-equivalent to sidecar.cpp's at write time.)
+
+##### D-3.5-3 — `FieldValue` integer type = `int64_t` (signed), not `uint64_t` — because
+
+Practical considerations:
+- All natural emitter cases (uid, euid, prog_id, port, errno, count, prog_id) fit in `INT64_MAX` ~9.2 × 10^18 with millennia of headroom.
+- `int64_t` round-trips cleanly through JSON (all major parsers — jq, Python `json` — represent integers as `int64_t` natively).
+- `uint64_t` values > `INT64_MAX` are vanishingly rare for our domain (would require a counter > 9 quintillion). If a future cycle needs `uint64_t` (e.g. unsigned PERCPU sum at extreme scale), it can ADD a `uint64_t` variant alternative — cycle 1 doesn't gate this.
+- Mixed-sign comparisons in callers are simpler with a single signed type.
+
+The caller's idiom for unsigned values: `static_cast<std::int64_t>(uid_unsigned)`. For values up to `INT64_MAX`, this is lossless. Documented in logger.hpp comment.
+
+##### D-3.5-4 — Logger emit is `noexcept` + silent-on-failure — because
+
+`fprintf(stderr, ...)` itself is documented as not-throwing (returns negative on error; sets errno). Logger's `emit()` mirrors this semantic: writes via internal `std::fprintf(stderr, "%s\n", rendered.c_str())` (text) OR `std::fprintf(stderr, "%s\n", json_envelope.c_str())` (JSON); on write failure, silently returns. There is NO recovery path for a stderr write failure (we cannot log the log failure — that would loop). The `noexcept` annotation guarantees callers can use `emit()` from ANY context (including catch blocks where the wrapping function is `noexcept`) without unwinding concerns.
+
+JSON envelope construction uses `std::string` (which CAN throw `bad_alloc`); per noexcept contract, ANY exception during envelope construction is CAUGHT inside emit() (`try { build_json(...); } catch (...) {}`) and silently dropped (the alternative — propagating bad_alloc up a logging call — is worse than a silent log loss). Mirrors `src/lib/sidecar.cpp::write_rule_index`'s D-3.4b-17 non-fatal-on-failure contract.
+
+##### D-3.5-5 — Multi-line msg discipline (cli.usage_text edge case) — because
+
+`src/cli/main.cpp:101` does `fputs(xdpmf::usage_text().c_str(), stderr)` where `usage_text()` returns a ~30-line multi-line string. Pre-§5.32, this is N stderr-text-lines for one CliError. Post-§5.32:
+- **Text mode (PI-3.5-1)**: byte-equivalent — logger writes the full multi-line string + `\n`, surfaces as N stderr lines. (No double-newline; `usage_text()` already ends with `\n` per current convention; logger MAY emit `<msg>` without appending extra `\n` IF msg already ends with `\n` — impl picks. Document the convention: text mode appends `\n` ONLY if msg does NOT already end with `\n`. PI-3.5-1 byte-equivalence is the contract; the trailing-newline policy is whatever preserves the existing 52-ctest stderr captures byte-for-byte.)
+- **JSON mode**: ONE JSON line with embedded `\\n` (escaped newlines) inside the `"msg"` field. `jq -r '.msg'` reproduces the multi-line text. Operators querying `jq 'select(.event=="cli.usage_text")'` get one event per CliError, matching the semantic "one error → one event log".
+
+Alternative considered: split usage_text into per-line events (~30 events per CliError). REJECTED — explodes event count for a UI dump that's not log-shipping-pipeline-meaningful. One event with multi-line msg is the right shape.
+
+##### D-3.5-6 — Trailing-newline policy: append `\n` ONLY IF msg does NOT already end with `\n` — because
+
+Pre-§5.32 emissions are inconsistent: `fprintf(stderr, "...\n")` (most sites end the format with `\n`); `fputs(usage_text.c_str(), stderr)` where `usage_text()` ends with `\n` already. To preserve PI-3.5-1 byte-equivalence, logger's text-mode write must NOT append a redundant `\n` for sites whose msg already ends with one. Concrete impl: logger checks `msg.ends_with('\n')` and conditionally writes `<msg>` OR `<msg>\n`. **Caller convention**: emission-site rewriters SHOULD include the trailing `\n` in msg (matches the pre-§5.32 format-string convention) — logger's check is a safety net for the `usage_text` case where msg already includes terminal `\n`. JSON mode strips the trailing `\n` before embedding in `"msg"` (operators reading JSON don't want a stray trailing `\\n` in their parsed msg field) OR escapes it as `\\n` — impl picks; default = STRIP trailing-only `\n` for JSON envelope construction (embedded `\n` between content lines stays escaped).
+
+##### D-3.5-7 — `src/cli/bypass.cpp:96` interactive prompt EXEMPT from logger conversion — because
+
+The line `BYPASS will detach XDP filter on %s. Continue? [y/N]: ` is an INTERACTIVE prompt — no trailing newline, fflushed, expects user input on stdin within `~few seconds`. Converting it to `logger::emit(...)` would:
+- In TEXT mode (preserves byte-equivalence): no functional change; works as before.
+- In JSON mode: would render as `{"ts":"...","level":"info","event":"bypass.prompt","iface":"veth_v0","msg":"BYPASS will detach XDP filter on veth_v0. Continue? [y/N]: ","fields":{}}\n` — operator's terminal sees a JSON line ending in `}\n` BEFORE the `[y/N]: ` ends; the prompt-to-stdin UX is broken (no visible cursor at end of `[y/N]: `).
+
+Decision: keep the prompt as a RAW `fprintf(stderr, ...)`. JSON-mode operators using `xdpmacfilter bypass` interactively see one non-JSON line during the prompt — acceptable wart for an interactive UI primitive. Non-interactive operators use `xdpmacfilter bypass --unsafe` (no prompt fires) — JSON stream stays pure. Document in §5.32 catalog: "40 of 41 emission sites converted; 1 exempt (interactive prompt at bypass.cpp:96)". `T_BYPASS_INTERACTIVE_PROMPT` text-mode behavior is byte-equivalent (the prompt is unchanged); JSON-mode coverage of bypass is via `bypass.activated` event (the audit line per HK-4 — fully converted).
+
+##### D-3.5-8 — Lazy-init under `std::once_flag` for env-var read — because
+
+The `XDPMF_LOG_FORMAT` env var is read on the FIRST call to `logger::emit()` (NOT at static-initialization time — that would risk SIOF / order-of-init issues). Lazy init under `std::once_flag` ensures:
+- Thread-safe initialization (multiple threads calling `emit()` simultaneously serialize through the `call_once`).
+- Cost: one branch + atomic flag check per emit AFTER the first (negligible).
+- Env-var changes AFTER the first emit are NOT observed (matches R1 read-once contract).
+- Test fixture can spawn the binary with `XDPMF_LOG_FORMAT=json` set in environment; the very first emit (typically `loader.trust_model` for xdpmacfilter at apply, OR `exporter.listening` for xdpmf-exporter at startup) captures the env-var value.
+
+Alternative considered: static initialization. REJECTED — order-of-init is fragile across translation units; `getenv` at static-init time could race with anyone modifying the environment in a parent translation unit's static-init.
+
+##### D-3.5-9 — JSON field order is FIXED (ts, level, event, iface, msg, fields) — because
+
+Stable field order helps:
+- Operators writing simple grep/awk tooling (`grep '"event":"bypass.activated"'` matches at consistent position).
+- Diff-based regression tests on JSON-mode output (reduces noise; jq normalization optional).
+- Future-cycle field additions (new field SHOULD go AFTER `fields` to preserve prefix-byte-equivalence — but schema_version is added BEFORE `ts` in a hypothetical future cycle as the first field, signaling the breaking change).
+
+JSON parsers (jq, Python `json`) are order-insensitive; the FIXED order is purely operational discipline. Documented in logger.hpp comment.
+
+##### D-3.5-10 — NO `bpf_printk` JSON-ification (kernel-side debug-prints) — because
+
+`bpf_printk` writes to `/sys/kernel/debug/tracing/trace` (kernel ringbuffer). Operators tail this via `cat`; the format is dictated by kernel's printk infrastructure (`<6>xdpmf[NNNN]: ...`). Adding JSON wrapping on the kernel side would require BPF helper functions that don't exist; it's out of scope for a userspace-only logging slice. NEW FENCE in §7 OOS.
+
+##### D-3.5-11 — Operator's existing-format `WARN` / `ERROR` / `error:` tokens stay EMBEDDED IN PROSE — because
+
+The pre-§5.32 prose strings already embed level keywords inline (`"xdpmf-exporter: WARN bpffs root..."`, `"xdpmf-exporter: ERROR all..."`, `"error: <what>"`). PI-3.5-1 byte-equivalence requires preserving these embeddings byte-for-byte. The JSON envelope's `"level"` field is the STRUCTURAL mirror (for jq query); the embedded prose token is the HUMAN-READABLE artifact. NO logger pass strips or normalizes the embedded tokens — text mode emits raw prose; JSON mode emits raw prose inside `"msg"` PLUS the `"level"` field separately. Future-cycle text-format refactor (e.g. normalize all-WARN-emissions to `[WARN]` prefix) is a breaking change requiring its own slice; OOS for MVP-3.5.
+
+#### §5.32 TestStrategy entries
+
+##### §6.53 T_LOG_TEXT_BYTE_EQUIVALENT — load-bearing canary for PI-3.5-1
+
+**Trigger**: run a deterministic stderr-producing sequence under THREE env conditions:
+1. `XDPMF_LOG_FORMAT` UNSET (no env var present).
+2. `XDPMF_LOG_FORMAT=""` (empty string).
+3. `XDPMF_LOG_FORMAT="text"` (explicit literal).
+
+Sequence: `xdpmacfilter attach --iface ${IFACE_A}` → `xdpmacfilter apply -f tests/fixtures/config_default.yaml --iface ${IFACE_A}` → `xdpmacfilter detach --iface ${IFACE_A}` → (optional negative) `xdpmacfilter attach --iface /nonexistent` (triggers a usage-error). Capture stderr from each invocation in each env condition.
+
+**Observable outcome**:
+- All 3 env conditions produce BYTE-IDENTICAL stderr (`cmp -s stderr_unset stderr_empty && cmp -s stderr_empty stderr_text` returns success).
+- Stderr matches the captured-at-test-write-time reference (`cmp -s stderr_text tests/fixtures/log_text_reference.txt`). Reference is committed alongside the test (~50 lines of expected stderr; gen'd from MVP-3.4b shipped HEAD at test-write time).
+- Reference comparison MUST be byte-equivalent except for timestamps (none in current loader stderr; the only timestamp in stderr is the sidecar's rule_index.json `applied_at` which is FILE content, not stderr) and process-specific ints (uid, euid, prog_id — these are normalized via `sed 's/uid=[0-9]\+/uid=N/g; s/euid=[0-9]\+/euid=N/g; s/prog id [0-9]\+/prog id N/g'` before comparison).
+
+**Negation control**: run the same sequence under `XDPMF_LOG_FORMAT=json`. Stderr is DIFFERENT (each line is a JSON object). Assert: `cmp stderr_json stderr_text` returns NON-ZERO. This proves the test isn't a no-op (text mode genuinely is byte-equivalent to baseline; JSON mode is genuinely different).
+
+**Assertion mechanism**: `cmp -s` for byte-equivalence between text-mode captures + against the committed reference; `cmp` (without `-s`) for the negation control with stderr to inspect on failure.
+
+**SKIP conditions**: none new (uses existing veth fixture).
+
+**Cleanup**: `cleanup_veth`.
+
+**Maps to**: PI-3.5-1 (load-bearing text-mode byte-equivalence), HG-3.5-1, D-3.5-6 (trailing-newline policy).
+
+**Load-bearing**: this test is the canary for PI-3.5-1. If it fails, EITHER the logger added decoration (a `[level]` prefix slipped in — code bug) OR an emission site's msg lost its `xdpmacfilter:` prefix (refactor regression). Failure mode is clear; impl peer-DMs architect to root-cause.
+
+##### §6.54 T_LOG_JSON_LOADER_EVENTS — attach + apply + detach under JSON mode
+
+**Trigger**: set `XDPMF_LOG_FORMAT=json`; run `xdpmacfilter attach --iface ${IFACE_A}` then `xdpmacfilter apply -f tests/fixtures/config_default.yaml --iface ${IFACE_A}` then `xdpmacfilter detach --iface ${IFACE_A}`. Capture stderr from each invocation.
+
+**Observable outcome**:
+- Each stderr line is a valid JSON object (`jq -e '.' < line.txt` returns success per line; `jq -s '.' < stderr.txt` parses as a valid JSON array of objects).
+- The `loader.trust_model` event fires exactly once per invocation (attach + apply each emit it; detach does NOT — pre-§5.32 behavior preserved). Assert via `jq -s '[.[] | select(.event == "loader.trust_model")] | length == 2'` across attach + apply captures.
+- Each emitted event's `level` value is in `{"info", "warn", "error"}`.
+- For iface-scoped events (`loader.trust_model` is process-scoped per catalog — iface is null; `loader.attach.replace` IS iface-scoped — iface = `${IFACE_A}`), iface field matches catalog expectation.
+- `loader.trust_model` event has `fields.trust_model == "strict"` (under default env).
+
+**Negation control**: re-run sequence with `XDPMF_LOG_FORMAT=text`; assert NO line parses as JSON (`jq -e '.' < text_line.txt` returns NON-ZERO for any non-trivial line). Confirms the env var is doing real work.
+
+**Assertion mechanism**: `jq -e` for shape; `jq -s '[ ... ] | length == N'` for event counts; bash `[[ "$(jq -r '.level' <<< $line)" == "info" ]]` for level extraction.
+
+**SKIP conditions**: `jq` already required. No new SKIP-77.
+
+**Cleanup**: `cleanup_veth`.
+
+**Maps to**: PI-3.5-2 (JSON envelope shape), PI-3.5-4 (event-name catalog enforcement), HG-3.5-2, Q3 E1, Q4 R1.
+
+##### §6.55 T_LOG_JSON_EXPORTER_EVENTS — exporter under JSON mode
+
+**Trigger**: set `XDPMF_LOG_FORMAT=json`; start `xdpmf-exporter --port ${EXPORTER_PORT} --bpffs-root /tmp/does-not-exist-${RANDOM}` in background; let it settle (~500ms); capture stderr; kill via SIGTERM; capture trailing stderr too. THEN repeat with bpffs root that exists but has zero per-iface subdirs.
+
+**Observable outcome**:
+- HK-16 missing-bpffs-root path: stderr contains EXACTLY ONE `exporter.warn.bpffs_root_missing` event (JSON line) with `fields.bpffs_root == "/tmp/does-not-exist-${RANDOM}"`.
+- Startup INFO event `exporter.listening` present with `fields.bind_addr` + `fields.port == ${EXPORTER_PORT}`.
+- Shutdown INFO event `exporter.shutdown` present after SIGTERM (no fields required; iface null).
+- Negation: re-run with `XDPMF_LOG_FORMAT=text`; assert lines are NOT JSON; specifically assert pre-§5.32 HK-16 text line shape `"xdpmf-exporter: WARN bpffs root .* does not exist; will serve empty metrics"` is present byte-equivalent (PI-3.5-1 cross-check at the exporter scope).
+
+For HK-17 ERROR (exit-6 trigger): test setup creates per-iface bpffs dir with `chmod 000` (mirrors T_EXPORTER_EXITS_6_ALL_IFACES_EACCES setup); exporter exits 6 within healthz timeout; stderr captures contain `exporter.error.all_ifaces_eacces` JSON event with `fields.total_discovered == <N>`. If EACCES reproduction not possible in test env, SKIP-77 the HK-17 sub-case (consistent with T_EXPORTER_EXITS_6_ALL_IFACES_EACCES SKIP-77 conditions).
+
+**Assertion mechanism**: `jq -e`; `grep -cE '"event":"exporter.warn.bpffs_root_missing"' stderr.txt == 1`.
+
+**SKIP conditions**: `jq` already required; HK-17 sub-case SKIP-77 if EACCES not reproducible (parallels §6.46).
+
+**Cleanup**: kill exporter; cleanup bpffs test dir.
+
+**Maps to**: PI-3.5-2, PI-3.5-3 (HK-16 + HK-17 byte-equivalence under text-mode + JSON-mode event-name presence), HG-3.5-2.
+
+##### §6.56 T_LOG_JSON_BYPASS_AUDIT — bypass under JSON mode carries HK-4 fields
+
+**Trigger**: set `XDPMF_LOG_FORMAT=json`; `sudo -E -n xdpmacfilter bypass --iface ${IFACE_A} --unsafe --reason T_LOG_JSON_test`. Capture stderr.
+
+**Observable outcome**:
+- Exactly ONE JSON line with `.event == "bypass.activated"`.
+- `.level == "info"`.
+- `.iface == "${IFACE_A}"`.
+- `.fields.uid` is an integer (matches `id -u` of the invoking process).
+- `.fields.euid` is an integer.
+- `.fields.sudo_user` is a string (the real SUDO_USER OR `<none>` if unset — accepts either per HK-4 contract).
+- `.fields.reason == "T_LOG_JSON_test"`.
+- `.msg` equals pre-§5.32 audit line prose (byte-equivalent under text mode — sub-case below).
+
+**Negation control (PI-3.5-1 byte-equivalence under text mode for bypass.activated specifically)**: re-run with `XDPMF_LOG_FORMAT=text`. Assert stderr contains a line matching the pre-§5.32 HK-4 audit-line regex `^xdpmacfilter: BYPASS activated on ${IFACE_A} by uid=[0-9]+ euid=[0-9]+ sudo_user="[^"]*" reason="T_LOG_JSON_test"$`. This is the byte-equivalence cross-check at the bypass scope (T_LOG_TEXT_BYTE_EQUIVALENT covers the broad case; this one is the focused HK-4-specific check).
+
+Second negation: bypass via `--reason` containing characters needing JSON-escape (e.g. `--reason 'has"quote'`). Assert: JSON-mode `.fields.reason == "has\"quote"` (jq-decoded back to `has"quote`); text-mode line preserves the existing HK-4 escape behavior byte-equivalent.
+
+**Assertion mechanism**: `jq -e`; bash `[[ $(jq -r '.fields.reason') == "T_LOG_JSON_test" ]]`; `grep -qE -- "${audit_ere}" "${stderr_text}"`.
+
+**SKIP conditions**: none new (uses existing bypass test setup).
+
+**Cleanup**: `cleanup_veth`.
+
+**Maps to**: PI-3.5-2, PI-3.5-5 (HK-4 structural fields in JSON `fields:{}`), HG-3.5-3, D-3.5-11 (level token embedding preserved).
+
+##### §6.57 T_LOG_JSON_ENVELOPE_INVARIANTS — every JSON line has required fields
+
+**Trigger**: set `XDPMF_LOG_FORMAT=json`; run a SWEEP that exercises many events: `attach` (loader.trust_model), `apply` (loader.trust_model + sidecar warns if applicable), `attach` (alien-refusal triggers loader.attach.replace or fail variant — pick the working subcase), `bypass --unsafe` (bypass.activated), `detach`, then start + stop exporter (exporter.listening + exporter.shutdown). Capture all stderr.
+
+**Observable outcome**: every captured stderr line that's non-empty MUST:
+- Parse as a single JSON object (`jq -e '.' < line`).
+- Have ALL required fields present: `ts`, `level`, `event`, `msg`, `fields`, `iface`.
+- `level` ∈ {`"info"`, `"warn"`, `"error"`} (exact string match).
+- `event` ∈ kEventNames catalog (33 valid values — fetch list at test-time from a compile-time-baked C-string array in a tiny test-only helper, OR hard-coded in the test as a `KNOWN_EVENTS` bash array of 33 strings).
+- `iface` is either a JSON string OR JSON null (NOT absent, NOT object/array/bool).
+- `fields` is a JSON object (possibly empty `{}`; NOT absent, NOT array/scalar).
+- `ts` matches ERE `^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$`.
+- `msg` is a JSON string (possibly multi-line via escaped `\\n` — assert `.msg | type == "string"`).
+
+**Negation control**: artificially construct a malformed JSON line (e.g. `echo '{"ts":"bad","level":"INFO","event":"unknown"}' > bad_line` — missing `msg` + `iface` + `fields`); pipe through the test's per-line validator; assert it REJECTS. Confirms the validator isn't a no-op.
+
+**Assertion mechanism**: per-line `jq -e` for shape; `jq -e '.level | IN("info","warn","error")'`; `jq -e '.event | IN($KNOWN_EVENTS[])' --argjson KNOWN_EVENTS "[\"cli.usage_error\", ...]"` for catalog membership; `jq -e '.iface | type | IN("string", "null")'` for iface type; `jq -e '.fields | type == "object"'`.
+
+**SKIP conditions**: none new.
+
+**Cleanup**: `cleanup_veth`; kill exporter.
+
+**Maps to**: PI-3.5-2, PI-3.5-4 (envelope invariants), HG-3.5-2.
+
+**Load-bearing**: this test prevents drift in the JSON envelope shape across cycles. If a future cycle accidentally omits the `iface` field (or omits `fields`), this test catches it.
+
+##### §6.58 T_LOG_EVENT_CATALOG_STABILITY — kEventNames set equality
+
+**Trigger**: build the binary; introspect `src/common/logger.hpp` for `kEventNames`. Two mechanisms (impl + tester pick):
+- **Mechanism A (simpler — compile-time-baked test helper)**: tester writes a small C++ helper test binary that links logger.cpp + dumps `kEventNames` to stdout (one event-name per line); ctest compares against `tests/fixtures/log_events_v1.txt` (committed reference of 33 names).
+- **Mechanism B (grep-only — no new test binary)**: tester `grep -E '^\s*"[a-z_.]+",\s*/\*' src/common/logger.hpp | sed -E 's/^\s*"([^"]+)".*/\1/'` extracts the 33 names; sort + cmp against committed reference.
+
+Tester picks. Mechanism B is simpler (no test-only TU); architect recommends Mechanism B + the committed reference file.
+
+**Observable outcome**:
+- Extracted list of event names from `kEventNames` source matches `tests/fixtures/log_events_v1.txt` exactly (sorted comparison, byte-equivalent).
+- Count is exactly 33.
+
+**Negation control**: temporarily inject an extra event-name into the source (or remove one) via `sed` on a copy; re-run extractor; assert MISMATCH. Confirms the comparator isn't a no-op. (This sub-case need NOT modify the real source — operate on a copy.)
+
+**Assertion mechanism**: `sort | cmp`; `wc -l`.
+
+**SKIP conditions**: none.
+
+**Cleanup**: rm test-copy if generated.
+
+**Maps to**: PI-3.5-4 (event catalog stability — locked set; one-line table extension required to add a new event in a future cycle), HG-3.5-4, D-3.5-1.
+
+**Load-bearing**: this test enforces the "catalog is a compile-time constexpr table" contract. If a future cycle adds an event-name via magic string literal scattered in source (NOT updating `kEventNames`), this test catches it because the new event-name extracted from emission sites wouldn't be in the catalog (sister-test could grep `logger::emit\(.*"[a-z_.]+"` for actual emit-site usage — optional extension; impl decides).
+
+##### Cross-test note: `xdp_fixture` RESOURCE_LOCK
+
+T_LOG_TEXT_BYTE_EQUIVALENT + T_LOG_JSON_LOADER_EVENTS + T_LOG_JSON_BYPASS_AUDIT + T_LOG_JSON_ENVELOPE_INVARIANTS all use the existing veth fixture (`setup_veth` / `cleanup_veth`); these serialize via `RESOURCE_LOCK xdp_fixture`. T_LOG_JSON_EXPORTER_EVENTS additionally locks `exporter_port_9417`. T_LOG_EVENT_CATALOG_STABILITY needs neither lock (static analysis; can run in parallel with everything).
+
+#### §6.5 Preserved invariants (MVP-3.5 brownfield) — PI-1..PI-34 + PI-3.4b-* hold + PI-3.5-* NEW
+
+All prior invariants (PI-1..PI-34 + PI-3.4b-1..PI-3.4b-9 + PI-7-3.4b-hpp/cpp + PI-7-3.4.5-hpp/cpp + PI-7-3.4-hpp + PI-7-3.3-hpp + PI-7-3.2-hpp) continue to hold post-§5.32 with NO adjudications + NO carve-outs (this slice is strictly additive: NEW shared module + NEW env var + NEW 6 ctests; NO modification of existing data structures, BPF programs, public APIs, or test bodies). PI-7-3.5-hpp continues the loader.hpp ZERO-diff streak (7th consecutive cycle). PI-3.5-1 is the LOAD-BEARING NEW PI of this slice.
+
+Reviewer's 5th framework point walks the COMBINED list (PI-1..PI-34 + PI-3.4b-* + PI-3.5-*) and reports `[INVARIANT-VIOLATED]` per failed check.
+
+**Continuing invariants — restatement for the MVP-3.5 namespace**:
+
+| # | Invariant | §5.32 check mechanism |
+|---|---|---|
+| PI-1..PI-5 | Trust+identity gates ENFORCED in both modes | Re-run §6.9 / §6.14 / §6.15 / §6.20 / §6.26 sub-cases; all pass (logger is orthogonal to gates; gates emit via logger but enforcement path byte-equivalent). |
+| **PI-6-3.5** | **52 pre-§5.32 ctests pass byte-equivalent OR legitimately SKIP-77 — STRICT SUPERSET with ZERO ctest-body-EDIT carve-out** (loader's text-mode emissions are byte-equivalent per PI-3.5-1; no existing ctest needs body update). | Re-run all 52 tests post-§5.32 → all pass (or SKIP-77); `git diff main -- tests/T_*.sh` shows ZERO modified files; 6 NEW files (§6.53..§6.58). All 52 pre-§5.32 ctest bodies byte-equivalent. PI-6-3.4b had 2-EDIT carve-out (T_RULES_SKELETON_NOT_WIRED + T_EXPORTER_METRICS_FORMAT); PI-6-3.5 has ZERO carve-out (text-mode byte-equivalence eliminates the need for any test-body change). Reviewer asserts the empty-diff statement explicitly. |
+| **PI-7-3.5-hpp** | **`loader.hpp` ZERO diff — 7TH consecutive slice** (MVP-3.1 +1; MVP-3.2/3.3/3.4/3.4.5/3.4b/3.5 = 0). ALSO: `src/lib/config.hpp` ZERO diff this slice (2nd cycle). | `git diff main -- src/lib/loader.hpp src/lib/config.hpp` shows ZERO output. Any diff = `[INVARIANT-VIOLATED]`. Logger module owns its own header (`src/common/logger.hpp`); the new public symbols (Level, Format, Field, emit, kEventNames) all live there, NOT in loader.hpp. |
+| PI-8-3.5 | `xdpmacfilter --version` reports `xdpmacfilter 0.8.0` AND `xdpmf-exporter --version` reports `xdpmf-exporter 0.8.0` (shared `version.h` per §5.25 P3) | Run both `--version`; both single-line outputs `0.8.0` + newline. MINOR bump from 0.7.0 (operator-facing feature: structured-logging env var). |
+| PI-9 | `--help` / `--version` output FORMAT preserved + optional one-line addition mentioning `XDPMF_LOG_FORMAT={text,json}` in the env-var block | §6.10 T_CLI_HELP_VERSION re-run passes (forward-compatible ERE). The mention IS optional per architect-spec — impl-flexible. Recommended: ADD `XDPMF_LOG_FORMAT` row to the Environment-variables block in BOTH `cli.cpp::usage_text()` AND `exporter/main.cpp::print_usage()` per HK-6 idiom. |
+| PI-10 | `src/common/mac_filter.h` UNCHANGED | `git diff main -- src/common/mac_filter.h` shows ZERO output (logger constants live in `src/common/logger.hpp` — separate file). PI-10-3.4b ADDITIVE-ONLY continues; this slice doesn't even add to mac_filter.h. |
+| PI-11 | Internal directory layout UNCHANGED | `find src -type d` shows the SAME 5 dirs (`src/lib/`, `src/cli/`, `src/common/`, `src/bpf/`, `src/exporter/`). No new dir; logger.cpp + logger.hpp live within existing `src/common/`. |
+| PI-12 | Pin paths host-global per `nsenter --net` | UNCHANGED. Logger doesn't touch bpffs. |
+| PI-13-3.4b ≡ PI-27 adjudicated | inner-allowlist-value offset-0 byte semantics PRESERVED; value_size 8 stable | UNCHANGED. Logger doesn't touch BPF maps. |
+| PI-14..PI-25 | mode flag / CIDR / STAT_PASS_CIDR / yaml schema / atomic swap / systemd / Ansible | UNCHANGED. |
+| PI-26 | MVP-3.3 historical "no C++/BPF source change" check | UNCHANGED (fires on MVP-3.3 commit set). |
+| PI-28-3.4b | `mac_filter_prog` BPF function body byte-equivalent to MVP-3.4b shape | UNCHANGED. JSON logging is userspace-only; no BPF code touch. |
+| PI-29-3.4b | `rules` map NOT consulted by datapath; `action_table` NOT consulted; inner-VALUE rule_id IS read | UNCHANGED. |
+| PI-30 | `bypass` primitive UNCHANGED in mechanics | UNCHANGED — bypass.cpp:174 audit-line is byte-equivalent under text mode (PI-3.5-1) + structurally exposed under JSON mode. |
+| PI-31-3.4b | Exporter is READ-ONLY by construction | UNCHANGED. Logger does NOT write any BPF map / sidecar file; logger emits to stderr ONLY. `grep -rE 'bpf_(map_(update\|delete)_elem\|obj_pin\|...)' src/exporter/` still returns ZERO. |
+| PI-32-3.4b | Exporter graceful sidecar-orphan tolerance | UNCHANGED. Sidecar-orphan path is unchanged; logger just adds an `exporter.scrape.warn.*` event-name to the existing WARN emission. |
+| PI-33 | Both binaries share version | UNCHANGED in shape; bump to 0.8.0 (PI-8-3.5). |
+| PI-34 ≡ PI-6-3.5 | 52 pre-§5.32 ctests strict-superset with ZERO carve-out | Same check as PI-6-3.5. |
+| PI-3.4b-1..PI-3.4b-9 (MVP-3.4b cycle 1) | rule_counters map / counter survival / struct allow_entry / bump_rule wiring / sidecar / exporter rule labels / config.id source / kManagedMaps[]=13 / 3-EDIT carve-out | UNCHANGED. Logger doesn't touch any of these surfaces. |
+
+**NEW invariants** (MVP-3.5-specific):
+
+| # | Invariant | Check mechanism |
+|---|---|---|
+| **PI-3.5-1** | **TEXT-MODE BYTE-EQUIVALENCE — load-bearing MUST.** Every emission site in TEXT mode (default, OR explicit `XDPMF_LOG_FORMAT=text`, OR `XDPMF_LOG_FORMAT=""`) writes byte-identical output to the pre-§5.32 emission. No `[level]` prefix added. No prose modification. No reordering. The 52-ctest baseline (specifically the 12 ctests that grep stderr text — see catalog below) passes WITHOUT modification. | T_LOG_TEXT_BYTE_EQUIVALENT (§6.53 — load-bearing canary): 3-way byte-equivalence across env conditions + byte-equivalence against committed reference. THE 12 stderr-grep ctests pass post-§5.32 byte-equivalent: T_APPLY_VALID_CONFIG (line 64), T_TRUST_MODEL_FLEET_RELAXES_GATE (lines 90, 118, 146, 185), T_APPLY_REJECTS_MALFORMED (line 110), T_APPLY_EXITS_1_ON_MISSING_CONFIG (line 65), T_EXIT_CODE_9_ON_CONFIG_ERROR (line 62), T_LINK_PERSIST_ACROSS_LOADER_EXIT (line 79), T_SYSTEMD_LIFECYCLE (line 240), T_FLEET_DOCS_SUBSTRING (line 66 — docs only, not stderr but cross-PI documentation), T_BYPASS_CMD_DETACHES (lines 86 + 134), T_BYPASS_INTERACTIVE_PROMPT (lines 309, 348, 391), T_RULES_SKELETON_NOT_WIRED (line 92), T_EXPORTER_NO_ATTACHED_IFACE (line 187), T_EXPORTER_EXITS_6_ALL_IFACES_EACCES (line 275). Total = 13 ctests with byte-equivalence dependency on text-mode emissions; all pass without modification. |
+| **PI-3.5-2** | **JSON-MODE ENVELOPE STABILITY** — every emission under `XDPMF_LOG_FORMAT=json` is a single-line JSON object with fixed-field shape `{ts, level, event, iface, msg, fields}`. `ts` is ISO-8601 UTC second-precision. `level` ∈ {info, warn, error}. `event` is from `kEventNames`. `iface` is string-or-null. `msg` is JSON-escaped string. `fields` is object (possibly `{}`). | T_LOG_JSON_ENVELOPE_INVARIANTS (§6.57): per-line `jq -e` validation across the full sweep. T_LOG_JSON_LOADER_EVENTS (§6.54) + T_LOG_JSON_EXPORTER_EVENTS (§6.55) + T_LOG_JSON_BYPASS_AUDIT (§6.56) lock specific event shapes. |
+| **PI-3.5-3** | **`XDPMF_LOG_FORMAT` ENV VAR CONTRACT** — read once at first emit (lazy init under once_flag); cached for process lifetime; unset/empty/`text` → Text; `json` → Json; any other value → WARN + Text fallback. Documented in both binaries' `--help` env-var block. | T_LOG_TEXT_BYTE_EQUIVALENT (§6.53) covers unset/empty/text 3-way equivalence (R1 + edge cases). T_LOG_JSON_LOADER_EVENTS (§6.54) negation control covers JSON vs Text distinguishability. `xdpmacfilter --help` AND `xdpmf-exporter --help` outputs contain `XDPMF_LOG_FORMAT` token under Environment variables block — verified via T_CLI_HELP_VERSION (recommended ERE forward-compat extension; not a hard fail if absent — see PI-9). |
+| **PI-3.5-4** | **EVENT-NAME CATALOG STABILITY** — `kEventNames` constexpr array contains exactly 33 entries; each entry is a dot-delimited lowercase snake_case identifier; adding/removing an entry requires explicit table extension (grep-visible in diff). | T_LOG_EVENT_CATALOG_STABILITY (§6.58): sort + cmp against committed reference `tests/fixtures/log_events_v1.txt`. Any drift = `[INVARIANT-VIOLATED]`. |
+| **PI-3.5-5** | **HK-4 STRUCTURAL FIELDS IN JSON `bypass.activated.fields:{}`** — uid (int), euid (int), sudo_user (string-or-`<none>`), reason (string, JSON-escaped) all present + correct type. Text-mode byte-equivalent to HK-4 audit line per PI-3.5-1. | T_LOG_JSON_BYPASS_AUDIT (§6.56): jq assertions on each fields entry + text-mode negation cross-check via existing HK-4 regex from T_BYPASS_INTERACTIVE_PROMPT.sh line 309 pattern. |
+| **PI-3.5-6** | **ONE EMISSION SITE EXEMPT** — `src/cli/bypass.cpp:96` (interactive prompt) stays as raw `fprintf(stderr, ...)` per D-3.5-7. NOT converted. NO logger include in that single emission. JSON-mode operators using bypass interactively see one non-JSON line (the prompt); document as known wart. | `grep -nE 'fprintf\(stderr.*BYPASS will detach' src/cli/bypass.cpp` returns line 96; `grep -nE 'logger::emit.*bypass\.prompt' src/cli/bypass.cpp` returns ZERO. Documented in CHANGELOG. |
+| **PI-3.5-7** | **NO NEW EXTERNAL BUILD DEP** — logger.cpp uses only stdlib (`<cstdio>`, `<ctime>`, `<string>`, `<string_view>`, `<variant>`, `<span>`, `<optional>`, `<array>`, `<mutex>`, `<cstdlib>` for getenv). NO `nlohmann/json`, NO `fmt`, NO `spdlog`, NO any logger library. Roll-your-own JSON envelope per D-3.4b-10 precedent extended. | `grep -E '^#include' src/common/logger.{cpp,hpp}` returns ONLY stdlib headers (`<...>`). `find_package` / `target_link_libraries` for logger TU adds NO new library link. CMake diff shows only `target_sources` additions. |
+
+**No deletions/relaxations** of PI-1..PI-34 + PI-3.4b-* in this slice. Strictly additive. No carve-outs.
+
+PI-7-3.5-hpp STRENGTHENS PI-7-3.4b-hpp (7th consecutive ZERO-diff cycle on loader.hpp + 2nd on config.hpp). PI-10 holds at ZERO diff (stronger than its previous "additive-only" baseline — this slice doesn't add to mac_filter.h at all).
+
+#### §5.32 verifiable invariants for reviewer
+
+(Per architect-spec §6.5 "Verification-hints discipline": these are GUIDANCE for the reviewer, NOT contracts for impl. Default MAY. Reserve MUST only for true PI-* contracts (PI-1..PI-34 + PI-3.4b-* + PI-3.5-* ARE MUSTs by definition; the items below MAY be relaxed by impl if a contract elsewhere demands it). **Resolution rule for prose-vs-invariants conflicts within this amendment: invariants block wins, prose loses; if impl deviates on a SHOULD/MAY hint to satisfy a PI-* contract, reviewer's correct disposition is `inline-merge` on the hint text — NOT `[UNRELATED-EDIT]` on impl.**)
+
+In addition to PI-1..PI-34 + PI-3.4b-* + PI-3.5-* above:
+
+- `git diff main -- src/lib/loader.hpp src/lib/config.hpp` SHOULD show ZERO output (PI-7-3.5-hpp — 7th consecutive cycle on loader.hpp + 2nd on config.hpp).
+- `git diff main -- src/common/mac_filter.h` SHOULD show ZERO output (PI-10 stricter-than-additive this slice).
+- `git diff main -- src/bpf/mac_filter.bpf.c` SHOULD show ZERO output (PI-28-3.4b continues — userspace-only slice).
+- `git diff main -- tests/T_*.sh` SHOULD show: 6 NEW files (§6.53..§6.58) AND ZERO modified files (PI-6-3.5 strict superset with ZERO carve-out).
+- `git diff main -- tests/CMakeLists.txt` SHOULD show 6 new `add_test` entries; ZERO modification to the 52 existing entries.
+- `git diff main -- tests/fixtures/` SHOULD show: 2 NEW files (`log_text_reference.txt` for §6.53 + `log_events_v1.txt` for §6.58); ZERO modification of existing fixtures.
+- `git diff main -- CMakeLists.txt` SHOULD show: VERSION bump 0.7.0 → 0.8.0; 2 lines added (logger.cpp added to xdpmf_internal AND xdpmf-exporter target_sources).
+- `git diff main -- CHANGELOG.md` SHOULD show NEW `[0.8.0]` entry + Build-pace MVP-3.5 row.
+- NEW files SHOULD exist: `src/common/logger.{cpp,hpp}`, 6 `tests/T_LOG_*.sh`, 2 `tests/fixtures/log_*.txt`.
+- 6 new ctests SHOULD pass (§6.53..§6.58); §6.53 (T_LOG_TEXT_BYTE_EQUIVALENT) is THE load-bearing canary.
+- 52 pre-§5.32 ctests SHOULD still pass byte-equivalent (or legitimately SKIP-77). The 13 stderr-grep ctests catalogued under PI-3.5-1 SHOULD pass byte-equivalent specifically without ctest-body modification.
+- `xdpmacfilter --version` SHOULD report `xdpmacfilter 0.8.0` AND `xdpmf-exporter --version` SHOULD report `xdpmf-exporter 0.8.0` (PI-8-3.5).
+- `XDPMF_SANITIZERS=ON` build SHOULD be clean for BOTH binaries (no UB / no leaks from new logger code; the `std::once_flag` + `std::variant` + `std::optional` usage is standard).
+- `XDPMF_LOG_FORMAT=text xdpmacfilter --version` AND `XDPMF_LOG_FORMAT=json xdpmacfilter --version` AND unset-env-var `xdpmacfilter --version` SHOULD all produce IDENTICAL stdout `xdpmacfilter 0.8.0` (logger doesn't intercept stdout; --version goes to stdout per existing semantic).
+- `grep -nE 'fprintf\(stderr.*BYPASS will detach' src/cli/bypass.cpp` SHOULD return line 96 (PI-3.5-6 — the EXEMPT site stays raw).
+- `grep -c 'logger::emit' src/` SHOULD return ≥40 (40 converted emission sites; impl may collapse some into helper functions).
+- `kEventNames` constexpr array SHOULD have exactly 33 entries (PI-3.5-4).
+- Helper duplication SHOULD show: `grep -c 'json_escape' src/lib/sidecar.cpp` == 1 (the existing) + `grep -c 'json_escape' src/common/logger.cpp` == 1 (the new duplicate) — D-3.5-2 contract. (Both call-sites bear the same semantic, byte-equivalent escaping.)
+- Optional: a tiny integration sanity-check: `XDPMF_LOG_FORMAT=json xdpmacfilter attach --iface ${IFACE_A} 2>&1 | head -1 | jq -e '.event == "loader.trust_model"'` SHOULD return success on a kernel that supports BPF.
+
+#### §7 OOS — MVP-3.5 components SHIPPED + new fences + cycle 2/3 surfaced
+
+##### Moved from deferred to SHIPPED (per MVP-3.5)
+
+The following item was deferred at §5.30 §7 OOS (carry-forward through 5 cycles 3.4.5 / 3.4b / 3.4c-name / MVP-3.4b cycle 1 / informal pending) and is now CLOSED by this slice:
+
+- ~~**JSON structured logs (MVP-3.5)**~~ **— SHIPPED in §5.32** as `XDPMF_LOG_FORMAT={text,json}` env var + `src/common/logger.{cpp,hpp}` module + 33-event catalog + 6 ctests + 40 emission-site conversions (1 exempt: bypass.cpp:96 interactive prompt). NDJSON envelope per HG-3.5-2; ISO-8601 sec-precision timestamps per Q2 T1; dot-delimited event names per Q3 E1; read-once env-var per Q4 R1; flat-scalars-only fields per Q5 F1; dup-TU compile per Q6 B1.
+
+##### Additional MVP-3.5 deliverables (surfaced in this slice)
+
+- **Phase A grep dividend**: 41 emission sites confirmed → 40 converted + 1 EXEMPT (bypass.cpp:96 interactive prompt). Brief's "8 files" enumeration corrected during Phase A: `src/cli/apply.cpp` listed in brief but has ZERO emissions (was a false-positive in brief author's count). Actual 8 files: `src/cli/{main,bypass}.cpp`, `src/lib/{loader,sidecar}.cpp`, `src/exporter/{main,http,stats_reader,rule_counters_reader}.cpp`. Documented in §5.32 FileList prose + D-3.5-7 exempt rationale.
+- **PI-6-3.5 ZERO carve-out** — first multi-source-touch slice since MVP-3.4b cycle 1 with literally ZERO ctest body modifications. Achievable because PI-3.5-1 text-mode byte-equivalence is a strict MUST + the 52 existing ctests are all forward-compatible.
+- **PI-7-3.5-hpp 7th-cycle ZERO-diff on loader.hpp + 2nd on config.hpp** — extends the streak. Logger module owns its own header per D-3.5-1.
+- **13-stderr-grep ctests catalogued under PI-3.5-1** — explicit list of which existing ctests gate the load-bearing PI. Reviewer's framework point 5 walks this list specifically.
+
+##### Surfaced as next-natural slice
+
+**MVP-3.5b — Log destination + level filtering** (gating on operator demand):
+- `XDPMF_LOG_DEST={stderr,file,syslog,journald}` — file destination + log rotation. NEW FENCE for MVP-3.5.
+- `XDPMF_LOG_LEVEL={info,warn,error}` — level-based filtering. Mute info-level events at process-lifetime granularity.
+- Live-toggle via SIGHUP — alternative R3 from Q4. Cycle 1 ships R1 read-once.
+
+**MVP-3.4b cycle 2 — atomic-swap promotion of `rules` map + counter management API** (carry-forward unchanged from §5.31 surfaced-next-natural).
+
+**MVP-3.4c — action-table dispatch (drop rules operative)** (carry-forward unchanged from §5.31).
+
+##### NEW out-of-scope fences (per §5.32; carry-forward unchanged from §5.31 unless noted)
+
+- **`XDPMF_LOG_DEST` (file/syslog/journald destinations)** — MVP-3.5b candidate. Cycle 1 is stderr-only. NEW FENCE.
+- **Log rotation** — operators wrap stderr with their own log shippers (rsyslog, vector, fluentbit). Native rotation OOS forever. NEW FENCE.
+- **`XDPMF_LOG_LEVEL` (level-based filtering)** — MVP-3.5b candidate. Cycle 1 emits all events always. NEW FENCE.
+- **Per-iface log routing** — separate stderr streams per iface; not needed at current event rate. NEW FENCE.
+- **`schema_version` field in JSON envelope** — added when a future cycle ships a breaking change; cycle 1 implicit schema_version=1. NEW FENCE.
+- **`bpf_printk` JSON-ification** — kernel-side BPF debug-prints stay text (D-3.5-10). Userspace stderr only converts. NEW FENCE.
+- **`src/common/json.{cpp,hpp}` extraction** — duplicated helpers in logger.cpp per D-3.5-2; future cycle MAY extract if 3rd JSON emitter surfaces. NEW FENCE.
+- **`uint64_t` FieldValue variant** — `int64_t` only per D-3.5-3; future cycle MAY add if a use case surfaces. NEW FENCE.
+- **Nested objects or arrays in `fields:{}`** — flat scalars only per Q5 F1; future cycle MAY relax. NEW FENCE.
+- **Multi-line msg splitting into per-line events** — cli.usage_text stays as ONE event with embedded `\\n` (D-3.5-5); not split into N events. NEW FENCE.
+- **Conversion of `src/cli/bypass.cpp:96` interactive prompt** — explicitly EXEMPT per D-3.5-7 + PI-3.5-6. JSON-mode operators using bypass interactively see one non-JSON line (the prompt). NEW FENCE.
+- **Text-mode format evolution** (e.g. add `[level]` prefix to text-mode emissions) — PI-3.5-1 byte-equivalence is the load-bearing contract; ANY text-mode shape change is a breaking-change slice requiring its own cycle + ctest body updates. NEW FENCE.
+- **Live env-var re-read on SIGHUP** — Q4 R3 rejected; cycle 1 ships R1 read-once. NEW FENCE.
+- **Q4 R2 per-emit getenv** — REJECTED at Q4; read-once R1 ships. NEW FENCE.
+- **`nlohmann/json` or any JSON library dep** — D-3.4b-10 zero-deps precedent extends to logger via D-3.5-2 + PI-3.5-7. NEW FENCE.
+- **Async/queued logger** — synchronous fprintf only; async (e.g. lock-free queue + drain thread) is OOS forever (architecture-level complexity for marginal benefit at current event rates). NEW FENCE.
+- **Color/ANSI escape codes in text mode** — none. Text mode is plain bytes byte-equivalent to MVP-3.4b shape. NEW FENCE.
+- **Doc bucket D1..D13** — user-driven manual pass; not /mint-dev. (Carry-forward.)
+- **Security M3 / Perf M1-M4 / TSAN / CO-RE field-probe** — separate cycles (carry-forward).
+- **MVP-3.4b cycle 2** (atomic-swap promotion of `rules` map; action_table dispatch) — carry-forward.
+- **Library extraction `libxdpmf.so.0` (MVP-3.6+)** — carry-forward.
+- **Daemon `xdpmfd` (MVP-3.6+)** — carry-forward.
+- **Binary rename `xdpmacfilter` → `xdpfilter` (MVP-3.12)** — carry-forward.
+- **L4 ports / VLAN / IPv6 CIDR** — carry-forward.
+- **sFlow (MVP-3.6 conditional)** — carry-forward.
+
+##### Anti-misdiagnosis notes (institutional learning, per architect-spec §6.6)
+
+This slice carries forward all anti-misdiagnosis guards from prior cycles + adds three specific to MVP-3.5:
+
+1. **Cap-set declaration on a NEW invocation path** (inherited from §5.28 / §5.29 / §5.30 / §5.31): unchanged. No new systemd unit cap-mask changes; logger is userspace-only synchronous fprintf — no new syscalls beyond those already exercised.
+
+2. **Silent-divergence-from-design pattern** (inherited from [[impl-role-discipline]]): impl follows design; disagreement is OK but ONLY via explicit Phase B escalation. Specific to this slice: PI-3.5-1 text-mode byte-equivalence is the load-bearing call; **if impl considers ANY decoration in text-mode output (level prefix, timestamp prefix, color codes, etc.), impl MUST SendMessage architect BEFORE shipping**. Default workaround surface is broad; silent decoration could mask the contract violation until a future cycle's ctest catches it.
+
+3. **Verification-hints discipline trap** (inherited from prior cycles): the §5.32 verifiable invariants section above is GUIDANCE for the reviewer, NOT contracts for impl. Items default to SHOULD/MAY; MUST is reserved for PI-* contracts. Resolution rule for prose-vs-invariants conflicts within this amendment: invariants block wins, prose loses (stated once per the amendment template; this single statement covers all §5.32 prose vs. PI-* conflicts).
+
+4. **Phase A code-grep discipline pays off (cont.)** (inherited from §5.31 EDIT-1 + EDIT-2 cycle): the Phase A grep of stderr emission sites + env-var existing patterns + helper-location decision caught (a) brief's "src/cli/apply.cpp" listed but ZERO emissions there (corrected to 8 actual files); (b) brief's "1 of 41 sites is interactive prompt at bypass.cpp:96" not flagged in brief but architect-spec sub-rule "where is X called per-runtime" caught it (interactive prompt ≠ log event semantic — D-3.5-7 EXEMPT decision flowed); (c) helper duplication vs extraction trade-off (D-3.5-2 keeps slice contained vs library-extraction scope creep). **Future-cycle guard for any architect agent**: BEFORE publishing brownfield design.md, grep ALL literal counts the brief mentions, classify each emission site by per-runtime semantic (UI vs log vs interactive prompt), and pre-decide helper-location trade-offs. The 30-minute Phase A pass during this slice's architecture phase reduced expected Phase B EDITs from ~2 (MVP-3.4b average) to ~0 expected (TBD pending impl).
+
+5. **Interactive-vs-log emission distinction (NEW guard #8, MVP-3.5-specific)** — when adding a logger to a codebase that has mixed log + interactive-UI fprintf-to-stderr sites, an automatic "convert all stderr fprintf" pass would break interactive UX. **Future-cycle architect anti-misdiagnosis rule**: when introducing a NEW logger module that wraps stderr emissions in a structured envelope (JSON, key=value, etc.), grep ALL emission sites + classify each as (a) log event with trailing `\n` OR (b) interactive UI primitive (no trailing `\n`, fflushed before stdin read OR before terminal cursor positioning). UI primitives MUST be EXEMPT from wrapping. Cost: 10-30 seconds of manual review per emission site during Phase A. Benefit: catches THIS class of bug before Phase 2 surfaces broken interactive UX in test runs. **Validated by §5.32 D-3.5-7**: bypass.cpp:96 was the ONE interactive primitive in 41 sites; correctly identified at Phase A; PI-3.5-6 documents the exemption.
+
+6. **Helper-location decision trap (NEW guard #9, MVP-3.5-specific)** — when a NEW source file (logger.cpp) needs the same helper functions as an EXISTING source file (sidecar.cpp), the temptation is to "DRY it up" by extracting to a new shared header. This pulls the existing source file into the slice's edit surface (sidecar.cpp's helper-section becomes "EDITED"), invalidating regional-diff fences. **Future-cycle architect anti-misdiagnosis rule**: prefer duplication of small (<100 LOC) helpers vs extraction-into-shared-module in brownfield slices. The cost of duplication is small + intentional + scope-contained; the cost of premature abstraction is a touchpoint on existing stable files that destabilizes their per-cycle contracts. **Validated by §5.32 D-3.5-2**: ~50 LOC of `json_escape` + `format_timestamp_utc` duplicated in logger.cpp vs extracted to src/common/json.{cpp,hpp}; the latter would have added 2 new files + a touchpoint on sidecar.cpp + a tester EDIT on T_SIDECAR_JSON_SHAPE's assertion regex (potentially). Duplication keeps the §5.32 slice strictly additive — PI-6-3.5 ZERO carve-out.
+
+Evidence: `mint/task-brief.md` MVP-3.5 brief (HG-3.5-1/2/3/4 + Q1-Q6 + PI-3.5-1 framing); `mint/architecture-v2.md` §"§5.30 §7 OOS" carry-forward fence (5 cycles); §5.13 (project's no-logging-library historical decision — §5.32 re-reads as "no LIBRARY DEPENDENCY; in-tree logger is fine"); §5.26 D-3.4-3 (read-once env-var pattern); §5.29 (exporter stderr-line shapes — PI-32 startup WARN posture); §5.30 HK-4 (bypass audit-line structural fields), HK-16 (PI-32 startup WARN exact format), HK-17 (exit-6 ERROR exact format), HK-8 (version bump pattern); §5.31 D-3.4b-10 (roll-your-own JSON writer, zero-deps), D-3.4b-14 (line-oriented format precedent), D-3.4b-17 (non-fatal sidecar write failures); project memory [[impl-role-discipline]] (Phase B escalation discipline); [[mint-hld-scope-discipline]] (single-architect cycle, no /mint-hld); architect-spec Phase A code-grep discipline (30-minute grep pass — emission catalog + helper-location decision + interactive-vs-log classification).
