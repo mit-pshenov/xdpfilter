@@ -1,173 +1,140 @@
-# Task brief — MVP-3.5: JSON structured logs (brownfield)
+# Task brief — MVP-3.5.5: mini housekeeping (brownfield, test-infra + design-text)
 
 ## Goal
 
-Add `XDPMF_LOG_FORMAT={text,json}` env var to BOTH binaries (`xdpmacfilter` and `xdpmf-exporter`). When `XDPMF_LOG_FORMAT=json`, every diagnostic stderr line becomes a single-line JSON object with a stable schema (one event per line, NDJSON-style). When unset OR `text` (default), the existing stderr lines are byte-equivalent to current behaviour — fleet operators who grep text don't break.
+Close the **chronic -j4 parallelism instability** that has been recurring across MVP-3.4.5, MVP-3.4b cycle 1, and MVP-3.5 — most acutely surfaced by MVP-3.5's A/B reviewer experiment where 3 independent ctest re-runs (tester + 2 reviewers) each produced a different flake victim set (T_MODE_NATIVE_UNSUPPORTED / T_BUILD / T_SANITIZER_BUILD / T_RULE_COUNTER_MAC_HIT_BUMPS / T_BPFFS_ROOT_SYMLINK). All pre-existing failures pass in isolation or serial — pure RESOURCE_LOCK omission on shared host state (`lo` iface; bpffs pin dirs after timeout cascades).
 
-The slice closes the **carry-forward fence** that's been sitting in §7 OOS since MVP-3.4.5 (5 consecutive cycles). It's the next-natural architectural slice per `architecture-v2.md` post-MVP-3.4b sequencing, and it pairs naturally with MVP-3.4b's structural fields work (per-rule counters → operator-readable Prometheus labels; JSON logs → operator-readable diagnostic stream). Together they complete the "observability surface" promise.
+Pure test-infra cleanup. No new operator-facing feature, no datapath change, no production source touches except the design.md institutional-learning bake-in (anti-misdiagnosis guard #12) + one prior-cycle OOT closure (MVP-3.4.5 review's `xdpmf-exporter: shutdown` stderr marker clarification).
 
-Scope is **41 stderr emission sites across 8 files** (grep-counted, brief-author Phase A discipline applied — see notes at bottom). Mostly mechanical conversion once the logger module + event-name catalog are in place. Estimated budget: **~1 cycle, low-medium risk**. Largest risk vectors: (a) text-mode byte-equivalence regression on the 52-ctest baseline (any text-mode drift = `[REGRESSION]`); (b) JSON shape decisions baking in long-lived contracts (event names, field types, timestamp format — operators will write log-shipping pipelines against these).
+The slice ships **4 small items**:
+
+1. **HK-A**: `RESOURCE_LOCK lo_iface` added to all ctests using `--iface lo` (6 candidates: T_APPLY_EXITS_1_ON_MISSING_CONFIG, T_CLI_BAD_MAC, T_CLI_CAPACITY, T_DETACH_NOTHING, T_EXIT_CODE_9_ON_CONFIG_ERROR, T_MODE_NATIVE_UNSUPPORTED — architect verifies which actually touch loader kernel state vs pure CLI parser).
+2. **HK-B**: Cleanup-on-exit hardening — tests creating bpffs pin dirs (T_RULE_COUNTER_*, T_LINK_PERSIST, etc.) ensure trap EXIT removes their PID-scoped pin dirs even on timeout / SIGTERM. Prevents cascade failures into T_BPFFS_ROOT_SYMLINK + subsequent runs.
+3. **HK-C**: Close MVP-3.4.5 OOT defer — `xdpmf-exporter: shutdown` stderr marker clarification in design.md (one-line note that the marker is benign and may appear before HK-17 ERROR — architect adds to §5.29 or §5.30 as a footnote, the choice is architect's).
+4. **HK-D**: Anti-misdiagnosis institutional learning — bake "chronic -j4 parallelism instability" pattern into design.md as guard #12 (with actionable check: when adding NEW ctest that touches shared host state — bpffs root, `lo` iface, fixed port — REQUIRE RESOURCE_LOCK declaration matching that resource's lock domain).
+
+Estimated budget: **<1 cycle, low risk**. Smallest LOC delta since MVP-3.4.5 housekeeping. Mostly tests/CMakeLists.txt edits + 2 design.md prose additions.
 
 ## Context: prior work
 
-- **All prior briefs**: archived in `mint/task-brief-mvp{1,1.1*,2-*,3.1,3.2,3.3,3.4,3.4.5,3.4b-c1}.md`. Most recent: MVP-3.4b cycle 1 per-rule counters (round-1 pass 2026-05-25; 52/52 ctests + 0 findings + 1 OOT inline-merge).
-- **Existing design**: `mint/design.md` — §5.31 (MVP-3.4b cycle 1 — per-rule counters + sidecar JSON writer in `src/lib/sidecar.cpp`) is the **direct ancestor** for the JSON-writing idiom. The roll-your-own JSON writer pattern is now established (zero `nlohmann/json` dep; ~200 LOC for sidecar; expect ~250-300 LOC for the logger module given more event types). `src/lib/sidecar.cpp` is the reference implementation — its `json_escape`, atomic-write idiom, line-oriented format are all relevant.
-- **Architecture document**: `mint/architecture-v2.md` — MVP-3.5 row sketches "JSON structured logs in loader + exporter". §"§5.30 §7 OOS" introduced the explicit fence + likely-shape sketch: `{"ts":"<iso8601>","level":"<info|warn|error>","event":"<name>","iface":"<iface or null>","msg":"<existing prose>","fields":{...}}`. This brief refines that sketch with concrete decisions.
-- **`/mint-review` audit (commit `325e2ee`)** has no MVP-3.5-specific findings — pre-3.5 audit so JSON logs weren't reviewable. Cross-cutting "structured-logging" sentiment was an implicit M2-class fleet-ops finding.
-- **PI continuity**: `loader.hpp` is in its 6th consecutive ZERO-diff cycle + `config.hpp` 1st cycle (per Phase A grep dividend in MVP-3.4b). This brief is **likely to break** the loader.hpp streak only if a new internal helper signature lands in the header (architect decides where logger module's public surface lives — `src/lib/logger.{cpp,hpp}` is the natural shape, NOT in `loader.hpp`). Brief author's expectation: **PI-7-3.5-hpp is byte-equivalent on `loader.hpp` (7th consecutive cycle)** + ZERO-or-additive on `config.hpp` (2nd cycle); the logger module owns its own header.
+- **All prior briefs**: archived in `mint/task-brief-mvp{1,1.1*,2-*,3.1,3.2,3.3,3.4,3.4.5,3.4b-c1,3.5}.md`. Most recent: MVP-3.5 JSON structured logs (round-1 pass 2026-05-25; 58 ctests; 4 OOT inline-merges from A/B; first A/B reviewer experiment completed).
+- **Existing design**: `mint/design.md` — §5.29 (exporter HTTP server + `shutdown` stderr marker site) + §5.30 (MVP-3.4.5 housekeeping precedent for this brief's shape) + §5.31 (per-rule counters) + §5.32 (JSON structured logs). This brief is a **direct descendant** of MVP-3.4.5's shape — small numbered HK items + design-text bake-ins + no new operator-facing surface.
+- **MVP-3.5 review** (`mint/review.md`) — A/B synthesis flagged 1 OOT (logger.hpp:97 stale comment, already inline-merged) + the parallelism-flake observation as informational. The flake observation is now THIS slice's HK-A + HK-B.
+- **MVP-3.4.5 review** (`git show 325e2ee:mint/review.md` for archived; current `mint/review.md` is MVP-3.5) — 1 OOT deferred: pre-existing `xdpmf-exporter: shutdown` stderr marker between `run()` return and HK-17 ERROR line. This brief's HK-C closes it.
+- **Phase A code-grep discipline**: brief author already grepped to identify the 6 lo-touching ctests + the 3 bpffs-pin-touching ctests (T_RULE_COUNTER_MAC_HIT_BUMPS / T_RULE_COUNTER_CIDR_HIT_BUMPS / T_RULE_COUNTER_SURVIVES_APPLY). Architect re-verifies + extends as needed.
+- **PI continuity**: `loader.hpp` is in its 7th consecutive ZERO-diff cycle + `config.hpp` 2nd. This brief is **strictly test-infra + design-text only** — ZERO C++ source touches expected. **PI-7-3.5.5-hpp** = 8th cycle ZERO diff on loader.hpp + 3rd on config.hpp + extends to ALL of `src/` (NO source touches whatsoever; userspace + BPF + headers all ZERO diff). Strongest PI-7 cycle since MVP-3.3 ("ENTIRE src+include+cmake tree ZERO diff").
 
 ## Workflow rules (brownfield mode)
 
-- **Architect**: read existing `design.md` §5.29 (MVP-3.4 — exporter stderr lines + bypass primitive audit-log) + §5.30 (MVP-3.4.5 — HK-4 escape + sudo identity in audit-log; HK-16 startup WARN format) + §5.31 (MVP-3.4b — `src/lib/sidecar.cpp` JSON-writer pattern; D-3.4b-10 zero-deps discipline; D-3.4b-14/20 line-oriented format) + §6.5 PI-1..PI-34 + new PI-3.4b-1..9 + §7 OOS. **Apply Phase A code-grep discipline** (post-MVP-3.4.5 architect-spec rule, sub-rule added post-MVP-3.4b): grep ALL stderr emission sites (`grep -rnE '(std::|f)?(printf|fprintf|cerr <<|fputs|fputc).*stderr' src/` → **41 sites across 8 files** per brief-author count); for each, identify whether it's an event (gets a stable event-name) or a free-form message (gets `msg` field only). EDIT `design.md` in place. Append `§5.32 MVP-3.5: JSON structured logs in loader + exporter`. Update §6.5 — PI-1..PI-34 + PI-3.4b-1..9 continue; **NEW PI-3.5-1 text-mode byte-equivalence** is the load-bearing invariant; PI-7-3.5-hpp byte-equivalent-or-additive continuation. Update §7 OOS — close MVP-3.5 deliverables; surface MVP-3.4b cycle 2 (atomic-swap promotion of `rules` map per D-3.4-4; action_table dispatch) AND MVP-3.5+ candidates (file/syslog destinations; log rotation; per-iface routing — all OOS this cycle).
-- **Impl**: brownfield mode. FileList is a DIFF. Expect 1 NEW source pair `src/lib/logger.{cpp,hpp}` (logger module — format selector via env var + per-event emitter helpers + event-name catalog as `constexpr` table). ~9-12 EDITED source files (the 8 stderr-emitting files + CMakeLists.txt + CHANGELOG + design.md). Each existing stderr emission site converts to a `logger::emit(level, event_name, "<prose>", fields...)` call. Text mode renders byte-equivalent to the pre-§5.32 line (this is the load-bearing PI-3.5-1 contract); JSON mode renders the JSON envelope.
-- **Tester**: NEW ctests (target 5-7):
-  - `T_LOG_JSON_ATTACH_EVENTS.sh` — set `XDPMF_LOG_FORMAT=json`, run `attach`, capture stderr, parse with `jq`, assert each line is valid JSON with `{ts, level, event, msg}` + appropriate `iface` + `fields`. Negation: same trigger with `XDPMF_LOG_FORMAT=text` → no JSON lines (or default behaviour).
-  - `T_LOG_JSON_APPLY_EVENTS.sh` — same for `apply` (richer event set: rule counts, atomic_swap flip, sidecar write).
-  - `T_LOG_TEXT_BYTE_EQUIVALENT.sh` — **LOAD-BEARING canary for PI-3.5-1**: run a known stderr-producing sequence (attach + apply + detach with deterministic inputs) under `XDPMF_LOG_FORMAT=text` (default) and compare stderr byte-for-byte against MVP-3.4b's expected output. ANY drift = fail.
-  - `T_LOG_JSON_EXPORTER_EVENTS.sh` — exporter under `XDPMF_LOG_FORMAT=json`; verify HK-16 startup WARN + HK-17 exit-6 ERROR (when triggered) + normal startup `listening on …` line are valid JSON with matching `event` names.
-  - `T_LOG_JSON_BYPASS_AUDIT.sh` — bypass primitive's audit-log line under JSON mode; verify HK-4 structural fields (uid, euid, sudo_user, reason) map to JSON `fields:{}` cleanly.
-  - Optional: `T_LOG_EVENT_CATALOG_STABILITY.sh` — micro-test asserting that the event-name catalog (a compile-time constexpr table in `logger.hpp` per architect's choice) contains the expected set of event names; locked-in to prevent silent rename of an event-name across cycles.
-  - Existing 52 ctests post-MVP-3.4b must continue to pass (PI-6-3.5 strict superset). PI-3.5-1 byte-equivalence is the explicit fence — any ctest that greps stderr text MUST still pass without modification.
+- **Architect**: read existing `design.md` §5.29 / §5.30 / §6.5 PI-1..PI-34 + PI-3.5-1..7 + anti-misdiagnosis guards #1..#11. EDIT `design.md` in-place. Append `§5.33 MVP-3.5.5: mini housekeeping (test-infra parallelism + design-text bake-ins)`. **No new PIs** (housekeeping by nature). Update §6.5 — PI-1..PI-34 + PI-3.5-1..7 continue; **PI-7-3.5.5-hpp** extends ZERO-diff invariant to ALL of `src/` (no source touches). Add **anti-misdiagnosis guard #12** per HK-D. Update §7 OOS — close the 1 OOT (HK-C); surface no new fences. **Apply Phase A code-grep discipline** (architect-spec rule + sub-rule "where is X called per-runtime"): verify which of the 6 lo-touching ctests actually invoke the loader's kernel-side path vs pure CLI parse — only the former need lo_iface lock; pure parser tests don't touch `lo` state.
+- **Impl**: brownfield mode. FileList is a DIFF. Expect **0 NEW files**. **3 EDITED**: `tests/CMakeLists.txt` (HK-A — add `RESOURCE_LOCK lo_iface` to 4-6 add_test entries per architect's filter); selected `tests/T_*.sh` files (HK-B — trap EXIT hardening for 3 bpffs-pin-touching tests); `mint/design.md` (HK-C inline footnote + HK-D guard #12 — architect handles these in-place). **NO C++ source touches** (PI-7-3.5.5-hpp ZERO diff on entire src/). **NO CMakeLists.txt VERSION bump expected** (PATCH-tier housekeeping at most: 0.8.0 → 0.8.1; architect decides — could even stay at 0.8.0 if no operator-facing change).
+- **Tester**: NO new ctests this cycle (HK-A/HK-B fix EXISTING tests; HK-C/HK-D are design-text). EDIT existing ctests per HK-B catalog (architect specifies which tests need trap-EXIT hardening). Tester verifies via Phase B that all 58 existing ctests still pass + the targeted -j4 parallelism flakes no longer fire. Specifically: run `ctest -j4` 3 times in succession and verify ZERO failures across all 3 runs (stability canary for HK-A/HK-B).
 - **Reviewer**: 5-point brownfield framework. Special attention:
-  - **(1) PI-3.5-1 byte-equivalence is the load-bearing invariant** — verify `T_LOG_TEXT_BYTE_EQUIVALENT` passes AND verify NO ctest body changes (the 52 existing ctests' stderr-grep assertions all hold byte-equivalent).
-  - **(2) Event-name catalog stability** — verify the catalog is a compile-time `constexpr` table (per architect's design decision in Q1) so that adding/removing an event is grep-visible in the diff. No magic string literals scattered across emission sites.
-  - **(3) JSON shape compliance** — verify each JSON line parses with `jq`; verify required fields (`ts`, `level`, `event`, `msg`) always present; verify `iface` is null-or-string (not missing); verify `fields:{}` is always an object (possibly empty, never absent).
-  - **(4) PI-7-3.5-hpp** — `loader.hpp` byte-equivalent OR additive-only (impl-discretion — architect picks). `git diff main -- src/lib/loader.hpp` MUST be empty OR purely additive (new declarations, no removed/renamed symbols).
-  - **(5) Out-of-scope drift fence**: no file destination logic, no log rotation, no syslog/journald-specific code, no per-iface routing. Logger emits to stderr only this cycle.
+  - **(1) PI-7-3.5.5-hpp** — ZERO diff on ALL of `src/`. `git diff <baseline> -- src/` MUST return zero lines.
+  - **(2) PI-3.5.5-1 parallelism resilience** — 3 consecutive `ctest -j4` runs MUST all pass (zero failures across the 3 runs). This is the load-bearing canary for HK-A + HK-B.
+  - **(3) PI-3.5-1 byte-equivalence preserved** — text-mode stderr untouched; no logger conversions this slice.
+  - **(4) Anti-misdiagnosis guard #12 explicit + actionable** — design.md §5.33 adds guard #12 with the actionable check ("when adding NEW ctest that touches shared host state, REQUIRE RESOURCE_LOCK declaration").
+  - **(5) MVP-3.4.5 OOT closure** — HK-C clarification added to design.md (architect decides §5.29 footnote OR §5.30 footnote OR §5.33 inline note); review.md "Deferred to next slice" list now empty.
 
-## Human-gate decisions (defaults applied — override at architect Phase A if you disagree)
+## Human-gate decisions (defaults applied — override at architect Phase A)
 
-### HG-3.5-1: Text-mode backward compat — **MUST be byte-equivalent**
+### HG-3.5.5-1: HK-A scope — **all 6 lo-touching ctests get `RESOURCE_LOCK lo_iface`** by default; architect prunes if false positives
 
-Per `XDPMF_LOG_FORMAT` default `text` semantic: existing stderr lines are byte-equivalent to MVP-3.4b shape. No reordering, no field additions, no prose changes. Operators grepping for `"xdpmacfilter: config error: open"` continue to see the same line. The 52-ctest baseline IS the validation — any drift in text-mode stderr breaks at least one ctest's grep assertion.
+Brief-author's grep returned 6 candidates: T_APPLY_EXITS_1_ON_MISSING_CONFIG, T_CLI_BAD_MAC, T_CLI_CAPACITY, T_DETACH_NOTHING, T_EXIT_CODE_9_ON_CONFIG_ERROR, T_MODE_NATIVE_UNSUPPORTED. Some may be PURE CLI parse-and-exit tests where the `--iface lo` string never reaches the loader's kernel-side attach (e.g. config_open() throws first OR bad-MAC parse rejects before any iface state-machine work). Those don't need the lock.
 
-**Default**: **PI-3.5-1 byte-equivalence is MUST**. The new logger's text-rendering MUST produce identical output to the pre-§5.32 emission site. Implementation-wise this means: each emission site's pre-§5.32 `fprintf(stderr, "...")` string becomes the `msg` parameter of `logger::emit(level, event, "<exact-old-string>", ...)`; in text mode the logger just writes `<exact-old-string>` + newline; in JSON mode it wraps. Architect may amend the test grep patterns if a future-cycle wants to evolve text-mode (e.g. add a `[level]` prefix) — that would be a deliberate breaking change requiring its own slice; OOS for MVP-3.5.
+**Default**: architect reads each test body + classifies. Add `RESOURCE_LOCK lo_iface` ONLY where the test actually invokes loader's kernel-side path on `lo` (attach/apply/detach state-machine reaches the iface). Pure-parser tests stay unlocked.
 
-**If architect picks "text mode adds [level] prefix"** (semantically richer text output): all 52 ctests' grep patterns need updating + PI-3.5-1 framed as a STRENGTHENING of existing format. Architect's stronger call.
+### HG-3.5.5-2: HK-B scope — **3 bpffs-pin-touching ctests get trap EXIT hardening**
 
-### HG-3.5-2: JSON shape — **single-line flat envelope** (one NDJSON line per event)
+T_RULE_COUNTER_MAC_HIT_BUMPS, T_RULE_COUNTER_CIDR_HIT_BUMPS, T_RULE_COUNTER_SURVIVES_APPLY all attach the loader to a veth and create per-iface pin dirs at `${PIN_DIR}/<iface>/`. On TIMEOUT (the -j4 contention scenario), the test's main script dies WITHOUT running its trap EXIT cleanup if the trap is registered too late or interrupted mid-cleanup. T_BPFFS_ROOT_SYMLINK then refuses to corrupt the non-empty `${PIN_DIR}` and fails cascading.
 
-Per architecture-v2.md sketch + JSON Lines / NDJSON convention:
-```json
-{"ts":"2026-05-25T17:30:00Z","level":"info","event":"attach.success","iface":"veth_v0","msg":"attached prog id 29760 to veth_v0","fields":{"prog_id":29760}}
-```
+**Default**: tester adds defense-in-depth to the trap EXIT in those 3 tests: explicit `sudo rm -rf "${PIN_DIR}/${IFACE_A}/" "${PIN_DIR}/${IFACE_B}/"` (PID-scoped iface names, so safe). Also: pre-test sweep — at the START of each, `sudo rm -rf "${PIN_DIR}/xdpmf_*_${TEST_PID}/"` to clean up any stale dirs from a prior aborted run. Combined: cleanup happens on normal exit AND on the worst-case "test was killed mid-cleanup" + pre-test wipes residue.
 
-- **One event = one line** (newline-terminated; no pretty-printed multi-line JSON).
-- **Required fields**: `ts`, `level`, `event`, `msg` (always present, never null).
-- **Conditional fields**: `iface` (null if event isn't iface-scoped; string if it is — never absent).
-- **Free-form**: `fields:{}` (object; empty `{}` if no structural data; never absent).
-- **No schema_version field in MVP-3.5** — operators can detect via presence of `ts` field; explicit schema_version added when a breaking change ships.
+### HG-3.5.5-3: HK-C OOT closure — **architect adds inline note in §5.29 (`run()` teardown)**
 
-**Default**: **above shape**. Architect can prune (e.g., drop `iface` and put it in `fields:{}`) but the flat top-level fields make jq queries cleaner (`jq 'select(.iface=="veth_v0")'` vs `jq 'select(.fields.iface=="veth_v0")'`).
+The OOT from MVP-3.4.5: pre-existing `xdpmf-exporter: shutdown` stderr marker between `http::run()` exit and HK-17 ERROR line. Contract not violated (HK-17 ERROR fires + exit(6); shutdown marker is teardown signal). Operator-observable: extra benign line under MVP-3.4 / MVP-3.4.5 baseline; under MVP-3.5 JSON mode, the shutdown marker becomes `exporter.shutdown` event (already in catalog).
 
-### HG-3.5-3: Bypass audit-log under JSON mode — **emit as event `bypass.activated`**
+**Default**: architect adds one-line note in §5.29 (next to the run() teardown discussion) — "the `xdpmf-exporter: shutdown` line emitted at run() exit is a benign teardown marker; under HK-17 trigger path it appears BEFORE the HK-17 ERROR line per the global-stop-then-final-error flow — assertion ERE for HK-17 uses substring match (not line-exclusive), so this is not contract-violating." ~3 LOC of prose. Closes the OOT.
 
-HK-4 / D-3.4.5-8 already gave the bypass audit-log structural fields (uid, euid, sudo_user, reason). Under JSON mode these slot naturally into `fields:{}` of a `bypass.activated` event. This is the cleanest demonstration that "JSON mode = structural fields exposed", and it pairs with HK-4's permissive regex extension in T_BYPASS_CMD_DETACHES (the test already accepts both shapes per MVP-3.4.5 EDIT-3).
+### HG-3.5.5-4: HK-D anti-misdiagnosis guard #12 — **bake into design.md as institutional learning**
 
-**Default**: yes — `bypass.activated` event with the 4 fields. Architect picks event-name (`bypass.activated` vs `bypass.audit` vs alternatives) per Q3 below.
+Across MVP-3.4.5, MVP-3.4b cycle 1, MVP-3.5: chronic -j4 parallelism instability has surfaced each cycle. Different victim per run; all pass in isolation/serial. Pattern: tests touching shared host state without RESOURCE_LOCK declaration race under -j4 scheduling.
 
-### HG-3.5-4: Event-name discovery vs assignment — **architect catalogs all event names in design.md §5.32**
+**Default**: architect adds to design.md §5.33 (or a §6.6 anti-misdiagnosis notes block) — "guard #12: when adding a NEW ctest that touches shared host state (bpffs root, named iface like `lo`, fixed port, systemd unit, ansible inventory), the new ctest's `add_test()` entry MUST declare an appropriate `RESOURCE_LOCK` matching that resource's lock domain (xdp_fixture for veth; lo_iface for `lo`; exporter_port_9417 for the exporter port; etc.). MVP-3.5.5 HK-A fixes the inherited gap on `lo`. Future ctest additions are guard'ed by this rule."
 
-Each of the ~41 stderr sites maps to ONE of:
-- A specific named event (loader: ~15 events; exporter: ~5 events; bypass: ~3 events; ~23 events total).
-- A generic free-form "info" / "warn" / "error" line that doesn't deserve an event (these get `event="generic"` OR the architect inlines them into specific events; default: architect groups them under ~5 generic event names like `loader.info`, `exporter.error`).
+## Open mechanism questions (architect decides; document in §5.33)
 
-**Default**: architect grep-walks the 41 sites + proposes a catalog of ~25-30 event names in §5.32. Brief author has NOT pre-cataloged them (would require reading 41 sites — that's architect's Phase A work per the spec rule). Catalog goes into design.md as a constexpr table + becomes the `constexpr` table in `logger.hpp` per Q1.
+### Q1: HK-A — `lo_iface` lock name
 
-## Open mechanism questions (architect decides; document in §5.32)
+- **L1**: `lo_iface` (matches `xdp_fixture` / `exporter_port_9417` naming convention — lowercase, underscore-separated, descriptive)
+- **L2**: `loopback_iface`
+- **L3**: `lo` (terse; matches Linux convention but loses lock-name clarity)
 
-### Q1: Logger module location — **`src/lib/logger.{cpp,hpp}`** (new file pair)
+**Recommendation**: **L1**. Consistent with project convention.
 
-- **M1**: NEW `src/lib/logger.{cpp,hpp}` — separate module; `src/lib/logger.hpp` exposes `logger::emit(level, event, msg, fields)` + the event-name catalog as a `constexpr` table; `src/lib/logger.cpp` implements format selection (text vs JSON via env var read once at startup) + JSON envelope rendering. Mirrors the §5.31 sidecar split.
-- **M2**: Inline helper functions in `src/cli/cli.cpp` (loader) + `src/exporter/main.cpp` (exporter) — DUPLICATE the logger logic. Smaller LOC delta but less DRY.
-- **M3**: Single `src/common/logger.{cpp,hpp}` shared between loader + exporter — slightly different from M1 (`src/common` vs `src/lib`). `src/common` is the right home for shared-by-both-binaries headers (cf. `mac_filter.h`).
+### Q2: HK-B — pre-test cleanup vs trap-only cleanup
 
-**Recommendation**: **M3** — `src/common/logger.{cpp,hpp}`. Both binaries need it; `src/common` is the established home for cross-binary code. Compiles into both `xdpmf_internal` library and the exporter binary.
+- **C1**: Trap EXIT cleanup ONLY (idempotent rm -rf at trap). Relies on trap firing.
+- **C2**: Pre-test cleanup ONLY (rm -rf at test start, before any setup). No trap.
+- **C3**: BOTH — pre-test + trap (defense-in-depth). Belt-and-suspenders.
 
-### Q2: Timestamp format — **ISO-8601 UTC with `Z` suffix**
+**Recommendation**: **C3**. Pre-test wipe + trap cleanup = robust across both "previous run died" + "this run dies" scenarios. The -j4 chronic-instability scenario is exactly the case where one or the other is needed.
 
-- **T1**: `"2026-05-25T17:30:00Z"` (ISO-8601, UTC, second-precision). Matches `src/lib/sidecar.cpp::format_timestamp_utc` from MVP-3.4b — already implemented helper that can be promoted to `src/common/logger.cpp` (or stay in sidecar and be called from there).
-- **T2**: `"2026-05-25T17:30:00.123456Z"` (ISO-8601 with microsecond precision). Useful for ordering events fired within the same second.
-- **T3**: `1748192195` (epoch seconds) or `1748192195000000000` (epoch nanoseconds). Smaller, sort-friendly, but operator-unfriendly (need to convert for human reading).
+### Q3: Version bump 0.8.0 → 0.8.1 (PATCH)?
 
-**Recommendation**: **T1** (ISO-8601 second-precision). Matches existing sidecar precedent. Operators can grep `2026-05-25T17:` for hourly windows. Microsecond precision (T2) is over-engineering for current event rates (which are operator-action events, not packet-rate events).
+- **V1**: Yes — bump to 0.8.1. Standard Keep-a-Changelog practice for any release-tagged change.
+- **V2**: No — keep 0.8.0. Pure test-infra + design-text, no operator-facing change; doesn't warrant a tag.
 
-### Q3: Event-name convention — **`<subsystem>.<action>[.<outcome>]`** dot-delimited
+**Recommendation**: **V2**. The smallest housekeeping cycle to date — no operator-facing change, no new ctest, no new design contract (just clarification + guard bake-in). Defer version bump to next operator-facing slice. CHANGELOG.md can gain an `[Unreleased]` section note for traceability without bumping the released version.
 
-- **E1**: Dot-delimited path: `attach.success`, `attach.fail.tag_mismatch`, `apply.start`, `apply.complete`, `bypass.activated`, `exporter.scrape.error.permission_denied`. Hierarchical, easy to filter (`.startswith("attach.")`).
-- **E2**: snake_case flat: `attach_success`, `attach_fail_tag_mismatch`, etc. Simpler; matches existing C++ snake_case identifiers.
-- **E3**: camelCase flat: `attachSuccess` etc. Inconsistent with project's C/snake_case convention.
+### Q4: Stability canary — separate ctest or test-runner script?
 
-**Recommendation**: **E1** (dot-delimited). Hierarchical event-names are the convention in structured-logging ecosystems (ECS, OpenTelemetry); easy to filter via `jq 'select(.event | startswith("attach."))'`. Slightly more characters than E2 but operator-readable wins.
+- **K1**: NEW ctest `T_PARALLELISM_RESILIENCE.sh` — runs `ctest -j4` 3 times in succession, asserts ZERO failures across all 3 runs. Self-contained.
+- **K2**: NO new ctest. Tester verifies manually in Phase B by running 3× ctest -j4 + reports stability.
+- **K3**: Add a script `tests/ci/stability_probe.sh` (NOT a ctest) that operators / CI can invoke externally.
 
-### Q4: Env-var read timing — **once at startup, cached for process lifetime**
-
-- **R1**: Read `XDPMF_LOG_FORMAT` once at startup; cache the format choice in a `constexpr` (no — `const`) module-static; every emission site reads the cached value. **Process restart required to switch format.**
-- **R2**: Read on every emission. Cost: a `getenv` per stderr write. **Live-toggleable via env var update.**
-- **R3**: Re-read on SIGHUP. Compromise.
-
-**Recommendation**: **R1**. Matches the existing pattern (`XDPMF_TRUST_MODEL`, `XDPMF_BPFFS_ROOT` — all read once). Live-toggleable logging is over-engineering; if an operator wants to switch they restart the binary (cheap).
-
-### Q5: `fields:{}` value types — **flat scalars only** (string, int, bool, null)
-
-- **F1**: Only scalar values in `fields:{}`. No nested objects, no arrays. Each field is `"key":"string"|123|true|null`.
-- **F2**: Allow nested objects (e.g., `fields: {"pin_paths": {"a": "/sys/fs/bpf/...", "b": "/sys/fs/bpf/..."}}`).
-- **F3**: Allow arrays (e.g., `fields: {"failed_ifaces": ["veth0", "veth1"]}`).
-
-**Recommendation**: **F1** (flat scalars). Matches the §5.31 sidecar one-rule-per-line shape; minimal JSON writer complexity (no recursive nesting); operators can re-construct nested structures from multiple events if needed.
-
-### Q6: Logger build into both binaries — **CMake target inclusion**
-
-- **B1**: `src/common/logger.cpp` added to BOTH `xdpmf_internal` (linked by loader) AND `xdpmf-exporter` target. Two compilations of the same TU.
-- **B2**: `src/common/logger.cpp` becomes a separate STATIC library `xdpmf_common`; both binaries link it. Cleaner CMake but introduces a new target.
-- **B3**: `src/common/logger.{cpp,hpp}` in `xdpmf_internal` only; exporter linked against `xdpmf_internal` (already half-true — exporter doesn't link `xdpmf_internal` today; would change build graph). Probably wrong shape.
-
-**Recommendation**: **B1** (duplicate compilation). Minimal CMake change; symmetric to `src/lib/sidecar.cpp` which is only in `xdpmf_internal` (exporter has its own `sidecar_reader.cpp`). One TU compiled twice is negligible cost.
+**Recommendation**: **K2**. K1 would itself contend with the very flakes it's measuring (recursion problem: a ctest-of-ctests under -j4 hits the same RESOURCE_LOCK contention). K3 is good but adds scope. Tester's Phase B manual verification is sufficient + cheap.
 
 ## Scope (cycle 1 — concrete items)
 
-### Item PI-3.5-1 — Logger module (`src/common/logger.{cpp,hpp}`)
-**Where**: NEW `src/common/logger.{cpp,hpp}` (~250-300 LOC total). `logger.hpp` exposes `enum class Level {Info, Warn, Error}`, `enum class Format {Text, Json}`, `void emit(Level, std::string_view event, std::string_view msg, std::span<const Field> fields = {})` where `struct Field { std::string_view key; FieldValue value; }` and `FieldValue` is a variant of `string_view | int64_t | bool | nullptr_t`. Module-static `Format g_format` cached from `XDPMF_LOG_FORMAT` env var at first call. Event-name catalog as `constexpr std::array<std::string_view, N> kEventNames` for stability checks. JSON writer reuses `json_escape` idiom from `src/lib/sidecar.cpp:38-158` (architect picks whether to refactor sidecar's escape helper into `src/common/json.{cpp,hpp}` shared OR duplicate the helper in logger.cpp).
+### Item HK-A — `RESOURCE_LOCK lo_iface` on lo-touching ctests
+**Where**: `tests/CMakeLists.txt` — for each `add_test(NAME T_X COMMAND ...)` that touches `--iface lo` AND invokes loader's kernel-side path, ADD `RESOURCE_LOCK lo_iface` to its `set_tests_properties(T_X PROPERTIES ... RESOURCE_LOCK lo_iface)` block. Pure parser tests stay unlocked. Architect classifies; impl applies. ~6 line touches max, likely 4 (T_CLI_BAD_MAC + T_CLI_CAPACITY may be pure-parser).
 
-### Item PI-3.5-2 — Stderr-emission site conversion (~41 sites across 8 files)
-**Where**: EDIT `src/cli/main.cpp`, `src/cli/cli.cpp`, `src/cli/bypass.cpp`, `src/cli/apply.cpp` (if it has emission sites — check during Phase A), `src/lib/loader.cpp`, `src/lib/sidecar.cpp`, `src/exporter/main.cpp`, `src/exporter/http.cpp`, `src/exporter/stats_reader.cpp`, `src/exporter/rule_counters_reader.cpp` — convert each `fprintf(stderr, "<prose>", ...)` to `logger::emit(Level::<...>, "<event-name>", "<prose>", {Field{...},...})`. Text mode preserves byte-equivalence per HG-3.5-1.
+### Item HK-B — Trap EXIT + pre-test cleanup hardening
+**Where**: `tests/T_RULE_COUNTER_MAC_HIT_BUMPS.sh`, `tests/T_RULE_COUNTER_CIDR_HIT_BUMPS.sh`, `tests/T_RULE_COUNTER_SURVIVES_APPLY.sh` (and any other test architect identifies as bpffs-pin-creating). Each gets: pre-test `sudo rm -rf "${PIN_DIR}/<iface_a>/" "${PIN_DIR}/<iface_b>/"` ~3 LOC near top + defense-in-depth `sudo rm -rf` re-statement inside `cleanup_veth()` or trap. ~10-15 LOC across 3 files.
 
-### Item PI-3.5-3 — Event-name catalog in design.md + logger.hpp
-**Where**: §5.32 in design.md contains the full table (~25-30 events: `attach.success`, `attach.fail.config`, `attach.fail.tag_mismatch`, `attach.fail.kernel_unsupported`, `detach.success`, `apply.start`, `apply.complete`, `apply.fail`, `bypass.activated`, `bypass.cancelled`, `exporter.listening`, `exporter.warn.bpffs_root_missing`, `exporter.error.all_ifaces_eacces`, `exporter.scrape.warn.iface_eacces`, `loader.warn`, `loader.info`, `exporter.warn`, `exporter.error`, ...). Architect commits the catalog in §5.32; `logger.hpp` mirrors it as a `constexpr` table.
+### Item HK-C — MVP-3.4.5 OOT closure (design-text)
+**Where**: `mint/design.md` §5.29 (or §5.30 or §5.33 — architect's call per HG-3.5.5-3). ~3 LOC inline note on benign `xdpmf-exporter: shutdown` marker.
 
-### Item PI-3.5-4 — Tests (5-7 new ctests)
-**Where**: `tests/T_LOG_JSON_ATTACH_EVENTS.sh`, `tests/T_LOG_JSON_APPLY_EVENTS.sh`, `tests/T_LOG_TEXT_BYTE_EQUIVALENT.sh`, `tests/T_LOG_JSON_EXPORTER_EVENTS.sh`, `tests/T_LOG_JSON_BYPASS_AUDIT.sh`, optional `tests/T_LOG_EVENT_CATALOG_STABILITY.sh`. Plus tests/CMakeLists.txt entries.
-
-### Item PI-3.5-5 — Version bump 0.7.0 → 0.8.0 + CHANGELOG
-**Where**: `CMakeLists.txt` (VERSION 0.7.0 → 0.8.0 — MINOR bump because new operator-facing env var + new structured-logging surface). `CHANGELOG.md` (new `[0.8.0]` entry per Keep-a-Changelog; sub-groups: Added — logger module + JSON format + 5-7 ctests; Internal — 41 stderr-site conversions).
+### Item HK-D — Anti-misdiagnosis guard #12 (institutional learning)
+**Where**: `mint/design.md` §5.33 (the new section). ~5-10 LOC describing the chronic-parallelism class-of-bug + actionable check for future ctest additions.
 
 ## Out of scope (explicit)
 
-- **File / syslog / journald destinations** — `XDPMF_LOG_DEST={stderr,file,syslog,journald}` is candidate scope for a follow-up cycle (MVP-3.5+; brief author calls it MVP-3.5b if/when it surfaces). This cycle is stderr-only.
-- **Log rotation** — operators wrap stderr with their own log shippers (rsyslog, vector, fluentbit); native rotation is OOS forever.
-- **Per-iface log routing** — separate stderr streams per iface; not needed at current event rate.
-- **Log level filtering via env var** — `XDPMF_LOG_LEVEL={info,warn,error}` could mute info-level events; OOS this cycle (all events always emitted).
-- **Schema_version field in JSON envelope** — added when a future cycle ships a breaking change; cycle 1 implicit schema_version=1.
-- **bpf_printk JSON-ification** — kernel-side BPF debug-prints stay text; only userspace stderr converts.
+- **No new ctests** (HK-A/HK-B fix existing tests; K1 stability-canary ctest rejected per Q4).
+- **No C++ source touches** (PI-7-3.5.5-hpp ZERO diff on entire src/).
+- **No CMakeLists.txt VERSION bump** (per Q3=V2; defer to next operator-facing slice).
+- **No CHANGELOG.md entry** (no released version this cycle; can update `[Unreleased]` section if desired).
+- **No new operator-facing surface** (no new env var, no new CLI flag, no new BPF map, no new exit code).
+- **Consolidated anti-misdiagnosis guards file** (`~/.claude/agents/mint-dev/anti-misdiagnosis-guards.md`) — workflow-level edit, outside /mint-dev scope; user actions inline if desired.
+- **MVP-3.5b** (XDPMF_LOG_DEST file/syslog/journald + XDPMF_LOG_LEVEL) — carry-forward.
 - **MVP-3.4b cycle 2** (atomic-swap promotion of `rules` map; action_table dispatch) — carry-forward.
-- **Doc bucket D1..D13** — user-driven manual pass, not /mint-dev.
-- **Security M3 / Perf M1-M4 / TSAN / CO-RE field-probe** — separate cycles.
+- **Doc bucket D1..D13** — user-driven manual, separate pass.
 
 ## Definition of done
 
-- `§5.32 MVP-3.5` amendment in `design.md` with full event-name catalog (~25-30 entries) + Q1-Q6 decisions + HG-3.5-1/2/3/4 confirmation.
-- `xdpmacfilter --version` reports `xdpmacfilter 0.8.0` (MINOR bump from 0.7.0).
-- `xdpmf-exporter --version` reports `xdpmf-exporter 0.8.0`.
-- `CHANGELOG.md` entry `[0.8.0] - 2026-05-NN`.
-- 5-7 new ctests pass; 52 existing ctests still pass byte-equivalent (PI-3.5-1 text-mode contract — load-bearing canary T_LOG_TEXT_BYTE_EQUIVALENT).
-- `XDPMF_SANITIZERS=ON` build clean.
-- `mint/review.md` round-1 verdict = `pass` (cycle is low-medium risk; aim for round-1 pass).
+- `§5.33 MVP-3.5.5 mini housekeeping` amendment in `design.md` documenting HK-A..HK-D + Q1-Q4 decisions + HG-3.5.5-1/2/3/4 confirmation.
+- §6.5 Preserved invariants extended: **PI-7-3.5.5-hpp** ZERO diff on ALL of `src/` (strongest cycle since MVP-3.3); **PI-3.5.5-1** parallelism resilience (3 consecutive `ctest -j4` runs zero failures).
+- Anti-misdiagnosis guard #12 added (chronic -j4 parallelism instability).
+- 58 existing ctests still pass.
+- Tester Phase B 3-run stability verification confirms zero flakes.
+- `mint/review.md` round-1 verdict = `pass`.
 - One git commit per phase boundary per workflow B.
 
 ## Dependencies
 
-- No new build deps (roll-your-own JSON writer per MVP-3.4b D-3.4b-10 precedent).
-- `jq` in test runtime (existing dep; multiple new ctests grep JSON output).
+- No new build deps.
+- No new test runtime deps.
 - No new BPF features.
 - No new kernel-version dependencies.
 
@@ -177,26 +144,26 @@ Each of the ~41 stderr sites maps to ONE of:
 mode: brownfield
 packs:
   architect:  []
-  impl:       [lang/cpp.md, lang/cmake.md]
+  impl:       [lang/cmake.md]
   tester:     [test/bpf-xdp.md]
   reviewer:   []
 ```
 
-Note: `lang/bpf.md` pack DROPPED from impl this cycle (no datapath edit; pure userspace work). Tester pack stays since ctests still attach loader against veth fixture.
+Note: `lang/cpp.md` + `lang/bpf.md` packs DROPPED from impl (no C++ source touches; no BPF touches). Only cmake pack needed for `tests/CMakeLists.txt` edits.
 
 ---
 
 ## Pre-brief sanity check (per [[mint-hld-scope-discipline]])
 
-This brief defers no questions to /mint-hld; all open questions are tactical (architect-tier). The JSON shape, event-name convention, env-var timing, etc., have strong defaults (industry conventions: NDJSON, dot-delimited event names, read-once env vars). No multi-axis design space to brainstorm. Single architect via standard /mint-dev is correct.
+Mechanical answer falls out of stated constraints: add `RESOURCE_LOCK lo_iface` to lo-touching tests; add cleanup hardening to bpffs-pin tests; close one OOT; bake one guard. No multi-axis design space to brainstorm. Single architect via standard /mint-dev is correct.
 
 ## Notes for architect Phase A code-grep discipline (per architect spec rules)
 
-Brief author already ran these greps (April 2026 sense of "Phase A discipline" applied at brief-write time per [[mint-hld-scope-discipline]] post-MVP-3.4b retrospective). Architect should re-verify:
+Brief author already ran initial greps. Architect should re-verify + extend:
 
-- `grep -rnE '(std::|f)?(printf|fprintf|cerr <<|fputs|fputc).*stderr' src/` → **41 sites across 8 files** (cli/{main,bypass,apply}.cpp, lib/{loader,sidecar}.cpp, exporter/{main,http,stats_reader,rule_counters_reader}.cpp). Architect catalog event names against this list during Phase A.
-- `Read src/lib/sidecar.cpp:38-158` — the existing `json_escape` + `format_timestamp_utc` helpers. Decide: promote to `src/common/json.{cpp,hpp}` shared OR duplicate in `src/common/logger.cpp`.
-- `grep -nE "XDPMF_LOG_FORMAT\|XDPMF_LOG" .` — should return ZERO matches (env var doesn't exist yet).
-- `grep -nE 'XDPMF_(BPFFS_ROOT|TRUST_MODEL|ENABLE_BPF_OBJECT_OVERRIDE|SANITIZERS)' src/ docs/` — existing env-var patterns; new XDPMF_LOG_FORMAT follows the same idiom (read-once at startup; documented in `--help` env-var block per HK-6).
-- `grep -rnE 'fprintf\(stderr.*[A-Z][a-z]+ ' src/` — find sites that emit identifying prefixes (`xdpmacfilter:`, `xdpmf-exporter:`); these become `event` candidates rather than `msg` candidates per the architect-spec sub-rule "where is X called per-runtime".
-- Read existing ctests that grep stderr (`grep -rnE 'grep.*stderr\|grep.*\.stderr' tests/` or similar) — these are the byte-equivalence canaries. Architect catalogs the regex set so PI-3.5-1 has explicit invariant list.
+- `grep -l 'iface lo' tests/T_*.sh` → 6 files. Read each + classify: pure-parser vs loader-kernel-touching. Only the latter need `RESOURCE_LOCK lo_iface`.
+- `grep -rnE 'PIN_DIR.*/.*pin\|bpf_obj_pin' tests/T_*.sh` → find bpffs-pin-touching tests. Cross-check with HK-B target list (T_RULE_COUNTER_*); add any missed test to HK-B catalog.
+- `Read tests/T_BPFFS_ROOT_SYMLINK.sh` — the cascade-victim test; understand its "refuse to corrupt non-empty bpffs root" precondition so HK-B trap cleanup targets the right pin dirs.
+- `grep -nE "anti-misdiagnosis|guard #[0-9]+" mint/design.md` — locate the 11 existing guards; choose where #12 lives (§5.33 standalone block, OR extension to whichever section has the existing guards table).
+- `git log --grep="-j4\|parallelism\|RESOURCE_LOCK" --oneline` — find prior commits that addressed similar issues (T_SANITIZER_BUILD timeout bump `e31cfcd`; T_BPFFS_ROOT_SYMLINK lock); use as precedent for HK-B+HK-D wording.
+- `Read mint/review.md` (current MVP-3.5 review.md) — confirm the 1 OOT (`xdpmf-exporter: shutdown` stderr marker) is the right closure target per HG-3.5.5-3. **Wait** — the current `mint/review.md` is MVP-3.5's; the OOT defer was MVP-3.4.5's. Architect retrieves the MVP-3.4.5 review.md via `git log --grep "MVP-3.4.5 housekeeping" --oneline` → `c0b537a` → `git show c0b537a:mint/review.md` for the deferred-OOT block.
