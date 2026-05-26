@@ -139,13 +139,22 @@ set_tests_properties(T_SANITIZER_BUILD PROPERTIES
 
 # ─────────────────────────────────────────────────────────────────────────
 # MVP-1.1C additions (§5.21 D1-D4 / §6.10-§6.13).
-# D1/D2/D3 are pure CLI-parser tests — no root, no veth, no RESOURCE_LOCK.
-# D4 needs CAP_BPF for bpf_xdp_query — uses `lo` instead of veth, so no
-# RESOURCE_LOCK either (lo is shared but we make no state changes).
-# All four use TIMEOUT 10 (binary launch + parse + exit only).
+# D1/D2/D3 are pure CLI-parser tests — no root, no veth.
+#   - T_CLI_HELP_VERSION: pure binary invocation, no iface — no lock.
+#   - T_CLI_BAD_MAC: 4 sub-cases all fail at parse_mac() BEFORE iface
+#     resolution — pure parser path, no `lo` interaction — no lock.
+#   - T_CLI_CAPACITY: parser-rejects-65 path, BUT the test's defensive
+#     "sanity floor" post-check reads `lo`'s XDP slot and FAILs if non-
+#     empty (§6.11). Under -j4 contention a concurrent attach-test on
+#     `lo` (T_DETACH_NOTHING / T_MODE_NATIVE_UNSUPPORTED /
+#     T_APPLY_EXITS_1_ON_MISSING_CONFIG negation branch) would race this
+#     read and produce false-positive FAILs. §5.33 HK-A classifier
+#     (D-3.5.5-1) flags this for `lo_iface` lock even though the loader
+#     never touches `lo` from this invocation — reads are AT RISK under
+#     contention (guard #12).
+# All use TIMEOUT 10 (binary launch + parse + exit only).
 foreach(T IN ITEMS
     T_CLI_HELP_VERSION
-    T_CLI_CAPACITY
     T_CLI_BAD_MAC
 )
     add_test(
@@ -159,12 +168,33 @@ foreach(T IN ITEMS
     )
 endforeach()
 
+# T_CLI_CAPACITY: separated from the no-lock foreach above per §5.33 HK-A
+# (D-3.5.5-1 classifier). Defensive `lo`-state read at post-check → must
+# serialize against other `lo`-touching tests under -j4 to avoid a
+# concurrent-attach race producing false-positive FAILs.
+add_test(
+    NAME T_CLI_CAPACITY
+    COMMAND bash ${TEST_DIR}/T_CLI_CAPACITY.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_CLI_CAPACITY PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK lo_iface
+    TIMEOUT 10
+)
+
 # T_DETACH_NOTHING needs passwordless sudo (calls bpf_xdp_query under root).
 # Per §5.22 amendment to §6.13: this entry takes RESOURCE_LOCK xdp_fixture
 # so it cannot race the destructive setup window of T_BPFFS_ROOT_SYMLINK
 # (§6.15) — that test transiently rmdir's /sys/fs/bpf/xdpmacfilter and a
 # concurrent T_DETACH_NOTHING would either trip the new PathRefused exit 8
 # (failure) or observe a wrong post-state. Test logic itself unchanged.
+#
+# §5.33 HK-A (D-3.5.5-1 classifier): extended to multi-lock
+# "xdp_fixture;lo_iface" — loader's detach state-machine probes `lo` via
+# bpf_xdp_query AND the post-check asserts on `lo`'s XDP slot. Follows
+# the multi-lock precedent from §5.30 T_EXPORTER_EXITS_6
+# ("xdp_fixture;exporter_port_9417").
 add_test(
     NAME T_DETACH_NOTHING
     COMMAND bash ${TEST_DIR}/T_DETACH_NOTHING.sh
@@ -172,7 +202,7 @@ add_test(
 )
 set_tests_properties(T_DETACH_NOTHING PROPERTIES
     ENVIRONMENT "${TEST_ENV}"
-    RESOURCE_LOCK xdp_fixture
+    RESOURCE_LOCK "xdp_fixture;lo_iface"
     TIMEOUT 10
     SKIP_RETURN_CODE 77
 )
@@ -223,8 +253,11 @@ set_tests_properties(T_BPFFS_ROOT_SYMLINK PROPERTIES
 # generic (SKB); RESOURCE_LOCK xdp_fixture (uses standard veth pair).
 #
 # T_MODE_NATIVE_UNSUPPORTED (§6.17): attach --mode native --iface lo →
-# exit 3.  NO RESOURCE_LOCK (does not touch the veth pair); SKIP 77 for
-# require_passwordless_sudo path.
+# exit 3.  RESOURCE_LOCK lo_iface (§5.33 HK-A / D-3.5.5-1: loader's
+# attach state-machine reaches the kernel on `lo`; cleanup_native
+# unconditionally runs `ip link set lo xdp{,generic} off` — touches `lo`
+# state regardless of test outcome). SKIP 77 for require_passwordless_sudo
+# path.
 #
 # T_PERCPU_STATS_SUM (§6.18): seeds known per-CPU values via bpftool map
 # update, asserts read_stats sum matches; RESOURCE_LOCK xdp_fixture.
@@ -251,6 +284,7 @@ add_test(
 )
 set_tests_properties(T_MODE_NATIVE_UNSUPPORTED PROPERTIES
     ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK lo_iface
     TIMEOUT 30
     SKIP_RETURN_CODE 77
 )
@@ -557,11 +591,13 @@ endforeach()
 # T_APPLY_EXITS_1_ON_MISSING_CONFIG (§6.43): HK-1 exit-code triple drift
 #   fix — `apply -f /nonexistent --iface lo` exits 1 (kExitUsageErr); the
 #   `xdpmacfilter: config error:` stderr prefix is preserved verbatim.
-#   Negation control: valid config does NOT exit 1. Uses `lo` so does NOT
-#   need RESOURCE_LOCK xdp_fixture; SKIP_RETURN_CODE 77 still present so
-#   require_passwordless_sudo can SKIP cleanly in unprivileged contexts
-#   (the negation-control branch does run the loader against `lo` which
-#   may attempt sudo-elevated calls).
+#   Negation control: valid config does NOT exit 1. Primary case is
+#   pure-parser (config_open throws first), BUT the negation branch
+#   invokes `apply -f config_valid.yaml --iface lo` which reaches the
+#   loader's attach state-machine on `lo` AND the post-cleanup line
+#   calls `detach --iface lo` → §5.33 HK-A (D-3.5.5-1 classifier) flags
+#   for `lo_iface` lock. SKIP_RETURN_CODE 77 still present so
+#   require_passwordless_sudo can SKIP cleanly in unprivileged contexts.
 # T_BYPASS_INTERACTIVE_PROMPT (§6.44): pseudo-tty driven y/N/EOF prompt
 #   coverage via `script -qc` (SKIP-77 if neither script nor expect
 #   available). Also embeds the HK-4 audit-line uid=/euid=/sudo_user=
@@ -576,7 +612,8 @@ endforeach()
 #   OR curl absent OR no unprivileged user available.
 #
 # Resource locks:
-#   - T_APPLY_EXITS_1_ON_MISSING_CONFIG: no RESOURCE_LOCK (pure CLI parse).
+#   - T_APPLY_EXITS_1_ON_MISSING_CONFIG: `lo_iface` (§5.33 HK-A — negation
+#     branch reaches loader's attach/detach state-machine on `lo`).
 #   - T_BYPASS_*: share `xdp_fixture` (touch veth via setup_veth).
 #   - T_EXPORTER_EXITS_6: shares `xdp_fixture` (touches veth) AND
 #     `exporter_port_9417` (new lock per §5.30 — prevents port clash with
@@ -588,6 +625,7 @@ add_test(
 )
 set_tests_properties(T_APPLY_EXITS_1_ON_MISSING_CONFIG PROPERTIES
     ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK lo_iface
     TIMEOUT 30
     SKIP_RETURN_CODE 77
 )

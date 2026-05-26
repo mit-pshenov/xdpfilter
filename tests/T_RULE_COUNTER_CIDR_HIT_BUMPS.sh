@@ -56,7 +56,17 @@ SRC_IP_IN="10.0.0.5"               # IN 10.0.0.0/24 (rule_id=42)
 SRC_IP_OUT="192.168.1.1"           # OUTSIDE 10.0.0.0/24
 
 stderr_file=$(mktemp /tmp/xdpmf-rulecidr-stderr.XXXXXX)
-trap 'cleanup_veth; rm -f "${stderr_file}"' EXIT
+# §5.33 HK-B: explicit signal trap-set covers SIGINT/SIGTERM/SIGHUP in
+# addition to normal EXIT so ctest's kill-escalation under -j4 still
+# fires cleanup_veth (bash's implicit-EXIT-on-signal is racy under some
+# kill scenarios; named-signal handlers fire immediately on receipt).
+trap 'cleanup_veth; rm -f "${stderr_file}"' EXIT INT TERM HUP
+
+# §5.33 HK-B pre-test residue wipe — idempotent belt-and-suspenders defense
+# against PID-recycled prior aborted runs leaving residue at the same
+# PID-scoped ${PIN_DIR}=${PIN_ROOT}/xdpmf_a_$$ path. setup_veth's internal
+# rm-rf already handles the in-test case; this catches the cross-run case.
+sudo -n rm -rf "${PIN_DIR}" 2>/dev/null || true
 
 setup_veth
 
