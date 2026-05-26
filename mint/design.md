@@ -6411,6 +6411,8 @@ int run(const HttpConfig& cfg);
 
 NO multithreading, NO async I/O, NO keep-alive (HTTP/1.0 → connection: close per response). The acceptor loop uses `poll()` on the listening socket with a 1-second timeout so the SIGTERM stop-flag is observed promptly. Per-conn budget: read until `\r\n\r\n` or 4 KiB or 5-second timeout; reject malformed requests with 400.
 
+> **Teardown-marker note (added §5.33 HK-C, MVP-3.5.5 — closes MVP-3.4.5 OOT)**: at `http::run()` exit (any path — clean SIGINT/SIGTERM OR §5.30 HK-17 exit-6 trigger) the exporter emits ONE benign stderr line `xdpmf-exporter: shutdown\n` (under MVP-3.5 JSON mode: `exporter.shutdown` event with no fields). Under the §5.30 HK-17 trigger path this marker appears BEFORE the `xdpmf-exporter: ERROR all <N> discovered interfaces failed …` line emitted by `main.cpp` post-`run() == 6` return (global-stop-then-final-error flow per §5.30 EDIT-2). The HK-17 assertion ERE in `T_EXPORTER_EXITS_6_ALL_IFACES_EACCES` (§6.46) uses substring match (not line-exclusive grep), so the intervening teardown marker is not contract-violating; observed behaviour is byte-equivalent to MVP-3.4 baseline and PI-3.5-1 (JSON additive overlay). Reviewer SHOULD NOT flag this ordering as a regression.
+
 #### §5.29 Interfaces additions
 
 ##### CLI grammar (post-§5.29 — supersedes §5.26 grammar block)
@@ -9384,3 +9386,282 @@ Evidence: `mint/task-brief.md` MVP-3.5 brief (HG-3.5-1/2/3/4 + Q1-Q6 + PI-3.5-1 
 1. mint-dev-impl: SendMessage acknowledging the gap-find + Option A pick + design.md edits applied + thanks for the guard #11 suggestion (incorporated verbatim into anti-misdiagnosis catalogue).
 2. mint-dev-tester: no SendMessage from architect needed (impl already peer-DM'd tester with the mechanical fix; tester applies the 4-LOC bump unblocked).
 3. team-lead: tactical FYI dispatch (not human-gate-tier; PI-6 carve-out narrowing within scope; tester-side fix is mechanical + already in flight).
+
+### §5.33 MVP-3.5.5: mini housekeeping (chronic -j4 parallelism instability — RESOURCE_LOCK + trap-EXIT hardening + OOT closure + guard #12) (brownfield amendment, 2026-05-26)
+
+**Purpose**: close the **chronic -j4 parallelism instability** that has recurred across MVP-3.4.5, MVP-3.4b cycle 1, and MVP-3.5 — most acutely surfaced by MVP-3.5's first A/B reviewer experiment where 3 independent `ctest -j4` re-runs (tester + LSP-reviewer + grep-reviewer) each produced a different flake victim set (T_MODE_NATIVE_UNSUPPORTED / T_BUILD / T_SANITIZER_BUILD / T_RULE_COUNTER_MAC_HIT_BUMPS / T_BPFFS_ROOT_SYMLINK). All pre-existing failures pass in isolation OR serial — pure RESOURCE_LOCK omission on shared host state (`lo` iface; bpffs pin dirs after timeout cascades). Smallest LOC delta to date: 4 housekeeping items (HK-A..HK-D), 0 NEW source files, 0 NEW ctests, 0 C++ source touches.
+
+**Anchor sections**: §5.22 + §5.30 + §5.31 RESOURCE_LOCK precedents (`xdp_fixture` for veth-touching tests; `exporter_port_9417` for exporter port range — this slice adds `lo_iface` as a 3rd lock domain for the loopback iface); §5.29 (where the `xdpmf-exporter: shutdown` teardown marker is emitted at `http::run()` exit — HK-C inline note now lives there); §5.30 HK-17 (the exit-6 path where the marker-ordering OOT was first observed); §6.5 PI-1..PI-34 + PI-7-3.4.5-hpp/cpp + PI-3.5-1..PI-3.5-7 + PI-7-3.5-hpp (all continue unchanged); anti-misdiagnosis guards #1..#11 (this slice adds #12 — chronic-parallelism + actionable RESOURCE_LOCK rule). Pre-loaded human-gates HG-3.5.5-1..4 confirmed; Q1-Q4 decisions confirmed per brief defaults (L1 / C3 / V2 / K2).
+
+**Scope contract (§5.33 short form)**:
+- NEW (files): **NONE** — no source files, no ctests, no fixtures.
+- EDITED (4 tests/CMakeLists.txt add_test entries — HK-A): `tests/CMakeLists.txt` gains `RESOURCE_LOCK lo_iface` on the 4 of 6 `--iface lo`-touching ctest entries whose loader path reaches the kernel-side state machine on `lo`. The other 2 stay unlocked (pure CLI parser tests). Concrete classifier output in §5.33 Decisions D-3.5.5-1 below.
+- EDITED (3 ctest bodies — HK-B): `tests/T_RULE_COUNTER_MAC_HIT_BUMPS.sh`, `tests/T_RULE_COUNTER_CIDR_HIT_BUMPS.sh`, `tests/T_RULE_COUNTER_SURVIVES_APPLY.sh` — each gains (a) pre-test idempotent wipe of `${PIN_DIR}` BEFORE `setup_veth` AND (b) the `trap '...' EXIT` line extended to fire on `EXIT INT TERM HUP` (so ctest SIGTERM / SIGINT under timeout cascade still runs cleanup). The pre-existing `cleanup_veth` (in `tests/lib/common.sh`) ALREADY removes `${PIN_DIR}` per §5.25 P1 — this slice does NOT touch `common.sh` (cleanup_veth's body is already correct; only trap signal-set + pre-test wipe gain hardening at the test-body layer). C3 belt-and-suspenders per HG-3.5.5-2 / Q2.
+- EDITED (this design.md — HK-C inline note): one prose paragraph already added at §5.29 immediately after the `http::run()` declaration (this commit's first edit, line ~6413 area; ~7 LOC of prose). Closes the MVP-3.4.5 OOT defer (`xdpmf-exporter: shutdown` benign marker observed BEFORE the §5.30 HK-17 ERROR line under exit-6 trigger). Placement rationale: §5.29 is where `http::run()` is declared and its teardown is described — the marker is emitted INSIDE `http::run()` at line ~420 of `src/exporter/http.cpp` per `xdpmf::logger::emit(...,"exporter.shutdown",...)`; cross-reference to §5.30 HK-17 path provided in the note.
+- EDITED (this design.md — HK-D guard #12): the §5.33 anti-misdiagnosis sub-section below adds guard #12 (chronic -j4 parallelism + actionable RESOURCE_LOCK rule). Bakes the institutional learning into the catalogue for all future cycles.
+- UNCHANGED-BUT-AFFECTED (zero git-diff fence — PI-7-3.5.5-hpp / PI-7-3.5.5-cpp): **ALL of `src/`** — `src/lib/{loader,config,sidecar,yaml_subset,cidr}.{cpp,hpp}`, `src/bpf/mac_filter.bpf.c`, `src/common/{mac_filter.h,logger.{cpp,hpp},version.h}`, `src/cli/*`, `src/exporter/*`. Strongest PI-7 cycle since MVP-3.3 — ZERO diff on ENTIRE source tree (userspace C++23 + BPF + headers + logger module all untouched). `CMakeLists.txt` UNCHANGED (no VERSION bump per Q3=V2). `CHANGELOG.md` UNCHANGED (no released version). All 58 pre-existing ctest BODIES UNCHANGED except the 3 EDITED for HK-B; the other 55 byte-equivalent. `systemd/*.service` UNCHANGED. `ansible/*` UNCHANGED. `tests/lib/common.sh` UNCHANGED. `tests/lib/*.py` UNCHANGED. `tests/fixtures/*` UNCHANGED. `mint/architecture-v2.md` UNCHANGED.
+
+#### §5.33 Human-gate decisions (confirmed)
+
+- **HG-3.5.5-1 — HK-A scope = ALL 6 lo-touching ctests evaluated; 4 get `RESOURCE_LOCK lo_iface`, 2 stay unlocked (pure-parser).** Confirmed per architect's Phase A classification (D-3.5.5-1 below). The 6 candidates from brief's grep + concrete reading of each test body produces a strict split between (a) tests that invoke loader's kernel-side path on `lo` OR perform an assertive post-state check on `lo`'s XDP slot, and (b) pure CLI parser tests that fail before ifindex resolution. Only category (a) gets the lock.
+
+- **HG-3.5.5-2 — HK-B scope = C3 belt-and-suspenders on 3 bpffs-pin-touching ctests.** Confirmed. Phase A grep of `tests/T_*.sh` for bpffs pin creation patterns confirms T_RULE_COUNTER_MAC_HIT_BUMPS / T_RULE_COUNTER_CIDR_HIT_BUMPS / T_RULE_COUNTER_SURVIVES_APPLY as the 3 PID-scoped-pin-dir-creating tests in the cycle of the T_BPFFS_ROOT_SYMLINK cascade victim. Other tests touching bpffs (T_ATTACH_TAG_MISMATCH, T_BYPASS_*, T_LINK_PERSIST_ACROSS_LOADER_EXIT, T_VERIFIER_REJECT, T_APPLY_*) are already covered by `cleanup_veth`'s `rm -rf ${PIN_DIR}` AND share `xdp_fixture` RESOURCE_LOCK with T_BPFFS_ROOT_SYMLINK (no cascade-victim risk under -j4 contention). The 3 RULE_COUNTER tests are the unique cascade-source set per Phase 2.5 evidence from MVP-3.4b cycle 1 + MVP-3.5 reviewer flakes.
+
+- **HG-3.5.5-3 — HK-C OOT closure = inline note in §5.29 (next to `http::run()` teardown).** Confirmed. Placement chosen over §5.30 (HK-17 context) and §5.33 (own-slice) because: (a) the marker is emitted INSIDE `http::run()` regardless of HK-17 trigger (clean SIGINT/SIGTERM also produces it) — the §5.29 anchor describes ALL exit paths; (b) §5.30 HK-17 readers already know about teardown ordering from the §5.30 EDIT-2 description; (c) putting the note in §5.33 would orphan it from the `run()` documentation that future maintainers reach first. The note explicitly cross-references §5.30 EDIT-2 for the exit-6 ordering and §6.46 (T_EXPORTER_EXITS_6_ALL_IFACES_EACCES) for the substring-match assertion contract that makes the ordering non-violating.
+
+- **HG-3.5.5-4 — HK-D guard #12 = bake into design.md anti-misdiagnosis catalogue as the 12th entry.** Confirmed. The actionable check is specified below (see "Anti-misdiagnosis guard #12") with the RESOURCE_LOCK declaration requirement for NEW ctests touching shared host state — reviewer's 5-point framework picks it up automatically at point 5 (behaviour preservation + invariants block walk).
+
+#### §5.33 Q-decisions (mechanism)
+
+##### Q1: HK-A — lock name → **L1 `lo_iface`**
+
+Confirmed per brief recommendation. Matches existing project convention: `xdp_fixture` (veth-pair lock, lowercase-underscore-descriptive), `exporter_port_9417` (port lock, same shape), `systemd_unit_install` (systemd lock). L2 (`loopback_iface`) is more verbose without semantic gain. L3 (`lo`) is terse but loses lock-name clarity at the CMakeLists.txt declaration site. **Lock domain semantics**: when a test declares `RESOURCE_LOCK lo_iface`, ctest serializes it against ALL other tests declaring the same `lo_iface` lock — but `lo_iface` is INDEPENDENT of `xdp_fixture` (no nesting, no implicit serialization). A test touching BOTH `lo` AND the veth pair (rare; none exist today) would declare `RESOURCE_LOCK "lo_iface;xdp_fixture"` per existing multi-lock idiom (precedent: §5.30 T_EXPORTER_EXITS_6_ALL_IFACES_EACCES with `"xdp_fixture;exporter_port_9417"`).
+
+##### Q2: HK-B — pre-test cleanup vs trap-only → **C3 (belt-and-suspenders: pre-test wipe + trap EXIT INT TERM HUP)**
+
+Confirmed per brief recommendation. The flake-cascade scenario:
+1. Test X (RULE_COUNTER_*) runs `setup_veth` → `apply` → BPF map pins materialize at `${PIN_DIR}` = `/sys/fs/bpf/xdpmacfilter/xdpmf_a_$$`.
+2. ctest sends SIGTERM under -j4 contention (timeout grace).
+3. Bash trap `EXIT` MAY run (bash typically runs EXIT trap on SIGTERM); MAY be interrupted mid-`cleanup_veth` (between `ip netns del` and `rm -rf ${PIN_DIR}`).
+4. Orphan `${PIN_DIR}` remains under parent bpffs root.
+5. Subsequent test Y (T_BPFFS_ROOT_SYMLINK) pre-check `[[ -n "$(sudo -n ls -A ${BPFFS_ROOT})" ]]` finds orphan → exit 1 "refuse to corrupt non-empty bpffs root" → cascade failure.
+
+C3 attacks both vectors:
+- **Pre-test wipe** (defends against: PID recycling — a prior aborted run with same PID number that left residue). Cost: 1 line, idempotent (`sudo -n rm -rf "${PIN_DIR}" 2>/dev/null || true` BEFORE `setup_veth`). Safe because `${PIN_DIR}` is PID-scoped (`xdpmf_a_$$`), so wiping it only affects OUR test.
+- **Trap signal-set extension** `EXIT → EXIT INT TERM HUP` (defends against: bash's EXIT-on-SIGTERM not firing cleanly under all kill scenarios — explicit trap on INT/TERM/HUP fires `cleanup_veth` immediately on signal receipt, bypassing any race in bash's implicit EXIT handler).
+
+C1 (trap-only) was the pre-§5.33 status quo — fails when trap is interrupted mid-cleanup. C2 (pre-test only) leaves the test's own EXIT path dependent on script reaching its end — fails when timeout fires post-`apply` pre-`cleanup`. C3 covers both. Cost: ~2 LOC per file × 3 files = ~6 LOC total.
+
+##### Q3: VERSION bump 0.8.0 → 0.8.1 → **V2 NO bump**
+
+Confirmed per brief recommendation. Pure test-infra + design-text cleanup. NO operator-facing change (no new CLI flag, no new env var, no new exit code, no new stderr line, no new BPF map, no schema change). The smallest housekeeping cycle to date. CHANGELOG.md is NOT updated this cycle either (V2 default — no released version; an `[Unreleased]` section note is OPTIONAL and brief-author-deferred). Next operator-facing slice (likely MVP-3.5b — XDPMF_LOG_DEST/LEVEL) will bump 0.8.0 → 0.9.0 per existing minor-bump-on-feature convention.
+
+##### Q4: stability canary — separate ctest or test-runner script → **K2 NO new ctest; tester verifies manually in Phase B**
+
+Confirmed per brief recommendation. K1 (NEW ctest T_PARALLELISM_RESILIENCE that runs `ctest -j4` 3 times) creates a recursion problem: the ctest-of-ctests under -j4 hits the same RESOURCE_LOCK contention the test is measuring; it would itself become a flake source. K3 (external script `tests/ci/stability_probe.sh`) is good but adds scope (NEW file outside ctest harness; documentation burden). K2 (tester runs `ctest -j4` 3× in succession during Phase B + reports zero flakes) is sufficient + cheap + matches the PI-3.5.5-1 invariant directly. PI-3.5.5-1 is the load-bearing canary; tester's Phase B run produces the evidence.
+
+#### §5.33 DataStructures additions
+
+**NONE** — no new types, no struct changes, no enum changes. `kManagedMaps[]` unchanged. `kEventNames[]` unchanged (catalogue count stays at 34 per §5.32 EDIT-1; no new logger events this cycle). `LoaderError` enum unchanged. `HttpConfig` / `StatsSample` / `DiscoveryAccounting` unchanged. `struct allow_entry` (§5.31) / `struct rule_entry` (§5.29) unchanged.
+
+#### §5.33 Interfaces additions
+
+**NONE** — no new CLI flag, no new env var, no new exit code, no new stderr line, no new HTTP route, no new function signature, no new IPC message. The 3 EDITED ctest bodies (HK-B) keep their existing assertion shapes; only test-infrastructure hardening (pre-test wipe + extended trap signal-set) is added. The 4 EDITED `add_test` entries (HK-A) gain `RESOURCE_LOCK lo_iface` as the ONLY property change; TIMEOUT / ENVIRONMENT / SKIP_RETURN_CODE remain unchanged.
+
+#### §5.33 Decisions (with rationale)
+
+##### D-3.5.5-1 — HK-A classifier output: 4 of 6 lo-touching ctests get the lock; 2 stay unlocked — because
+
+Architect Phase A reading of each test body produced the following strict split (the column "Loader kernel-side path on lo?" answers brief's classification question):
+
+| Test | Loader kernel-side path on `lo`? | Lo state assertion in post-check? | Add `lo_iface` lock? | Rationale |
+|---|---|---|---|---|
+| `T_APPLY_EXITS_1_ON_MISSING_CONFIG` | YES (negation branch) | YES (line 96 calls `loader detach --iface lo`) | **YES** | Primary case is pure-parser (config_open throws first), BUT negation branch invokes `${LOADER_BIN} apply -f config_valid.yaml --iface lo` (line 87) which reaches the loader's attach state-machine on `lo`, and the post-cleanup line 96 calls `detach --iface lo`. Lock needed. |
+| `T_DETACH_NOTHING` | YES | YES (line 80-87 checks `xdp_prog_id lo` AND pin dir) | **YES** | Loader's `detach` state-machine probes `lo` (`bpf_xdp_query`) + assertive pre/post checks. Already had `RESOURCE_LOCK xdp_fixture` per §5.22 amendment (to serialize against T_BPFFS_ROOT_SYMLINK destructive bpffs-root corruption window). HK-A extends to `RESOURCE_LOCK "xdp_fixture;lo_iface"` (multi-lock per existing precedent). |
+| `T_MODE_NATIVE_UNSUPPORTED` | YES | YES (pre + post both probe `xdp_prog_id lo`) | **YES** | Loader's `attach --mode native --iface lo` reaches kernel; `cleanup_native` unconditionally does `ip link set lo xdp{,generic} off` (line 42-43) — touches lo state regardless of test outcome. |
+| `T_CLI_CAPACITY` | NO (parser rejects 65 macs before any attach) | YES (line 63 `xdp_prog_id lo` post-check with FAIL assertion) | **YES** | Pure CLI parser path, BUT the test's defensive "sanity floor" post-check at line 63-66 reads `lo`'s XDP slot and FAILs if non-empty. Under -j4 contention, a concurrent attach-test on `lo` would race this read and produce a false-positive FAIL. Lock prevents the race even though loader never touches `lo` from this test's invocation. |
+| `T_EXIT_CODE_9_ON_CONFIG_ERROR` | NO (env parse fails before ifindex resolution per test comment line 9-12) | NO | **NO** | Pure parser test. `XDPMF_TRUST_MODEL=garbage_value` rejection happens in env parse BEFORE `if_nametoindex("lo")`. No post-check on `lo` state. Zero `lo` interaction. Stays unlocked. |
+| `T_CLI_BAD_MAC` | NO (4 sub-cases all fail at MAC parser before iface arg use) | NO | **NO** | Pure parser test per test header line 10 ("Pure CLI-parser test; no veth, no root, no SKIP_RETURN_CODE"). All 4 malformed-MAC sub-cases fail in `parse_mac()` before iface resolution. No post-check on `lo` state. Stays unlocked. |
+
+Concrete CMakeLists.txt changes (impl reference — exact line numbers MAY shift; impl picks the cleanest edit):
+
+| Existing `set_tests_properties` block | Post-HK-A change |
+|---|---|
+| `T_APPLY_EXITS_1_ON_MISSING_CONFIG` (currently no RESOURCE_LOCK) | ADD `RESOURCE_LOCK lo_iface` (single-lock; not touching veth fixture) |
+| `T_DETACH_NOTHING` (currently `RESOURCE_LOCK xdp_fixture`) | CHANGE to `RESOURCE_LOCK "xdp_fixture;lo_iface"` (multi-lock per §5.30 precedent) |
+| `T_MODE_NATIVE_UNSUPPORTED` (currently no RESOURCE_LOCK) | ADD `RESOURCE_LOCK lo_iface` (single-lock; not touching veth fixture) |
+| `T_CLI_CAPACITY` (currently no RESOURCE_LOCK) | ADD `RESOURCE_LOCK lo_iface` (single-lock; defensive — protects post-check read) |
+
+Total: 4 set_tests_properties EDITs in `tests/CMakeLists.txt` (~4 LOC delta). The comment blocks ABOVE each `add_test` entry SHOULD be updated to reflect the new lock (per the existing project convention of commenting the RESOURCE_LOCK rationale — see §5.30 line 578-583 for precedent). ~5-10 additional comment LOC.
+
+##### D-3.5.5-2 — HK-B body shape: pre-test wipe ABOVE `setup_veth` + trap signal-set extension — because
+
+Concrete diff shape (impl reference — each of the 3 RULE_COUNTER tests):
+
+```bash
+# Before (status quo, pre-§5.33):
+trap 'cleanup_veth; rm -f "${stderr_file}"' EXIT
+setup_veth
+
+# After (§5.33 HK-B):
+trap 'cleanup_veth; rm -f "${stderr_file}"' EXIT INT TERM HUP
+# HK-B pre-test residue wipe (idempotent — catches stale dirs from PID-recycled prior aborted runs):
+sudo -n rm -rf "${PIN_DIR}" 2>/dev/null || true
+setup_veth
+```
+
+Rationale for the EXACT shape:
+- **Trap line gains `INT TERM HUP`** but KEEPS `EXIT` first (matches existing project trap-line ordering; `EXIT` fires on normal exit + as final fallback after signal handlers). The 3-signal addition costs zero runtime overhead (signal handlers are tiny) and guarantees cleanup on ctest's SIGTERM-then-grace-then-SIGKILL escalation.
+- **Pre-test wipe goes BEFORE `setup_veth`** (not inside it; common.sh stays untouched per PI-7-3.5.5-cpp ZERO-diff scope-fence — common.sh is not in src/ but the brief explicitly lists tests/lib/common.sh as UNCHANGED). `setup_veth`'s existing internal `sudo -n rm -rf "${PIN_DIR}" 2>/dev/null || true` at line 112 ALREADY handles this for the case where `setup_veth` is called; the HK-B pre-test wipe is a DEFENSE-IN-DEPTH belt against the case where `setup_veth` is somehow skipped OR the user's previous PID-recycled aborted run left residue under the same `xdpmf_a_$$` name. Belt-and-suspenders per Q2 C3.
+- **Idempotent** — `rm -rf` on a non-existent path is a no-op; `2>/dev/null || true` swallows ENOENT cleanly.
+
+No other test-body changes. The `cleanup_veth()` in common.sh already does the right thing (`rm -rf ${PIN_DIR}` per §5.25 P1); we DO NOT modify common.sh this cycle (cleanup_veth correctness is established multi-cycle).
+
+##### D-3.5.5-3 — HK-C placement = §5.29 inline note (NOT §5.30, NOT §5.33) — because
+
+The benign `xdpmf-exporter: shutdown` marker (now also `exporter.shutdown` JSON event per §5.32) is emitted INSIDE `http::run()` at `src/exporter/http.cpp` line ~420 via `xdpmf::logger::emit(Level::Info, "exporter.shutdown", "xdpmf-exporter: shutdown\n")`. It fires on EVERY `run()` exit path — clean SIGINT/SIGTERM, OR the §5.30 HK-17 g_exit_six → return 6 path, OR future fatal-exit paths. So the natural anchor is `http::run()`'s docstring/teardown discussion in §5.29 (where `run()` is declared and its semantic described). Putting the note in §5.30 (HK-17 context) would orphan it from §5.29 maintainers; putting it in §5.33 would scatter cross-cutting `http::run()` lore across slices. The note cross-references §5.30 HK-17 ordering AND §6.46 substring-match assertion contract for full context.
+
+##### D-3.5.5-4 — HK-D guard #12 = chronic -j4 parallelism + RESOURCE_LOCK rule for future ctests — because
+
+See "Anti-misdiagnosis guard #12" sub-section below. The actionable check pattern follows guards #5..#11 (Phase A grep discipline → catches class-of-bug before Phase B coordination loops). #12 specifically protects against the most recurrent flake class observed over 3 consecutive cycles. Reviewer's 5-point framework point 5 walks the invariants block; #12 entry there ensures any NEW ctest added in MVP-3.5b+ that touches shared host state without a matching RESOURCE_LOCK is flagged at review-time.
+
+#### §5.33 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+##### NEW (0 files)
+
+NONE this slice.
+
+##### EDITED (4 files)
+
+| Path | Role / change (one line) | Language | LOC est |
+|---|---|---|---|
+| `tests/CMakeLists.txt` | HK-A: 4 `set_tests_properties` blocks gain `RESOURCE_LOCK lo_iface` per D-3.5.5-1 classifier; one (T_DETACH_NOTHING) becomes multi-lock `"xdp_fixture;lo_iface"`. Comment blocks ABOVE each updated `add_test` entry gain ~2 LOC rationale citing §5.33 HK-A + classifier. | CMake | ~15 (4 add_test edits + ~10 comment LOC) |
+| `tests/T_RULE_COUNTER_MAC_HIT_BUMPS.sh` | HK-B: pre-test `sudo -n rm -rf "${PIN_DIR}" 2>/dev/null \|\| true` added BEFORE line 53 `setup_veth`; line 51 trap extended `EXIT` → `EXIT INT TERM HUP`. | bash | ~3 |
+| `tests/T_RULE_COUNTER_CIDR_HIT_BUMPS.sh` | HK-B: same shape as MAC variant — pre-test wipe before line 61 `setup_veth`; line 59 trap extended `EXIT` → `EXIT INT TERM HUP`. | bash | ~3 |
+| `tests/T_RULE_COUNTER_SURVIVES_APPLY.sh` | HK-B: same shape — pre-test wipe before line 54 `setup_veth`; line 52 trap extended `EXIT` → `EXIT INT TERM HUP`. | bash | ~3 |
+| `mint/design.md` | HK-C inline note in §5.29 (already committed at this amendment's start, line ~6413); HK-D guard #12 + §5.33 amendment (THIS block). | Markdown | ~200 (this amendment) |
+
+##### UNCHANGED-BUT-AFFECTED (PI-7-3.5.5-hpp / PI-7-3.5.5-cpp — strongest PI-7 cycle since MVP-3.3)
+
+| Path / scope | Invariant + check mechanism |
+|---|---|
+| **ALL of `src/`** | **PI-7-3.5.5-hpp + PI-7-3.5.5-cpp**: ZERO diff on entire source tree. `git diff <pre-§5.33> -- src/` MUST return zero lines. Covers: `src/lib/{loader,config,sidecar,yaml_subset,cidr}.{cpp,hpp}` + `src/bpf/mac_filter.bpf.c` + `src/common/{mac_filter.h,logger.{cpp,hpp},version.h}` + `src/cli/*` + `src/exporter/*`. Strongest PI-7 cycle since MVP-3.3 ("ENTIRE src+include+cmake tree ZERO diff"). loader.hpp = 8th consecutive cycle (MVP-3.2/3/4/4.5/4b/5/5/5.5); config.hpp = 3rd consecutive (MVP-3.5/5/5.5). |
+| `CMakeLists.txt` (top-level) | UNCHANGED. NO VERSION bump per Q3=V2 (stays at 0.8.0). `git diff <pre-§5.33> -- CMakeLists.txt` MUST show zero output. |
+| `CHANGELOG.md` | UNCHANGED. No released version this cycle. `git diff <pre-§5.33> -- CHANGELOG.md` MUST show zero output. |
+| `cmake/*` | UNCHANGED. `git diff <pre-§5.33> -- cmake/` MUST show zero output. |
+| 55 of 58 pre-existing ctest BODIES | UNCHANGED. Only 3 RULE_COUNTER bodies EDITed for HK-B. `git diff <pre-§5.33> -- tests/T_*.sh` MUST show exactly 3 modified files; the other 55 ctest bodies byte-equivalent. |
+| `tests/lib/common.sh` | UNCHANGED. `cleanup_veth` already does the right thing per §5.25 P1; HK-B does NOT touch common.sh. `git diff <pre-§5.33> -- tests/lib/` MUST show zero output. |
+| `tests/lib/*.py` (read_stats.py / read_rule_counters.py / inject_runt.py) | UNCHANGED. No test-helper changes this slice. |
+| `tests/fixtures/*` | UNCHANGED. No fixture changes (HK-B uses existing fixtures unchanged). |
+| `systemd/*` | UNCHANGED. No unit changes. |
+| `ansible/*` | UNCHANGED. No playbook changes. |
+| `mint/architecture-v2.md` | UNCHANGED. No HLD-level changes. |
+| `mint/task-brief.md` | UNCHANGED (architect reads but does not write). |
+| `mint/review.md` | Reviewer will write next phase; architect does not pre-touch. |
+
+#### §5.33 TestStrategy
+
+**NO new ctests this slice.** The verification is **3 consecutive `ctest -j4` runs** during tester's Phase B per PI-3.5.5-1 canary (HG-3.5.5 / Q4=K2). Specifically:
+
+##### Tester Phase B verification protocol (PI-3.5.5-1 canary)
+
+| # | Trigger | Observable outcome | Assertion mechanism |
+|---|---|---|---|
+| 1 | `cd build && ctest -j4 --output-on-failure 2>&1 \| tee /tmp/ctest-run-1.log` (first run) | All 58 ctests pass OR legitimately SKIP-77. ZERO `*** Failed` lines. | Exit code 0 from ctest; grep `Failed` returns 0 matches; grep `Passed\|Skipped` total = 58. |
+| 2 | Re-run identical: `ctest -j4 --output-on-failure 2>&1 \| tee /tmp/ctest-run-2.log` | Same outcome — zero flakes between runs 1 and 2. | Same assertions as #1. |
+| 3 | Re-run identical: `ctest -j4 --output-on-failure 2>&1 \| tee /tmp/ctest-run-3.log` | Same outcome — zero flakes across all 3 runs. | Same assertions as #1. |
+| 4 | `diff <(awk '/Failed|Passed|Skipped/' /tmp/ctest-run-{1,2}.log) <(awk '/Failed|Passed|Skipped/' /tmp/ctest-run-3.log) \|\| true` | The per-test verdict shape is byte-identical across all 3 runs (same SKIP list, same PASS list, no variation). | `diff` returns zero output OR only test-ordering differences (which are harmless under -j4). |
+| 5 | `git diff <pre-§5.33> -- src/` | ZERO lines of diff. | PI-7-3.5.5-hpp + PI-7-3.5.5-cpp canary. |
+| 6 | `git diff <pre-§5.33> -- tests/T_*.sh \| grep -cE '^diff --git'` | Exactly **3** EDITed test files (the HK-B set). | PI-3.5.5-2 carve-out invariant — strict superset with 3-ctest-body-EDIT carve-out for HK-B trap hardening. |
+| 7 | `grep -c 'RESOURCE_LOCK lo_iface' tests/CMakeLists.txt` | Returns **4** (HK-A classifier output). | HK-A classifier evidence. |
+
+Tester reports the 3-run results in `mint/review.md` write-up at Phase B closeout. Brief default expectation: zero failures across all 3 runs (otherwise the HK-A/HK-B fix is incomplete; tester SendMessages architect with the flake test + ctest-run log + this triggers a Phase B EDIT to expand HK-A classifier OR HK-B catalog).
+
+##### What is NOT tested this slice
+
+- No new functional behaviour to verify (no new feature shipped).
+- No new contract to assert (no new PI created beyond PI-3.5.5-1 + PI-7-3.5.5-hpp/cpp which are themselves verification-shape PIs).
+- No regression-canary needed beyond the 58-ctest baseline (HK-A/HK-B don't change any test's semantic — only its scheduling/cleanup).
+- The K1 "stability-canary ctest" was REJECTED at Q4 (recursion problem); the 3-run Phase B manual canary is the contract.
+
+#### §6.5 Preserved invariants (MVP-3.5.5 brownfield) — PI-1..PI-34 + PI-3.5-1..PI-3.5-7 hold + PI-7-3.5.5-hpp/cpp continuation + PI-3.5.5-1 NEW
+
+All MVP-3.1..3.5 invariants (PI-1..PI-34 + PI-7-3.4.5-hpp/cpp + PI-3.4b-* + PI-3.5-1..PI-3.5-7 + PI-7-3.5-hpp per §5.26 + §5.27 + §5.28 + §5.29 + §5.30 + §5.31 + §5.32 sub-sections) continue to hold post-§5.33. NEW PI-3.5.5-1 captures the parallelism-resilience canary; PI-7-3.5.5-hpp / PI-7-3.5.5-cpp strengthen PI-7 to entire `src/` tree (strongest cycle since MVP-3.3).
+
+Reviewer's 5th framework point walks the COMBINED list and reports `[INVARIANT-VIOLATED]` per failed check.
+
+| PI | Statement | Check mechanism |
+|---|---|---|
+| **PI-7-3.5.5-hpp** | `src/lib/loader.hpp` byte-identical (8th consecutive ZERO-diff cycle; MVP-3.2 → MVP-3.5.5). `src/lib/config.hpp` byte-identical (3rd consecutive ZERO-diff cycle; MVP-3.5 → MVP-3.5.5). NO new public symbol, NO LoaderError addition, NO Config field change this slice. | `git diff <pre-§5.33> -- src/lib/loader.hpp src/lib/config.hpp` MUST return zero lines. |
+| **PI-7-3.5.5-cpp** | ENTIRE `src/` tree byte-identical: `src/{lib,bpf,common,cli,exporter}/**`. NO C++ source touches, NO BPF source touches, NO shared header touches. Strongest PI-7 cycle since MVP-3.3. | `git diff <pre-§5.33> -- src/` MUST return zero lines. Reviewer additionally runs `find src/ -newer mint/task-brief.md -print` and expects EMPTY output. |
+| **PI-3.5.5-1** (NEW, load-bearing parallelism canary) | 3 consecutive `ctest -j4 --output-on-failure` runs produce IDENTICAL per-test verdict shape (same PASS set + same SKIP set + ZERO Failed across all 3 runs). Order-within-run MAY differ (parallel scheduling); per-test verdict MUST NOT. | Tester Phase B protocol §5.33 TestStrategy steps 1-4 above. Reviewer asks tester for the 3 log files OR re-runs locally for spot-check. |
+| **PI-7-3.4.5-hpp / -cpp** (carried forward) | Same as MVP-3.4.5 + MVP-3.5 — unchanged. | `git diff <baseline> -- src/lib/loader.{hpp,cpp}` per §5.30 line-range fences. |
+| **PI-3.5-1** (carried forward) | Text-mode stderr byte-equivalence — UNCHANGED this slice (no logger conversions; logger module not touched). | 13 stderr-grep ctests pass byte-equivalent per §5.32 PI-3.5-1 list. |
+| **PI-3.5-2..PI-3.5-7** (carried forward) | All JSON envelope + catalogue + interactive-exempt + cap-set invariants from §5.32 — UNCHANGED. | Per §5.32 check mechanisms. |
+| **PI-1..PI-34** (carried forward) | All MVP-1 through MVP-3.4 invariants — UNCHANGED. | Per their original §5.x check mechanisms. |
+| **PI-34 ≡ PI-6-3.5.5** | 58 pre-§5.33 ctests strict-superset with **3-EDIT carve-out** for HK-B (T_RULE_COUNTER_{MAC,CIDR,SURVIVES}_*.sh trap-EXIT hardening — assertion bodies byte-equivalent; only pre-test wipe + trap signal-set change). | `git diff <pre-§5.33> -- tests/T_*.sh` shows EXACTLY 3 modified files; per-file diff shows ONLY the 2 lines per file (trap line + pre-test wipe line). |
+
+##### Verification hints for reviewer (architect-spec §6.5 discipline — default MAY; MUST reserved for PI-* contracts)
+
+(Per architect-spec §6.5 "Verification-hints discipline": items below are GUIDANCE for the reviewer, NOT contracts for impl. Default MAY. Reserve MUST only for true PI-* contracts (PI-1..PI-34 + PI-7-3.5.5-hpp/cpp + PI-3.5.5-1 above ARE MUSTs by definition; items below MAY be relaxed by impl if a contract elsewhere demands it). Resolution rule for prose-vs-invariants conflicts within this amendment: invariants block wins, prose loses; if impl deviates on a hint to satisfy a PI-* contract, reviewer's correct disposition is `inline-merge` on the hint text, NOT `[UNRELATED-EDIT]` on impl.)
+
+In addition to PI-1..PI-34 + PI-3.5-* + PI-7-3.5.5-hpp/cpp + PI-3.5.5-1 above:
+
+- `git diff <pre-§5.33> -- src/` SHOULD return ZERO lines (PI-7-3.5.5 canary). Strongest evidence point this slice.
+- `git diff <pre-§5.33> -- CMakeLists.txt CHANGELOG.md cmake/` SHOULD return ZERO lines (no VERSION bump per Q3=V2).
+- `git diff <pre-§5.33> -- tests/lib/` SHOULD return ZERO lines (common.sh untouched).
+- `git diff <pre-§5.33> -- tests/CMakeLists.txt` SHOULD show ~4 `set_tests_properties` blocks gaining `RESOURCE_LOCK lo_iface` + ~10 LOC of rationale comments; ZERO other modifications.
+- `git diff <pre-§5.33> -- tests/T_*.sh` SHOULD show EXACTLY 3 modified files (the 3 RULE_COUNTER tests); each file SHOULD show ONLY the trap-line extension + pre-test wipe line addition (≤4 LOC delta per file).
+- `git diff <pre-§5.33> -- mint/design.md` SHOULD show the §5.29 inline HK-C note (this commit's first edit) + the §5.33 amendment (this block) + NOTHING else.
+- `grep -c 'RESOURCE_LOCK lo_iface' tests/CMakeLists.txt` SHOULD return **4** (per D-3.5.5-1 classifier output).
+- `grep -c 'RESOURCE_LOCK lo_iface' tests/T_*.sh` SHOULD return **0** (RESOURCE_LOCK lives in CMakeLists.txt only, not test bodies).
+- `grep -cE 'trap .* EXIT INT TERM HUP' tests/T_RULE_COUNTER_*.sh` SHOULD return **3** (HK-B extended-signal-set evidence — one per file).
+- `grep -cE 'HK-B pre-test residue wipe' tests/T_RULE_COUNTER_*.sh` SHOULD return **3** (one per file; matches the comment in D-3.5.5-2 reference shape — impl MAY use slightly different wording but the rm-rf line MUST exist).
+- 3 consecutive `ctest -j4` runs SHOULD all show ZERO Failed lines (PI-3.5.5-1 canary; tester's Phase B evidence is the load-bearing assertion).
+- All 58 pre-existing ctests SHOULD still pass OR legitimately SKIP-77 (PI-6-3.5.5 strict superset with 3-EDIT carve-out for HK-B).
+- `xdpmacfilter --version` AND `xdpmf-exporter --version` SHOULD STILL report `0.8.0` (Q3=V2 no bump).
+- `CHANGELOG.md` head SHOULD STILL show `## [0.8.0]` as latest (no new `[0.8.1]` section this cycle).
+
+##### Anti-misdiagnosis guard #12 (NEW, HK-D, MVP-3.5.5-specific)
+
+This slice carries forward all 11 anti-misdiagnosis guards (#1..#11) from prior cycles (§5.28 D-3.3-6 cap-set, §5.31 EDIT-1 bpffs ≠ tmpfs, §5.31 EDIT-2 bpftool-vs-libbpf BTF asymmetry, §5.32 EDIT-1 catalogue arithmetic, §5.32 EDIT-2 VERSION-bump literal propagation, etc.) AND adds guard #12 specific to chronic parallelism instability:
+
+12. **Chronic -j4 parallelism instability — shared host state without RESOURCE_LOCK**. When adding a NEW ctest that touches shared host state — bpffs root (`/sys/fs/bpf/xdpmacfilter`), named iface (`lo`, `eth0`, any non-PID-scoped iface name), fixed TCP/UDP port (`9417` exporter, any well-known port), systemd unit instance (`xdpmacfilter@<iface>.service`, `xdpmf-exporter.service`), ansible inventory, Kubernetes secret, host-global file path under `/etc` or `/var/lib` — the new ctest's `add_test()` block in `tests/CMakeLists.txt` MUST declare an appropriate `RESOURCE_LOCK` matching that resource's lock domain. Current lock domains (extend the list as new shared-state types surface):
+    - `xdp_fixture` — veth-pair touchers (`${IFACE_A}` / `${IFACE_B}` PID-scoped) AND any bpffs-pin creators (the pin parent `/sys/fs/bpf/xdpmacfilter` is shared even though PID-scoped sub-dirs aren't).
+    - `lo_iface` (NEW §5.33) — `lo` iface touchers (loader's kernel-side state-machine OR assertive post-state checks on `xdp_prog_id lo`).
+    - `exporter_port_9417` — exporter port-9417 touchers (any test that runs `xdpmf-exporter` and binds the default port).
+    - `systemd_unit_install` — `systemctl daemon-reload` / unit install/uninstall touchers.
+
+    **Future-cycle architect anti-misdiagnosis rule**: when adding a NEW ctest, BEFORE publishing the design, classify the test against the shared-host-state list above. If the test touches any item, the ctest's `add_test()` entry MUST include a matching `RESOURCE_LOCK` declaration. If the test introduces a NEW shared-state type (e.g. a new fixed-port daemon, a new file under `/etc`), the design.md MUST ALSO extend this list with the new lock domain name. **Reviewer's 5-point framework point 5** picks this up at invariants-walk time: for each NEW `add_test()` block, reviewer reads the test body and asks "does this touch any shared-state item in the list?" — if YES and no matching `RESOURCE_LOCK`, reviewer flags `[INVARIANT-VIOLATED]` with guard #12 citation.
+
+    **Validated by MVP-3.5.5 (this cycle)**: 3 consecutive cycles (MVP-3.4.5 + MVP-3.4b cycle 1 + MVP-3.5) shipped tests that violated this rule (T_CLI_CAPACITY post-check on `lo` state; T_RULE_COUNTER_* pre-test wipe gap; T_BPFFS_ROOT_SYMLINK cascade victim). Each cycle's flakes had DIFFERENT victim sets because the race window is non-deterministic. The cumulative cost was 3 reviewer/tester wall-clock loops spent diagnosing "is this a real regression?" → "no, just -j4 flake, re-run". A 30-second Phase A classification pass per NEW ctest avoids the multi-cycle compounding cost. **Direct precedent**: §5.30 T_EXPORTER_EXITS_6_ALL_IFACES_EACCES correctly declared `RESOURCE_LOCK "xdp_fixture;exporter_port_9417"` at first publish — that test never flaked because the architect at MVP-3.4.5 explicitly classified it against shared-state. The pattern works; #12 codifies it.
+
+    **Anti-pattern to AVOID** (caught by guard #12): "this test only READS state, doesn't write — so no lock needed". Reads are AT RISK whenever the read result is part of an assertion that fails on unexpected state (the T_CLI_CAPACITY post-check pattern). Reads under contention with a concurrent writer can FAIL assertively even though the test-under-question doesn't touch the state. The rule is "does the test's correctness depend on the state being in a particular shape?" — if YES, lock.
+
+The cumulative anti-misdiagnosis catalogue now covers **12 distinct classes** of architect-side / cycle-side slip, all surfaced through Phase B peer-DMs or post-mortem analysis and now formalized as Phase A guards. Pattern remains consistent: 30-60s Phase A discipline per class-of-bug avoids 5-30min Phase B coordination loops (single cycle) OR multi-cycle compounding (chronic flakes per #12).
+
+#### §7 OOS — MVP-3.5.5 components SHIPPED + close 1 OOT + carry-forward
+
+##### Moved from deferred to SHIPPED (per MVP-3.5.5)
+
+The following item was deferred at MVP-3.4.5 §7 OOS (carry-forward through MVP-3.4b cycle 1 + MVP-3.5) and is now CLOSED by this slice:
+
+- ~~**Pre-existing `xdpmf-exporter: shutdown` stderr marker between `http::run()` exit and HK-17 ERROR line** (MVP-3.4.5 OOT defer, per `git show c0b537a:mint/review.md` "Deferred to next slice" block)~~ **— SHIPPED in §5.33 as HK-C** (inline footnote at §5.29 next to `http::run()` teardown discussion; clarifies that the marker is benign + cross-refs §5.30 HK-17 ordering + §6.46 substring-match assertion contract). The MVP-3.x OOT-deferred queue is **EMPTY post-§5.33** — no carry-forward.
+
+##### Additional MVP-3.5.5 deliverables (NOT in prior OOT queues; surfaced in this slice)
+
+- **HK-A `RESOURCE_LOCK lo_iface` on 4 of 6 lo-touching ctests** — surfaced by MVP-3.5 A/B reviewer experiment (3 ctest re-runs each produced different flake victim sets including T_MODE_NATIVE_UNSUPPORTED). SHIPPED.
+- **HK-B trap-EXIT hardening on 3 bpffs-pin-touching ctests** — surfaced by recurrent T_BPFFS_ROOT_SYMLINK cascade-victim failures under -j4. SHIPPED.
+- **HK-D anti-misdiagnosis guard #12** — bakes 3-cycle pattern into permanent catalogue. SHIPPED.
+- **PI-7-3.5.5-hpp/-cpp** (NEW invariant naming for the 8th-cycle loader.hpp + entire-src-tree ZERO-diff streak). SHIPPED — strongest PI-7 cycle since MVP-3.3.
+- **PI-3.5.5-1 parallelism-resilience canary** (NEW invariant; tester Phase B 3-run protocol). SHIPPED.
+
+##### Closed-as-WONT-DO (architect ruling this slice)
+
+- **K1 — `T_PARALLELISM_RESILIENCE.sh` NEW ctest** per Q4 — REJECTED: recursion problem (a ctest-of-ctests under -j4 itself flakes under RESOURCE_LOCK contention). Tester Phase B manual 3-run is the right shape. CLOSED.
+- **`tests/lib/common.sh` modifications** — REJECTED scope-creep: existing `cleanup_veth` correctness is established multi-cycle; HK-B body-layer hardening is sufficient + scope-fenced. CLOSED.
+- **VERSION bump 0.8.0 → 0.8.1** per Q3 — REJECTED V1: pure test-infra + design-text; no operator-facing change warrants a tag. Next operator-facing slice bumps 0.8.0 → 0.9.0. CLOSED.
+- **CHANGELOG.md `[Unreleased]` section note** — DEFERRED to next operator-facing slice (would be lonely without a release tag).
+
+##### Carry-forward (unchanged from §5.32 §7 OOS unless noted)
+
+- **MVP-3.5b — `XDPMF_LOG_DEST={stderr,file,syslog,journald}` + `XDPMF_LOG_LEVEL={info,warn,error}` + SIGHUP re-read** — carry-forward unchanged.
+- **MVP-3.4b cycle 2 — atomic-swap promotion of `rules` map + counter management API** — carry-forward unchanged.
+- **MVP-3.4c — action-table dispatch (drop rules operative)** — carry-forward unchanged.
+- **Doc bucket D1..D13** — user-driven manual pass; carry-forward unchanged.
+- **Security M3 / Perf M1-M4 / TSAN / CO-RE field-probe** — separate cycles; carry-forward.
+- **Library extraction `libxdpmf.so.0` (MVP-3.6+)** — carry-forward.
+- **Daemon `xdpmfd` (MVP-3.6+)** — carry-forward.
+- **Binary rename `xdpmacfilter` → `xdpfilter` (MVP-3.12)** — carry-forward.
+- **L4 ports / VLAN / IPv6 CIDR** — carry-forward.
+- **sFlow (MVP-3.6 conditional)** — carry-forward.
+- **Consolidated anti-misdiagnosis guards file** (`~/.claude/agents/mint-dev/anti-misdiagnosis-guards.md`) — workflow-level edit, outside /mint-dev scope; user actions inline if desired.
+
+##### NEW out-of-scope fences (per §5.33)
+
+- **NEW ctests for shared-state classes not currently covered** (e.g. Kubernetes secret tests, ansible inventory tests) — guard #12 codifies the rule for FUTURE additions, but this slice does NOT proactively expand the lock-domain catalogue to non-existent shared-state types. Each new domain MUST be added in the cycle that introduces the first test touching it. NEW FENCE.
+- **Common.sh refactor to centralize trap-EXIT signal-set** — REJECTED scope: 3 individual test bodies are simpler/clearer than introducing a helper. Future cycle MAY extract if 6+ tests need the pattern. NEW FENCE.
+- **Stability-canary as a CI-only external script** — REJECTED at Q4 K3; tester's manual 3-run is sufficient at current scale. NEW FENCE (will revisit if test-suite-flake budget grows past 1% under -j4 over 3 consecutive cycles).
+- **Bash-level shared-state detector** (a static script that greps `--iface lo` and asserts matching `RESOURCE_LOCK lo_iface` in CMakeLists.txt) — REJECTED scope: guard #12 + reviewer's 5-point framework point 5 is sufficient. Future cycle MAY add if guard #12 catches violations repeatedly. NEW FENCE.
+
+Evidence: `mint/task-brief.md` MVP-3.5.5 brief (HG-3.5.5-1..4 + HK-A/B/C/D + Q1-Q4); MVP-3.5 review.md (informational flake observation + A/B reviewer 3-run divergent victim sets — surfacing source for HK-A/HK-B); `git show c0b537a:mint/review.md` (MVP-3.4.5 OOT-deferred queue — HK-C closure source); §5.22 (T_BPFFS_ROOT_SYMLINK destructive-bpffs-root precedent + RESOURCE_LOCK xdp_fixture lock-domain origin); §5.25 P1 (cleanup_veth atomic netns-del + pin-dir-rm — the multi-cycle foundation HK-B doesn't touch); §5.29 (http::run() teardown anchor for HK-C); §5.30 HK-17 (exit-6 ordering context cross-referenced by HK-C); §5.30 HK-9 kManagedMaps[] precedent (the landmine-removal pattern HK-D guard #12 mirrors for parallelism); §5.30 T_EXPORTER_EXITS_6_ALL_IFACES_EACCES (multi-lock `"xdp_fixture;exporter_port_9417"` precedent T_DETACH_NOTHING follows); §5.32 EDIT-2 PI-6 carve-out language (3-EDIT carve-out per PI-6-3.5.5 mirrors); anti-misdiagnosis guards #1..#11 catalogue (extends to #12); architect-spec §6.6 anti-misdiagnosis institutional-learning rule (this slice's HK-D realizes it for parallelism class).
