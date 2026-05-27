@@ -8272,8 +8272,8 @@ Reviewer's 5th framework point walks the COMBINED list (PI-1..PI-34 + PI-3.4b-*)
 | PI-21..PI-25 | Ansible playbook + syntax-check + FLEET_DEPLOYMENT.md + directive catalogue + systemd-restart flake handling | UNCHANGED. |
 | PI-26 | MVP-3.3 historical "no C++/BPF source change" check | UNCHANGED (PI-26 fires on the MVP-3.3 commit set, not the MVP-3.4b commit set). |
 | PI-27 ≡ PI-13-3.4b adjudicated | inner-allowlist-value offset-0 byte semantics PRESERVED (occupied slots return 0x01 at byte 0); `value_size` EXTENDED 1 → 8 (PI-13-3.4b PASS-as-additive adjudication) | See PI-13-3.4b above for the full check mechanism. The PRIOR strict-byte-shape reading of PI-27 is SUPERSEDED by PI-13-3.4b for slices post-§5.31. PI-27's "load-bearing defer PI" status from §5.29 is REPLACED by PI-13-3.4b's "load-bearing PASS-as-additive PI" — the defer ends here, with byte-level evidence the offset-0 byte is preserved. |
-| PI-28 → **PI-28-3.4b** | **`mac_filter_prog` BPF function body EXTENDS (no longer byte-equivalent to MVP-3.2/3.4.5)**: adds `bump_rule(entry->rule_id)` call in the MAC HASH-hit branch (line ~228 area, was just `bump_stat(STAT_PASS); return XDP_PASS;`); adds `bump_rule(cidr_hit->rule_id)` call in the CIDR LPM_TRIE-hit branch (line ~256 area, was just `bump_stat(STAT_PASS_CIDR); return XDP_PASS;`); adds `struct allow_entry *entry` typed-pointer (vs `__u8 *present`) reads at lines 226 + 254. **First substantive `mac_filter_prog` body change since MVP-3.2.** All OTHER body lines (default fallthrough, drop branches, IPv4 ethertype check, ethhdr bounds check) BYTE-EQUIVALENT. Functional semantic: same verdicts for same inputs PLUS rule_counters bump per hit. | `git diff main -- src/bpf/mac_filter.bpf.c` shows the EDITED line-set per the FileList table above + new `bump_rule` helper + new `rule_counters` map declaration. All other diff lines (default fallthrough, drop branches, etc.) zero. Reviewer's regional-diff check on the function-body: allowed hunks = {line 55 inner-VALUE typedef, line 95 inner-VALUE typedef, line 226 typed-pointer + bump_rule call, line 254 typed-pointer + bump_rule call, NEW `rule_counters` map decl in .maps block, NEW `bump_rule` helper definition}. Any hunk outside this set in the function body = `[INVARIANT-VIOLATED]`. |
-| PI-29 → **PI-29-3.4b** | **`rules` map STILL NOT consulted by datapath**; **`action_table` map STILL NOT consulted by datapath**; **inner-allowlist-value's `rule_id` IS read by datapath** (NEW). | `bpftool map dump pinned ${PIN_DIR}/<iface>/rules` shows occupied slots matching applied config (UNCHANGED from MVP-3.4 — still populated by `populate_rules_skeleton` per D-3.4b-18); `bpftool map dump pinned ${PIN_DIR}/<iface>/action_table` shows two entries (UNCHANGED). **Datapath non-consultation of `rules` + `action_table` verified via PI-28-3.4b regional-diff**: no `bpf_map_lookup_elem(&rules, ...)` or `bpf_map_lookup_elem(&action_table, ...)` calls inside `mac_filter_prog` function body. **Datapath read of inner-VALUE rule_id IS the only NEW datapath map-related read this slice** (a struct-field deref on a successfully-looked-up inner pointer, NOT a separate `bpf_map_lookup_elem` call). T_DROP_RULE_BUMPS_COUNTER + T_RULES_SKELETON_NOT_WIRED jointly confirm the carve-out: drop-rule entry in `rules` map populated but `rule_counters[drop_rule_id]` stays 0 because the drop-rule's MAC is NOT in inner-allowlist (datapath never executes bump_rule for that MAC). |
+| PI-28 → **PI-28-3.4b** **[SUPERSEDED BY §5.34 PI-29-3.4b-c2 — see §5.34 LIFTED PI declarations sub-section + §5.34 PI-29-3.4b-c2 successor contract; `mac_filter_prog` body extends further with rules→action_table dispatch chain per HG-3.4b-c2-4]** | **`mac_filter_prog` BPF function body EXTENDS (no longer byte-equivalent to MVP-3.2/3.4.5)**: adds `bump_rule(entry->rule_id)` call in the MAC HASH-hit branch (line ~228 area, was just `bump_stat(STAT_PASS); return XDP_PASS;`); adds `bump_rule(cidr_hit->rule_id)` call in the CIDR LPM_TRIE-hit branch (line ~256 area, was just `bump_stat(STAT_PASS_CIDR); return XDP_PASS;`); adds `struct allow_entry *entry` typed-pointer (vs `__u8 *present`) reads at lines 226 + 254. **First substantive `mac_filter_prog` body change since MVP-3.2.** All OTHER body lines (default fallthrough, drop branches, IPv4 ethertype check, ethhdr bounds check) BYTE-EQUIVALENT. Functional semantic: same verdicts for same inputs PLUS rule_counters bump per hit. | `git diff main -- src/bpf/mac_filter.bpf.c` shows the EDITED line-set per the FileList table above + new `bump_rule` helper + new `rule_counters` map declaration. All other diff lines (default fallthrough, drop branches, etc.) zero. Reviewer's regional-diff check on the function-body: allowed hunks = {line 55 inner-VALUE typedef, line 95 inner-VALUE typedef, line 226 typed-pointer + bump_rule call, line 254 typed-pointer + bump_rule call, NEW `rule_counters` map decl in .maps block, NEW `bump_rule` helper definition}. Any hunk outside this set in the function body = `[INVARIANT-VIOLATED]`. |
+| PI-29 → **PI-29-3.4b** **[SUPERSEDED BY §5.34 PI-29-3.4b-c2 — see §5.34 LIFTED PI declarations sub-section + §5.34 PI-29-3.4b-c2 successor contract; `rules` + `action_table` NOW consulted by datapath per HG-3.4b-c2-4; `action_table` STAYS SHARED per HG-3.4b-c2-3]** | **`rules` map STILL NOT consulted by datapath**; **`action_table` map STILL NOT consulted by datapath**; **inner-allowlist-value's `rule_id` IS read by datapath** (NEW). | `bpftool map dump pinned ${PIN_DIR}/<iface>/rules` shows occupied slots matching applied config (UNCHANGED from MVP-3.4 — still populated by `populate_rules_skeleton` per D-3.4b-18); `bpftool map dump pinned ${PIN_DIR}/<iface>/action_table` shows two entries (UNCHANGED). **Datapath non-consultation of `rules` + `action_table` verified via PI-28-3.4b regional-diff**: no `bpf_map_lookup_elem(&rules, ...)` or `bpf_map_lookup_elem(&action_table, ...)` calls inside `mac_filter_prog` function body. **Datapath read of inner-VALUE rule_id IS the only NEW datapath map-related read this slice** (a struct-field deref on a successfully-looked-up inner pointer, NOT a separate `bpf_map_lookup_elem` call). T_DROP_RULE_BUMPS_COUNTER + T_RULES_SKELETON_NOT_WIRED jointly confirm the carve-out: drop-rule entry in `rules` map populated but `rule_counters[drop_rule_id]` stays 0 because the drop-rule's MAC is NOT in inner-allowlist (datapath never executes bump_rule for that MAC). |
 | PI-30 | `bypass` primitive UNCHANGED | UNCHANGED. Bypass invokes `detach`; no map change; no datapath change for bypass. |
 | PI-31 → **PI-31-3.4b** | **Exporter is READ-ONLY by construction** — extends to cover NEW `rule_counters_reader.cpp` + `sidecar_reader.cpp`. NO `bpf_map_update_elem`, no `bpf_map_delete_elem`, no map mutations; sidecar_reader is filesystem-READ-ONLY (no write to rule_index.json). | `grep -rE 'bpf_(map_(update\|delete)_elem\|obj_pin\|link_create\|link_destroy\|xdp_(attach\|detach)\|prog_load)' src/exporter/` returns ZERO matches post-§5.31. `grep -rE '\b(fopen\|fwrite\|open).*rule_index' src/exporter/` returns ZERO writes (only reads). Reviewer asserts during framework point 5 walk. |
 | PI-32 → **PI-32-3.4b** | **Exporter handles missing/empty bpffs gracefully + missing-sidecar gracefully** — extends PI-32 to include sidecar-orphan tolerance. Missing rule_index.json → degrade to `action="unknown"` labels (NOT crash, NOT skip series). Missing rule_counters pin → exporter emits NO rule_match samples for that iface (graceful). | T_EXPORTER_RULE_LABELS sidecar-orphan sub-test (above) — delete rule_index.json mid-scrape; assert exporter survives + labels become `action="unknown"`. PI-32-3.4b STRENGTHENS PI-32 with two new degradation paths. |
@@ -9665,3 +9665,765 @@ The following item was deferred at MVP-3.4.5 §7 OOS (carry-forward through MVP-
 - **Bash-level shared-state detector** (a static script that greps `--iface lo` and asserts matching `RESOURCE_LOCK lo_iface` in CMakeLists.txt) — REJECTED scope: guard #12 + reviewer's 5-point framework point 5 is sufficient. Future cycle MAY add if guard #12 catches violations repeatedly. NEW FENCE.
 
 Evidence: `mint/task-brief.md` MVP-3.5.5 brief (HG-3.5.5-1..4 + HK-A/B/C/D + Q1-Q4); MVP-3.5 review.md (informational flake observation + A/B reviewer 3-run divergent victim sets — surfacing source for HK-A/HK-B); `git show c0b537a:mint/review.md` (MVP-3.4.5 OOT-deferred queue — HK-C closure source); §5.22 (T_BPFFS_ROOT_SYMLINK destructive-bpffs-root precedent + RESOURCE_LOCK xdp_fixture lock-domain origin); §5.25 P1 (cleanup_veth atomic netns-del + pin-dir-rm — the multi-cycle foundation HK-B doesn't touch); §5.29 (http::run() teardown anchor for HK-C); §5.30 HK-17 (exit-6 ordering context cross-referenced by HK-C); §5.30 HK-9 kManagedMaps[] precedent (the landmine-removal pattern HK-D guard #12 mirrors for parallelism); §5.30 T_EXPORTER_EXITS_6_ALL_IFACES_EACCES (multi-lock `"xdp_fixture;exporter_port_9417"` precedent T_DETACH_NOTHING follows); §5.32 EDIT-2 PI-6 carve-out language (3-EDIT carve-out per PI-6-3.5.5 mirrors); anti-misdiagnosis guards #1..#11 catalogue (extends to #12); architect-spec §6.6 anti-misdiagnosis institutional-learning rule (this slice's HK-D realizes it for parallelism class).
+
+---
+
+### §5.34 MVP-3.4b cycle 2: `rules` map atomic-swap promotion + datapath dispatch + schema cycle 2→3 shift (brownfield amendment, 2026-05-26)
+
+**Purpose**: close the **datapath-consultation half** of the per-rule action machinery deferred from MVP-3.4 Open Q #13 RESOLUTION Option 2 + MVP-3.4b cycle 1. Two coupled deliverables ship together (carving them apart creates half-applied state — atomic-swap of `rules` without datapath consultation is meaningless; datapath consultation without atomic-swap creates race windows):
+
+1. **`rules` map atomic-swap promotion** — promote the currently-SHARED `rules` ARRAY (declared at `src/bpf/mac_filter.bpf.c:172-178`) to parallel `rules_outer` ARRAY_OF_MAPS[2] of `rules_a` / `rules_b` inner ARRAYs, byte-for-byte mirroring the §5.27 CIDR-axis pattern. Single `active_idx` flip swaps MAC inner + CIDR inner + defaults + rules atomically in one u32 store. Closes D-3.4-4 carry-over.
+
+2. **Datapath consultation + action dispatch** — `mac_filter_prog` extends BOTH the MAC HASH-hit branch AND the CIDR LPM_TRIE-hit branch to read `rules[entry->rule_id]` → look up `action_table[rule.action_id]` → dispatch `XDP_PASS` or `XDP_DROP` based on `action_type`. **Drop rules become operative**: a `match.mac: X` + `action: drop` rule now drops X explicitly via the action_table path, rather than via the indirect "X-not-in-allowlist → defaults[active]=drop fallthrough" mechanism. This requires the schema cycle 2 → cycle 3 SEMANTIC SHIFT (HG-3.4b-c2-2): drop rules NOW populate the inner-allowlist (with their `rule_id`), so datapath can reach the rules-lookup step.
+
+**Anchor sections**: §5.26 Q1 AS1 + Q2 A1 (atomic-swap mechanism — parent pattern); §5.27 Q1 AS1 (CIDR-axis parallel-outer precedent — DIRECT MIRROR for `rules` axis); §5.29 HG-3.4-1 + Q3 + §5.29 DataStructures (rules+action_table SKELETON declared + populated + WARN; the fence this slice LIFTS); §5.31 PI-13-3.4b + PI-28-3.4b + PI-29-3.4b (direct cycle-1 ancestor — inner-VALUE rule_id extension is the load-bearing datapath plumbing this slice consults); §5.30 HK-9 `kManagedMaps[]` table (the landmine refactor that makes the +3/−1 net +2 entry shift mechanical); §5.31 D-3.4b-15 `MacRule` / `CidrRule` anon-namespace shape (the precedent for the rule_id-carrying intermediate vectors); §4.1 exit-code table (UNCHANGED — no new exit code); §4.3 LoaderError enum (UNCHANGED — PI-7-3.4b-c2-hpp ZERO-diff continues).
+
+**Scope contract (§5.34 short form)**:
+- NEW (no source files): all changes are EDITs to existing files; ZERO new translation units.
+- NEW (BPF maps): `rules_outer` ARRAY_OF_MAPS[XDPMF_RULESET_COUNT=2] outer + `rules_a` + `rules_b` inner ARRAYs (template `rules_inner` for libbpf `__inner_map` linkage). Parallel-swap symmetry with §5.27 CIDR axis.
+- REMOVED (BPF map): the existing SHARED `rules` ARRAY (line 172-178). PI-29-3.4b-c2-removal: the prior `${PIN_DIR}/<iface>/rules` pin disappears; replaced by `${PIN_DIR}/<iface>/rules_outer` + `${PIN_DIR}/<iface>/rules_a` + `${PIN_DIR}/<iface>/rules_b`.
+- NEW (datapath): per-match `rules[rule_id] → action_table[action_id] → XDP_PASS/XDP_DROP` dispatch chain at BOTH MAC HASH-hit + CIDR LPM_TRIE-hit branches in `mac_filter_prog`. STAT_PASS / STAT_PASS_CIDR continue to bump on PASS verdict; STAT_DROP_DENY bumps on DROP verdict (Q1 = Q1.B — re-use existing bucket, no new enum slot).
+- NEW (schema semantic shift): apply path's rule-extraction step (`extract_pass_macs` + `extract_pass_cidrs` at `loader.cpp:1479` + `:1503`) now INCLUDES `RuleAction::Drop` rules in the inner-allowlist population (carrying their `rule_id`). Prior §5.26 schema cycle 2 contract — "drop rules do NOT populate the inner allowlist" — is EXPLICITLY AMENDED (PI-30-3.4b-c2-schema below).
+- NEW (3 ctests): `T_DROP_RULE_OPERATIVE.sh` (§6.NN), `T_RULES_ATOMIC_SWAP_NO_DROP.sh` (§6.NN+1), `T_RULES_AXIS_FLIPS_WITH_ACTIVE_IDX.sh` (§6.NN+2). All 3 take `RESOURCE_LOCK xdp_fixture` (guard #12).
+- EDITED (1 ctest body, schema-shift semantic): `T_DROP_RULE_BUMPS_COUNTER.sh` body rewrite per Q3.A — drop-rule MAC NOW enters inner-allowlist; per-rule counter NOW bumps; verdict is XDP_DROP via action_table (was: MAC absent, counter stays 0, drop via defaults fallthrough). EXPLICIT semantic-change EDIT per HG-3.4b-c2-2; reviewer treats as `inline-merge` per §5.34 EDIT-1 reviewer-disposition rule below.
+- DELETED (1 ctest): `T_RULES_SKELETON_NOT_WIRED.sh` body + its `tests/CMakeLists.txt:573` foreach entry (Q2.A) — the contract this test asserts (rules+action_table NOT consulted by datapath) is RETIRED by this slice.
+- EDITED (BPF source): `src/bpf/mac_filter.bpf.c` — D-1 (`rules` map promotion to parallel ARRAY_OF_MAPS) + D-2 (datapath dispatch extension at MAC HASH-hit + CIDR LPM_TRIE-hit branches).
+- EDITED (loader): `src/lib/loader.cpp` — L-1 (kManagedMaps[] 13 → 15 entries: REMOVE `rules`; ADD `rules_outer` + `rules_a` + `rules_b`; comment count update) + L-2 (`populate_rules_skeleton` signature change to `populate_rules_inner_slot` operating on the inactive inner-fd; called BEFORE active_idx flip) + L-3 (rule-extraction step schema-shift: include `RuleAction::Drop` rules in MacRule/CidrRule vectors with their `rule_id`).
+- EDITED (shared header): `src/common/mac_filter.h` — L-4 (ADD `XDPMF_MAP_RULES_OUTER_NAME` + `XDPMF_MAP_RULES_INNER_A_NAME` + `XDPMF_MAP_RULES_INNER_B_NAME`; DELETE `XDPMF_MAP_RULES_NAME`).
+- EDITED (CMakeLists.txt): V-1 — VERSION bump `0.8.0 → 0.9.0` (MINOR — operator-observable behavioural change: drop rules now operative explicitly).
+- EDITED (CHANGELOG.md): V-2 — NEW `## [0.9.0] - 2026-05-NN` section per Keep-a-Changelog; build-pace table row update; one-line note on `reset-counters` / `rule_counter atomic-swap` carve-out to follow-up.
+- EDITED (test version literal): `tests/T_EXPORTER_METRICS_FORMAT.sh` — HK-8/PI-8-3.4b-c2-forced bump at 4 sites (lines 21, 22, 101, 102) `xdpmf-exporter 0.8.0` → `xdpmf-exporter 0.9.0`. Mirrors §5.31 EDIT-2 PI-3.4b-9 precedent + §5.32 EDIT-2 PI-6-3.5 precedent.
+- UNCHANGED-BUT-AFFECTED (zero git-diff fence — PI-7-3.4b-c2-hpp / -cpp): `src/lib/loader.hpp` (**9th consecutive ZERO-diff cycle**); `src/lib/config.hpp` (**4th consecutive ZERO-diff cycle**); `src/lib/config.cpp` (the `Config::Rule::action` field already exists at config.hpp:43 — VERIFY-not-modify per HG-3.4b-c2-1 inheritance); `src/lib/sidecar.cpp` (sidecar shape UNCHANGED — `action="drop"` label flows through unchanged); `src/lib/yaml_subset.{cpp,hpp}` (UNCHANGED); `src/cli/*` (CLI surface UNCHANGED); `src/exporter/*` (exporter UNCHANGED — `xdpfilter_rule_match_total{action="drop"}` now reflects EXPLICIT drop-rule activations, not zero; this is the operator-facing operationalization signal); systemd unit files (UNCHANGED); ansible files (UNCHANGED); §5.4 / §5.19 / §5.22 / §5.24 / §5.26 / §5.27 trust+identity gates (UNCHANGED — no `attach`/`detach` path change).
+
+#### §5.34 Phase A grep verification report (architect-independent — 2026-05-26)
+
+Per architect spec Phase A code-grep discipline (anti-misdiagnosis guards #5, #7, #9, #10, #11, #12 all applicable per brief). Independent of brief's Phase 2 verification report; results aligned:
+
+1. **`SEC(".maps")` count in `src/bpf/mac_filter.bpf.c`**: `grep -cE 'SEC\(".maps"\)' src/bpf/mac_filter.bpf.c` returns **13**. Components walked: 2 inner templates (`xdpmf_allowlist_inner`, `xdpmf_cidr_inner`) + 2 MAC HASH inners (`allowlist_a/b`) + MAC outer (`rulesets`) + 2 CIDR LPM_TRIE inners (`cidr_allowlist_a/b`) + CIDR outer (`cidr_rulesets`) + `active_idx` + `defaults` + `stats` + `rules` + `action_table` + `rule_counters`. **Post-§5.34 expected**: 13 + 3 (NEW `rules_inner` template + `rules_a` + `rules_b` + `rules_outer`) − 1 (REMOVED shared `rules`) = +3 net under the template-explicit shape; brief said "+2 net" but brief was reasoning at the userspace-pin level (where the template is NOT pinned). Architect picks the template-explicit shape per §5.27 precedent (`xdpmf_cidr_inner` template at line 5256 of design — declared in `.maps` but NOT pinned). Reviewer's check: post-§5.34 `grep -cE 'SEC\(".maps"\)'` returns **16** (13 + 3 with the template).
+2. **`kManagedMaps[]` count in `src/lib/loader.cpp`**: `grep -cE '^\s*\{ &SkelMapsT::' src/lib/loader.cpp` returns **13** (12 non-alias + 1 legacy alias per §5.30 HK-9 + §5.31 D-3.4b-13). Post-§5.34 expected: 13 − 1 (REMOVE `rules`) + 3 (ADD `rules_outer` + `rules_a` + `rules_b`) = **15** entries (14 non-alias + 1 alias). Brief's L-1 wording "13 → 15 entries (12 → 14 non-alias)" matches.
+3. **`populate_rules_skeleton(int rules_fd, ...)` signature**: located at `src/lib/loader.cpp:1231` — CONFIRMED. Renames to `populate_rules_inner_slot(int rules_inner_fd, const std::vector<Rule>& rules)` per L-2; clear-and-write semantic preserved BUT now operates on the INACTIVE inner before flip (parallel to `populate_inner_slot` / `populate_cidr_inner_slot` precedent).
+4. **`Config::Rule::action` field**: located at `src/lib/config.hpp:43` (`RuleAction action = RuleAction::Drop;`) — CONFIRMED. No `config.hpp` / `config.cpp` change this slice (PI-7-3.4b-c2-hpp / -cpp ZERO-diff continues; D-3.4b-11 dividend extends).
+5. **VERSION 0.8.0 literal propagation** (guard #11): `grep -rln '0\.8\.0' tests/ src/ docs/ CHANGELOG.md CMakeLists.txt` returns:
+   - `CMakeLists.txt:13` (`project(... VERSION 0.8.0 ...)`) — bumps to `0.9.0` per V-1.
+   - `tests/T_EXPORTER_METRICS_FORMAT.sh:21, 22, 101, 102` — 4 sites; HK-8-forced bump to `xdpmf-exporter 0.9.0` per the precedent established in §5.31 EDIT-2 + §5.32 EDIT-2.
+   - `CHANGELOG.md` — bumped by V-2 (NEW `[0.9.0]` section + build-pace row).
+   - `mint/task-brief.md` + `mint/design.md` + `mint/task-brief-mvp-3.5.5.md` + `mint/task-brief-mvp3.5.md` — design/brief docs; NOT touched by impl/tester (those are append-only history under /mint workflow).
+   - **Total operative version-literal touches**: 1 (CMakeLists.txt) + 4 (test body) + N (CHANGELOG entry) = ~6 LOC.
+6. **`bpftool prog load` standalone smoke (guard #7)**: `grep -nE 'bpftool prog load' tests/` returns hits in `T_ATTACH_TAG_MISMATCH.sh` (alt-fixture preflight branch ONLY per §5.31 EDIT-2 D-3.4b-22 — real-fixture branch already uses real loader path). The alt fixture (`mac_filter_alt.bpf.c`) has a trivial `XDP_PASS` body — NO inner-VALUE read, NO new chained-deref pattern from `rules_outer`. Architect assessment: `rules_outer` ARRAY_OF_MAPS reshape is shape-symmetric with the existing `rulesets`/`cidr_rulesets` outers (which DO NOT trigger bpftool standalone-load failures — they pass since MVP-3.1/3.2). The inner-VALUE of `rules_*` inners is `struct rule_entry` (UNCHANGED from §5.29 — already 4 bytes), NOT a new layout. So the BTF asymmetry trap that surfaced in §5.31 EDIT-2 (inner-VALUE shape mutation triggering offset-4 verifier-reject under standalone bpftool) is **NOT expected to recur** for this slice. **However**: impl SHOULD run the §5.31 EDIT-2 guard #7 smoke (`sudo -n bpftool prog load build/src/bpf/mac_filter.bpf.o /sys/fs/bpf/probe type xdp; rc=$?; sudo -n bpftool prog unpin /sys/fs/bpf/probe; echo $rc`) once during Phase 2.5 against the rebuilt object as defense-in-depth. If standalone load FAILS, the same hybrid pattern as §5.31 EDIT-2 (real-loader path for the affected preflight) applies. Result expected: rc 0 (per the precedent that adding a NEW ARRAY_OF_MAPS outer with EXISTING inner-VALUE shape is BTF-safe).
+7. **RESOURCE_LOCK declarations** (guard #12): `grep -nE 'RESOURCE_LOCK|xdp_fixture|lo_iface|exporter_port_9417' tests/CMakeLists.txt | head -20` confirms `xdp_fixture` lock domain is established. NEW T-1 / T-2 / T-3 all touch veth → all MUST declare `RESOURCE_LOCK xdp_fixture` in their `set_tests_properties` block. NO new lock domain needed.
+8. **Catalogue arithmetic** (guard #10): post-§5.34 expected values for the reviewer's invariants walk:
+   - `enum xdpmf_stat` count: **UNCHANGED** (STAT_MAX=4 stays — per Q1.B = re-use STAT_DROP_DENY for explicit-rule-drops AND default-deny-fallthroughs; PI-26-ish territory preserved).
+   - `XDPMF_MAP_*_NAME` constant count: pre-§5.34 has `XDPMF_MAP_RULES_NAME` (deleted) → ADD 3 new constants → net +3 / −1 = **+2 net** (15 → 17 if you count, though impl doesn't pin them all).
+   - `kManagedMaps[]` count: **13 → 15** (12 → 14 non-alias + 1 alias).
+   - `SEC(".maps")` count in bpf source: **13 → 16** (with template).
+   - mac_filter_prog body new map-lookups per match: **+3** (rules_outer + rules_inner + action_table) per axis, symmetric MAC + CIDR.
+9. **Schema cycle 2 contract currently in code**: `src/lib/loader.cpp:1483-1485` shows `extract_pass_macs` filters to `r.action != RuleAction::Pass continue` (skips drop rules). Line 1508 same for `extract_pass_cidrs`. CONFIRMED. Post-§5.34 the `continue` line REMOVES the action-filter (or changes condition to `r.action != RuleAction::Pass && r.action != RuleAction::Drop continue` — semantically a no-op since enum has only 2 values, so the cleanest shape is to DELETE the line; impl picks per D-3.4b-c2-3 below).
+10. **Discrepancies vs brief**: NONE. Brief's Phase 2 grep results align with my independent Phase A pass at all checkpoints (kManagedMaps=13 baseline, populate_rules_skeleton location, Config::Rule::action pre-existence, 4 version-literal sites in T_EXPORTER_METRICS_FORMAT, schema cycle 2 contract location). The only nuance: brief said "rules → rules_outer/rules_a/rules_b = +2 net" at the BPF `SEC(".maps")` level, but architect picks template-explicit shape (+3 net) per §5.27 precedent — this is an architect-implementation refinement, not a brief contradiction.
+
+#### §5.34 Human-gate decisions (pre-loaded defaults from brief — confirmed by architect Phase A)
+
+- **HG-3.4b-c2-1 — `rules` map promotion shape = PARALLEL `rules_outer` ARRAY_OF_MAPS[2] of `rules_a` / `rules_b` inner ARRAYs.** Confirmed. Byte-for-byte mirror of §5.27 Q1 AS1 (CIDR axis): outer `BPF_MAP_TYPE_ARRAY_OF_MAPS` of size `XDPMF_RULESET_COUNT=2` indexed by `active_idx`; inner `BPF_MAP_TYPE_ARRAY[XDPMF_ALLOWLIST_MAX=64]` of `struct rule_entry`. Both inners pinned via `LIBBPF_PIN_BY_NAME`. The §5.27 precedent is load-bearing pattern; architect-override candidates (INNER HASH_OF_MAPS, shared-with-rcu) are not motivated by any operator constraint and would diverge from the established CIDR-axis idiom. Verifier-precedent: §5.27 CIDR axis has been operationally green since MVP-3.2; same shape for `rules_outer` is verifier-trivial.
+
+- **HG-3.4b-c2-2 — Schema cycle 2 → cycle 3 SEMANTIC SHIFT: drop rules NOW populate inner-allowlist.** Confirmed; this is the SECOND load-bearing human-gate of the cycle (alongside HG-3.4b-c2-1). The prior §5.26 schema cycle 2 contract is EXPLICITLY AMENDED — see §5.34 prior-contract-cite + new-contract-statement block below (PI-30-3.4b-c2-schema). Operator mental model shift: "every rule that matches a frame contributes per-rule counter; action is explicit via the rule's `action:` field; the default-drop fallback only catches frames matching NO rule".
+
+  **Prior §5.26 schema cycle 2 contract (VERBATIM cite, to be SUPERSEDED)** — from §5.26 D-3.1-4 schema rule 4 + §5.26 apply step 8 (paraphrased to operative shape):
+  > Rules with `action: drop` populate NEITHER inner-allowlist axis (MAC HASH NOR CIDR LPM_TRIE). The MAC/CIDR matched by a drop rule falls through to `defaults[active]=drop` (default-deny). The `rules` map carries `{present=1, action_id=DROP}` for the drop rule (per §5.29 forward-compat), but the datapath does NOT consult it (PI-29 carve-out). Per-rule counter `rule_counters[drop_rule_id]` stays at 0 because `bump_rule` is only invoked on inner-allowlist MATCH (per §5.31 Q1 B3).
+
+  **NEW §5.34 schema cycle 3 contract (VERBATIM statement, post-shift)**:
+  > Rules with `action: drop` populate the inner-allowlist axis matching their `match:` clause (MAC HASH for `match.mac`, CIDR LPM_TRIE for `match.src_cidr`, BOTH for combined-match rules — symmetric with pass-rule axis selection). The inner-allowlist VALUE shape (`struct allow_entry{present=1, _pad[3]=0, rule_id=<rule.id>}`) is BYTE-IDENTICAL between pass-rule and drop-rule entries — the action discrimination happens DOWNSTREAM at the `rules[rule_id].action_id → action_table[action_id].action_type` lookup chain in `mac_filter_prog`. A frame matching a drop-rule's MAC/CIDR is observable in `rule_counters[drop_rule_id]` (per-rule counter NOW BUMPS — HG-3.4b-c2-5) AND increments `STAT_DROP_DENY` (the global verdict bucket — Q1.B re-uses the bucket for both explicit-rule-drops AND default-deny-fallthroughs). The default-deny fallthrough at `defaults[active]=drop` now ONLY catches frames matching NO rule (neither MAC nor CIDR).
+
+  **Reviewer disposition rule**: any reviewer-flagged "drop-rule MAC NOW appears in inner-allowlist" or "drop-rule per-rule counter NOW bumps" or "T_DROP_RULE_BUMPS_COUNTER assertion semantics inverted" finding is `inline-merge` per HG-3.4b-c2-2 — NOT `[CONTRACT-DRIFT]`. The schema shift is explicit-by-design.
+
+- **HG-3.4b-c2-3 — `action_table` map shape STAYS SHARED ARRAY (no promotion to parallel).** Confirmed. `action_table` contains static `{PASS, DROP}` entries written once at apply (via `populate_action_table` at `loader.cpp:1263`); values do NOT mutate across applies. Atomic-swap is NOT motivated. If MVP-3.8+ adds mutable action types (MIRROR / RL / TAG with per-config parameters), action_table promotion becomes the natural next step — surfaced as a fence in §7 OOS NEW FENCE block.
+
+- **HG-3.4b-c2-4 — Datapath dispatch order = MAC HASH-hit → `rules_outer[active]` → `rules_inner[entry->rule_id]` → `action_table[rule.action_id]` → action_type → `XDP_PASS` or `XDP_DROP`.** Confirmed. Symmetric across MAC HASH and CIDR LPM_TRIE branches in `mac_filter_prog`. Miss-on-both-axes still falls through to `defaults[active]` (UNCHANGED — that's the default-action contract from §5.26 Q2-extension; this slice does NOT touch defaults semantics).
+
+  Datapath pseudocode (impl picks exact C-level shape — semantic is the contract):
+  ```
+  // MAC HASH hit branch (replaces §5.31 lines ~270-275):
+  struct allow_entry *entry = bpf_map_lookup_elem(inner, &key);
+  if (entry) {
+      bump_rule(entry->rule_id);                          // PER-RULE COUNT (PI-3.4b-4 preserved)
+      __u32 rid = entry->rule_id;
+      void *rules_inner = bpf_map_lookup_elem(&rules_outer, &active);  // NEW (active = same snapshot used for MAC inner)
+      if (rules_inner) {
+          struct rule_entry *r = bpf_map_lookup_elem(rules_inner, &rid);  // NEW
+          if (r && r->present) {
+              __u32 aid = r->action_id;
+              struct action_entry *a = bpf_map_lookup_elem(&action_table, &aid);  // NEW
+              if (a) {
+                  if (a->action_type == ACTION_DROP) {
+                      bump_stat(STAT_DROP_DENY);          // Q1.B re-use existing bucket
+                      return XDP_DROP;
+                  }
+                  /* a->action_type == ACTION_PASS — fall through to PASS below */
+              }
+          }
+      }
+      bump_stat(STAT_PASS);                               // EXISTING global count (preserved)
+      return XDP_PASS;
+  }
+  // CIDR LPM_TRIE hit branch (replaces §5.31 lines ~302-307): SYMMETRIC.
+  // Same shape; same active snapshot; same rules_outer / rules_inner / action_table chain;
+  // STAT_DROP_DENY on DROP verdict; STAT_PASS_CIDR on PASS verdict (preserved).
+  ```
+
+  **Verifier acceptance**: 3 additional `bpf_map_lookup_elem` calls per match (rules_outer / rules_inner / action_table). Each is a NULL-checked chained-inner-deref; verifier-precedent established by §5.27 CIDR axis (`cidr_rulesets` outer → `cidr_inner` chain — green since MVP-3.2) AND §5.31 `bump_rule` (inner PERCPU_ARRAY lookup with bounded rule_id — green since MVP-3.4b cycle 1). Combined complexity is well within the verifier's instruction-budget for XDP programs.
+
+  **If verifier rejects**: impl peer-DMs architect (Phase B SendMessage per `[[impl-role-discipline]]`); fallback is a flattened helper that pre-loads `action_type` into a stack local from `rules_inner` lookup (collapses the chained deref into 2 reads instead of 3 via stack staging). Architect re-scopes via design.md EDIT if needed.
+
+- **HG-3.4b-c2-5 — `rule_counters` bump policy at explicit-rule-DROP = STILL BUMP.** Confirmed. A rule MATCHED a frame; the per-rule counter increments REGARDLESS of whether the resulting verdict is PASS or DROP. Distinction surfaces via the existing `xdpfilter_rule_match_total{rule_id="<N>", action="drop"}` label (per §5.31 Q4 A3 — action-as-label, preserved from cycle 1). The global `xdpfilter_packets_total{verdict="drop"}` (STAT_DROP_DENY) now SUMS explicit-rule-drops + default-drop-fallthroughs; the per-rule series disambiguates.
+
+  Sanity-floor implication: `bump_rule(entry->rule_id)` call-site placement is BEFORE the new rules→action_table dispatch chain (so the counter bumps even if the action_table lookup somehow returns NULL — defense-in-depth). This is the shape shown in the HG-3.4b-c2-4 pseudocode above.
+
+#### §5.34 Q-decisions (mechanism)
+
+##### Q1: NEW STAT bucket for explicit-rule-DROP? → **Q1.B (re-use STAT_DROP_DENY for both)**
+
+Per brief recommendation. Minimizes invariant-surface diff: `enum xdpmf_stat` stays byte-equivalent (STAT_MAX=4 unchanged); `src/common/mac_filter.h` has ZERO change to the enum. PI-10-3.4b-c2 ADDITIVE-only contract is preserved (the only header additions are the 3 new map-name constants).
+
+Operator audit story: `sum(xdpfilter_packets_total{verdict="drop"}) by (iface)` = sum of explicit-rule-drops + default-deny-fallthroughs. To get explicit-rule-drops in isolation: `sum(xdpfilter_rule_match_total{action="drop"}) by (iface)`. The PROMQL composition gives operators the desired separation without inflating the global stat enum. Q1.A (NEW `STAT_DROP_RULE = 4`, STAT_MAX = 5) was the alternative — gives direct verdict-label visibility but at the cost of `enum xdpmf_stat` diff (PI-10 territory) + `STAT_MAX` bump (`PERCPU_ARRAY max_entries` change in mac_filter.bpf.c) + downstream exporter changes. NOT motivated by current operator demand; surfaced as future-fence in §7 OOS.
+
+##### Q2: `T_RULES_SKELETON_NOT_WIRED.sh` disposition → **Q2.A (DELETE)**
+
+Per brief recommendation. The test (declared at `tests/CMakeLists.txt:573`, body at `tests/T_RULES_SKELETON_NOT_WIRED.sh`) tests the contract that THIS slice explicitly RETIRES (rules+action_table NOT consulted by datapath). Post-§5.34, the test's contract no longer exists.
+
+NEW ctests `T_DROP_RULE_OPERATIVE.sh` + `T_RULES_ATOMIC_SWAP_NO_DROP.sh` + `T_RULES_AXIS_FLIPS_WITH_ACTIVE_IDX.sh` cover the new contract (datapath DOES consult rules + action_table per match). Q2.B (repurpose-rename `T_RULES_NOW_WIRED.sh`) and Q2.C (strip-and-rename) add naming churn without semantic value.
+
+Mechanical impact: ctest baseline 58 → 57 from this delete; then +3 NEW (T-1/T-2/T-3) = 60. Plus 1 EDITED ctest body (E-1 = T_DROP_RULE_BUMPS_COUNTER). Net ctest count: **60** (per brief Item E-2).
+
+##### Q3: `T_DROP_RULE_BUMPS_COUNTER.sh` disposition → **Q3.A (REWRITE body in-place)**
+
+Per brief recommendation. The test (declared at `tests/CMakeLists.txt:688`, body at `tests/T_DROP_RULE_BUMPS_COUNTER.sh`) currently verifies the §5.26 schema cycle 2 contract that THIS slice's HG-3.4b-c2-2 amends. Body rewrite per Q3.A: drop-rule's MAC NOW enters inner-allowlist; per-rule counter BUMPS; verdict is XDP_DROP via action_table.
+
+Concrete shape (impl reference; tester picks exact bash idiom):
+- Apply config with one drop rule (`id=17`, `action: drop`, `match.mac: 02:00:00:00:00:11`) + one pass rule for control (`id=5`, `action: pass`, `match.mac: 02:00:00:00:00:05`).
+- Inject 5 frames from drop-rule MAC.
+- Assert: `STAT_DROP_DENY` delta == 5 (was 5 pre-§5.34 via default fallthrough; now 5 via explicit action_table dispatch — same value, different mechanism).
+- **NEW**: Assert `rule_counters[17]` == 5 (was 0 pre-§5.34; per HG-3.4b-c2-5 NOW bumps).
+- **NEW**: Assert drop-rule MAC IS present in active inner allowlist via `bpftool map dump pinned ${PIN_DIR}/<iface>/allowlist_<active> --json | jq` (was ABSENT pre-§5.34; per HG-3.4b-c2-2 NOW present).
+- Sidecar `rule_index.json` for rule_id=17 STILL shows `"action": "drop"` (sidecar shape UNCHANGED — exporter labels `action="drop"`).
+- Negation: 2 frames from `id=5` PASS MAC → `rule_counters[5]` == 2; `rule_counters[17]` still == 5 (no cross-bump). STAT_PASS delta == 2.
+
+Test name kept (`T_DROP_RULE_BUMPS_COUNTER` — name now matches semantic, where pre-§5.34 it was somewhat ironic). Body rewrite ~30-50 LOC per brief estimate. PI-3.4b-c2-* carve-out: EXPLICIT semantic-change EDIT per HG-3.4b-c2-2 (the test's pre-§5.34 assertion that `rule_counters[17] STAYS 0` flips to `rule_counters[17] == 5`).
+
+##### Q4: `defaults` map semantics post-shift → **Q4.A (UNCHANGED)**
+
+Per brief recommendation. `defaults[active]` STILL CONSULTED on miss-both-axes (frames matching NO rule on MAC NOR CIDR). PRESERVED across applies via existing parallel-swap. Q4.B (retire `defaults`, require every operator to declare a catch-all rule) would be a breaking-config-change with no operator demand. `defaults` keeps its current responsibility as the fallback for unmatched frames.
+
+#### §5.34 LIFTED PI declarations (PI-28-3.4b + PI-29-3.4b)
+
+Per brief workflow rule (a): the schema-shift HG-3.4b-c2-2 is explicit-by-design and not OOS drift; per workflow rule (b): the PI-28-3.4b + PI-29-3.4b LIFTs MUST be explicitly named in design.md — reviewer treats silent retire as `[CONTRACT-DRIFT]`. This block names them.
+
+##### PI-28-3.4b LIFTED — `mac_filter_prog` body EXTENDS again (cycle 2 datapath consultation)
+
+**Prior PI-28-3.4b contract** (from §5.31, paraphrased): "`mac_filter_prog` BPF function body EXTENDS — adds `bump_rule(entry->rule_id)` call in MAC HASH-hit branch + `bump_rule(cidr_hit->rule_id)` call in CIDR LPM_TRIE-hit branch + struct allow_entry typed-pointer reads at the lookup sites. All OTHER body lines (default fallthrough, drop branches, IPv4 ethertype check, ethhdr bounds check) BYTE-EQUIVALENT. Functional semantic: same verdicts for same inputs PLUS rule_counters bump per hit."
+
+**Why LIFTED**: this slice ADDS 3 new `bpf_map_lookup_elem` chain reads per match (rules_outer → rules_inner → action_table) AND adds verdict-dispatch branching INSIDE the existing hit branches. The MAC HASH-hit and CIDR LPM_TRIE-hit branches grow in line-count + branching logic; the "all other body lines byte-equivalent" promise of PI-28-3.4b is no longer satisfied because the hit branches themselves now contain the dispatch chain.
+
+**NEW PI-29-3.4b-c2** (REPLACES PI-28-3.4b for slices ≥ MVP-3.4b cycle 2) — see successor PI sub-section below for the full contract.
+
+##### PI-29-3.4b LIFTED — `rules` + `action_table` maps NOW CONSULTED by datapath (carve-out closed)
+
+**Prior PI-29-3.4b contract** (from §5.31, paraphrased): "`rules` map STILL NOT consulted by datapath; `action_table` map STILL NOT consulted by datapath; inner-allowlist-value's `rule_id` IS read by datapath (NEW in cycle 1)."
+
+**Why LIFTED**: this slice's Items D-2 + HG-3.4b-c2-4 EXPLICITLY introduce datapath consultation of BOTH `rules_outer/inner` (replacing the SHARED `rules`) AND `action_table`. The "still NOT consulted" promise is the entire purpose of THIS slice to retire.
+
+**NEW PI-29-3.4b-c2** (REPLACES PI-29-3.4b for slices ≥ MVP-3.4b cycle 2) — see successor PI sub-section below for the full contract.
+
+#### §5.34 DataStructures additions / changes
+
+##### BPF (`src/bpf/mac_filter.bpf.c`) — `rules` axis promotion to parallel ARRAY_OF_MAPS
+
+Replace existing SHARED `rules` ARRAY (lines 172-178) with parallel-outer pattern (DIRECT MIRROR of §5.27 CIDR axis):
+
+```c
+/* §5.34 (MVP-3.4b cycle 2): rules map promoted to parallel ARRAY_OF_MAPS
+ * (HG-3.4b-c2-1). Inner template + 2 pinned inner ARRAYs + outer
+ * ARRAY_OF_MAPS pointing at them. Single active_idx u32 flip atomically
+ * commits MAC HASH inner + CIDR LPM_TRIE inner + defaults + rules inner —
+ * all four axes share the same active_idx (per §5.27 Q1 AS1 mechanism
+ * extended). Datapath dispatch chain consults rules_inner[rule_id] →
+ * action_table[action_id] → action_type per match (HG-3.4b-c2-4). */
+
+/* Inner ARRAY template — referenced by rules_outer.value.value. NOT pinned directly. */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __type(key, __u32);
+    __type(value, struct rule_entry);
+    __uint(max_entries, XDPMF_ALLOWLIST_MAX);
+} rules_inner SEC(".maps");          /* template; NOT pinned */
+
+/* Two pinned inner ARRAY instances (slot 0 / slot 1). */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __type(key, __u32);
+    __type(value, struct rule_entry);
+    __uint(max_entries, XDPMF_ALLOWLIST_MAX);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} rules_a SEC(".maps");              /* pinned at ${PIN_DIR}/<iface>/rules_a */
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __type(key, __u32);
+    __type(value, struct rule_entry);
+    __uint(max_entries, XDPMF_ALLOWLIST_MAX);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} rules_b SEC(".maps");              /* pinned at ${PIN_DIR}/<iface>/rules_b */
+
+/* Outer ARRAY_OF_MAPS parallel to existing rulesets / cidr_rulesets outers. */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
+    __uint(max_entries, XDPMF_RULESET_COUNT);
+    __type(key, __u32);
+    __array(values, struct rules_inner);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} rules_outer SEC(".maps");          /* pinned at ${PIN_DIR}/<iface>/rules_outer */
+```
+
+**REMOVED**: the prior SHARED `rules` ARRAY (lines 172-178) — no longer exists. The `XDPMF_MAP_RULES_NAME` constant (`"rules"`) is also REMOVED from `src/common/mac_filter.h`.
+
+`action_table` declaration (lines 180-186) **UNCHANGED** (per HG-3.4b-c2-3 STAYS SHARED).
+`rule_counters` declaration (lines 188-201) **UNCHANGED** (per §5.31; this slice does NOT touch the per-rule counter pipeline; HG-3.4b-c2-5 preserves the bump-on-match contract).
+`stats` PERCPU_ARRAY (line 158, `max_entries = STAT_MAX = 4`) **UNCHANGED** (per Q1.B no new enum slot).
+
+Pinning paths (post-§5.34, per LIBBPF_PIN_BY_NAME):
+- `${PIN_DIR}/<iface>/rules_a` (ARRAY inner slot 0)
+- `${PIN_DIR}/<iface>/rules_b` (ARRAY inner slot 1)
+- `${PIN_DIR}/<iface>/rules_outer` (ARRAY_OF_MAPS outer)
+
+**REMOVED PIN**: `${PIN_DIR}/<iface>/rules` (the prior shared-array pin no longer exists).
+
+##### Shared header (`src/common/mac_filter.h`) — map-name constants
+
+**ADDED**:
+```c
+/* §5.34 (MVP-3.4b cycle 2) HG-3.4b-c2-1: rules axis promoted to parallel
+ * ARRAY_OF_MAPS — DIRECT MIRROR of §5.27 CIDR-axis shape. Inner template +
+ * 2 pinned inners + outer; shared active_idx commits both axes atomically. */
+#define XDPMF_MAP_RULES_OUTER_NAME    "rules_outer"     /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] of ARRAY fds */
+#define XDPMF_MAP_RULES_INNER_A_NAME  "rules_a"         /* inner slot 0, ARRAY of struct rule_entry */
+#define XDPMF_MAP_RULES_INNER_B_NAME  "rules_b"         /* inner slot 1, ARRAY of struct rule_entry */
+```
+
+**REMOVED**: `#define XDPMF_MAP_RULES_NAME "rules"` (line 125 of current `src/common/mac_filter.h`). The SHARED-ARRAY pin disappears.
+
+**UNCHANGED**: `XDPMF_MAP_ACTION_TABLE_NAME`, `XDPMF_MAP_RULE_COUNTERS_NAME`, `XDPMF_RULE_COUNTERS_MAX`, `XDPMF_RULESET_COUNT`, `struct rule_entry`, `struct action_entry`, `enum xdpmf_action_type`, `enum mac_filter_stat`, `struct xdpmf_mac`, `struct xdpmf_cidr_v4`, `struct allow_entry`, `XDPMF_BPFFS_ROOT`, `XDPMF_ALLOWLIST_MAX`, `XDPMF_SIDECAR_ROOT` — ALL pre-§5.34 constants/types preserved byte-equivalent. PI-10-3.4b-c2 ADDITIVE-modulo-deletion contract: 3 added + 1 removed; the removal is the SHARED-`rules` retirement which is the explicit operative point of HG-3.4b-c2-1.
+
+  > **Naming-symmetry note**: the existing `XDPMF_MAP_INNER_A_NAME` / `XDPMF_MAP_INNER_B_NAME` constants name the MAC HASH inners as `allowlist_a` / `allowlist_b` (note: NOT `mac_inner_a/b`). The CIDR inners are `XDPMF_MAP_CIDR_INNER_A_NAME` = `cidr_allowlist_a` etc. For the rules axis, we use `rules_a` / `rules_b` (NOT `rules_inner_a/b`) — shorter and consistent with the SHARED-ARRAY-being-retired's name (`rules`). The map-name constants encode this: `XDPMF_MAP_RULES_INNER_A_NAME = "rules_a"`. The C identifier of the BPF map struct in mac_filter.bpf.c is `rules_a` (not `rules_inner_a`). Architect chose the shorter form per §5.27 precedent (where `cidr_allowlist_a` is the C identifier of the LPM_TRIE inner, not `cidr_allowlist_inner_a`).
+
+##### Loader (`src/lib/loader.cpp`) — `kManagedMaps[]` table 13 → 15 entries
+
+Concrete diff shape (impl reference — exact positioning is impl-flexible per D-3.4b-13 precedent):
+
+```cpp
+constexpr ManagedMapEntry kManagedMaps[] = {
+    { &SkelMapsT::allowlist_a,      XDPMF_MAP_INNER_A_NAME,             false },
+    { &SkelMapsT::allowlist_b,      XDPMF_MAP_INNER_B_NAME,             false },
+    { &SkelMapsT::rulesets,         XDPMF_MAP_RULESETS_OUTER_NAME,      false },
+    { &SkelMapsT::cidr_allowlist_a, XDPMF_MAP_CIDR_INNER_A_NAME,        false },
+    { &SkelMapsT::cidr_allowlist_b, XDPMF_MAP_CIDR_INNER_B_NAME,        false },
+    { &SkelMapsT::cidr_rulesets,    XDPMF_MAP_CIDR_RULESETS_OUTER_NAME, false },
+    { &SkelMapsT::active_idx,       XDPMF_MAP_ACTIVE_IDX_NAME,          false },
+    { &SkelMapsT::defaults,         XDPMF_MAP_DEFAULTS_NAME,            false },
+    { &SkelMapsT::stats,            XDPMF_MAP_STATS_NAME,               false },
+    /* §5.34 (MVP-3.4b cycle 2) D-3.4b-c2-1: REMOVE prior {rules, RULES_NAME}
+     * entry; ADD 3 new entries for rules_a / rules_b / rules_outer matching
+     * the §5.27 CIDR axis triple. Net: 13 → 15 entries (12 → 14 non-alias
+     * + 1 alias). All 3 call-site loops (clear, pin, reuse) walk the table. */
+    { &SkelMapsT::rules_a,          XDPMF_MAP_RULES_INNER_A_NAME,       false },
+    { &SkelMapsT::rules_b,          XDPMF_MAP_RULES_INNER_B_NAME,       false },
+    { &SkelMapsT::rules_outer,      XDPMF_MAP_RULES_OUTER_NAME,         false },
+    { &SkelMapsT::action_table,     XDPMF_MAP_ACTION_TABLE_NAME,        false },
+    { &SkelMapsT::rule_counters,    XDPMF_MAP_RULE_COUNTERS_NAME,       false },
+    { &SkelMapsT::allowlist,        XDPMF_MAP_ALLOWLIST_NAME,           true  },
+};
+```
+
+Position is alphabetical near `rulesets` group (impl-flexible — could be placed at end-before-alias too). The pre-HK-9 3-callsite-lockstep landmine is closed; this slice is the 2nd consecutive cycle to collect the HK-9 dividend (§5.31 D-3.4b-13 was the 1st: `rule_counters` added as 13th entry).
+
+Comment update: any in-file comment referencing "13th entry" or "12 non-alias" updates to "15 entries total (14 non-alias + 1 alias) post-§5.34" — architect rewrites the surrounding comment in-place.
+
+##### Loader (`src/lib/loader.cpp`) — `populate_rules_skeleton` → `populate_rules_inner_slot`
+
+**Signature change** (per L-2):
+```cpp
+// PRE-§5.34 (at loader.cpp:1231):
+void populate_rules_skeleton(int rules_fd, const std::vector<Rule>& rules)
+
+// POST-§5.34 (renamed; semantically operates on inner slot):
+void populate_rules_inner_slot(int rules_inner_fd, const std::vector<Rule>& rules)
+```
+
+**Body semantic**: BYTE-IDENTICAL to current `populate_rules_skeleton` body — clear-all-64-slots + write occupied slots with `{present=1, action_id=<from r.action>}`. The ONLY behavioural change is the CALLER (apply_request) now invokes against the **inactive** inner-fd (BEFORE active_idx flip), not against a SHARED map fd. The fd-source semantic shifts from "the kernel-shared `rules` map fd" to "the inactive `rules_<a|b>` inner map fd" — same shape, different fd. Existing clear loop + write loop logic preserved.
+
+**Call sites** (apply_request body):
+- Current `populate_rules_skeleton(rules_fd, req.config.rules)` at `loader.cpp:1785` (state-b reattach) and `:1915` (fresh attach) — BOTH update.
+- New shape: caller computes `inactive_rules_inner_fd` (via `skel->maps.rules_a` or `rules_b` depending on `inactive` value) BEFORE invoking `populate_rules_inner_slot`. Apply ordering: write to the inactive inner BEFORE the active_idx flip (parallel to existing `populate_inner_slot` / `populate_cidr_inner_slot` placement). The single `write_active_idx(active_idx_fd, inactive)` u32 store at `loader.cpp:1819` then atomically commits MAC + CIDR + defaults + RULES all together.
+
+**`populate_action_table`** UNCHANGED (action_table stays SHARED per HG-3.4b-c2-3; still called once per apply with its current signature).
+
+##### Loader (`src/lib/loader.cpp`) — rule-extraction step schema-shift (L-3)
+
+**Current contract** (`loader.cpp:1483-1484` + `:1508-1509`): filters to `r.action == RuleAction::Pass` only — drop rules are excluded from inner-allowlist population (§5.26 schema cycle 2).
+
+**Post-§5.34 contract** (per HG-3.4b-c2-2): filter ALSO includes `RuleAction::Drop` rules. Since `enum RuleAction` has only `{Drop, Pass}` two values, the cleanest implementation is to DELETE the action-filter line entirely:
+
+```cpp
+// PRE-§5.34 (extract_pass_macs body, loader.cpp:1483-1494):
+for (const Rule& r : c.rules) {
+    if (r.action != RuleAction::Pass) continue;          // <<< REMOVED in §5.34
+    if (!r.match.mac.has_value())    continue;
+    /* ... dedup + push_back ... */
+}
+
+// POST-§5.34 (extract_pass_macs body — RENAMED conceptually to extract_inner_macs;
+// impl picks whether to rename the function or just remove the filter line):
+for (const Rule& r : c.rules) {
+    if (!r.match.mac.has_value())    continue;           // action filter REMOVED
+    /* ... dedup + push_back ... */
+}
+```
+
+Symmetric for `extract_pass_cidrs` (`loader.cpp:1508-1509`) — `r.action != RuleAction::Pass` filter line REMOVED.
+
+**Function naming**: impl picks whether to rename `extract_pass_macs` → `extract_inner_macs` (more accurate post-shift) OR keep the existing name (less code churn). Architect default: KEEP existing name — the "pass" in the function name was always semantically misleading (rules are extracted for inner-allowlist population regardless of pass/drop), and renaming now would inflate the diff. Reviewer's regional-diff fence allows either choice; if renamed, all call-sites must update (impl handles atomically). PI-7-3.4b-c2-cpp scope-fence permits BOTH the filter-line removal AND an optional function rename inside the same hunk.
+
+**Dedup semantic note**: existing dedup at `loader.cpp:1487-1492` (MAC dedup) and `:1511-1516` (CIDR dedup) retains the FIRST rule_id for a given MAC/CIDR. Post-§5.34, this means: if operator declares `id=5 action=pass match.mac=X` AND `id=17 action=drop match.mac=X` (same MAC, two rule entries), the inner-allowlist gets `{mac=X, rule_id=5}` (first encountered). Per HG-3.4b-c2-4 datapath dispatch: a frame from MAC X hits the inner-allowlist, reads `rule_id=5`, looks up `rules_inner[5].action_id` → PASS → `XDP_PASS`. Operator's `id=17` drop rule for the same MAC is SHADOWED by the earlier pass rule (first-rule-wins). This is consistent with operator mental model of "rules are evaluated in source order; first match wins" and matches §5.26 dedup precedent. Architect documents this here so reviewer + tester don't flag it as an edge case to test — it's intentional shadowing.
+
+(Operators wanting "later-rule-wins" or "drop-precedence-over-pass" semantics → MVP-3.4d future cycle. NEW FENCE.)
+
+#### §5.34 Interfaces additions
+
+##### `mac_filter_prog` datapath contract (per HG-3.4b-c2-4)
+
+See pseudocode in HG-3.4b-c2-4 above. Semantic contract:
+- Each inner-allowlist match (MAC HASH OR CIDR LPM_TRIE) invokes `bump_rule(entry->rule_id)` BEFORE the rules→action_table dispatch chain (counter-bump invariant preserved per HG-3.4b-c2-5).
+- The rules→action_table chain reads ONE field at each step: `rule_entry::action_id` at offset 1 of `struct rule_entry` (post-§5.29 layout: `{present, action_id, _pad[2]}`); `action_entry::action_type` at offset 0 of `struct action_entry` (post-§5.29 layout: `{action_type, _pad[3]}`). NULL-checks on all 3 chained lookups (verifier-required).
+- On `action_type == ACTION_DROP`: bump `STAT_DROP_DENY` (Q1.B), return `XDP_DROP`.
+- On `action_type == ACTION_PASS` OR fallthrough (any chained lookup returns NULL, OR `r->present == 0`): bump `STAT_PASS` (or `STAT_PASS_CIDR` in the CIDR branch), return `XDP_PASS`. The NULL-fallthrough to PASS is defense-in-depth — practically unreachable because loader populates rules_inner + action_table before active_idx flip per apply ordering. If the chain DOES return NULL (kernel inconsistency), default to safer verdict (PASS — counter still bumped per `bump_rule` earlier, audit visible).
+
+**Active snapshot discipline**: the BPF program reads `active_idx` ONCE at the head of the datapath (already established by §5.27 Q1 AS1 race-window-benignity proof — see §5.27 Q1 rationale). The SAME `active` value indexes MAC `rulesets_outer`, CIDR `cidr_rulesets_outer`, `defaults`, AND NEW `rules_outer` — all four outers index the same slot per snapshot. Concurrent userspace `active_idx` flip is benign: the program either sees pre-flip (all four maps' old slots) OR post-flip (all four maps' new slots) — NEVER a half-applied state across the four axes. This is the LOAD-BEARING extension of §5.27 Q1 AS1 to 4 axes from 3 (MAC inner + CIDR inner + defaults → +rules inner).
+
+##### `populate_rules_inner_slot` contract (per L-2)
+
+```cpp
+/* §5.34 (MVP-3.4b cycle 2): populate the INACTIVE rules inner ARRAY slot
+ * before active_idx flip. Replaces the §5.29 populate_rules_skeleton which
+ * operated on the SHARED `rules` map; now parallel to populate_inner_slot
+ * / populate_cidr_inner_slot (per-axis inactive-slot pattern).
+ *
+ * Semantic: clear all 64 slots in the target inner; then write occupied
+ * slots with {present=1, action_id=<ACTION_PASS|ACTION_DROP from r.action>}.
+ * Empty slots written explicitly as {present=0, action_id=0} so removed
+ * rules don't leave stale state. */
+void populate_rules_inner_slot(int rules_inner_fd, const std::vector<Rule>& rules);
+```
+
+Anon-namespace in `src/lib/loader.cpp` (impl SHOULD NOT promote to a public symbol; PI-7-3.4b-c2-hpp preserved).
+
+##### CLI surface — UNCHANGED
+
+`xdpmacfilter attach --iface <X> --allow <MAC>` / `apply -f <file> --iface <X>` / `detach --iface <X>` / `bypass --iface <X> [--unsafe]` / `--help` / `--version` — ALL UNCHANGED. No new subcommand, no new flag, no new env var. `--help` MAY (not MUST) get an updated line mentioning that drop rules are now operative (impl-flexible; tester does NOT assert presence — CHANGELOG suffices for discoverability).
+
+##### Loader public API (`src/lib/loader.hpp`) — ZERO diff (PI-7-3.4b-c2-hpp, 9th consecutive cycle)
+
+`AttachConfig` / `DetachConfig` / `attach()` / `detach()` / `LoaderError` enum: ALL UNCHANGED. New datapath dispatch + schema shift live entirely behind the `internal::apply_request` boundary and inside the BPF program body. No public symbol added.
+
+##### Config API (`src/lib/config.hpp`) — ZERO diff (PI-7-3.4b-c2-hpp / -cpp, 4th consecutive cycle on config.hpp)
+
+`Config::Rule::action` field at config.hpp:43 already exists; the schema-shift requires NO new field, NO new enum value, NO new validator. `config.cpp` is VERIFY-not-modify (the `r.action == RuleAction::Drop` value is already faithfully preserved through validation per §5.26 schema rule 4 — confirmed by architect Phase A grep).
+
+##### Exporter (`src/exporter/*`) — UNCHANGED
+
+`xdpfilter_rule_match_total{iface, rule_id, action="drop"}` series already exists since §5.31 Q4 A3. Post-§5.34 this label now reflects EXPLICIT drop-rule activations (was 0 pre-§5.34 since drop-rule MAC was absent from inner-allowlist and `bump_rule` never fired). The exporter code path itself is BYTE-EQUIVALENT — only the data flowing through it changes. Sidecar `rule_index.json`'s `action: "drop"` field for drop rules continues to be written by `sidecar::write_rule_index` (UNCHANGED — sidecar shape per §5.31 Q2 S1 is preserved).
+
+#### §5.34 apply() flow update (rules-axis inner-population)
+
+Post-§5.34 `internal::apply_request()` body (incremental over §5.31 step 8 / 9):
+
+```
+internal::apply_request(req):
+  1..7. UNCHANGED from §5.26 (kernel probe, trust_model parse + log, ifindex,
+        skel load + self_tag, BpffsRootFd, §5.4 state-machine, P0a link pin detect).
+
+  8.   populate inactive slots (EXTENDED — now 4 axes share the inactive slot):
+         active_cur = read active_idx_map[0]
+         inactive   = 1 - active_cur
+
+         ── MAC axis (UNCHANGED §5.27 + §5.31 — but L-3 schema-shift INCLUDES drop rules) ─
+         for each rule in req.config.rules with match.mac.has_value():     // action filter REMOVED per L-3
+             bpf_map_update_elem(allowlist_<inactive>_fd, &rule.match.mac,
+                                 &allow_entry{.present=1, .rule_id=rule.id}, BPF_ANY)
+
+         ── CIDR axis (UNCHANGED §5.27 + §5.31 — same L-3 schema-shift) ──
+         for each rule in req.config.rules with match.src_cidr.has_value():    // action filter REMOVED
+             bpf_map_update_elem(cidr_allowlist_<inactive>_fd, &rule.match.src_cidr,
+                                 &allow_entry{.present=1, .rule_id=rule.id}, BPF_ANY)
+
+         ── defaults (UNCHANGED §5.26) ─────────────────────────────────────
+         bpf_map_update_elem(defaults_map, &inactive, &(default_action==Pass ? 1u : 0u), BPF_ANY)
+
+         ── NEW §5.34 — rules axis (parallel to MAC/CIDR per HG-3.4b-c2-1) ─
+         populate_rules_inner_slot(rules_<inactive>_fd, req.config.rules)
+         /* populate_rules_inner_slot clears all 64 slots + writes occupied
+          * with {present=1, action_id=<ACTION_PASS|DROP>} per §5.34 L-2. */
+
+  8.5. UNCHANGED §5.29 — action_table prepopulation:
+         populate_action_table(action_table_fd)
+         /* action_table STAYS SHARED per HG-3.4b-c2-3. Single ARRAY map;
+          * idempotent write of {PASS=0 → {action_type=PASS}, DROP=1 →
+          * {action_type=DROP}}. NOT inside the inactive-slot block above. */
+
+       ── WARN emission REMOVED §5.34 ───────────────────────────────────
+       The §5.29 stderr WARN `xdpmacfilter: rules: section parsed (<N>
+       entries) but per-rule action dispatch deferred to MVP-3.4b — ...`
+       is RETIRED this slice. The contract it announces (`rules` not
+       consulted by datapath) is no longer true. Impl REMOVES the WARN
+       emission at loader.cpp:1557-1574 (the `if (!req.config.rules.empty())`
+       block + the `logger::emit("loader.warn.rules_skeleton_not_wired", ...)`
+       call). PI-3.5-7 stability impact: ONE event-name catalogue entry
+       (`loader.warn.rules_skeleton_not_wired`) is REMOVED from
+       `kEventNames` — see §5.34 Decisions D-3.4b-c2-4 below for the
+       PI-3.5-4 catalog count adjustment 34 → 33.
+
+  9.   atomic flip (UNCHANGED §5.26):
+         bpf_map_update_elem(active_idx_map, &zero, &inactive, BPF_ANY)
+       ─ single u32 store ─ atomic commit point for ALL FOUR axes ─
+       (MAC inner + CIDR inner + defaults + rules inner. action_table is
+       NOT swapped — it's SHARED per HG-3.4b-c2-3.)
+
+ 10.   post-flip cleanup (UNCHANGED §5.26): leave previous slot populated.
+
+ 10.5. NEW §5.31 (UNCHANGED §5.34) — sidecar write:
+         sidecar::write_rule_index(req.iface, XDPMF_SIDECAR_ROOT, req.config)
+       /* Sidecar shape UNCHANGED per HG-3.4b-c2-3 / sidecar fence. Drop
+        * rules continue to appear with action="drop" label. The semantic
+        * shift (drop rules NOW in inner-allowlist) is BPF-side; sidecar
+        * is exporter-label-only. */
+
+ 11.   bpffs alias pin (UNCHANGED §5.26).
+```
+
+**State-b reattach path** (D-3.1-4): extends symmetrically. The `bpf_map__reuse_fd` loop walks `kManagedMaps[]` which now has 15 entries (was 13); the 3 new `rules_*` maps are reused via the existing loop body (zero loop-body change per HK-9 dividend). Same population ordering as fresh-attach above.
+
+#### §5.34 FileList (brownfield DIFF)
+
+##### NEW (created this slice)
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `tests/T_DROP_RULE_OPERATIVE.sh` | §6.NN test: explicit drop rule with `match.mac: X` drops X via action_table; per-rule counter bumps; `xdpfilter_rule_match_total{rule_id=X.id, action="drop"}` advances. Negation: PASS rule for different MAC Y passes; Y's drop-action label NOT observed. RESOURCE_LOCK xdp_fixture. | bash | 110 |
+| `tests/T_RULES_ATOMIC_SWAP_NO_DROP.sh` | §6.NN+1 test: apply config A + concurrent traffic injecting frames matching multiple rules across MAC + CIDR axes; mid-traffic apply config B (different rule set, different actions); assert no in-flight frame sees half-applied rules+actions state. LOAD-BEARING for PI-13-3.4b-c2 atomic-swap. Template: §6.23 + §6.31 patterns. RESOURCE_LOCK xdp_fixture. | bash | 110 |
+| `tests/T_RULES_AXIS_FLIPS_WITH_ACTIVE_IDX.sh` | §6.NN+2 test: apply config; read active_idx; read `rules_<active>` slot → matches applied rules. Apply again (different config); active_idx flips; new `rules_<active>` matches new config; OLD inner slot preserved (one-deep rollback history per §5.26 atomic-swap contract). RESOURCE_LOCK xdp_fixture. | bash | 90 |
+
+Total NEW test LOC est: ~310. NO new source files (all C++/BPF changes are EDITs to existing files).
+
+NEW fixture (likely needed): `tests/fixtures/config_drop_rule_operative.yaml` — minimal config with one drop rule + one pass rule for §6.NN. Or T-1 reuses an inline-heredoc fixture (tester's call per existing precedent). Architect leaves fixture-file vs heredoc choice to tester — both acceptable.
+
+##### EDITED (existing files touched this slice)
+
+| Path | What changes |
+|---|---|
+| `src/bpf/mac_filter.bpf.c` | **D-1**: Replace SHARED `rules` ARRAY (lines 172-178) with the `rules_inner` template + `rules_a` + `rules_b` inner ARRAYs + `rules_outer` ARRAY_OF_MAPS per §5.34 DataStructures. **D-2**: Extend MAC HASH-hit branch (current §5.31 lines ~270-275) with rules_outer → rules_inner → action_table chain + XDP_DROP dispatch on `action_type == ACTION_DROP` per HG-3.4b-c2-4. Symmetric extension for CIDR LPM_TRIE-hit branch (current §5.31 lines ~302-307). `bump_rule` calls PRESERVED at the head of each hit branch (HG-3.4b-c2-5). NO change to: `mac_filter_prog` function signature; ethhdr/IPv4 bounds check; `bump_stat` helper; `STAT_DROP_MALFORMED` branches; default-fallthrough at lines ~310+ (`defaults[active]` lookup); the existing `unlikely()` annotations from MVP-3.4.5 HK-5; the IPv4 ethertype gate; `bump_rule` helper definition (UNCHANGED — only call-site preserved with same shape). PI-29-3.4b-c2 reviewer regional-diff fence: allowed hunks in mac_filter_prog body = {MAC HASH-hit branch extension, CIDR LPM_TRIE-hit branch extension}; allowed hunks in `.maps` block = {1 removed ARRAY decl (`rules`), 4 added decls (`rules_inner` template + `rules_a` + `rules_b` + `rules_outer`)}. |
+| `src/common/mac_filter.h` | **L-4**: ADD `XDPMF_MAP_RULES_OUTER_NAME`, `XDPMF_MAP_RULES_INNER_A_NAME`, `XDPMF_MAP_RULES_INNER_B_NAME` constants per §5.34 DataStructures. REMOVE `XDPMF_MAP_RULES_NAME` (line 125 of current header). All other constants/structs UNCHANGED (PI-10-3.4b-c2 ADDITIVE-modulo-deletion: 3 added + 1 removed; the removal is the SHARED-`rules` retirement which is the explicit operative point of HG-3.4b-c2-1). |
+| `src/lib/loader.cpp` | **L-1** (`kManagedMaps[]` table 13 → 15 entries): REMOVE `{ &SkelMapsT::rules, XDPMF_MAP_RULES_NAME, false }` at line 157; ADD 3 new entries `{ &SkelMapsT::rules_a, XDPMF_MAP_RULES_INNER_A_NAME, false }` + `{ &SkelMapsT::rules_b, XDPMF_MAP_RULES_INNER_B_NAME, false }` + `{ &SkelMapsT::rules_outer, XDPMF_MAP_RULES_OUTER_NAME, false }`. Surrounding comment "12 non-alias + 1 alias" → "14 non-alias + 1 alias" or similar (impl-flexible wording). **L-2** (`populate_rules_skeleton` → `populate_rules_inner_slot` rename + signature semantic shift at line 1231): function body BYTE-IDENTICAL; only fd-source semantic shifts (caller passes inactive inner-fd). Both call-sites at `loader.cpp:1785` + `:1915` update to compute inactive inner-fd (via `skel->maps.rules_a` / `rules_b` per `inactive`) BEFORE invoking; insertion BEFORE the active_idx flip at line 1819. **L-3** (rule-extraction step schema-shift): REMOVE the `if (r.action != RuleAction::Pass) continue;` filter line at `loader.cpp:1484` (extract_pass_macs) and `:1508` (extract_pass_cidrs). Optional function rename (impl-flexible per L-3 architect default = KEEP existing name). **REMOVE the §5.29 WARN emission** at `loader.cpp:1557-1574` (the `if (!req.config.rules.empty())` block + the `logger::emit("loader.warn.rules_skeleton_not_wired", ...)` call) — the contract it announces is retired this slice. PI-7-3.4b-c2-cpp scope-fence: allowed function names = {`apply_request` (active-idx-flip area + rule-extraction area + WARN removal area + new populate_rules_inner_slot call insertion), `extract_pass_macs` (filter-line removal + optional rename), `extract_pass_cidrs` (filter-line removal + optional rename), `populate_rules_inner_slot` (renamed from `populate_rules_skeleton`; body byte-equivalent), anon-namespace `kManagedMaps[]` table (3-line + 1-line edits)}. ZERO diff in: `attach()` / `detach()` public bodies, §5.4 state-machine, §5.19 name-check, §5.22 tag-check + O_PATH, §5.24 kernel-version probe, §5.26 trust_model parse+log, §5.27 CIDR-axis active_idx flip mechanism, link-pin P0a logic, RAII wrappers, error-translation paths, the legacy-alias pin path, `populate_inner_slot` body, `populate_cidr_inner_slot` body, `populate_action_table` body (action_table STAYS SHARED per HG-3.4b-c2-3), `bump_*` helpers, `extract_pass_*` dedup logic (only filter line removed), sidecar-write call. |
+| `CMakeLists.txt` | **V-1**: VERSION bump `0.8.0 → 0.9.0`. MINOR — operator-observable behavioural change (drop rules now operative explicitly). No other CMake change (no new translation units; no new linkage). |
+| `CHANGELOG.md` | **V-2**: NEW `## [0.9.0] - 2026-05-NN` section per Keep-a-Changelog. **Added**: explicit drop-rule action dispatch via action_table; `rules` map promoted to parallel ARRAY_OF_MAPS (atomic-swap with MAC + CIDR + defaults); 3 new ctests (T_DROP_RULE_OPERATIVE, T_RULES_ATOMIC_SWAP_NO_DROP, T_RULES_AXIS_FLIPS_WITH_ACTIVE_IDX). **Changed**: schema cycle 2 → cycle 3 SEMANTIC SHIFT — drop rules NOW populate inner-allowlist (with their `rule_id`) and dispatch DROP via action_table (previously: indirect via `defaults[active]=drop` fallthrough); `mac_filter_prog` datapath body extends MAC HASH-hit + CIDR LPM_TRIE-hit branches with rules→action_table dispatch chain; `populate_rules_skeleton` renamed to `populate_rules_inner_slot` (operates on inactive inner before active_idx flip); `kManagedMaps[]` grows 13 → 15 entries; T_DROP_RULE_BUMPS_COUNTER assertion semantic INVERTED (per-rule counter for drop rules NOW bumps); T_RULES_SKELETON_NOT_WIRED DELETED (contract retired). **Removed**: SHARED `rules` ARRAY pin (`${PIN_DIR}/<iface>/rules` no longer exists; replaced by `rules_outer` + `rules_a` + `rules_b` pins); stderr WARN `xdpmacfilter: rules: section parsed (<N> entries) but per-rule action dispatch deferred to MVP-3.4b — ...` (contract no longer applicable); event-name catalog entry `loader.warn.rules_skeleton_not_wired` (kEventNames count 34 → 33). **Notes**: `reset-counters` subcommand + `rule_counter` atomic-swap explicitly scoped-out of this slice → follow-up cycle (working name MVP-3.4d — architect's call). Build-pace table gains a row for MVP-3.4b cycle 2. |
+| `tests/CMakeLists.txt` | (a) ADD 3 new `add_test(...)` entries (§6.NN..§6.NN+2: T_DROP_RULE_OPERATIVE, T_RULES_ATOMIC_SWAP_NO_DROP, T_RULES_AXIS_FLIPS_WITH_ACTIVE_IDX) all with `RESOURCE_LOCK xdp_fixture` per guard #12; (b) REMOVE `T_RULES_SKELETON_NOT_WIRED` from the §5.29 `foreach(T IN ITEMS ...)` block at line 573 per Q2.A (the foreach's other 5 entries — T_EXPORTER_METRICS_FORMAT, T_EXPORTER_VALUES_MATCH_STATS, T_EXPORTER_NO_ATTACHED_IFACE, T_BYPASS_CMD_DETACHES, T_BYPASS_REQUIRES_UNSAFE_NONINTERACTIVE — stay UNCHANGED, including the shared `RESOURCE_LOCK xdp_fixture` for the remaining 5); (c) NO modification of the other 50 pre-§5.34 `add_test` entries. Net ctest count: 58 − 1 (Q2.A delete) + 3 (T-1/T-2/T-3) = **60**. |
+| `tests/T_DROP_RULE_BUMPS_COUNTER.sh` | **E-1 body rewrite per Q3.A + HG-3.4b-c2-2** (~30-50 LOC delta): drop-rule MAC NOW enters inner-allowlist; per-rule counter BUMPS; verdict is XDP_DROP via action_table (was: MAC absent, counter stays 0, drop via defaults fallthrough). Test header comment updated to cite §5.34 schema cycle 3 contract; assertion bodies inverted per the shape in Q3 above. Test name kept (`T_DROP_RULE_BUMPS_COUNTER` — name now matches semantic). PI-6-3.4b-c2 EXPLICIT semantic-change EDIT carve-out. |
+| `tests/T_EXPORTER_METRICS_FORMAT.sh` | **HK-8/PI-8-3.4b-c2-forced version-literal bump** at 4 sites (lines 21, 22, 101, 102): `xdpmf-exporter 0.8.0` → `xdpmf-exporter 0.9.0`. Body diff = 4 LOC EDIT (the 4 literals); NO test logic change. Mirrors §5.31 EDIT-2 + §5.32 EDIT-2 precedent (version-literal in test bodies is HK-bump-forced; precedent is stable). PI-6-3.4b-c2 carve-out #2. |
+
+##### DELETED (this slice)
+
+| Path | Reason |
+|---|---|
+| `tests/T_RULES_SKELETON_NOT_WIRED.sh` | Per Q2.A. The contract this test asserts (rules+action_table NOT consulted by datapath) is RETIRED by §5.34. Body deleted in full; `tests/CMakeLists.txt` foreach entry deleted (see EDITED row above). |
+
+##### UNCHANGED-BUT-AFFECTED (zero git-diff fence; behaviour must hold)
+
+| Path | Why it matters |
+|---|---|
+| `src/lib/loader.hpp` | **PI-7-3.4b-c2-hpp — 9TH consecutive ZERO-diff cycle** (MVP-3.1 +1; MVP-3.2/3.3/3.4/3.4.5/3.4b/3.5/3.5.5/3.4b-c2 = 0). `git diff <pre-§5.34> -- src/lib/loader.hpp` MUST show ZERO output. The schema shift + datapath dispatch + rules-axis promotion live entirely behind `internal::apply_request` + inside the BPF program body. No public symbol added. Any diff = `[INVARIANT-VIOLATED]`. |
+| `src/lib/config.hpp` | **PI-7-3.4b-c2-hpp / cpp — 4TH consecutive ZERO-diff cycle** (MVP-3.5/3.5.5/3.4b-c2). `Config::Rule::action` field at line 43 already exists; the schema shift requires NO new field, NO new enum value, NO new validator. `git diff <pre-§5.34> -- src/lib/config.hpp` MUST show ZERO output. |
+| `src/lib/config.cpp` | UNCHANGED. The `r.action == RuleAction::Drop` value is already faithfully preserved through validation per §5.26 schema rule 4 — confirmed Phase A. If impl finds a code path where drop-rule action is silently clipped or remapped, SendMessage architect (would invalidate the schema shift). Expected: ZERO diff in config.cpp. |
+| `src/lib/sidecar.{cpp,hpp}` | UNCHANGED. Sidecar shape per §5.31 Q2 S1 is preserved; the `action: "drop"` label flows through unchanged. Operationally: post-§5.34 the sidecar's `action: "drop"` label reflects EXPLICIT drop-rule activations (was descriptive-only pre-§5.34 since drop-rule MAC was absent from inner-allowlist). No code change needed. |
+| `src/lib/cidr.{cpp,hpp}`, `src/lib/yaml_subset.{cpp,hpp}` | UNCHANGED. Schema is byte-equivalent (no new YAML keys); CIDR axis match logic unchanged (only the inner-VALUE population path's action-filter changes per L-3, which is in loader.cpp). |
+| `src/cli/*` (all CLI files) | UNCHANGED. No CLI surface change. `xdpmacfilter apply -f <path>` / `attach --allow <MAC>` / `detach` / `bypass` / `--help` / `--version` semantics byte-equivalent (only `--version` output value changes via V-1 CMakeLists bump → version.h auto-propagation). |
+| `src/exporter/*` (all exporter files) | UNCHANGED. `xdpfilter_rule_match_total{iface, rule_id, action}` series already emits since §5.31. Post-§5.34, `action="drop"` labels now correlate with non-zero counter values (was zero pre-§5.34) — operationally meaningful change; codepath unchanged. PI-31-3.4b-c2 (exporter READ-ONLY) PRESERVED. `--version` reports `0.9.0` via shared `version.h`. |
+| `src/common/logger.{cpp,hpp}` | UNCHANGED. The `loader.warn.rules_skeleton_not_wired` event-name entry is REMOVED from `kEventNames` per the WARN-removal in §5.34 apply flow above; the entry was added in §5.32 catalog at count 34. Post-§5.34 catalog count: **33** (back to the §5.32-pre-EDIT-1 derived count — but with a different removal/addition history). T_LOG_EVENT_CATALOG_STABILITY (§6.58) updates from 34 → 33 (the only required event-catalog touch). See D-3.4b-c2-4 below. |
+| `src/bpf/mac_filter.bpf.c` outside the EDITED regions (D-1 .maps block + D-2 datapath dispatch) | UNCHANGED. `bump_stat` helper, `bump_rule` helper, defaults-map fallthrough, STAT_DROP_MALFORMED branch, ETH_P_IP gate, IPv4 header bounds check, the `unlikely()` annotations. The MAC HASH-hit and CIDR LPM_TRIE-hit branches EXTEND (PI-29-3.4b-c2 carve-out) but other body lines byte-equivalent. |
+| `systemd/xdpmacfilter@.service` + `systemd/xdpmf-exporter.service` | UNCHANGED. Loader's runtime invocation pattern unchanged; exporter discovers new `rules_*` pins via existing `${XDPMF_BPFFS_ROOT}/<iface>/` scan. NO new caps required (existing `CAP_BPF` + `CAP_NET_ADMIN` for loader; `CAP_BPF` for exporter sufficient — no new kernel API calls). |
+| `ansible/xdpmacfilter-deploy.yml`, `ansible/templates/xdpfilter-config.yaml.j2` | UNCHANGED. The Jinja template already emits `id:` and `action:` for each rule; the loader picks them up per Q5 R1 (cycle 1) + L-3 schema-shift (cycle 2) transparently. |
+| `docs/FLEET_DEPLOYMENT.md` | UNCHANGED this slice. The behavioural change (drop rules now operative) is documented in CHANGELOG `[0.9.0]`. A future docs pass (separate manual pass per user direction; Doc bucket carry-forward from MVP-3.4.5) may add operator migration notes. NEW FENCE in §7 OOS. |
+| All 60 pre-§5.34 ctest BODIES (post-Q2.A delete: 58 − 1 = 57; we add 3 new = 60) | UNCHANGED with explicit 2-EDIT carve-out per PI-3.4b-c2-fixture-ripple (see PI-6-3.4b-c2 below). The 2 EDITed bodies are T_DROP_RULE_BUMPS_COUNTER (E-1 semantic-shift rewrite per Q3.A) + T_EXPORTER_METRICS_FORMAT (version-literal bump 0.8.0 → 0.9.0). The 1 DELETED body is T_RULES_SKELETON_NOT_WIRED. All other 55 ctest bodies byte-equivalent. |
+| `tests/lib/common.sh`, `tests/lib/read_stats.py`, `tests/lib/read_rule_counters.py`, `tests/lib/pins.sh.in`, `tests/inject/*.py` | UNCHANGED. No test-helper changes this slice. T-1/T-2/T-3 reuse existing helpers (`setup_veth`, `cleanup_veth`, `apply_config`, `inject_eth`, `read_stats.py`, `read_rule_counters.py`, `wait_for_stats_sum`, `wait_for_active_idx_flip`). |
+| `tests/fixtures/*` (existing fixtures) | UNCHANGED. T-1 / T-2 / T-3 either reuse existing fixtures (config_per_rule_counters.yaml from §5.31 + config_valid.yaml + config_apply_swap_a/b.yaml from §5.26/§5.27) OR introduce ONE new fixture file (impl-flexible; architect's preference: minimal new fixture or inline heredoc per existing test precedent). |
+| §5.4 / §5.19 / §5.22 / §5.24 / §5.26 / §5.27 / §5.29 / §5.30 / §5.31 / §5.32 / §5.33 trust+identity gates | UNCHANGED. The new BPF map declarations + the inner-VALUE READ at offset 4 (datapath dispatch chain) are detected and verified by all existing gate codepaths transparently (libbpf handles the .maps shape diff at load time; tag-check is byte-equivalent at per-iface attach because BPF object's tag is recomputed from the new bytecode). PI-1..PI-5 all pass. |
+| `mint/architecture-v2.md` | UNCHANGED. No HLD-level changes (this slice implements pre-decided phasing from §"§MVP-3.4 Open Question #13 RESOLUTION" Option 2 + Caveat (b)). |
+
+Any file NOT listed above is off-limits for impl. If impl needs to edit a file not listed, that's a design gap — SendMessage architect.
+
+#### §5.34 Decisions (with rationale)
+
+##### D-3.4b-c2-1 — `rules` map promotion shape = parallel `rules_outer` mirror of §5.27 CIDR axis — because
+
+Per HG-3.4b-c2-1 confirmation. Byte-for-byte mirror of §5.27 Q1 AS1. Template-explicit shape (1 template + 2 pinned inners + 1 outer) per §5.27 precedent — keeps libbpf `__inner_map` linkage idiom + auto-pin behaviour aligned with the established CIDR-axis pattern. All 3 call-site loops (`kManagedMaps[]` walk in open_skeleton_only / pin / reuse) handle the 3 new pinned entries (rules_a / rules_b / rules_outer) automatically per HK-9 dividend. Single one-line table EDIT (with 3 rows added + 1 row removed) instead of any literal-array lockstep update. Validates HK-9 refactor for the 3rd consecutive cycle.
+
+##### D-3.4b-c2-2 — Schema cycle 2 → 3 shift via deleting one filter line per axis — because
+
+Per HG-3.4b-c2-2 confirmation + L-3 above. The mechanically-smallest implementation: REMOVE the `if (r.action != RuleAction::Pass) continue;` filter line at `loader.cpp:1484` (MAC extract) and `:1508` (CIDR extract). Since `enum RuleAction` is `{Drop, Pass}` two values, removing the filter accepts ALL rules into the inner-allowlist population. No new enum slot, no new struct field, no new code path — just removal of two filter lines + the L-2 `populate_rules_inner_slot` rename to clarify the function's new role.
+
+Reviewer disposition rule (cite once per this amendment per architect-spec §6.5 verification-hints discipline): the schema-shift is explicit-by-design per HG-3.4b-c2-2; reviewer treats any flagged "drop-rule semantic change" as `inline-merge`, NOT `[CONTRACT-DRIFT]`. The shift IS the operative point of this slice.
+
+##### D-3.4b-c2-3 — `extract_pass_macs` / `extract_pass_cidrs` function-name KEPT (no rename) — because
+
+Function names are misleading post-shift ("pass" is no longer the filter criterion) but renaming inflates the diff (every call-site updates atomically). Architect default: KEEP existing names; comment update at the function declaration site clarifies the semantic shift. Impl MAY rename if the diff is small (e.g. 2-3 call-sites only — confirmed Phase A: 1 call-site each in `apply_request` body); reviewer's regional-diff fence permits either choice. If renamed, all 3 EDITed regions remain within PI-7-3.4b-c2-cpp scope.
+
+##### D-3.4b-c2-4 — `loader.warn.rules_skeleton_not_wired` event REMOVED from `kEventNames` catalog (count 34 → 33) — because
+
+Per §5.34 apply flow update: the §5.29 WARN emission at `loader.cpp:1557-1574` is RETIRED this slice (the contract it announces — "rules+action_table populated NOT consulted by datapath" — is the operative thing this slice retires). The emission site is REMOVED from loader.cpp; correspondingly the `kEventNames` entry `"loader.warn.rules_skeleton_not_wired"` in `src/common/logger.hpp` is REMOVED. Catalog count: 34 → 33.
+
+T_LOG_EVENT_CATALOG_STABILITY (§6.58) micro-test reference value updates from 34 → 33. This is the ONLY required logger-module touch this slice; the logger.cpp + logger.hpp other code is byte-equivalent. (`kEventNames` is `constexpr std::array<std::string_view, kEventCount>`; the count constant `kEventCount` updates from 34 → 33 in lockstep with the array literal.)
+
+PI-3.5-4 amendment: catalog count = 33 (was 34 per §5.32 EDIT-1). Reviewer treats this as `inline-merge` on the PI text — NOT `[CONTRACT-DRIFT]` — because the count change is direct consequence of the WARN-emission removal which is explicit-by-design for this slice's RETIRE of the §5.29 contract.
+
+**Note on logger.hpp diff vs PI-7-3.4b-c2-hpp**: the kEventNames array literal touch in logger.hpp is the ONLY hpp-file EDIT this slice (loader.hpp + config.hpp ZERO-diff fence preserved). PI-7-3.4b-c2-hpp scope is specifically on `loader.hpp` + `config.hpp` (the public-API headers + the schema header); logger.hpp is an INTERNAL header — same fence boundary as the §5.30 HK-17 EDIT-2 + §5.32 logger.hpp ADDs (where logger.hpp was permitted to grow). Reviewer's regional-diff check excludes logger.hpp from the loader.hpp / config.hpp ZERO-diff fence.
+
+##### D-3.4b-c2-5 — Q1.B re-use `STAT_DROP_DENY` for explicit-rule-DROP (no new STAT enum slot) — because
+
+Per Q1.B above. Minimizes invariant-surface diff: `enum xdpmf_stat` byte-equivalent (`STAT_MAX=4` unchanged); `mac_filter.h` ZERO change to enum; `stats` PERCPU_ARRAY `max_entries` UNCHANGED; downstream `read_stats.py` + exporter `stats_reader.cpp` UNCHANGED. Operator audit story: explicit-rule-drops disambiguated from default-drops via `xdpfilter_rule_match_total{action="drop"}` series (already exists since §5.31). Q1.A (new `STAT_DROP_RULE = 4` slot) saved for future cycle if operator demand surfaces (NEW FENCE in §7 OOS).
+
+##### D-3.4b-c2-6 — Action_table STAYS SHARED (per HG-3.4b-c2-3) — because
+
+Action_table values are static `{ACTION_PASS, ACTION_DROP}` — written once per apply, never mutate at runtime, never differ between consecutive applies (the `{0 → {action_type=PASS}, 1 → {action_type=DROP}}` mapping is hardcoded in `populate_action_table` at `loader.cpp:1263`). Atomic-swap is meaningless when values never change. Saves 3 BPF maps (template + 2 inners) + 3 pin paths + 3 kManagedMaps[] entries vs the parallel-promotion alternative. When MVP-3.8+ adds mutable action types (MIRROR with per-config destination, RL with per-config rate, TAG with per-config classifier-id), promotion to parallel ARRAY_OF_MAPS becomes the natural next step — surfaced as NEW FENCE.
+
+##### D-3.4b-c2-7 — First-rule-wins dedup semantic for MAC/CIDR shadowing (pass-rule shadows drop-rule on same MAC, vice versa) — because
+
+Per L-3 dedup-semantic note above. Existing `extract_pass_macs` / `extract_pass_cidrs` dedup retains the FIRST rule_id for a given MAC/CIDR (current `loader.cpp:1487-1492` + `:1511-1516`). Post-§5.34 schema shift, this means same-MAC pass-rule + drop-rule combinations are resolved by source-order (first encountered wins). Consistent with operator mental model "rules evaluated in source order; first match wins" and matches §5.26 dedup precedent. Architect explicitly documents this so reviewer + tester don't flag as edge case — it's intentional shadowing. Operators wanting alternative semantics (later-rule-wins, drop-precedence) → MVP-3.4d future cycle (NEW FENCE).
+
+##### D-3.4b-c2-8 — `populate_rules_inner_slot` called BEFORE active_idx flip (parallel to MAC/CIDR inner-population) — because
+
+Per §5.34 apply flow step 8 above. The same atomic-swap discipline that §5.26 + §5.27 established for MAC + CIDR inners applies here: write the INACTIVE inner BEFORE the active_idx flip; the single u32 store commits all 4 axes (MAC + CIDR + defaults + rules). Race-window analysis is BYTE-IDENTICAL to §5.27 Q1 AS1 race-window-benignity (the BPF program's snapshot of `active_idx` at datapath head is the consistency anchor; concurrent userspace flip either lands pre- or post-snapshot, never half-applied). 4-axis extension validates the §5.27 mechanism's scalability — the same single-u32-write commits N parallel axes for any N (template extension is mechanical).
+
+#### §5.34 TestStrategy entries
+
+##### §6.NN T_DROP_RULE_OPERATIVE — explicit drop rule drops via action_table dispatch
+
+**Trigger**: `setup_veth`; `apply_config <fixture>` where fixture contains: (a) `default_action: drop`; (b) explicit drop rule (`id=17`, `action: drop`, `match.mac: 02:00:00:00:00:11`); (c) explicit pass rule (`id=5`, `action: pass`, `match.mac: 02:00:00:00:00:05`) — the pass rule is the negation-control "other rule, different MAC".
+
+**Observable outcome (all)**:
+- `apply` exits 0.
+- Pin `${PIN_DIR}/<iface>/rules_outer` exists (NEW per §5.34 D-1).
+- Pin `${PIN_DIR}/<iface>/rules_a` OR `${PIN_DIR}/<iface>/rules_b` (whichever active_idx selects) contains entry at index 17 with `present=1, action_id=ACTION_DROP=1`.
+- Pin `${PIN_DIR}/<iface>/rules_a/b` (active) ALSO contains entry at index 5 with `present=1, action_id=ACTION_PASS=0`.
+- Drop-rule MAC `02:00:00:00:00:11` IS present in active inner allowlist (`bpftool map dump pinned ${PIN_DIR}/<iface>/allowlist_<active> --json | jq` shows it — schema cycle 3 shift per HG-3.4b-c2-2).
+- Inject 5 frames with src MAC `02:00:00:00:00:11`: `STAT_DROP_DENY` advances by 5 (explicit action_table dispatch); `STAT_PASS` delta == 0; `rule_counters[17]` advances by 5 (per HG-3.4b-c2-5 per-rule counter bumps on match regardless of verdict).
+- Inject 5 frames with src MAC `02:00:00:00:00:05` (negation control): `STAT_PASS` advances by 5; `STAT_DROP_DENY` delta == 0 from this batch; `rule_counters[5]` advances by 5.
+- Verify drop-action operates via action_table chain: `bpftool map dump pinned ${PIN_DIR}/<iface>/action_table --json | jq` shows `[{key=0, value={action_type=0=PASS}}, {key=1, value={action_type=1=DROP}}]` (UNCHANGED from §5.29 baseline; this assertion proves action_table is the dispatch source).
+
+**Assertion mechanism**: `apply_config` helper + `bpftool map dump pinned ${PIN_DIR}/<iface>/rules_<active> --json | jq` for rules_inner contents + `bpftool map dump pinned ${PIN_DIR}/<iface>/allowlist_<active> --json | jq` for inner-allowlist contents (proves schema shift) + `bpftool map dump pinned ${PIN_DIR}/<iface>/action_table --json | jq` for action_table contents (proves dispatch source) + `read_stats.py` for STAT_* deltas + `read_rule_counters.py` for per-rule counter deltas + bash arithmetic on deltas.
+
+**Anti-theatricality control**: dual-MAC fixture verifies that DIFFERENT rule actions produce DIFFERENT counter buckets (STAT_PASS vs STAT_DROP_DENY) via the SAME inner-allowlist mechanism. If the action_table dispatch were broken (e.g. always-PASS), the drop-MAC frames would PASS instead of DROP — directly observable via STAT_DROP_DENY delta == 0 instead of 5.
+
+**SKIP conditions**: `bpftool`, `jq` already required; no new SKIP-77 conditions.
+
+**Cleanup**: `cleanup_veth`. **RESOURCE_LOCK**: `xdp_fixture` (touches veth + bpffs pins) per guard #12.
+
+**Maps to**: PI-29-3.4b-c2 (datapath consults rules_outer + rules_inner + action_table per match), HG-3.4b-c2-2 (schema cycle 3 shift), HG-3.4b-c2-4 (dispatch order), HG-3.4b-c2-5 (counter bumps on match regardless of verdict), Q1.B (STAT_DROP_DENY re-use for explicit-rule-drops).
+
+##### §6.NN+1 T_RULES_ATOMIC_SWAP_NO_DROP — atomic swap on rules axis under concurrent traffic (LOAD-BEARING for PI-13-3.4b-c2)
+
+**Trigger**:
+1. `setup_veth` + initial `apply_config <config_A>` (config A: `default_action: drop`; rule `id=5 action=pass match.mac=02:00:00:00:00:05`; rule `id=17 action=drop match.mac=02:00:00:00:00:11`).
+2. Start background traffic injector on the peer veth: continuous frames alternating between MAC `02:00:00:00:00:05` (pass under A) and MAC `02:00:00:00:00:11` (drop under A), ~100 Hz, ~2s baseline.
+3. Snapshot baselines: `STAT_PASS_baseline`, `STAT_DROP_DENY_baseline`, `rule_counters[5]_baseline`, `rule_counters[17]_baseline`.
+4. `apply_config <config_B>` (config B: `default_action: drop`; rule `id=5 action=drop match.mac=02:00:00:00:00:05` — INVERTED action; rule `id=17 action=pass match.mac=02:00:00:00:00:11` — INVERTED action). Same MAC universe, OPPOSITE actions.
+5. Continue traffic ~2s more.
+6. Stop injector; let stats quiesce; snapshot final values.
+
+**Observable outcome (all)**:
+- Both `apply` invocations exit 0.
+- Across the swap, NO frame from the running injector observes a "half-applied" state where `rule_counters[5]` bumps but the verdict is DROP via config-B-action (or any similar partial-apply inconsistency). This is the load-bearing atomicity proof.
+- Concretely: define `Δ_PASS = STAT_PASS_final - STAT_PASS_baseline`; `Δ_DROP = STAT_DROP_DENY_final - STAT_DROP_DENY_baseline`. The sum `Δ_PASS + Δ_DROP` equals the total injected frame count across the test window (no frame lost; no double-counted). `Δ_PASS == frames_from_MAC_05_pre_apply + frames_from_MAC_17_post_apply`; `Δ_DROP == frames_from_MAC_17_pre_apply + frames_from_MAC_05_post_apply` — the test asserts each side approximately matches expected within ~10% tolerance (real-time race window is ms-scale, not deterministic).
+- `active_idx_map[0]` value CHANGED across the apply (pre-snapshot vs post-snapshot assertion; equal would fail).
+- `rule_counters[5]_final - rule_counters[5]_baseline == total_MAC_05_frames_across_window` (per-rule counter bumps on every match regardless of verdict per HG-3.4b-c2-5).
+- `rule_counters[17]_final - rule_counters[17]_baseline == total_MAC_17_frames_across_window`.
+
+**Assertion mechanism**: `read_stats.py` + `read_rule_counters.py` baselines + finals + bash arithmetic on deltas + `bpftool map dump pinned ${PIN_DIR}/<iface>/active_idx` for active_idx value pre/post.
+
+**Anti-theatricality controls**:
+- Background injection MUST be concurrent with the apply (`&` in bash, not sequential).
+- Action inversion across config A → B is the load-bearing element — any half-applied state during the swap would manifest as either an inflated `Δ_DROP` (MAC 05 frames seeing the new DROP action while still being applied) or an inflated `Δ_PASS` (MAC 17 frames seeing the new PASS action prematurely).
+- Per-rule counter bumps verify that EVERY match (regardless of verdict) is counted — atomic-swap correctness is reflected in the BPF program's snapshot discipline.
+
+**SKIP conditions**: same as §6.23 + §6.31 — if `XDPMF_INJECT_RATE_HZ` baseline falls below 150 (2s × 100Hz × 0.75), SKIP with rc 77 + stderr `runner too slow for rules-axis swap test`.
+
+**Cleanup**: stop background injector via `kill ${INJECT_PID}`; `cleanup_veth`. **RESOURCE_LOCK**: `xdp_fixture` (touches veth + bpffs pins; concurrent traffic + apply requires serialization vs other veth tests).
+
+**Maps to**: PI-13-3.4b-c2 (rules atomic-swap via active_idx flip — symmetric with §5.27 Q1 AS1 CIDR pattern; load-bearing), HG-3.4b-c2-1 (parallel ARRAY_OF_MAPS mechanism), Q1.B (STAT_DROP_DENY re-use), §5.27 Q1 AS1 + §5.31 PI-3.4b-2 atomicity precedents extended.
+
+##### §6.NN+2 T_RULES_AXIS_FLIPS_WITH_ACTIVE_IDX — `rules_<active>` slot correlates with active_idx; one-deep rollback history
+
+**Trigger**:
+1. `setup_veth` + `apply_config <config_A>` (config A: 3 rules — `id=5 action=pass`, `id=17 action=drop`, `id=42 action=pass match.src_cidr`).
+2. Read `bpftool map dump pinned ${PIN_DIR}/<iface>/active_idx --json | jq '.[0].value'` → `active_A` (value in {0, 1}).
+3. Read `bpftool map dump pinned ${PIN_DIR}/<iface>/rules_<active_A> --json | jq` → assert occupied slots match config A's rules.
+4. `apply_config <config_B>` (config B: 2 rules — `id=10 action=drop`, `id=20 action=pass` — DIFFERENT rule_ids than config A).
+5. Read active_idx → `active_B`. Assert `active_B != active_A` (flipped).
+6. Read `rules_<active_B>` → assert occupied slots match config B's rules (id=10, id=20 occupied; id=5, id=17, id=42 = empty).
+7. Read `rules_<active_A>` (the now-inactive slot) → assert STILL contains config A's rules (one-deep rollback history per §5.26 atomic-swap contract).
+
+**Observable outcome (all)**:
+- Both `apply` invocations exit 0.
+- `active_A != active_B` (one of {0, 1}, other of {1, 0}).
+- `rules_<active_A>` and `rules_<active_B>` carry different contents per the configs.
+- The PRIOR active slot's content is preserved post-flip (one-deep rollback semantic). MAC HASH inner + CIDR LPM_TRIE inner + defaults exhibit the same behavior (preserved per §5.26 + §5.27).
+
+**Assertion mechanism**: `bpftool map dump` + `jq`-based content comparison. No traffic injection needed.
+
+**SKIP conditions**: none new.
+
+**Cleanup**: `cleanup_veth`. **RESOURCE_LOCK**: `xdp_fixture` (touches veth + bpffs pins).
+
+**Maps to**: PI-13-3.4b-c2 (rules-axis active_idx-driven swap), §5.26 Q2 A1 + §5.27 Q1 AS1 (parallel-outer indexing precedent extends to rules axis), §5.34 D-3.4b-c2-1 (rules promotion shape mirror), Q4.A (defaults still consulted on miss-both — verified indirectly via traffic NOT injected).
+
+##### §6.52-revised T_DROP_RULE_BUMPS_COUNTER — REWRITTEN per Q3.A + HG-3.4b-c2-2 (PI-6-3.4b-c2 carve-out)
+
+(Documented in EDITED FileList row above + Q3 above. Body diff ~30-50 LOC: invert assertions on drop-rule MAC presence in inner-allowlist + per-rule counter delta + sidecar action label flow-through. Test name kept.)
+
+**Maps to**: HG-3.4b-c2-2 (schema cycle 3 shift), HG-3.4b-c2-5 (counter bumps on match), §5.34 D-3.4b-c2-2 (filter-line removal mechanism), Q3.A disposition.
+
+#### §6.5 Preserved invariants (MVP-3.4b cycle 2 brownfield) — PI-1..PI-34 + PI-3.4b-* + PI-3.5-* + PI-3.5.5-* hold (with adjudications) + PI-3.4b-c2-* NEW
+
+All MVP-3.1..3.5.5 invariants continue to hold post-§5.34 EXCEPT where this slice explicitly LIFTS (PI-28-3.4b LIFTED per §5.34 LIFTED PI declarations above) or AMENDS (PI-29-3.4b LIFTED; PI-29 carve-out fully closed; PI-3.5-4 catalog count 34 → 33 per D-3.4b-c2-4).
+
+Reviewer's 5th framework point walks the COMBINED list and reports `[INVARIANT-VIOLATED]` per failed check.
+
+| PI | Statement | §5.34 check mechanism |
+|---|---|---|
+| **PI-7-3.4b-c2-hpp** | `src/lib/loader.hpp` byte-identical (**9th consecutive ZERO-diff cycle**; MVP-3.2 → MVP-3.4b cycle 2). `src/lib/config.hpp` byte-identical (**4th consecutive ZERO-diff cycle**; MVP-3.5 → MVP-3.4b cycle 2). NO new public symbol, NO LoaderError addition, NO Config field change this slice. | `git diff <pre-§5.34> -- src/lib/loader.hpp src/lib/config.hpp` MUST return zero lines. |
+| **PI-7-3.4b-c2-cpp** | `src/lib/loader.cpp` SCOPED EDIT only — diff lines confined to: (a) `kManagedMaps[]` table 13 → 15 entries (1 REMOVE + 3 ADD lines + comment count update); (b) `populate_rules_skeleton` → `populate_rules_inner_slot` rename + signature semantic shift (fd-source change from shared `rules` map fd to inactive `rules_<a|b>` inner fd; body byte-equivalent); (c) `apply_request` body — call-site updates for `populate_rules_inner_slot` at 2 sites (state-b reattach line ~1785 + fresh-attach line ~1915); REMOVE the §5.29 WARN-emission block at lines ~1557-1574; ADD the new `populate_rules_inner_slot` invocation in the inactive-slot section parallel to MAC/CIDR inner population; (d) `extract_pass_macs` body — REMOVE the `if (r.action != RuleAction::Pass) continue;` filter line at ~1484 (optional function rename per D-3.4b-c2-3); (e) `extract_pass_cidrs` body — same filter-line REMOVE at ~1508 (optional function rename); (f) anon-namespace updates if optional rename is taken (impl-flexible). ZERO diff in: `attach()` / `detach()` public bodies, §5.4 state-machine, §5.19 name-check, §5.22 tag-check + O_PATH, §5.24 kernel-version probe, §5.26 trust_model parse+log, §5.27 CIDR-axis active_idx flip mechanism, §5.31 `bump_rule` invocation sites in BPF (handled in mac_filter.bpf.c — separate file), link-pin P0a logic, RAII wrappers, error-translation paths, the legacy-alias pin path, `populate_inner_slot` body, `populate_cidr_inner_slot` body, `populate_action_table` body, `bump_*` helpers, sidecar-write call, all other `apply_request` body lines outside the 6 enumerated regions. | `git diff <pre-§5.34> -- src/lib/loader.cpp` shows changes confined to the regions above. Reviewer applies regional-diff check: produce `git diff <pre-§5.34> -- src/lib/loader.cpp` output; classify each hunk by enclosing function name; allowed function names = {`apply_request` (only in the 4 enumerated areas: kManagedMaps section, WARN-removal section, populate_rules_inner_slot call insertion, optional adjacent comment updates), `populate_rules_inner_slot` (renamed from `populate_rules_skeleton`; body byte-equivalent), `extract_pass_macs` (filter-line removal + optional rename), `extract_pass_cidrs` (filter-line removal + optional rename), anon-namespace `kManagedMaps[]` table}. Any hunk outside this set = `[INVARIANT-VIOLATED]`. Cross-cycle baseline: reviewer compares against MVP-3.5.5-shipped HEAD (NOT project's pristine main). |
+| PI-8-3.4b-c2 | `xdpmacfilter --version` reports `xdpmacfilter 0.9.0` AND `xdpmf-exporter --version` reports `xdpmf-exporter 0.9.0` (shared `version.h` per §5.25 P3). | Run both `--version`; both single-line outputs `0.9.0` + newline. MINOR bump from 0.8.0 — operator-observable behavioural change (drop rules now operative). |
+| PI-9 | `--help` / `--version` output FORMAT unchanged modulo version-number bump | §6.10 T_CLI_HELP_VERSION re-run passes (forward-compatible ERE). |
+| **PI-10-3.4b-c2** | `src/common/mac_filter.h` additive-modulo-deletion: ADD 3 new map-name constants (`XDPMF_MAP_RULES_OUTER_NAME`, `XDPMF_MAP_RULES_INNER_A_NAME`, `XDPMF_MAP_RULES_INNER_B_NAME`); REMOVE 1 constant (`XDPMF_MAP_RULES_NAME` — the SHARED-`rules` retirement per HG-3.4b-c2-1). ALL other constants/structs/enums byte-equivalent: `struct xdpmf_mac`, `struct xdpmf_cidr_v4`, `struct rule_entry`, `struct action_entry`, `struct allow_entry`, `enum xdpmf_action_type`, `enum mac_filter_stat` (STAT_MAX=4 unchanged per Q1.B), `XDPMF_BPFFS_ROOT`, `XDPMF_ALLOWLIST_MAX`, `XDPMF_RULESET_COUNT`, `XDPMF_MAP_ALLOWLIST_NAME`, `XDPMF_MAP_STATS_NAME`, `XDPMF_MAP_ACTIVE_IDX_NAME`, `XDPMF_MAP_RULESETS_OUTER_NAME`, `XDPMF_MAP_INNER_A_NAME`, `XDPMF_MAP_INNER_B_NAME`, `XDPMF_MAP_DEFAULTS_NAME`, `XDPMF_LINK_PIN_BASENAME`, `XDPMF_MAP_CIDR_RULESETS_OUTER_NAME`, `XDPMF_MAP_CIDR_INNER_A_NAME`, `XDPMF_MAP_CIDR_INNER_B_NAME`, `XDPMF_MAP_ACTION_TABLE_NAME`, `XDPMF_MAP_RULE_COUNTERS_NAME`, `XDPMF_RULE_COUNTERS_MAX`, `XDPMF_SIDECAR_ROOT`. | `git diff <pre-§5.34> -- src/common/mac_filter.h` shows the 3-line + 1-line edit. Reviewer asserts each existing constant/struct/enum-value byte-identical via grep cross-reference. |
+| PI-11 | Internal directory layout UNCHANGED | `find src -type d` shows the SAME 5 dirs (`src/lib/`, `src/cli/`, `src/common/`, `src/bpf/`, `src/exporter/`). |
+| PI-12 | Pin paths host-global per `nsenter --net` | NEW pins `${PIN_DIR}/<iface>/rules_a`, `${PIN_DIR}/<iface>/rules_b`, `${PIN_DIR}/<iface>/rules_outer` visible from `nsenter --net` per existing mechanism. REMOVED pin `${PIN_DIR}/<iface>/rules` no longer exists (operator scripts that pre-§5.34 grep'd for this pin will not find it — reviewer flags as `inline-merge` IF any existing test does so; Phase A grep shows NO test does, so this is theoretical). |
+| PI-13-3.4b | inner-allowlist value shape `struct allow_entry` (8 bytes; offset-0 `present` + offset-4 `rule_id`) PRESERVED unchanged from §5.31 | `bpftool map show pinned ${PIN_DIR}/<iface>/allowlist_a` reports `value_size 8`; same for `allowlist_b`, `cidr_allowlist_a`, `cidr_allowlist_b`. Datapath continues reading `entry->rule_id` at offset 4 per HG-3.4b-c2-4 pseudocode. |
+| PI-14..PI-18 | All MVP-3.2 invariants (CIDR axis additive + STAT_PASS_CIDR + schema_version + atomic-swap) | UNCHANGED — no CIDR/schema/swap mechanism change in this slice. PI-18 specifically EXTENDS to cover the 4th axis (rules) via the same single-u32-flip mechanism (D-3.4b-c2-8). |
+| PI-19..PI-25 | All MVP-3.3 invariants (systemd + Ansible + FLEET_DEPLOYMENT + directive catalogue + restart flake handling) | UNCHANGED — no systemd/Ansible/docs touch this slice. |
+| PI-26 | MVP-3.3 historical "no C++/BPF source change" | UNCHANGED (PI-26 fires on the MVP-3.3 commit set; not on §5.34). |
+| PI-27 ≡ PI-13-3.4b adjudicated | inner-allowlist-value offset-0 byte semantics PRESERVED | Unchanged per PI-13-3.4b above. |
+| **PI-28-3.4b LIFTED → PI-29-3.4b-c2 supersedes** | (See LIFTED PI declarations above + PI-29-3.4b-c2 below for the new contract.) | Per LIFTED block. |
+| **PI-29-3.4b LIFTED → PI-29-3.4b-c2 supersedes** | (See LIFTED PI declarations above + PI-29-3.4b-c2 below.) | Per LIFTED block. |
+| PI-30 | `bypass` primitive UNCHANGED | UNCHANGED. |
+| PI-31-3.4b | Exporter READ-ONLY | UNCHANGED. Exporter code byte-equivalent. |
+| PI-32-3.4b | Exporter handles missing/empty bpffs + missing sidecar gracefully | UNCHANGED. |
+| PI-33 | Both binaries report same version (shared version.h) | UNCHANGED in shape; bump to 0.9.0 (PI-8-3.4b-c2). |
+| **PI-6-3.4b-c2 ≡ PI-34-3.4b-c2** | **59 pre-§5.34 ctests (58 baseline post-§5.33 + 1 net from §5.34 ops — REMOVE 1 via Q2.A, ADD 3 via T-1/T-2/T-3) strict-superset analysis: 56 ctest bodies byte-equivalent OR legitimately SKIP-77; 2 EXPLICIT EDIT carve-outs (T_DROP_RULE_BUMPS_COUNTER body rewrite per Q3.A/HG-3.4b-c2-2 + T_EXPORTER_METRICS_FORMAT version-literal bump per HK-8); 1 DELETED ctest (T_RULES_SKELETON_NOT_WIRED per Q2.A); 3 NEW ctests (T_DROP_RULE_OPERATIVE + T_RULES_ATOMIC_SWAP_NO_DROP + T_RULES_AXIS_FLIPS_WITH_ACTIVE_IDX). Post-§5.34 ctest count: 60.** | `git diff <pre-§5.34> --stat tests/T_*.sh` shows EXACTLY 2 modified files (E-1 + E-2) + 1 deleted file + 3 new files. The 55 other ctest bodies byte-equivalent. Reviewer accepts the 2 EDITs as scope-fenced per HG-3.4b-c2-2 + HK-8 precedent. |
+| PI-3.4b-1..PI-3.4b-8 (carry-forward §5.31) | rule_counters PERCPU_ARRAY[64] exists + counter survival + struct allow_entry symmetric MAC+CIDR + bump_rule per-match + sidecar /run path + exporter rule labels + Config::Rule::id source + kManagedMaps[] table | UNCHANGED per HG-3.4b-c2 inheritance. PI-3.4b-8 ADJUSTED: kManagedMaps[] count was 13 post-§5.31; now **15** post-§5.34 (1 removed + 3 added). PI-3.4b-8 check mechanism: `grep -c '^\s*{ &SkelMapsT::' src/lib/loader.cpp` returns **15** (was 13). |
+| **PI-3.5-4 AMENDED 34 → 33** | `kEventNames` constexpr catalog count = **33** (was 34 per §5.32 EDIT-1). Per D-3.4b-c2-4: `loader.warn.rules_skeleton_not_wired` event REMOVED from catalog in lockstep with the §5.29 WARN emission removal. | T_LOG_EVENT_CATALOG_STABILITY (§6.58) reference value updates 34 → 33. `grep -c '"' src/common/logger.hpp` on the kEventNames literal returns 33 entries. `tests/fixtures/log_events_v1.txt` (if exists per §5.32 Mechanism A) updates to drop the removed entry. |
+| PI-3.5-1, PI-3.5-2, PI-3.5-3, PI-3.5-5, PI-3.5-6, PI-3.5-7 (carry-forward §5.32) | Text-mode byte-equivalence + JSON envelope invariants + bypass.activated fields + interactive-exempt + cap-set | UNCHANGED. The only catalog touch is PI-3.5-4 count adjustment per D-3.4b-c2-4. |
+| PI-3.5.5-1, PI-7-3.5.5-hpp, PI-7-3.5.5-cpp (carry-forward §5.33) | Parallelism canary + entire-src-tree ZERO-diff | PI-3.5.5-1 continues — tester verifies 3 consecutive `ctest -j4` runs zero-flake during Phase B. PI-7-3.5.5-hpp / -cpp REPLACED by PI-7-3.4b-c2-hpp / -cpp this cycle (entire-src-tree ZERO-diff broken intentionally by D-1/D-2/L-1/L-2/L-3/L-4/V-1 edits; the §5.33 ZERO-diff was a strongest-cycle achievement, not a permanent contract). |
+
+**NEW invariants** (MVP-3.4b cycle 2-specific):
+
+| # | Invariant | Check mechanism |
+|---|---|---|
+| **PI-13-3.4b-c2** (LOAD-BEARING — rules-axis atomic-swap) | **`rules` map promoted to parallel ARRAY_OF_MAPS[2] (`rules_outer` outer + `rules_a` / `rules_b` inners) — atomic-swap via active_idx flip, symmetric with §5.27 Q1 AS1 CIDR pattern.** Single u32 `active_idx_map[0]` write commits 4-axis swap (MAC inner + CIDR inner + defaults + rules inner). | (a) `bpftool map show pinned ${PIN_DIR}/<iface>/rules_outer` reports `type array_of_maps`, `max_entries 2`, `value_size 4`, `key_size 4`. (b) `bpftool map show pinned ${PIN_DIR}/<iface>/rules_a` reports `type array`, `max_entries 64`, `value_size 4`, `key_size 4`; same for `rules_b`. (c) `bpftool map dump pinned ${PIN_DIR}/<iface>/rules_outer` shows 2 entries (slot 0 → inner_a fd; slot 1 → inner_b fd). (d) T_RULES_AXIS_FLIPS_WITH_ACTIVE_IDX (§6.NN+2) verifies active_idx flip correlates with rules-axis content visibility. (e) T_RULES_ATOMIC_SWAP_NO_DROP (§6.NN+1) verifies no half-applied state under concurrent traffic. |
+| **PI-29-3.4b-c2** (LOAD-BEARING — datapath consults rules + action_table) | **`mac_filter_prog` datapath consults `rules_outer[active] → rules_inner[entry->rule_id] → action_table[rule.action_id]` chain per match in BOTH MAC HASH-hit AND CIDR LPM_TRIE-hit branches.** Dispatches `XDP_DROP` on `action_type == ACTION_DROP`, falls through to `XDP_PASS` on `action_type == ACTION_PASS` or chain-NULL (defense-in-depth). Active snapshot discipline preserved (single `active_idx` read at datapath head indexes all 4 axes per §5.27 Q1 AS1 race-window-benignity). Per-rule counter `bump_rule(entry->rule_id)` called BEFORE the dispatch chain (HG-3.4b-c2-5 — bumps on match regardless of verdict). | (a) `git diff <pre-§5.34> -- src/bpf/mac_filter.bpf.c` shows: 1 removed `rules` ARRAY decl + 4 added decls (template + 2 inners + outer) in `.maps` block; MAC HASH-hit branch extended with 3 new `bpf_map_lookup_elem` chain calls + XDP_DROP dispatch; CIDR LPM_TRIE-hit branch symmetric. (b) T_DROP_RULE_OPERATIVE (§6.NN) verifies dispatch chain operationally — explicit drop rule produces XDP_DROP verdict + STAT_DROP_DENY bump + rule_counters bump. (c) `bpftool map dump pinned ${PIN_DIR}/<iface>/action_table` shows static `{0 → PASS, 1 → DROP}` mapping UNCHANGED from §5.29 baseline (action_table STAYS SHARED per HG-3.4b-c2-3). |
+| **PI-30-3.4b-c2-schema** (LOAD-BEARING — schema cycle 3 semantic shift) | **Drop rules NOW populate the inner-allowlist** (their `match.mac` / `match.src_cidr` AND their `rule_id` BOTH go into the inner-allowlist as `struct allow_entry{present=1, rule_id=<rule.id>}`). The prior §5.26 schema cycle 2 contract ("drop rules do NOT populate the inner allowlist") is EXPLICITLY AMENDED per HG-3.4b-c2-2. | (a) Apply a config with a drop rule (`id=17 action=drop match.mac=X`); `bpftool map dump pinned ${PIN_DIR}/<iface>/allowlist_<active> --json | jq` shows the drop-rule MAC X present in the inner-allowlist (was ABSENT pre-§5.34). (b) `populate_inner_slot` writes `{present=1, rule_id=17}` for the drop-rule entry (verified via `bpftool map dump | jq '.[].formatted.value.rule_id'` returns 17 for the drop-rule MAC key). (c) Datapath reads the rule_id and dispatches DROP via action_table (PI-29-3.4b-c2). (d) T_DROP_RULE_OPERATIVE (§6.NN) verifies all of the above; T_DROP_RULE_BUMPS_COUNTER (§6.52-revised) verifies the inverted assertion. Reviewer disposition rule: any "drop-rule semantic change" flag is `inline-merge` per HG-3.4b-c2-2 — NOT `[CONTRACT-DRIFT]`. |
+| **PI-3.4b-c2-fixture-ripple** | 2 ctest body EDITs + 1 ctest delete + 3 ctest adds per §5.34 FileList. All other 55 ctest bodies byte-equivalent. | `git diff <pre-§5.34> --stat tests/T_*.sh` shows EXACTLY 2 modified files (T_DROP_RULE_BUMPS_COUNTER + T_EXPORTER_METRICS_FORMAT) + 1 deleted file (T_RULES_SKELETON_NOT_WIRED) + 3 new files. Any 3rd modification = `[INVARIANT-VIOLATED]` (impl/tester SendMessages architect for any 3rd EDIT). |
+| **PI-3.4b-c2-warn-removed** | The §5.29 stderr WARN `xdpmacfilter: rules: section parsed (<N> entries) but per-rule action dispatch deferred to MVP-3.4b — datapath uses MAC/CIDR-only matching this cycle` is REMOVED. Apply with non-empty `rules:` block produces NO such WARN line. Event-name `loader.warn.rules_skeleton_not_wired` REMOVED from `kEventNames` (count 34 → 33). | `apply -f <config-with-non-empty-rules-block>` → stderr does NOT contain `rules: section parsed`. T_LOG_EVENT_CATALOG_STABILITY count assertion 33 (NOT 34). |
+
+**Carve-outs / adjudications summary**:
+- PI-13-3.4b PRESERVED unchanged from §5.31 (inner-allowlist value shape `struct allow_entry` byte-equivalent; only the population path's filter changes per L-3).
+- PI-28-3.4b LIFTED — `mac_filter_prog` body extends further (dispatch chain at MAC HASH-hit + CIDR LPM_TRIE-hit branches); replaced by PI-29-3.4b-c2 for slices ≥ §5.34.
+- PI-29-3.4b LIFTED — rules + action_table NOW consulted by datapath; replaced by PI-29-3.4b-c2 (with action_table STAYING SHARED per HG-3.4b-c2-3 carve-out).
+- PI-29 (and downstream PI-29-3.4b) CARVE-OUT FULLY CLOSED — datapath consultation is the explicit operative point of this slice.
+- PI-3.5-4 catalog count AMENDED 34 → 33 per D-3.4b-c2-4 (warn-emission removal).
+- PI-7-3.4b-c2-hpp / -cpp continues the loader.hpp + config.hpp ZERO-diff streak (9th cycle on loader.hpp; 4th on config.hpp).
+- PI-10-3.4b-c2 RELAXED from §5.32/§5.33 ADDITIVE-only to ADDITIVE-modulo-deletion (1 constant removed; net additive of 2).
+- PI-6-3.4b-c2 RELAXED to 2-EDIT + 1-DELETE + 3-NEW carve-out per Q2.A + Q3.A + T-1/T-2/T-3.
+
+#### §5.34 verifiable invariants for reviewer
+
+(Per architect-spec §6.5 "Verification-hints discipline": items below are GUIDANCE for the reviewer, NOT contracts for impl. Default MAY. Reserve MUST only for true PI-* contracts (PI-1..PI-34 + PI-3.4b-* + PI-3.5-* + PI-3.5.5-* + PI-3.4b-c2-* above ARE MUSTs by definition; items below MAY be relaxed by impl if a contract elsewhere demands it). **Resolution rule for prose-vs-invariants conflicts within this amendment: invariants block wins, prose loses; if impl deviates on a SHOULD/MAY hint to satisfy a PI-* contract, reviewer's correct disposition is `inline-merge` on the hint text — NOT `[UNRELATED-EDIT]` on impl.**)
+
+In addition to PI-1..PI-34 + PI-3.4b-* + PI-3.5-* + PI-3.5.5-* + PI-3.4b-c2-* above:
+
+- `git diff <pre-§5.34> -- src/lib/loader.hpp src/lib/config.hpp` SHOULD return ZERO output (PI-7-3.4b-c2-hpp — 9th consecutive cycle on loader.hpp + 4th on config.hpp).
+- `git diff <pre-§5.34> -- src/lib/loader.cpp` SHOULD show changes confined to the 6 enumerated scopes (a)-(f) in PI-7-3.4b-c2-cpp.
+- `git diff <pre-§5.34> -- src/common/mac_filter.h` SHOULD show 3 added constants + 1 removed constant; ZERO other changes.
+- `git diff <pre-§5.34> -- src/bpf/mac_filter.bpf.c` SHOULD show the PI-29-3.4b-c2 enumerated edit-set (`.maps` block: 1 removed + 4 added decls; datapath: MAC HASH-hit branch extension + CIDR LPM_TRIE-hit branch extension). ZERO diff to: bump_stat, bump_rule, ethhdr bounds check, IPv4 ethertype gate, IPv4 header bounds check, default-fallthrough, STAT_DROP_MALFORMED branches, `unlikely()` annotations, char __license[] line.
+- `git diff <pre-§5.34> -- src/common/logger.hpp` SHOULD show ONLY the `kEventNames` array literal entry removal (`loader.warn.rules_skeleton_not_wired`) + the `kEventCount` constant decrement (34 → 33). ZERO other logger module changes.
+- `git diff <pre-§5.34> -- tests/T_*.sh` SHOULD show: 3 NEW files (§6.NN..§6.NN+2) + 2 EDITED files (T_DROP_RULE_BUMPS_COUNTER + T_EXPORTER_METRICS_FORMAT) + 1 DELETED file (T_RULES_SKELETON_NOT_WIRED). 55 of 58 pre-§5.34 ctest bodies byte-equivalent.
+- `git diff <pre-§5.34> -- tests/CMakeLists.txt` SHOULD show: 3 new add_test entries; 1 entry removed from foreach block (T_RULES_SKELETON_NOT_WIRED); other 50 entries unchanged.
+- `git diff <pre-§5.34> -- tests/fixtures/` SHOULD show: at most 1 new fixture (if tester chooses file-fixture over inline-heredoc); existing fixtures byte-equivalent.
+- `git diff <pre-§5.34> -- CMakeLists.txt` SHOULD show: VERSION bump 0.8.0 → 0.9.0 ONLY; ZERO other CMake changes.
+- `git diff <pre-§5.34> -- CHANGELOG.md` SHOULD show NEW `[0.9.0]` entry + build-pace row.
+- New files SHOULD exist: 3 T_*.sh under `tests/`; at most 1 new fixture under `tests/fixtures/` (impl-flexible).
+- 3 new ctests SHOULD pass (§6.NN..§6.NN+2); T_RULES_ATOMIC_SWAP_NO_DROP (§6.NN+1) is the LOAD-BEARING canary for PI-13-3.4b-c2.
+- 55 of 58 pre-§5.34 ctests SHOULD still pass byte-equivalent (or legitimately SKIP-77).
+- 2 PI-3.4b-c2-EDITED ctests SHOULD pass with their updated bodies (T_DROP_RULE_BUMPS_COUNTER semantic-shift rewrite preserves test semantic but inverts assertions; T_EXPORTER_METRICS_FORMAT version-literal bump aligns with PI-8-3.4b-c2).
+- 1 PI-3.4b-c2-DELETED ctest no longer runs (T_RULES_SKELETON_NOT_WIRED removed from CMakeLists foreach + body deleted).
+- `xdpmacfilter --version` SHOULD report `xdpmacfilter 0.9.0` AND `xdpmf-exporter --version` SHOULD report `xdpmf-exporter 0.9.0` (PI-8-3.4b-c2).
+- `XDPMF_SANITIZERS=ON` build SHOULD be clean for BOTH binaries.
+- BPF object SHOULD verifier-load cleanly: `xdpmacfilter attach` on a fixture iface exits 0 (T_LOAD_ATTACH or equivalent existing test); the 3 new map-lookups per match (rules_outer + rules_inner + action_table) SHOULD pass verifier per the §5.27 + §5.31 precedents.
+- `bpftool map show pinned ${PIN_DIR}/<iface>/rules_outer` SHOULD report `type array_of_maps max_entries 2 value_size 4 key_size 4`.
+- `bpftool map show pinned ${PIN_DIR}/<iface>/rules_a` SHOULD report `type array max_entries 64 value_size 4 key_size 4`; same for `rules_b`.
+- `bpftool map show pinned ${PIN_DIR}/<iface>/rules` SHOULD FAIL with `Error: bpf obj get (/sys/fs/bpf/xdpmacfilter/<iface>/rules): No such file or directory` (the SHARED `rules` pin is RETIRED).
+- `grep -c '^\s*{ &SkelMapsT::' src/lib/loader.cpp` SHOULD return **15** (was 13 pre-§5.34; PI-3.4b-c2-kManagedMaps catalog count).
+- `grep -cE 'SEC\(".maps"\)' src/bpf/mac_filter.bpf.c` SHOULD return **16** (was 13 pre-§5.34: −1 removed `rules` decl + 4 added: template + 2 inners + outer).
+- `grep -cE 'XDPMF_MAP_RULES' src/common/mac_filter.h` SHOULD return 3 occurrences (the 3 NEW constants `XDPMF_MAP_RULES_OUTER_NAME` / `XDPMF_MAP_RULES_INNER_A_NAME` / `XDPMF_MAP_RULES_INNER_B_NAME`); ZERO `XDPMF_MAP_RULES_NAME` occurrence (the removed constant).
+- `grep -c 'loader.warn.rules_skeleton_not_wired' src/` SHOULD return ZERO (the WARN emission AND the kEventNames entry both removed).
+- `apply -f <config-with-non-empty-rules-block>` stderr SHOULD NOT contain the `rules: section parsed` substring (PI-3.4b-c2-warn-removed).
+- T_LOG_EVENT_CATALOG_STABILITY (§6.58) SHOULD assert count == 33 (was 34 per §5.32 EDIT-1; PI-3.5-4 AMENDED per D-3.4b-c2-4).
+- Optional verifier-canary: `xdpmacfilter attach --iface lo` exits 0 on a kernel that supports BPF (sanity check that the 3 new chained-deref lookups per match do NOT trigger verifier-reject).
+- Optional guard #7 smoke-check: `sudo -n bpftool prog load build/src/bpf/mac_filter.bpf.o /sys/fs/bpf/probe type xdp; rc=$?; sudo -n bpftool prog unpin /sys/fs/bpf/probe; echo $rc` SHOULD return 0 (the new `rules_outer` ARRAY_OF_MAPS does NOT introduce a new BTF-asymmetry trap since the inner-VALUE `struct rule_entry` is UNCHANGED from §5.29 — see §5.34 Phase A grep guard #7 above).
+
+#### §5.34 Anti-misdiagnosis notes (institutional learning, per architect-spec §6.6)
+
+This slice carries forward all 12 anti-misdiagnosis guards from prior cycles + adds two specific to MVP-3.4b cycle 2:
+
+1. **All guards #1..#12 inherited** unchanged: cap-set declaration on NEW invocation path (D-3.3-6), bpffs ≠ tmpfs (§5.31 EDIT-1), bpftool-vs-libbpf-skeleton BTF asymmetry (§5.31 EDIT-2), catalogue arithmetic (§5.32 EDIT-1), VERSION-bump literal propagation (§5.32 EDIT-2), Phase A code-grep discipline pays off (§5.31 anti-misdiagnosis #5), helper-location duplication-over-extraction (§5.31 guard #9), three-callsite lockstep landmine (RESOLVED MVP-3.4.5 HK-9; dividend collected here for 3rd consecutive cycle), [[impl-role-discipline]] (silent deviation forbidden; Phase B peer-DM required), [[mint-hld-scope-discipline]] (mechanical-answer check; this slice is mechanical extension of §5.27 precedent — no /mint-hld needed), chronic -j4 parallelism + RESOURCE_LOCK rule (§5.33 guard #12 — applied to T-1/T-2/T-3 NEW ctests requiring xdp_fixture lock).
+
+2. **NEW anti-misdiagnosis note: 4-axis atomic-swap scalability** (validated by §5.34). The §5.27 Q1 AS1 mechanism (single u32 active_idx flip commits N parallel ARRAY_OF_MAPS axes via shared indexing) scales from 1 axis (MAC, §5.26) → 2 axes (MAC + CIDR, §5.27) → 3 axes (MAC + CIDR + defaults, §5.26 Q2-extension; though defaults is ARRAY not ARRAY_OF_MAPS, the indexing-by-active discipline is symmetric) → **4 axes** (MAC + CIDR + defaults + rules, §5.34). Future cycles introducing a 5th+ axis (e.g. MVP-3.8+ action_table promotion, or MVP-3.5b XDPMF_LOG_DEST-style config-swap) MAY follow the same template: declare ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] outer + 2 inners + add to kManagedMaps[] + write inactive slot in `apply_request` step 8 + read same `active` snapshot in BPF program. **Future-cycle architect anti-misdiagnosis rule**: when adding a NEW axis to atomic-swap, do NOT introduce a separate `active_idx` map — share the existing one. Race-window analysis is BYTE-IDENTICAL to §5.27 Q1 AS1 (snapshot discipline at datapath head). Cost: ~5-line BPF .maps decl + 1-line kManagedMaps[] insert + ~10-line apply_request step extension. Benefit: 1 atomic commit point for arbitrary-N axes. The shape is now established — no future cycle should need to re-derive it.
+
+3. **NEW anti-misdiagnosis note: schema-contract retirement discipline** (validated by §5.34's lift of §5.26 schema cycle 2 contract). When a slice EXPLICITLY RETIRES a prior schema contract (vs additively extending one), the architect MUST: (a) CITE the prior contract VERBATIM (or paraphrase to operative shape with explicit "from §X" reference); (b) WRITE the new contract VERBATIM in the new amendment; (c) FLAG it as a NEW PI (here: PI-30-3.4b-c2-schema); (d) STATE the reviewer disposition rule once (here: any "drop-rule semantic change" flag is `inline-merge` per HG-3.4b-c2-2, NOT `[CONTRACT-DRIFT]`); (e) UPDATE ALL DOWNSTREAM TESTS that asserted the prior contract (here: T_DROP_RULE_BUMPS_COUNTER body rewrite per Q3.A — its assertions INVERT). Silent contract drift = institutional-memory loss + reviewer false-positive `[CONTRACT-DRIFT]` flags + impl/tester confusion. **Future-cycle architect anti-misdiagnosis rule**: when ANY brownfield slice retires a prior contract, walk this 5-step checklist before publishing the amendment. Cost: ~15 minutes of careful drafting. Benefit: eliminates a class of reviewer false-positives + makes audit trail navigable for future cycles. Validated by §5.34 (this slice).
+
+#### §7 OOS — MVP-3.4b cycle 2 components SHIPPED + new fences + cycle 3 surfaced
+
+##### Moved from deferred to SHIPPED (per MVP-3.4b cycle 2)
+
+- ~~**`rules` map atomic-swap promotion (D-3.4-4 close-out)** — MVP-3.4b cycle 2 / MVP-3.4c.~~ **— SHIPPED in §5.34** as parallel `rules_outer` ARRAY_OF_MAPS[2] of `rules_a` / `rules_b` inner ARRAYs per HG-3.4b-c2-1 + D-3.4b-c2-1. Single `active_idx` flip atomically commits MAC + CIDR + defaults + rules.
+- ~~**`action_table` datapath consultation (action-dispatch) — MVP-3.4c future cycle**.~~ **— PARTIALLY SHIPPED in §5.34**: `action_table` map IS NOW CONSULTED by datapath per HG-3.4b-c2-4 dispatch chain. `action_table` map shape STAYS SHARED per HG-3.4b-c2-3 (not promoted to parallel). Per-action-type extensibility for MIRROR/RL/TAG actions remains MVP-3.8+ work. The cycle naming "MVP-3.4c" was a placeholder; this slice (MVP-3.4b cycle 2) fully delivers action-dispatch via existing PASS/DROP action types.
+- ~~**Schema cycle 2 → cycle 3 shift (drop rules populate inner-allowlist)** — never explicitly listed as carry-forward, but implicit consequence of action-table dispatch.~~ **— SHIPPED in §5.34** per HG-3.4b-c2-2 + D-3.4b-c2-2 + PI-30-3.4b-c2-schema.
+- ~~**§5.29 WARN emission `xdpmacfilter: rules: section parsed (<N> entries) but per-rule action dispatch deferred to MVP-3.4b — ...`** — implicit consequence of datapath consultation.~~ **— RETIRED in §5.34** per D-3.4b-c2-4 (WARN-emission removal + kEventNames count 34 → 33).
+
+##### NEW out-of-scope fences (per §5.34)
+
+- **`reset-counters` subcommand** — split out of this slice per brief-author decision 2026-05-26. Follow-up cycle (working name MVP-3.4d — final name architect's call when the brief lands). NEW FENCE.
+- **`rule_counter` atomic-swap** — same follow-up; cycle 2 preserves cycle 1's PI-3.4b-2 (counter-monotonicity across apply). NEW FENCE.
+- **`action_table` promotion to parallel ARRAY_OF_MAPS** — not motivated by cycle 2 (action_table contents static per D-3.4b-c2-6); becomes motivated if MVP-3.8+ adds mutable action types (MIRROR / RL / TAG with per-config parameters). NEW FENCE.
+- **Action types beyond `{PASS, DROP}`** — MVP-3.8+ carry-forward unchanged.
+- **`xdpfilter_packets_total{verdict="rule_drop"}` separate verdict bucket** (Q1.A) — Q1.B picked; future-cycle if operator demand surfaces for direct verdict-label distinction. NEW FENCE.
+- **`defaults` map retirement (Q4.B)** — Q4.A picked; defaults stays for unmatched-frame fallback. Carry-forward unchanged (was MVP-3.2 OOS).
+- **Drop-precedence-over-pass or later-rule-wins dedup semantics** — D-3.4b-c2-7 documents first-rule-wins (current `extract_pass_macs` / `extract_pass_cidrs` dedup). Alternative semantics → future cycle (working name MVP-3.4e — architect's call). NEW FENCE.
+- **Documentation pass** (FLEET_DEPLOYMENT.md migration notes for schema cycle 3 shift; CHANGELOG operator-language explainer; Prometheus alert semantic update for `xdpfilter_rule_match_total{action="drop"}` now being non-zero) — separate manual doc pass per user direction (Doc bucket carry-forward). NEW FENCE.
+- **CHANGELOG operator migration notes** for the schema shift in cycle-2-savvy operator language — included in V-2 CHANGELOG entry as a NOTES paragraph; deeper documentation deferred to FLEET_DEPLOYMENT.md doc pass.
+
+##### Carry-forward (unchanged from §5.33 §7 OOS unless noted)
+
+- **MVP-3.5b — `XDPMF_LOG_DEST={stderr,file,syslog,journald}` + `XDPMF_LOG_LEVEL` + SIGHUP re-read** — carry-forward unchanged.
+- **MVP-3.4d (working name) — `reset-counters` subcommand + `rule_counter` atomic-swap** — split out of THIS slice; surfaced as next-natural.
+- **Doc bucket D1..D13** — user-driven manual pass; carry-forward unchanged.
+- **Security M3 / Perf M1-M4 / TSAN / CO-RE field-probe** — separate cycles; carry-forward.
+- **Library extraction `libxdpmf.so.0` (MVP-3.6+)** — carry-forward.
+- **Daemon `xdpmfd` (MVP-3.6+)** — carry-forward.
+- **Binary rename `xdpmacfilter` → `xdpfilter` (MVP-3.12)** — carry-forward.
+- **L4 ports / VLAN / IPv6 CIDR** — carry-forward.
+- **sFlow (MVP-3.6 conditional)** — carry-forward.
+- **Consolidated anti-misdiagnosis guards file** — workflow-level; outside /mint-dev scope.
+
+Evidence: `mint/task-brief.md` MVP-3.4b cycle 2 brief (HG-3.4b-c2-1..5 + Q1-Q4 + Items D-1/D-2/L-1..L-4/T-1..T-3/E-1/E-2/V-1/V-2); `mint/architecture-v2.md` §"§MVP-3.4 Open Question #13 RESOLUTION" Option 2 + Caveat (b) (the load-bearing pre-decision, committed 2d4b31a 2026-05-24); §5.26 Q1 AS1 + Q2 A1 (atomic-swap parent pattern); §5.27 Q1 AS1 (CIDR axis precedent — DIRECT MIRROR for rules axis); §5.29 HG-3.4-1 + Q3 (rules+action_table SKELETON declared + populated + WARN — the contract LIFTED this slice); §5.30 HK-9 kManagedMaps[] (the landmine refactor; 3rd consecutive cycle's dividend); §5.31 D-3.4b-13 + D-3.4b-15 (`MacRule` / `CidrRule` anon-namespace shape — precedent for rule_id-carrying intermediate vectors); §5.31 PI-13-3.4b + PI-28-3.4b + PI-29-3.4b (the cycle-1 ancestor's contracts; PI-13-3.4b PRESERVED; PI-28/29-3.4b LIFTED per LIFTED PI declarations block); §5.32 EDIT-1 catalogue arithmetic precedent (D-3.4b-c2-4 catalog count adjustment 34 → 33 follows same shape); §5.32 EDIT-2 PI-6 carve-out language + §5.31 EDIT-2 PI-6 3-EDIT carve-out (PI-6-3.4b-c2 2-EDIT carve-out follows same precedent); §5.33 PI-7-3.5.5-cpp ZERO-diff strongest cycle (this slice intentionally breaks the streak with the D-1/D-2/L-1..L-4 edits per the operative operative point of the slice); architect-spec §6.5 Verification-hints discipline + §6.6 Anti-misdiagnosis institutional learning (both applied in this amendment per the standard discipline).
