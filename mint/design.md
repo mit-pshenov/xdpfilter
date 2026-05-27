@@ -12030,3 +12030,15 @@ Per architect spec "design flaw" + "tester ambiguity" scenarios:
 1. team-lead notified via SendMessage at correction-flag time with the diff summary (this EDIT block) + the two rulings.
 2. mint-dev-impl notified with the EDIT-1 ruling (drop resolve_ifindex; helper returns bool; CLI maps to exit 0/1) + the EDIT-2 ruling (T-2 drops event-name-token assertion).
 3. mint-dev-tester notified with the T-2 sub-case (a) assertion list change (via SendMessage; T-2 file authoring will reflect the relaxed assertions).
+
+#### §5.36 EDIT-3 — Post-review sweep round 1 (2026-05-27)
+
+Trigger: reviewer round-1 verdict `pass`, 0 framework findings, 2 OOT both `inline-merge`. Audit-trail housekeeping only — no spec defect.
+
+**OOT-1 — `docs/BACKLOG.md` retroactively registered as NEW out-of-cycle file.** Committed in ccfd8d9 (Phase 2-3 impl+test) but not enumerated in §5.36 FileList. Resolution of 2026-05-27 mint-review doc-dim L4 ("no tracking issue exists in-tree"). Pre-flagged by team-lead. Classification: NEW (out-of-cycle, doc-only). 109 LOC. Zero code/test/spec surface; zero PI impact; consolidates CHANGELOG.md:245 13-item bucket + 14 doc-dim findings (B1..B15). No code/test/build deps (Grep zero refs).
+
+**OOT-2 — EDIT-1 clarification amended.** EDIT-1's "T-1 sub-case (c) runs reset-counters from HOST context" note was a Phase B observation written BEFORE the resolve_ifindex drop. Post-EDIT-1 helper no longer performs `if_nametoindex` lookup → NSEXEC-vs-HOST context behaviorally MOOT for reset_counters_request (validate_iface_name is host-invariant; BpffsRootFd opens host-global bpffs per §5.25 P1; openat O_NOFOLLOW resolves relative to root_fd, not caller's netns). Both contexts functionally equivalent; T-1 sub-case (c)'s NSEXEC choice is internally consistent with setup_veth+attach being NSEXEC. Stylistic alignment is impl-flexible.
+
+Guard #18 amended: "when removing netns-dependent operations from a helper (e.g. dropping `if_nametoindex`), verify that downstream tests' NSEXEC-vs-HOST choice is no longer behaviorally meaningful — both should pass; stylistic alignment is impl-flexible".
+
+Aggregate impact: zero PI changes; zero scope changes; zero new fences. Ready to ship.
