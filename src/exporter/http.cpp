@@ -265,6 +265,13 @@ void handle_connection(int conn_fd, std::string_view bpffs_root)
     return ::inet_pton(AF_INET, copy.c_str(), &out) == 1;
 }
 
+/* §5.39 (MVP-3.4h) HG-3.4h-2 + D-3.4h-2: numerical 127.0.0.0/8 check on a
+ * post-`inet_pton` `struct in_addr`. Robust vs string-prefix edge cases. */
+[[nodiscard]] bool is_loopback_ipv4(struct in_addr addr)
+{
+    return (addr.s_addr & ::htonl(0xff000000)) == ::htonl(0x7f000000);
+}
+
 }  // namespace
 
 void install_signal_handlers()
@@ -296,6 +303,23 @@ int run(const HttpConfig& cfg)
         xdpmf::logger::emit(xdpmf::logger::Level::Error,
                             "exporter.bind.invalid_addr", msg, fs);
         return 1;
+    }
+
+    /* §5.39 (MVP-3.4h) HG-3.4h-3 + Q2: byte-equivalent text-mode WARN +
+     * bind_addr field in JSON envelope. Process-scoped (no iface). Fires
+     * AFTER parse_bind_addr success, BEFORE ::socket() — visible in stderr
+     * ordering BEFORE any bind/listen failure AND BEFORE exporter.listening. */
+    if (!is_loopback_ipv4(bind_inaddr)) {
+        const std::string warn_msg = std::format(
+            "xdpmf-exporter: WARN --bind {} is not loopback (127.0.0.0/8); "
+            "/metrics will be exposed on a routable interface\n",
+            cfg.bind_addr);
+        const xdpmf::logger::Field warn_fields[] = {
+            xdpmf::logger::Field{"bind_addr", std::string_view{cfg.bind_addr}},
+        };
+        xdpmf::logger::emit(xdpmf::logger::Level::Warn,
+                            "exporter.warn.bind_non_loopback",
+                            warn_msg, warn_fields);
     }
 
     const int listen_fd = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);

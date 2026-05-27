@@ -971,3 +971,31 @@ foreach(T IN ITEMS
         SKIP_RETURN_CODE 77
     )
 endforeach()
+
+# ─────────────────────────────────────────────────────────────────────────
+# MVP-3.4h additions (§5.39 — exporter --bind non-loopback startup WARN).
+#
+# T_EXPORTER_BIND_NON_LOOPBACK_WARN (§5.39 T-1): spawn exporter with
+#   --bind <addr> across 5 sub-cases (a) 0.0.0.0 positive, (b) 127.255.255.255
+#   upper-edge negation, (c) default-127.0.0.1 negation, (d) 127.0.0.2
+#   in-range non-default negation, (e) JSON-mode positive structured-event
+#   shape. Asserts the new `exporter.warn.bind_non_loopback` event token +
+#   D-3.4h-7 LOAD-BEARING text prose substring on positive cases; verifies
+#   silence on the entire 127.0.0.0/8 range (HG-3.4h-2 bitmask coverage).
+#   Closes /mint-review sec M2 + KC-2 observability half.
+#
+# Resource lock per D-3.4h-T1-LOCK + Q4: `exporter_port_9417` ONLY (port-
+# clash serialization with sibling exporter tests). NO xdp_fixture — this
+# test does NOT touch the veth pair / attach XDP / read pinned maps.
+# Minimizing lock surface per architect spec guard #12.
+add_test(
+    NAME T_EXPORTER_BIND_NON_LOOPBACK_WARN
+    COMMAND bash ${TEST_DIR}/T_EXPORTER_BIND_NON_LOOPBACK_WARN.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_EXPORTER_BIND_NON_LOOPBACK_WARN PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK exporter_port_9417
+    TIMEOUT 60
+    SKIP_RETURN_CODE 77
+)
