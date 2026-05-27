@@ -1,0 +1,17 @@
+# §6.NN+1 swap-A (MVP-3.4b cycle 2 / §5.34).
+#
+# Rules-axis atomic-swap canary side A: id=5 PASSES MAC_05; id=17 DROPS
+# MAC_11. The swap to config_rules_swap_b.yaml INVERTS both actions on
+# the same MAC universe (id=5 DROPS MAC_05; id=17 PASSES MAC_11).
+# Atomic-swap correctness means no in-flight frame ever sees a
+# half-applied state across the action inversion.
+default_action: drop
+rules:
+  - id: 5
+    action: pass
+    match:
+      mac: "02:00:00:00:00:05"
+  - id: 17
+    action: drop
+    match:
+      mac: "02:00:00:00:00:11"

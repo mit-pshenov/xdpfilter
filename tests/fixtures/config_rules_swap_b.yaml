@@ -1,0 +1,17 @@
+# §6.NN+1 swap-B (MVP-3.4b cycle 2 / §5.34).
+#
+# Rules-axis atomic-swap canary side B: id=5 DROPS MAC_05 (action
+# INVERTED from A); id=17 PASSES MAC_11 (action INVERTED from A).
+# Same MAC universe as A; the swap from A→B must commit atomically so
+# no in-flight frame observes a half-applied (id=5 still pass, id=17
+# now pass) state.
+default_action: drop
+rules:
+  - id: 5
+    action: drop
+    match:
+      mac: "02:00:00:00:00:05"
+  - id: 17
+    action: pass
+    match:
+      mac: "02:00:00:00:00:11"

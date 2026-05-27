@@ -556,12 +556,13 @@ set_tests_properties(T_FLEET_DOCS_SUBSTRING PROPERTIES
 # T_BYPASS_REQUIRES_UNSAFE_NONINTERACTIVE (§6.41): NEGATION CONTROL —
 #   bypass under setsid (non-tty) without --unsafe refuses (exit 1, stderr
 #   audit-safety message, XDP STILL attached). Fail-open regression guard.
-# T_RULES_SKELETON_NOT_WIRED (§6.42): apply config_rules_skeleton.yaml;
-#   verify WARN regex + rules/action_table populated + drop-MAC ABSENT
-#   from inner allowlist (the load-bearing defer-posture signature).
-#   SKIP-77 if jq absent.
+# T_RULES_SKELETON_NOT_WIRED (§6.42): DELETED in §5.34 per Q2.A — the
+#   defer-posture contract (rules+action_table NOT consulted) is RETIRED
+#   by MVP-3.4b cycle 2; the new T_DROP_RULE_OPERATIVE / T_RULES_ATOMIC_
+#   SWAP_NO_DROP / T_RULES_AXIS_FLIPS_WITH_ACTIVE_IDX cover the wired
+#   contract. Foreach below shrunk from 6 to 5 entries.
 #
-# All 6 tests share RESOURCE_LOCK xdp_fixture — they touch the veth pair
+# All 5 tests share RESOURCE_LOCK xdp_fixture — they touch the veth pair
 # AND/OR spawn the exporter against the host-global PIN_ROOT bpffs.
 # Serialized against the 30 other veth-touching tests.
 foreach(T IN ITEMS
@@ -570,7 +571,6 @@ foreach(T IN ITEMS
     T_EXPORTER_NO_ATTACHED_IFACE
     T_BYPASS_CMD_DETACHES
     T_BYPASS_REQUIRES_UNSAFE_NONINTERACTIVE
-    T_RULES_SKELETON_NOT_WIRED
 )
     add_test(
         NAME ${T}
@@ -675,8 +675,10 @@ set_tests_properties(T_EXPORTER_EXITS_6_ALL_IFACES_EACCES PROPERTIES
 # T_EXPORTER_RULE_LABELS        (§6.51): xdpfilter_rule_match_total
 #   Prometheus series + sidecar-orphan tolerance (action="unknown").
 #   Takes BOTH xdp_fixture AND exporter_port_9417 RESOURCE_LOCKs.
-# T_DROP_RULE_BUMPS_COUNTER     (§6.52): PI-29-3.4b carve-out signature —
-#   drop rule MAC never bumps rule_counters (no inner match).
+# T_DROP_RULE_BUMPS_COUNTER     (§6.52-revised, §5.34 Q3.A): drop rule
+#   MAC NOW enters inner-allowlist, per-rule counter NOW bumps on match,
+#   verdict XDP_DROP via rules→action_table chain (PI-29-3.4b-c2 +
+#   PI-30-3.4b-c2-schema — assertions INVERTED from pre-§5.34 body).
 #
 # All 6 tests touch the veth fixture → share xdp_fixture RESOURCE_LOCK.
 # §6.51 additionally takes exporter_port_9417 (port-clash serialization).
@@ -709,6 +711,60 @@ set_tests_properties(T_EXPORTER_RULE_LABELS PROPERTIES
     ENVIRONMENT "${TEST_ENV}"
     RESOURCE_LOCK "xdp_fixture;exporter_port_9417"
     TIMEOUT 90
+    SKIP_RETURN_CODE 77
+)
+
+# ─────────────────────────────────────────────────────────────────────────
+# MVP-3.4b cycle 2 additions (§5.34 / §6.NN–§6.NN+2 — rules atomic-swap
+# promotion + datapath dispatch via rules→action_table + schema cycle
+# 2→3 semantic shift).
+#
+# T_DROP_RULE_OPERATIVE          (§6.NN):   explicit drop rule dispatches
+#   XDP_DROP via the rules→action_table chain (PI-29-3.4b-c2 + schema
+#   shift per PI-30-3.4b-c2-schema). Dual-MAC fixture verifies that a
+#   pass rule (id=5) and drop rule (id=17) produce different verdict
+#   buckets via the SAME inner-allowlist machinery.
+# T_RULES_ATOMIC_SWAP_NO_DROP    (§6.NN+1): LOAD-BEARING canary for
+#   PI-13-3.4b-c2 (rules-axis atomic-swap via active_idx flip,
+#   symmetric with §5.27 Q1 AS1 CIDR-axis pattern). Concurrent
+#   alternating traffic across an action-inverting apply; rule_counters
+#   sum equals verdict sum across the swap window (atomicity proof).
+# T_RULES_AXIS_FLIPS_WITH_ACTIVE_IDX (§6.NN+2): bpftool-only verification
+#   that rules_<active_A> ↔ rules_<active_B> indexing tracks active_idx
+#   flip, and the inactive slot retains prior content (one-deep rollback
+#   history per §5.26 atomic-swap contract).
+#
+# All 3 tests touch the veth fixture → share RESOURCE_LOCK xdp_fixture
+# per anti-misdiagnosis guard #12. T_RULES_ATOMIC_SWAP_NO_DROP runs a
+# 14s background injector + 2× WINDOW_SEC waits → TIMEOUT 120 matching
+# §6.23 T_APPLY_ATOMIC_SWAP_NO_DROP + §6.31 T_CIDR_ATOMIC_SWAP_NO_DROP
+# precedent. The other two are bpftool-only / single-batch tests → 60s.
+foreach(T IN ITEMS
+    T_DROP_RULE_OPERATIVE
+    T_RULES_AXIS_FLIPS_WITH_ACTIVE_IDX
+)
+    add_test(
+        NAME ${T}
+        COMMAND bash ${TEST_DIR}/${T}.sh
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    set_tests_properties(${T} PROPERTIES
+        ENVIRONMENT "${TEST_ENV}"
+        RESOURCE_LOCK xdp_fixture
+        TIMEOUT 60
+        SKIP_RETURN_CODE 77
+    )
+endforeach()
+
+add_test(
+    NAME T_RULES_ATOMIC_SWAP_NO_DROP
+    COMMAND bash ${TEST_DIR}/T_RULES_ATOMIC_SWAP_NO_DROP.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_RULES_ATOMIC_SWAP_NO_DROP PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 120
     SKIP_RETURN_CODE 77
 )
 

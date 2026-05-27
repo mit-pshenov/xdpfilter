@@ -24,7 +24,6 @@ exporter.warn.cpu_count_invalid
 loader.attach.fleet_replace
 loader.attach.replace
 loader.trust_model
-loader.warn.rules_skeleton_not_wired
 logger.warn.unknown_log_format
 sidecar.warn.lstat_failed
 sidecar.warn.mkdir_failed

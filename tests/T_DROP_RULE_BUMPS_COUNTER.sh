@@ -1,50 +1,50 @@
 #!/bin/bash
-# T_DROP_RULE_BUMPS_COUNTER — design §6.52 (MVP-3.4b cycle 1 / §5.31).
+# T_DROP_RULE_BUMPS_COUNTER — design §6.52-revised (MVP-3.4b cycle 2 / §5.34).
 #
-# Operational signature of PI-29-3.4b carve-out + the §5.26/§5.29
-# "drop rules don't populate inner-allowlist" contract.
+# REWRITTEN per Q3.A + HG-3.4b-c2-2 (PI-6-3.4b-c2 carve-out). The
+# pre-§5.34 body asserted the §5.26 schema cycle 2 contract ("drop rules
+# don't populate inner-allowlist; rule_counters stay 0"). §5.34 RETIRES
+# that contract: drop rules NOW populate the inner-allowlist with their
+# rule_id, the per-rule counter NOW bumps on match (HG-3.4b-c2-5), and
+# the verdict XDP_DROP is dispatched via the rules→action_table chain
+# (PI-29-3.4b-c2), NOT via the defaults[active]=drop fallthrough.
 #
-# Per §5.26 schema cycle 2: drop rules are POPULATED into the `rules`
-# map (with action_id=1=DROP) but their MAC is NOT added to the inner
-# allowlist. Frames from drop-rule MAC therefore MISS the inner-HASH
-# lookup → fall through to defaults[active]=drop → STAT_DROP_DENY bumps,
-# but rule_counters[drop_rule_id] STAYS 0 (bump_rule is only called on
-# MATCH per Q1 B3 — and the drop-rule MAC produces no match).
+# Test name kept (now matches semantic — pre-§5.34 the name was ironic).
 #
-# This is the operationally-observable signature that PI-29-3.4b's
-# carve-out is intact: action dispatch via existing PASS-branch
-# (defaults[active]=drop fallthrough), NOT via rules+action_table lookup.
-#
-# Fixture has rule_id=17 as `action: drop` with MAC "02:00:00:00:00:11".
-#
-# Trigger:
-#   1. setup_veth + apply config_per_rule_counters.yaml.
-#   2. Inject 5 frames from the drop-rule's MAC (rule_id=17).
-#   3. Verify STAT_DROP_DENY advances by 5 AND rule_counters[17] STAYS 0.
-#   4. Verify `rules` map IS populated for id=17 with action_id=1=DROP
-#      (proves PI-29-3.4b: `rules` map populated NOT consulted).
-#   5. Verify sidecar rule_index.json shows action="drop" for rule_id=17.
-#   6. Negation: inject 2 frames from rule_id=5 MAC (PASS); confirm
-#      rule_counters[5] advances; rule_counters[17] STILL 0.
+# Per §5.34 Q3.A concrete shape:
+#   - Apply config_per_rule_counters.yaml (id=17 DROP MAC_11; id=5 PASS).
+#   - Inject 5 frames from drop-MAC.
+#   - Assert STAT_DROP_DENY delta == 5 (value unchanged from pre-§5.34;
+#     mechanism flipped from defaults-fallthrough to action_table dispatch).
+#   - NEW: assert rule_counters[17] delta == 5 (was 0 pre-§5.34).
+#   - NEW: assert drop-rule MAC IS in active inner-allowlist (was ABSENT).
+#   - Sidecar rule_index.json for id=17 STILL shows action="drop"
+#     (sidecar shape UNCHANGED — only the inner-allowlist population
+#     filter changed in loader.cpp; sidecar emit is downstream).
+#   - Negation: inject 2 frames from id=5 PASS MAC → rc[5] == 2,
+#     rc[17] still == 5 (no cross-bump). STAT_PASS delta == 2.
 #
 # Observable outcome (ALL must hold):
 #   (a) apply exit 0.
 #   (b) STAT_DROP_DENY delta == 5 (the drop-MAC frames).
-#   (c) rule_counters[17] == 0 (the drop-rule's per-rule counter STAYS).
-#   (d) `rules` map at key=17 has action_id=1 (DROP).
-#   (e) Sidecar rule_index.json at /run/xdpmacfilter/<iface>/ shows
-#       rule_id=17 with action="drop" (path per §5.31 EDIT-1 D-3.4b-21).
-#   (f) Drop-rule MAC is ABSENT from the active inner allowlist (
-#       §5.26 schema cycle 2 contract — preserved across §5.31).
-#   (g) After step 6: rule_counters[5] == 2; rule_counters[17] STILL == 0.
+#   (c) rule_counters[17] delta == 5 (was 0 pre-§5.34 — INVERTED).
+#   (d) rules_<active>[17] has present=1, action_id=1 (DROP).
+#   (e) Sidecar rule_index.json shows rule_id=17 with action="drop".
+#   (f) drop-rule MAC IS in active inner-allowlist (was ABSENT — INVERTED).
+#   (g) After negation: rule_counters[5] == 2; rule_counters[17] still
+#       advanced exactly 5 (no cross-bump on pass-MAC traffic).
 #
 # Sanity-floor smoke: step (a) — apply succeeds.
-# Negation control: step (g) — PASS rule bumps counter; DROP rule does
-# NOT. This is the differential proving "bump_rule only fires on MATCH"
-# rather than "bump_rule fires on every traffic frame".
+# Negation control: step (g) — pass-rule MAC bumps rc[5] while drop-rule
+# counter rc[17] does NOT advance on pass-MAC frames. This is the
+# differential proving rc[N] keys on rule_id (i.e., on inner-allowlist
+# match), not on traffic volume.
 #
-# Maps to: PI-29-3.4b (carve-out: rules map populated NOT consulted;
-# inner-VALUE's rule_id IS read on MATCH only), HG-3.4b-4, Q5 R1.
+# Maps to: HG-3.4b-c2-2 (schema cycle 3 shift — load-bearing for this
+# rewrite), HG-3.4b-c2-5 (counter bumps regardless of verdict),
+# §5.34 D-3.4b-c2-2 (filter-line removal mechanism),
+# PI-29-3.4b-c2 (datapath consults rules+action_table),
+# PI-30-3.4b-c2-schema, Q3.A disposition.
 set -euo pipefail
 source "${TEST_DIR}/lib/common.sh"
 require_passwordless_sudo
@@ -75,7 +75,7 @@ read_rc_slot() {
         "${PIN_DIR}/rule_counters" "${id}"
 }
 
-# Helper: MAC → JSON octet array (for inner-allowlist queries).
+# MAC → JSON octet array (for inner-allowlist queries).
 mac_to_oct_json() {
     local mac="$1" oct_arr="[" first=1 hex
     local IFS=':'
@@ -97,7 +97,7 @@ mac_in_inner_pin() {
         ' >/dev/null 2>&1
 }
 
-# Helper: read rules[key].action_id (BTF-formatted shape from T_RULES_SKELETON_NOT_WIRED).
+# rules_<active>[key].action_id reader (parallel-outer post-§5.34).
 _jq_decode_key='
   (.formatted.key //
     (if (.key | type) == "array"
@@ -105,6 +105,16 @@ _jq_decode_key='
      elif (.key | type) == "number" then .key
      else null end))
 '
+rule_present_at() {
+    local pin="$1" key="$2"
+    sudo -n bpftool map dump pinned "${pin}" --json 2>/dev/null \
+        | jq -r --argjson k "${key}" "
+            .[]
+            | select(${_jq_decode_key} == \$k)
+            | (.formatted.value.present //
+               ((.value[0] // 0) | if type == \"string\" then sub(\"^0x\";\"\") | tonumber else . end))
+        " 2>/dev/null | head -n1
+}
 rule_action_id_at() {
     local pin="$1" key="$2"
     sudo -n bpftool map dump pinned "${pin}" --json 2>/dev/null \
@@ -147,10 +157,23 @@ if ! sudo -n test -e "${PIN_DIR}/rule_counters"; then
     exit 1
 fi
 
-# ── (b/c) inject 5 drop-MAC frames → STAT_DROP_DENY += 5; rc[17] stays 0 ─
-echo "=== step (b/c): inject 5 frames src=${MAC_DROP} (rule_id=17 DROP)"
+# Determine active inner slot + active rules slot.
+active=$(read_active_idx)
+echo "active_idx='${active}'"
+case "${active}" in
+    0) inner_pin="${PIN_DIR}/allowlist_a"; rules_pin="${PIN_DIR}/rules_a" ;;
+    1) inner_pin="${PIN_DIR}/allowlist_b"; rules_pin="${PIN_DIR}/rules_b" ;;
+    *)
+        echo "FAIL[a.idx]: cannot determine active inner slot (active_idx='${active}')" >&2
+        exit 1
+        ;;
+esac
+
+# ── (b/c) inject 5 drop-MAC frames → STAT_DROP_DENY += 5; rc[17] += 5 ──
+echo "=== step (b/c): inject 5 frames src=${MAC_DROP} (rule_id=17 DROP via action_table)"
 read -r p0 d0 m0 < <(read_stats)
-echo "stats baseline: PASS=${p0} DROP_DENY=${d0} DROP_MALFORMED=${m0}"
+rc17_0=$(read_rc_slot 17)
+echo "baseline: PASS=${p0} DROP_DENY=${d0} DROP_MALFORMED=${m0} rc[17]=${rc17_0}"
 
 for i in 1 2 3 4 5; do
     inject_eth "${IFACE_B}" "${MAC_DROP}" "${MAC_DST}"
@@ -158,10 +181,12 @@ done
 wait_for_stats_sum "${IFACE_A}" $(( p0 + d0 + m0 + 5 )) || true
 
 read -r p1 d1 m1 < <(read_stats)
-echo "stats after drop-MAC: PASS=${p1} DROP_DENY=${d1} DROP_MALFORMED=${m1}"
-echo "  delta PASS=$((p1-p0)) DROP_DENY=$((d1-d0)) DROP_MALFORMED=$((m1-m0))"
+rc17_1=$(read_rc_slot 17)
+echo "after drop-MAC: PASS=${p1} DROP_DENY=${d1} rc[17]=${rc17_1}"
+echo "  delta PASS=$((p1-p0)) DROP_DENY=$((d1-d0)) rc[17]=$((rc17_1-rc17_0))"
 
-# (b) STAT_DROP_DENY delta == 5
+# (b) STAT_DROP_DENY delta == 5 — same value pre/post §5.34, different
+#     mechanism (was defaults-fallthrough; now action_table dispatch).
 if (( d1 - d0 != 5 )); then
     echo "FAIL[b]: STAT_DROP_DENY delta=$((d1-d0)) (expected 5)" >&2
     fail=1
@@ -171,32 +196,30 @@ if (( p1 - p0 != 0 )); then
     fail=1
 fi
 
-# (c) rule_counters[17] STAYS 0 — the drop-rule did NOT match (MAC absent
-#     from inner-allowlist; no bump_rule invocation per PI-29-3.4b).
-c17=$(read_rc_slot 17)
-echo "rule_counters[17]=${c17} (expected 0 — drop-rule MAC absent from inner; bump_rule never fires)"
-if [[ "${c17}" != "0" ]]; then
-    echo "FAIL[c]: rule_counters[17]='${c17}' (expected 0)" >&2
-    echo "         PI-29-3.4b VIOLATED: bump_rule fired despite no inner-allowlist match" >&2
-    echo "         OR: drop-rule MAC was incorrectly added to inner allowlist" >&2
+# (c) rule_counters[17] delta == 5 — INVERTED from pre-§5.34 (was STAY-0).
+#     The drop-rule's MAC IS in inner-allowlist (HG-3.4b-c2-2); each
+#     match invokes bump_rule(17) (HG-3.4b-c2-5) regardless of verdict.
+if (( rc17_1 - rc17_0 != 5 )); then
+    echo "FAIL[c]: rule_counters[17] delta=$((rc17_1-rc17_0)) (expected 5 — HG-3.4b-c2-5 contract)" >&2
+    echo "         per-rule counter must bump on match regardless of verdict;" >&2
+    echo "         drop-rule MAC must be in inner-allowlist per HG-3.4b-c2-2" >&2
     fail=1
 fi
 
-# ── (d) `rules` map at key=17 has action_id=1 (DROP) — PI-29-3.4b populate ─
-if ! sudo -n test -e "${PIN_DIR}/rules"; then
-    echo "FAIL[d.pin]: ${PIN_DIR}/rules pin missing" >&2
+# ── (d) rules_<active>[17] has action_id=1 (DROP) — PI-29-3.4b-c2 ──────
+p17=$(rule_present_at   "${rules_pin}" 17)
+a17=$(rule_action_id_at "${rules_pin}" 17)
+echo "rules_<active>[17] present='${p17}' action_id='${a17}' (expected 1, 1=DROP)"
+if [[ "${p17}" != "1" ]]; then
+    echo "FAIL[d.p]: rules_<active>[17].present='${p17}' (expected 1)" >&2
     fail=1
-else
-    action_17=$(rule_action_id_at "${PIN_DIR}/rules" 17)
-    echo "rules[17].action_id='${action_17}' (expected 1 = DROP)"
-    if [[ "${action_17}" != "1" ]]; then
-        echo "FAIL[d]: rules[17].action_id='${action_17}' (expected 1 = DROP)" >&2
-        echo "         drop-rule must be POPULATED into the rules map per HG-3.4b-4 / D-3.4b-18" >&2
-        fail=1
-    fi
+fi
+if [[ "${a17}" != "1" ]]; then
+    echo "FAIL[d.a]: rules_<active>[17].action_id='${a17}' (expected 1=DROP)" >&2
+    fail=1
 fi
 
-# ── (e) Sidecar shows rule_id=17 with action="drop" (path per §5.31 EDIT-1) ─
+# ── (e) Sidecar shows rule_id=17 with action="drop" ────────────────────
 if ! sudo -n test -e "${SIDECAR_PATH}"; then
     echo "FAIL[e.pin]: sidecar ${SIDECAR_PATH} missing" >&2
     fail=1
@@ -210,49 +233,50 @@ else
     fi
 fi
 
-# ── (f) drop-rule MAC ABSENT from active inner allowlist (§5.26 contract) ─
-active=$(read_active_idx)
-echo "active_idx='${active}'"
-inner_pin=""
-case "${active}" in
-    0) inner_pin="${PIN_DIR}/allowlist_a" ;;
-    1) inner_pin="${PIN_DIR}/allowlist_b" ;;
-esac
-
-if [[ -z "${inner_pin}" ]]; then
-    echo "FAIL[f.idx]: could not determine active inner pin (active_idx='${active}')" >&2
-    fail=1
-elif ! sudo -n test -e "${inner_pin}"; then
+# ── (f) drop-rule MAC IS in active inner-allowlist (INVERTED from pre-§5.34) ─
+if ! sudo -n test -e "${inner_pin}"; then
     echo "FAIL[f.pin]: active inner pin ${inner_pin} missing" >&2
     fail=1
 else
     if mac_in_inner_pin "${inner_pin}" "${MAC_DROP}"; then
-        echo "FAIL[f]: drop-rule MAC ${MAC_DROP} (id=17) found in active inner allowlist" >&2
-        echo "         §5.26 schema cycle 2 contract VIOLATED: drop rules must NOT populate inner" >&2
+        echo "drop-rule MAC ${MAC_DROP} present in ${inner_pin} (PI-30-3.4b-c2-schema OK)"
+    else
+        echo "FAIL[f]: drop-rule MAC ${MAC_DROP} (id=17) NOT in active inner-allowlist" >&2
+        echo "         PI-30-3.4b-c2-schema VIOLATED: drop rules MUST populate inner-allowlist" >&2
+        echo "         per HG-3.4b-c2-2 schema cycle 3 contract" >&2
         fail=1
     fi
 fi
 
-# ── (g) NEGATION CONTROL: PASS rule bumps; DROP rule still 0 ──────────────
+# ── (g) NEGATION CONTROL: PASS rule bumps rc[5]; drop rc[17] stays at 5 ─
 echo
 echo "=== step (g): NEGATION — inject 2 frames src=${MAC_ID5} (rule_id=5 PASS)"
 read -r p2 d2 m2 < <(read_stats)
+rc5_0=$(read_rc_slot 5)
 for i in 1 2; do
     inject_eth "${IFACE_B}" "${MAC_ID5}" "${MAC_DST}"
 done
 wait_for_stats_sum "${IFACE_A}" $(( p2 + d2 + m2 + 2 )) || true
 
+read -r p3 d3 m3 < <(read_stats)
 c5=$(read_rc_slot 5)
 c17_final=$(read_rc_slot 17)
-echo "rule_counters[5]=${c5} (expected 2); rule_counters[17]=${c17_final} (expected STILL 0)"
+echo "after pass-MAC: PASS_delta=$((p3-p2)) DROP_delta=$((d3-d2))  rc[5]=${c5} (delta $((c5-rc5_0)))  rc[17]=${c17_final}"
 
-if [[ "${c5}" != "2" ]]; then
-    echo "FAIL[g.5]: rule_counters[5]='${c5}' (expected 2)" >&2
+# (g.PASS) STAT_PASS delta == 2.
+if (( p3 - p2 != 2 )); then
+    echo "FAIL[g.pass]: STAT_PASS delta=$((p3-p2)) (expected 2)" >&2
     fail=1
 fi
-if [[ "${c17_final}" != "0" ]]; then
-    echo "FAIL[g.17]: rule_counters[17]='${c17_final}' (expected STILL 0)" >&2
-    echo "           drop-rule counter must NOT bump even with subsequent PASS traffic" >&2
+# (g.rc5) rule_counters[5] delta == 2.
+if (( c5 - rc5_0 != 2 )); then
+    echo "FAIL[g.5]: rule_counters[5] delta=$((c5-rc5_0)) (expected 2)" >&2
+    fail=1
+fi
+# (g.rc17-no-cross) rc[17] did NOT bump on pass-MAC frames.
+if (( c17_final != rc17_1 )); then
+    echo "FAIL[g.17]: rule_counters[17]='${c17_final}' moved on pass-MAC frames (was ${rc17_1})" >&2
+    echo "           cross-bump leak — rule_id isolation broken" >&2
     fail=1
 fi
 

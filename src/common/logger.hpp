@@ -70,16 +70,20 @@ struct Field {
  *
  * §5.32 EDIT-1 (2026-05-25): catalog invariant — "every event emitted via
  * logger::emit() — including logger-internal self-emits — is in kEventNames".
- * Size = 33 emission-site-derived events + 1 logger self-emit
- * (`logger.warn.unknown_log_format`) = 34. */
-inline constexpr std::array<std::string_view, 34> kEventNames = {
-    /* loader (xdpmacfilter) — 19 events */
+ *
+ * §5.34 (MVP-3.4b cycle 2) D-3.4b-c2-4: count 34 → 33. The
+ * `loader.warn.rules_skeleton_not_wired` event entry is REMOVED in lockstep
+ * with the §5.29 WARN-emission removal at loader.cpp:1557-1574 (the contract
+ * it announced — "rules+action_table populated NOT consulted by datapath" —
+ * is the operative thing §5.34 retires). Size = 32 emission-site-derived
+ * events + 1 logger self-emit (`logger.warn.unknown_log_format`) = 33. */
+inline constexpr std::array<std::string_view, 33> kEventNames = {
+    /* loader (xdpmacfilter) — 18 events (was 19 pre-§5.34) */
     "cli.usage_error",                       /* src/cli/main.cpp:100 */
     "cli.usage_text",                        /* src/cli/main.cpp:101 (multi-line usage dump) */
     "cli.error",                             /* src/cli/main.cpp:136, 142, 146 (CliError + system_error + std::exception fallback) */
     "config.error",                          /* src/cli/main.cpp:140 (ConfigError variant) */
     "loader.trust_model",                    /* src/lib/loader.cpp:1031 (audit log — PI-23) */
-    "loader.warn.rules_skeleton_not_wired",  /* src/lib/loader.cpp:1545 (HG-3.4-1 WARN) */
     "loader.attach.fleet_replace",           /* src/lib/loader.cpp:1606 (trust_model=fleet replace) */
     "loader.attach.replace",                 /* src/lib/loader.cpp:1784 (existing program replace) */
     "logger.warn.unknown_log_format",        /* src/common/logger.cpp self-emit (Q4 edge case) */
@@ -112,7 +116,7 @@ inline constexpr std::array<std::string_view, 34> kEventNames = {
     "exporter.scrape.warn.rule_counters_open_failed", /* src/exporter/rule_counters_reader.cpp:137 */
 };
 
-inline constexpr std::size_t kEventCount = kEventNames.size();   // = 34
+inline constexpr std::size_t kEventCount = kEventNames.size();   // = 33 (§5.34 D-3.4b-c2-4: 34 → 33; rules_skeleton_not_wired retired)
 
 /*
  * emit() — write ONE log event to stderr.

@@ -121,9 +121,16 @@ enum xdpmf_action_type {
     ACTION_MAX  = 2,           /* sentinel; future MVP-3.8+ may extend (MIRROR/RL/TAG) */
 };
 
-/* Pinned at ${PIN_DIR}/rules and ${PIN_DIR}/action_table respectively. */
-#define XDPMF_MAP_RULES_NAME         "rules"        /* ARRAY[XDPMF_ALLOWLIST_MAX] of struct rule_entry */
-#define XDPMF_MAP_ACTION_TABLE_NAME  "action_table" /* ARRAY[ACTION_MAX] of struct action_entry */
+/* §5.34 (MVP-3.4b cycle 2) HG-3.4b-c2-1: `rules` axis promoted to parallel
+ * ARRAY_OF_MAPS — DIRECT MIRROR of §5.27 CIDR-axis shape. Inner template +
+ * 2 pinned inners + outer; shared `active_idx` commits MAC + CIDR + defaults
+ * + rules atomically with a single u32 store. The SHARED `rules` ARRAY pin
+ * (and its `XDPMF_MAP_RULES_NAME` constant) is RETIRED — userspace no longer
+ * sees a single `${PIN_DIR}/<iface>/rules` dentry. */
+#define XDPMF_MAP_RULES_OUTER_NAME    "rules_outer"     /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] of ARRAY fds */
+#define XDPMF_MAP_RULES_INNER_A_NAME  "rules_a"         /* inner slot 0, ARRAY of struct rule_entry */
+#define XDPMF_MAP_RULES_INNER_B_NAME  "rules_b"         /* inner slot 1, ARRAY of struct rule_entry */
+#define XDPMF_MAP_ACTION_TABLE_NAME   "action_table"    /* ARRAY[ACTION_MAX] of struct action_entry */
 
 /* §5.31 (MVP-3.4b): inner-allowlist-value extension carrying per-rule id.
  *

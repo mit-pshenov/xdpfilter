@@ -158,24 +158,49 @@ struct {
 } stats SEC(".maps");
 
 /*
- * §5.29 (MVP-3.4) HG-3.4-1: rules + action_table SKELETON. DECLARED here +
- * POPULATED from config in userspace at apply time; the xdp datapath
- * (mac_filter_prog below) does NOT consult either map per-packet (PI-28
- * function-body byte-equivalence). MVP-3.4b will wire datapath consumption
- * once PI-13-3.1 adjudication on the inner-allowlist-value extension lands.
+ * §5.34 (MVP-3.4b cycle 2) HG-3.4b-c2-1: `rules` map promoted to parallel
+ * ARRAY_OF_MAPS — BYTE-FOR-BYTE MIRROR of §5.27 CIDR axis shape (template +
+ * 2 pinned inner ARRAYs + outer). Single `active_idx` u32 store atomically
+ * commits MAC HASH inner + CIDR LPM_TRIE inner + defaults + rules inner —
+ * all four axes share the same active_idx (§5.27 Q1 AS1 mechanism extended
+ * to 4 axes per D-3.4b-c2-8). The prior §5.29 SHARED `rules` ARRAY is
+ * RETIRED; PI-29-3.4b carve-out (datapath NOT consulting rules+action_table)
+ * is CLOSED — `mac_filter_prog` now reads `rules_outer[active] →
+ * rules_inner[entry->rule_id] → action_table[rule.action_id]` per match per
+ * HG-3.4b-c2-4 dispatch contract.
  *
- * `rules` is a SHARED ARRAY (NOT parallel-swapped via ARRAY_OF_MAPS, D-3.4-4):
- * because the datapath ignores it this cycle, atomic-swap is unnecessary;
- * clear-and-rewrite on every apply suffices. MVP-3.4b will revisit if the
- * map becomes datapath-consulted.
+ * `action_table` STAYS SHARED per HG-3.4b-c2-3 (D-3.4b-c2-6): values are
+ * static `{PASS=0, DROP=1}`, never mutate at runtime; atomic-swap meaningless.
  */
-struct {
+
+/* Named inner-map template — referenced by rules_outer.__array(values, ...)
+ * AND used as the C type for the two concrete inner instances rules_a /
+ * rules_b. Same idiom as the existing `xdpmf_cidr_inner` / `xdpmf_allowlist_
+ * inner` templates above: NO `LIBBPF_PIN_BY_NAME` in the struct — libbpf
+ * rejects pinning on inner-map types of ARRAY_OF_MAPS (`inner def can't be
+ * pinned`). The two instances rules_a / rules_b are pinned MANUALLY via
+ * `bpf_map__pin()` in loader.cpp's `kManagedMaps[]` per-iface pin loop,
+ * symmetric with allowlist_a / allowlist_b / cidr_allowlist_a / _b. */
+struct rules_inner {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __type(key, __u32);
     __type(value, struct rule_entry);
     __uint(max_entries, XDPMF_ALLOWLIST_MAX);
+};
+
+struct rules_inner rules_a SEC(".maps");   /* pinned via kManagedMaps[] at ${PIN_DIR}/<iface>/rules_a */
+struct rules_inner rules_b SEC(".maps");   /* pinned via kManagedMaps[] at ${PIN_DIR}/<iface>/rules_b */
+
+/* Outer ARRAY_OF_MAPS parallel to existing rulesets / cidr_rulesets outers. */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
+    __uint(max_entries, XDPMF_RULESET_COUNT);
+    __uint(key_size, sizeof(__u32));
     __uint(pinning, LIBBPF_PIN_BY_NAME);
-} rules SEC(".maps");
+    __array(values, struct rules_inner);
+} rules_outer SEC(".maps") = {
+    .values = { &rules_a, &rules_b },
+};
 
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
@@ -263,13 +288,37 @@ int mac_filter_prog(struct xdp_md *ctx)
         return XDP_DROP;
     }
 
-    /* §5.31 (MVP-3.4b) PI-28-3.4b: inner-VALUE is now `struct allow_entry`
-     * (PI-13-3.4b adjudication). The offset-0 byte-equivalent null-check
-     * pattern is preserved (`if (entry)` shape unchanged from `if (present)`);
-     * NEW read at offset 4 (`entry->rule_id`) feeds bump_rule per Q1=B3. */
+    /* §5.31 (MVP-3.4b) PI-28-3.4b: inner-VALUE is `struct allow_entry`
+     * (PI-13-3.4b adjudication). Offset-0 byte-equivalent null-check
+     * pattern is preserved; offset-4 `rule_id` is read for bump_rule + the
+     * §5.34 rules→action_table dispatch chain below.
+     *
+     * §5.34 (MVP-3.4b cycle 2) HG-3.4b-c2-4 dispatch chain — datapath now
+     * consults `rules_outer[active] → rules_inner[rule_id] → action_table[
+     * action_id]` per match. bump_rule() runs BEFORE the chain per
+     * HG-3.4b-c2-5 (per-rule counter bumps on every match regardless of
+     * verdict). On `action_type == ACTION_DROP` we bump STAT_DROP_DENY
+     * (Q1.B re-uses the existing bucket — no new STAT enum slot) and
+     * return XDP_DROP. On ACTION_PASS or NULL-fallthrough at any chain
+     * step (defense-in-depth — practically unreachable because loader
+     * populates rules_inner + action_table before the active_idx flip)
+     * we fall through to the existing STAT_PASS branch. */
     struct allow_entry *entry = bpf_map_lookup_elem(inner, &key);
     if (entry) {
         bump_rule(entry->rule_id);
+        __u32 rid = entry->rule_id;
+        void *rules_inner_map = bpf_map_lookup_elem(&rules_outer, &active);
+        if (rules_inner_map) {
+            struct rule_entry *r = bpf_map_lookup_elem(rules_inner_map, &rid);
+            if (r && r->present) {
+                __u32 aid = r->action_id;
+                struct action_entry *a = bpf_map_lookup_elem(&action_table, &aid);
+                if (a && a->action_type == ACTION_DROP) {
+                    bump_stat(STAT_DROP_DENY);
+                    return XDP_DROP;
+                }
+            }
+        }
         bump_stat(STAT_PASS);
         return XDP_PASS;
     }
@@ -296,12 +345,31 @@ int mac_filter_prog(struct xdp_md *ctx)
             .prefixlen = 32u,        /* lookup is /32 host-route; LPM_TRIE picks longest matching prefix */
             .addr      = ip->saddr,  /* network byte order on wire, matches LPM_TRIE key shape */
         };
-        /* §5.31 (MVP-3.4b) PI-28-3.4b CIDR symmetry: same shape as MAC HASH
-         * hit branch — typed pointer deref + rule_id read at offset 4 +
-         * bump_rule. STAT_PASS_CIDR bump preserved byte-equivalent. */
+        /* §5.31 (MVP-3.4b) PI-28-3.4b CIDR symmetry + §5.34 HG-3.4b-c2-4
+         * dispatch chain: same shape as MAC HASH-hit branch above —
+         * bump_rule first (HG-3.4b-c2-5), then rules_outer → rules_inner →
+         * action_table chain. STAT_DROP_DENY on DROP (Q1.B); STAT_PASS_CIDR
+         * preserved on PASS / NULL-fallthrough. Active snapshot discipline:
+         * the SAME `active` u32 read at the head of the datapath indexes
+         * BOTH `cidr_rulesets` AND `rules_outer` here — concurrent
+         * userspace flip is benign per §5.27 Q1 AS1 race-window analysis
+         * extended to the 4th axis. */
         struct allow_entry *cidr_hit = bpf_map_lookup_elem(cidr_inner, &cidr_key);
         if (cidr_hit) {
             bump_rule(cidr_hit->rule_id);
+            __u32 c_rid = cidr_hit->rule_id;
+            void *c_rules_inner_map = bpf_map_lookup_elem(&rules_outer, &active);
+            if (c_rules_inner_map) {
+                struct rule_entry *cr = bpf_map_lookup_elem(c_rules_inner_map, &c_rid);
+                if (cr && cr->present) {
+                    __u32 c_aid = cr->action_id;
+                    struct action_entry *ca = bpf_map_lookup_elem(&action_table, &c_aid);
+                    if (ca && ca->action_type == ACTION_DROP) {
+                        bump_stat(STAT_DROP_DENY);
+                        return XDP_DROP;
+                    }
+                }
+            }
             bump_stat(STAT_PASS_CIDR);
             return XDP_PASS;
         }

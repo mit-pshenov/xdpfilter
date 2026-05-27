@@ -122,10 +122,13 @@ constexpr std::string_view kBpfObjectPathEnv{"XDPMF_BPF_OBJECT_PATH"};
  * The table below replaces the three literals. Member-pointer
  * representation (Q4 T1; D-3.4.5-3) catches a libbpf-skel rename at
  * BUILD time (compiler error) rather than at runtime (cryptic libbpf
- * NULL deref or pin-already-set EEXIST). 12 entries: 11 "real" maps
- * (walked by all three callsites; pin/reuse loops skip none) + 1 legacy
- * alias (`allowlist`, kept ONLY in the clear-list because its actual
- * per-iface pin uses the special-pin path at the legacy alias location). */
+ * NULL deref or pin-already-set EEXIST). 15 entries post-§5.34: 14 "real"
+ * maps (walked by all three callsites; pin/reuse loops skip none) + 1
+ * legacy alias (`allowlist`, kept ONLY in the clear-list because its actual
+ * per-iface pin uses the special-pin path at the legacy alias location).
+ * Pre-§5.34: 13 entries (12 real + 1 alias). §5.34 D-3.4b-c2-1 net +2:
+ * REMOVE the SHARED `rules` entry; ADD three (`rules_a`, `rules_b`,
+ * `rules_outer`) — DIRECT MIRROR of the §5.27 CIDR axis triple. */
 using SkelMapsT = std::remove_reference_t<decltype(std::declval<mac_filter_bpf&>().maps)>;
 
 struct ManagedMapEntry {
@@ -154,14 +157,19 @@ constexpr ManagedMapEntry kManagedMaps[] = {
     { &SkelMapsT::active_idx,       XDPMF_MAP_ACTIVE_IDX_NAME,          false },
     { &SkelMapsT::defaults,         XDPMF_MAP_DEFAULTS_NAME,            false },
     { &SkelMapsT::stats,            XDPMF_MAP_STATS_NAME,               false },
-    { &SkelMapsT::rules,            XDPMF_MAP_RULES_NAME,               false },
+    /* §5.34 (MVP-3.4b cycle 2) D-3.4b-c2-1: REMOVE prior SHARED `rules`
+     * entry (the SHARED-ARRAY pin retired per HG-3.4b-c2-1); ADD three new
+     * entries `rules_a` / `rules_b` / `rules_outer` mirroring the §5.27
+     * CIDR-axis triple. Net 13 → 15 entries (12 → 14 real + 1 alias). All
+     * three call-site loops (clear, pin, reuse) walk this table — HK-9
+     * dividend collected for the 3rd consecutive cycle. */
+    { &SkelMapsT::rules_a,          XDPMF_MAP_RULES_INNER_A_NAME,       false },
+    { &SkelMapsT::rules_b,          XDPMF_MAP_RULES_INNER_B_NAME,       false },
+    { &SkelMapsT::rules_outer,      XDPMF_MAP_RULES_OUTER_NAME,         false },
     { &SkelMapsT::action_table,     XDPMF_MAP_ACTION_TABLE_NAME,        false },
-    /* §5.31 (MVP-3.4b) D-3.4b-13: 13th entry — `rule_counters` PERCPU_ARRAY.
-     * Single-line table extension is the MVP-3.4.5 HK-9 landmine refactor
-     * dividend (pre-HK-9 this slice would have needed 3 lockstep updates
-     * across pinned_maps/pin_specs/reuse_specs literals). LIBBPF_PIN_BY_NAME
-     * + bpf_map__reuse_fd discipline preserves PERCPU values across apply
-     * per HG-3.4b-2 (Prometheus counter-monotonicity). */
+    /* §5.31 (MVP-3.4b) D-3.4b-13: `rule_counters` PERCPU_ARRAY. The
+     * LIBBPF_PIN_BY_NAME + bpf_map__reuse_fd discipline preserves PERCPU
+     * values across apply per HG-3.4b-2 (Prometheus counter-monotonicity). */
     { &SkelMapsT::rule_counters,    XDPMF_MAP_RULE_COUNTERS_NAME,       false },
     { &SkelMapsT::allowlist,        XDPMF_MAP_ALLOWLIST_NAME,           true  },
 };
@@ -1219,25 +1227,35 @@ void write_active_idx(int active_idx_fd, std::uint32_t idx)
     }
 }
 
-/* §5.29 (MVP-3.4): populate the `rules` skeleton ARRAY[XDPMF_ALLOWLIST_MAX]
- * from the validated Config. Clear-and-rewrite per D-3.4-8 (the map is
- * SHARED — not parallel-swapped — because the datapath does NOT consult it
- * this cycle; PI-28 + PI-29). Idempotent across applies.
+/* §5.34 (MVP-3.4b cycle 2) L-2: populate the INACTIVE `rules` inner ARRAY
+ * slot from the validated Config. Replaces the §5.29 populate_rules_skeleton
+ * which operated on the SHARED `rules` map; now parallel to populate_inner_slot
+ * / populate_cidr_inner_slot (per-axis inactive-slot pattern). The function
+ * BODY is byte-identical to the prior populate_rules_skeleton — only the
+ * fd-source semantic shifts (caller passes the inactive `rules_<a|b>` inner-fd,
+ * NOT a shared `rules` fd). Caller writes BEFORE the active_idx flip so the
+ * single u32 store at active_idx[0] atomically commits all 4 axes
+ * (MAC + CIDR + defaults + rules) per HG-3.4b-c2-4 + D-3.4b-c2-8.
  *
  * Encoding: a Config.rules entry at id=k with action=Pass becomes
- * rules[k] = {present=1, action_id=ACTION_PASS}; action=Drop becomes
- * rules[k] = {present=1, action_id=ACTION_DROP}. Empty slots are written
- * as {present=0, action_id=0} so a removed rule doesn't leave stale state. */
-void populate_rules_skeleton(int rules_fd, const std::vector<Rule>& rules)
+ * rules_inner[k] = {present=1, action_id=ACTION_PASS}; action=Drop becomes
+ * rules_inner[k] = {present=1, action_id=ACTION_DROP}. Empty slots written
+ * as {present=0, action_id=0} so a removed rule doesn't leave stale state.
+ *
+ * Schema cycle 3 (HG-3.4b-c2-2): the operator's `rules:` block carries BOTH
+ * pass AND drop rules; this function writes BOTH faithfully (the action
+ * discrimination happens downstream at the datapath's rules→action_table
+ * lookup chain per HG-3.4b-c2-4). */
+void populate_rules_inner_slot(int rules_inner_fd, const std::vector<Rule>& rules)
 {
     /* Clear all 64 slots first — operator may have removed rules across
      * applies; the prior occupant must not survive. */
     const struct rule_entry empty{};
     for (std::uint32_t k = 0; k < static_cast<std::uint32_t>(XDPMF_ALLOWLIST_MAX); ++k) {
-        const int rc = bpf_map_update_elem(rules_fd, &k, &empty, BPF_ANY);
+        const int rc = bpf_map_update_elem(rules_inner_fd, &k, &empty, BPF_ANY);
         if (rc < 0) {
             throw_loader(classify(rc, LoaderError::LoadFailed),
-                         std::format("bpf_map_update_elem(rules[{}] clear): {}",
+                         std::format("bpf_map_update_elem(rules_inner[{}] clear): {}",
                                      k, std::strerror(-rc)));
         }
     }
@@ -1248,10 +1266,10 @@ void populate_rules_skeleton(int rules_fd, const std::vector<Rule>& rules)
         entry.action_id = (r.action == RuleAction::Pass)
             ? static_cast<unsigned char>(ACTION_PASS)
             : static_cast<unsigned char>(ACTION_DROP);
-        const int rc = bpf_map_update_elem(rules_fd, &r.id, &entry, BPF_ANY);
+        const int rc = bpf_map_update_elem(rules_inner_fd, &r.id, &entry, BPF_ANY);
         if (rc < 0) {
             throw_loader(classify(rc, LoaderError::LoadFailed),
-                         std::format("bpf_map_update_elem(rules[{}]): {}",
+                         std::format("bpf_map_update_elem(rules_inner[{}]): {}",
                                      r.id, std::strerror(-rc)));
         }
     }
@@ -1466,23 +1484,25 @@ std::uint32_t detach(const std::string& iface)
 
 namespace internal {
 
-/* Extract the inner-allowlist contents from the validated Config: only
- * rules with action==Pass + a present mac contribute. Drop-action rules
- * are accepted-but-no-op in cycle 1 (the global default_action carries
- * them) per design §5.26 schema rule 4. Dedup preserved by insertion-order.
+/* Extract the inner-allowlist contents from the validated Config: every
+ * rule with a present `match.mac` contributes (action filter REMOVED per
+ * §5.34 L-3 + D-3.4b-c2-2 — schema cycle 3 shift per HG-3.4b-c2-2).
+ * Drop rules NOW populate the inner allowlist with their `rule_id`; the
+ * action discrimination happens downstream at the datapath's
+ * rules→action_table dispatch chain per HG-3.4b-c2-4.
  *
- * §5.31 (MVP-3.4b) Q5 R1: each entry carries its operator-supplied
- * `rule.id` so the inner-allowlist-value's offset-4 `rule_id` matches the
- * Prometheus `xdpfilter_rule_match_total{rule_id="N"}` label namespace.
- * Dedup retains the FIRST rule_id for a given MAC (preserves §5.26 dedup
- * semantic; collision case is operator config bug surfaced elsewhere). */
+ * Function name retained per D-3.4b-c2-3 (rename would inflate diff for
+ * no semantic benefit — "pass" in the name is now historical but the
+ * function's purpose is the same: extract inner-allowlist entries).
+ * Dedup preserved by insertion-order: retains the FIRST rule_id for a
+ * given MAC (per §5.26 dedup precedent + D-3.4b-c2-7 documented
+ * shadowing semantic). */
 [[nodiscard]] std::vector<MacRule> extract_pass_macs(const Config& c)
 {
     std::vector<MacRule> out;
     out.reserve(c.rules.size());
     for (const Rule& r : c.rules) {
-        if (r.action != RuleAction::Pass) continue;
-        if (!r.match.mac.has_value())    continue;
+        if (!r.match.mac.has_value()) continue;
         const xdpmf_mac& m = *r.match.mac;
         const bool already = std::any_of(
             out.begin(), out.end(),
@@ -1494,19 +1514,15 @@ namespace internal {
     return out;
 }
 
-/* §5.27 sibling of extract_pass_macs for the CIDR axis. Mirror shape:
- * only Pass-action rules with src_cidr set contribute; dedup by
- * (prefixlen, addr) tuple equality. Rules with BOTH mac AND src_cidr
- * populate both axes — OR-compose at the BPF datapath.
- *
- * §5.31: rule_id-carrying parallel to extract_pass_macs above. */
+/* §5.27 sibling of extract_pass_macs for the CIDR axis — same §5.34 L-3
+ * schema-shift treatment (action filter REMOVED; drop rules populate
+ * inner-allowlist with their rule_id). Dedup by (prefixlen, addr) tuple. */
 [[nodiscard]] std::vector<CidrRule> extract_pass_cidrs(const Config& c)
 {
     std::vector<CidrRule> out;
     out.reserve(c.rules.size());
     for (const Rule& r : c.rules) {
-        if (r.action != RuleAction::Pass)     continue;
-        if (!r.match.src_cidr.has_value())    continue;
+        if (!r.match.src_cidr.has_value()) continue;
         const xdpmf_cidr_v4& c4 = *r.match.src_cidr;
         const bool already = std::any_of(
             out.begin(), out.end(),
@@ -1550,29 +1566,13 @@ std::uint32_t apply_request(const ApplyRequest& req)
     const TrustModel trust_model = parse_trust_model_env();
     log_trust_model(trust_model);
 
-    // §5.29 (MVP-3.4) HG-3.4-1: operator-facing deferred-wiring notice. Fires
-    // ONCE per apply when the config carries an explicit `rules:` block.
-    // Sits AFTER trust_model log and BEFORE any kernel-touch / completion log
-    // per the §5.29 ordering contract. PI-29 operator-facing signature.
-    if (!req.config.rules.empty()) {
-        /* §5.32 (MVP-3.5): byte-equivalent text-mode emission (PI-3.5-1);
-         * JSON-mode exposes the rules-count in `fields.entries`. Iface-
-         * scoped — log shippers can correlate by iface across apply runs. */
-        const std::string msg = std::format(
-            "xdpmacfilter: rules: section parsed ({} entries) but "
-            "per-rule action dispatch deferred to MVP-3.4b — datapath "
-            "uses MAC/CIDR-only matching this cycle\n",
-            req.config.rules.size());
-        const xdpmf::logger::Field fs[] = {
-            xdpmf::logger::Field{
-                "entries", static_cast<std::int64_t>(req.config.rules.size())},
-        };
-        xdpmf::logger::emit(xdpmf::logger::Level::Warn,
-                            "loader.warn.rules_skeleton_not_wired",
-                            std::string_view{req.iface},
-                            msg,
-                            fs);
-    }
+    // §5.34 (MVP-3.4b cycle 2) D-3.4b-c2-4: the §5.29 HG-3.4-1
+    // "rules: section parsed (...) but per-rule action dispatch deferred"
+    // WARN emission is RETIRED here. The contract it announced — `rules` +
+    // `action_table` populated but NOT consulted by datapath — is the
+    // operative thing this slice retires (datapath NOW consults the chain
+    // per HG-3.4b-c2-4). The `loader.warn.rules_skeleton_not_wired` event
+    // entry is REMOVED from `kEventNames` in lockstep (catalog 34 → 33).
 
     const int ifindex = resolve_ifindex(req.iface, LoaderError::AttachFailed);
 
@@ -1770,20 +1770,27 @@ std::uint32_t apply_request(const ApplyRequest& req)
             write_default_slot(defaults_fd, inactive, default_action);
         }
 
-        // §5.29 (MVP-3.4) step 8.5: populate the skeleton maps in-place.
-        // `rules` + `action_table` are SHARED (not parallel-swapped) per
-        // D-3.4-4 because the datapath does NOT consult them; the
-        // active_idx flip below does not gate their content. Writing them
-        // here BEFORE the flip leaves the system in a consistent state
-        // across reattach. PI-29 + PI-28 (datapath byte-equivalent).
+        // §5.34 (MVP-3.4b cycle 2) D-3.4b-c2-8: populate the INACTIVE
+        // `rules` inner ARRAY slot BEFORE the active_idx flip — parallel
+        // to populate_inner_slot / populate_cidr_inner_slot above. The
+        // single u32 store at active_idx[0] below atomically commits the
+        // 4-axis swap (MAC + CIDR + defaults + rules). The datapath's
+        // single active_idx snapshot at the head of mac_filter_prog
+        // indexes all 4 outers consistently per §5.27 Q1 AS1 extended.
         {
-            const int rules_fd = bpf_map__fd(skel->maps.rules);
-            if (rules_fd < 0) {
+            bpf_map* inactive_rules_inner = (inactive == 0)
+                                                ? skel->maps.rules_a
+                                                : skel->maps.rules_b;
+            const int inactive_rules_fd = bpf_map__fd(inactive_rules_inner);
+            if (inactive_rules_fd < 0) {
                 throw_loader(LoaderError::LoadFailed,
-                             "rules fd unavailable (reattach)");
+                             "inactive rules inner fd unavailable (reattach)");
             }
-            populate_rules_skeleton(rules_fd, req.config.rules);
+            populate_rules_inner_slot(inactive_rules_fd, req.config.rules);
         }
+        // §5.29 (MVP-3.4) step 8.5: `action_table` STAYS SHARED per
+        // §5.34 HG-3.4b-c2-3 / D-3.4b-c2-6 — values are static
+        // {PASS=0, DROP=1}, never mutate at runtime; atomic-swap meaningless.
         {
             const int at_fd = bpf_map__fd(skel->maps.action_table);
             if (at_fd < 0) {
@@ -1903,17 +1910,21 @@ std::uint32_t apply_request(const ApplyRequest& req)
         write_default_slot(defaults_fd, 0u, default_action);
     }
 
-    // §5.29 (MVP-3.4) step 8.5: populate the skeleton maps on fresh attach.
-    // Same payload as the reattach path above (D-3.4-8 clear-and-rewrite).
-    // PI-28: datapath does NOT read these; the population is purely for
-    // bpftool-map-dump observability + MVP-3.4b forward-compat. PI-29.
+    // §5.34 (MVP-3.4b cycle 2) D-3.4b-c2-8: fresh-attach populates slot 0
+    // of the `rules` inner ARRAY axis alongside MAC slot 0 + CIDR slot 0;
+    // the active_idx u32 write below (= 0) is the atomic commit for ALL
+    // 4 axes. The datapath consults rules_outer[0] → rules_inner[rule_id]
+    // → action_table[action_id] per match per HG-3.4b-c2-4.
     {
-        const int rules_fd = bpf_map__fd(skel->maps.rules);
-        if (rules_fd < 0) {
-            throw_loader(LoaderError::LoadFailed, "rules map fd unavailable");
+        bpf_map* rules_inner_map = skel->maps.rules_a;
+        const int rules_inner_fd = bpf_map__fd(rules_inner_map);
+        if (rules_inner_fd < 0) {
+            throw_loader(LoaderError::LoadFailed, "rules inner-map fd unavailable");
         }
-        populate_rules_skeleton(rules_fd, req.config.rules);
+        populate_rules_inner_slot(rules_inner_fd, req.config.rules);
     }
+    // §5.29 (MVP-3.4) step 8.5: `action_table` STAYS SHARED per §5.34
+    // HG-3.4b-c2-3 / D-3.4b-c2-6 — static {PASS=0, DROP=1} mapping.
     {
         const int at_fd = bpf_map__fd(skel->maps.action_table);
         if (at_fd < 0) {

@@ -5,6 +5,60 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-05-27
+
+MVP-3.4b cycle 2 — `rules` map atomic-swap promotion + datapath dispatch + schema cycle 2 → 3 shift (brownfield amendment §5.34). Closes the **datapath-consultation half** of the per-rule action machinery deferred from MVP-3.4 Open Q #13 Option 2 + MVP-3.4b cycle 1. The two coupled deliverables — (1) `rules` map promotion to parallel `rules_outer` ARRAY_OF_MAPS[2] of `rules_a` / `rules_b` inner ARRAYs; (2) `mac_filter_prog` consultation of the rules → action_table dispatch chain — ship together because carving them apart creates half-applied state. Operator-observable behavioural change: **drop rules are now operative explicitly** — a `match.mac: X` + `action: drop` rule drops X via the action_table dispatch path rather than via the indirect default-deny fallthrough.
+
+### Added
+- **`rules` axis parallel ARRAY_OF_MAPS** — promoted from SHARED ARRAY to parallel `rules_outer` ARRAY_OF_MAPS[2] of `rules_a` / `rules_b` inner ARRAYs. Single `active_idx` u32 flip now atomically commits **all 4 axes** (MAC HASH inner + CIDR LPM_TRIE inner + defaults + rules inner). Direct mirror of the §5.27 CIDR-axis pattern. New pins under `${PIN_DIR}/<iface>/`: `rules_outer`, `rules_a`, `rules_b`.
+- **Explicit drop-rule action dispatch** — `mac_filter_prog` extends BOTH the MAC HASH-hit AND CIDR LPM_TRIE-hit branches with a 3-step chain: `rules_outer[active]` → `rules_inner[entry->rule_id]` → `action_table[rule.action_id]` → `XDP_PASS` or `XDP_DROP`. Per-rule counter `bump_rule()` runs BEFORE the dispatch chain — counter bumps on every match regardless of verdict (HG-3.4b-c2-5).
+- **3 new ctests**: `T_DROP_RULE_OPERATIVE` (explicit drop-rule produces XDP_DROP via action_table; per-rule counter bumps; verdict observable in STAT_DROP_DENY), `T_RULES_ATOMIC_SWAP_NO_DROP` (load-bearing canary for PI-13-3.4b-c2 — atomic swap under concurrent traffic with inverted actions across configs), `T_RULES_AXIS_FLIPS_WITH_ACTIVE_IDX` (rules-axis content correlates with active_idx; one-deep rollback history preserved).
+
+### Changed
+- **Schema cycle 2 → cycle 3 SEMANTIC SHIFT** — drop rules now populate the inner-allowlist (MAC HASH for `match.mac`, CIDR LPM_TRIE for `match.src_cidr`) with their `rule_id`. The prior §5.26 schema cycle 2 contract — "drop rules do NOT populate the inner allowlist" — is EXPLICITLY AMENDED per HG-3.4b-c2-2. Operator mental model shift: every rule that matches a frame contributes per-rule counter; verdict is explicit via the rule's `action:` field; default-deny only catches frames matching NO rule. Sidecar `rule_index.json`'s `action: "drop"` label flow-through is byte-equivalent — only the data flowing through it changes (the label now correlates with non-zero per-rule counter values).
+- **`mac_filter_prog` datapath body** — MAC HASH-hit + CIDR LPM_TRIE-hit branches grow with the 3-step rules→action_table dispatch chain + XDP_DROP verdict path; 3 new chained `bpf_map_lookup_elem` calls per match. All NULL-checked (verifier-required). Active snapshot discipline preserved — the SAME `active` u32 read at the head of the datapath indexes all 4 outers (MAC + CIDR + defaults + rules).
+- **`populate_rules_skeleton` renamed to `populate_rules_inner_slot`** — function body byte-equivalent (clear-all-64 + write occupied); only fd-source semantic shifts (caller passes the inactive `rules_<a|b>` inner-fd, NOT a shared `rules` fd). Called BEFORE the active_idx flip per §5.34 D-3.4b-c2-8 atomic-swap discipline.
+- **`extract_pass_macs` + `extract_pass_cidrs` action filter REMOVED** — the `if (r.action != RuleAction::Pass) continue;` line is gone (one line per axis, two total). Function names retained per D-3.4b-c2-3 to minimize diff (rename would inflate call-site touches with no semantic benefit). Drop rules NOW feed both axes alongside pass rules.
+- **`kManagedMaps[]` table grows 13 → 15 entries** — REMOVE `{rules, RULES_NAME}`; ADD `{rules_a, RULES_INNER_A_NAME}` + `{rules_b, RULES_INNER_B_NAME}` + `{rules_outer, RULES_OUTER_NAME}`. Single-line table extension is the MVP-3.4.5 HK-9 landmine refactor dividend (3rd consecutive cycle collecting it).
+- **`T_DROP_RULE_BUMPS_COUNTER` assertion semantic INVERTED** — drop-rule MAC NOW enters inner-allowlist; per-rule counter NOW bumps; verdict is XDP_DROP via action_table (was: MAC absent, counter stays 0, drop via defaults fallthrough). Test name kept — semantic now matches the literal name (it was somewhat ironic pre-§5.34). Explicit schema-shift carve-out per PI-6-3.4b-c2.
+- **`T_RULES_SKELETON_NOT_WIRED` DELETED** — the contract this test asserted (rules+action_table NOT consulted by datapath) is RETIRED by this slice. Body deleted; foreach entry removed.
+- VERSION 0.8.0 → 0.9.0 (MINOR — operator-observable behavioural change: drop rules now operative explicitly). Both binaries report `0.9.0` via `--version` per shared `version.h` (PI-8-3.4b-c2).
+
+### Removed
+- **SHARED `rules` ARRAY pin** — `${PIN_DIR}/<iface>/rules` no longer exists; replaced by `rules_outer` + `rules_a` + `rules_b` pins. The `XDPMF_MAP_RULES_NAME` constant is removed from `src/common/mac_filter.h`.
+- **§5.29 stderr WARN** — `xdpmacfilter: rules: section parsed (<N> entries) but per-rule action dispatch deferred to MVP-3.4b — datapath uses MAC/CIDR-only matching this cycle` is GONE. The contract it announced no longer applies — datapath consults the chain per HG-3.4b-c2-4.
+- **`loader.warn.rules_skeleton_not_wired` event** — REMOVED from `kEventNames` catalog in lockstep with the WARN emission removal. Catalog count 34 → 33. PI-3.5-4 amended per D-3.4b-c2-4. T_LOG_EVENT_CATALOG_STABILITY reference value updates 34 → 33.
+
+### Notes
+- `reset-counters` subcommand + `rule_counter` atomic-swap explicitly scoped-out of this slice → follow-up cycle (working name MVP-3.4d — architect's call when the brief lands).
+- `action_table` map STAYS SHARED per HG-3.4b-c2-3 (D-3.4b-c2-6) — values are static `{PASS=0, DROP=1}`, never mutate at runtime; atomic-swap is meaningless. Promotion to parallel ARRAY_OF_MAPS becomes motivated when MVP-3.8+ adds mutable action types (MIRROR / RL / TAG with per-config parameters). NEW FENCE.
+- First-rule-wins dedup semantic preserved per D-3.4b-c2-7: if operator declares `id=5 action=pass match.mac=X` AND `id=17 action=drop match.mac=X` (same MAC, two rule entries), the inner-allowlist gets `{mac=X, rule_id=5}` (first encountered); the drop-rule is shadowed. Consistent with §5.26 dedup precedent. Operators wanting alternative semantics (later-rule-wins / drop-precedence) → MVP-3.4e future cycle. NEW FENCE.
+
+### Preserved invariants
+- **PI-7-3.4b-c2-hpp**: `src/lib/loader.hpp` ZERO diff — **9th consecutive cycle**. `src/lib/config.hpp` ZERO diff — **4th consecutive cycle**. No public symbol added; `Config::Rule::action` field already exists.
+- **PI-7-3.4b-c2-cpp**: `src/lib/loader.cpp` SCOPED EDIT — diffs confined to kManagedMaps[] 13→15, `populate_rules_inner_slot` rename + signature semantic shift, `apply_request` call-site updates (2 sites) + WARN-emission removal, `extract_pass_macs` / `extract_pass_cidrs` filter-line removal.
+- **PI-10-3.4b-c2**: `src/common/mac_filter.h` ADDITIVE-modulo-deletion (3 added + 1 removed); all other constants/structs/enums byte-equivalent. STAT_MAX = 4 unchanged (Q1.B re-uses STAT_DROP_DENY for explicit-rule-drops, no new enum slot).
+- **PI-13-3.4b-c2 (NEW, load-bearing)**: rules atomic-swap via active_idx flip, symmetric with §5.27 Q1 AS1 CIDR pattern; single u32 commits 4-axis swap.
+- **PI-29-3.4b-c2 (NEW, load-bearing — SUPERSEDES PI-28-3.4b + PI-29-3.4b)**: datapath consults `rules_outer → rules_inner → action_table` chain per match in both MAC HASH-hit AND CIDR LPM_TRIE-hit branches.
+- **PI-30-3.4b-c2-schema (NEW, load-bearing)**: drop rules NOW populate inner-allowlist (their `rule_id` AND their `match.*` clause). The prior §5.26 schema cycle 2 contract is explicitly amended; reviewer's disposition rule for "drop-rule semantic change" flag is `inline-merge` (NOT `[CONTRACT-DRIFT]`).
+- **PI-3.5-4 AMENDED**: `kEventNames` count 34 → 33 per D-3.4b-c2-4. The change is direct consequence of the §5.29 WARN-emission removal; explicit-by-design per `inline-merge` reviewer disposition.
+- **PI-6-3.4b-c2 / PI-3.4b-c2-fixture-ripple**: 2 ctest body EDITs (T_DROP_RULE_BUMPS_COUNTER semantic-shift rewrite per Q3.A; T_EXPORTER_METRICS_FORMAT version-literal bump 0.8.0 → 0.9.0) + 1 DELETED ctest (T_RULES_SKELETON_NOT_WIRED) + 3 NEW ctests. All other 55 ctest bodies byte-equivalent.
+- **PI-28-3.4b LIFTED** + **PI-29-3.4b LIFTED** — replaced by PI-29-3.4b-c2 above (`mac_filter_prog` body extends with the dispatch chain; rules + action_table NOW consulted — the entire purpose of this slice).
+
+### Out-of-scope fences (per §5.34)
+- `reset-counters` subcommand + `rule_counter` atomic-swap — follow-up cycle MVP-3.4d (working name). NEW FENCE.
+- `action_table` promotion to parallel ARRAY_OF_MAPS — not motivated by cycle 2 (values static); motivated if MVP-3.8+ adds mutable action types. NEW FENCE.
+- Action types beyond `{PASS, DROP}` — MVP-3.8+ carry-forward.
+- `xdpfilter_packets_total{verdict="rule_drop"}` separate verdict bucket (Q1.A alternative) — Q1.B re-use picked; future-cycle if operator demand surfaces. NEW FENCE.
+- Drop-precedence-over-pass / later-rule-wins dedup — first-rule-wins preserved per D-3.4b-c2-7. NEW FENCE.
+- `defaults` map retirement (Q4.B alternative) — Q4.A unchanged; defaults stays for unmatched-frame fallback.
+- Documentation pass for the schema cycle 3 shift (FLEET_DEPLOYMENT.md migration notes; Prometheus alert wording update) — separate manual doc pass per user direction.
+
+### Build pace
+| Cycle | Slice | Anchor | Source delta |
+|---|---|---|---|
+| MVP-3.4b cycle 2 | rules atomic-swap promotion + datapath dispatch + schema cycle 3 shift | §5.34 | ~7 EDITED source files (mac_filter.bpf.c map block + datapath dispatch; mac_filter.h constant set; loader.cpp kManagedMaps + populate_rules_inner_slot + extract_* filter removal + WARN removal + 2 call-sites; logger.hpp catalog 34→33; CMakeLists.txt version bump; CHANGELOG.md entry; tests/CMakeLists.txt foreach trim); tests: 2 EDITED + 1 DELETED + 3 NEW |
+
 ## [0.8.0] — 2026-05-25
 
 MVP-3.5 — JSON structured logs in loader + exporter (brownfield amendment §5.32). Operator-facing structured-logging surface deferred from §5.30 §7 OOS for 5 consecutive cycles. New env var `XDPMF_LOG_FORMAT={text,json}` (default `text`) selects rendering for every diagnostic stderr emission in BOTH `xdpmacfilter` + `xdpmf-exporter`. Text mode is byte-equivalent to the pre-§5.32 line (load-bearing **PI-3.5-1** — the 52-ctest baseline is the validation surface). JSON mode emits one NDJSON object per event with a flat envelope `{ts, level, event, iface, msg, fields:{}}` and a stable 34-event catalog (33 emission-site-derived + 1 logger self-emit). Strictly additive — only a 1-EDIT carve-out on the 52 pre-§5.32 ctests (T_EXPORTER_METRICS_FORMAT version-literal bump per §5.32 EDIT-2), NO touch to BPF datapath, NO new external build dependency.

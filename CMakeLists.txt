@@ -10,8 +10,8 @@ endif()
 
 project(xdpmacfilter
     LANGUAGES C CXX
-    VERSION   0.8.0
-    DESCRIPTION "MVP-3.5 L2 MAC + L3 src-CIDR allow-list XDP filter (OR-compose) + Prometheus exporter + per-rule counters + structured logging"
+    VERSION   0.9.0
+    DESCRIPTION "MVP-3.4b cycle 2 L2 MAC + L3 src-CIDR allow-list XDP filter (OR-compose) + Prometheus exporter + per-rule counters + structured logging + explicit drop-rule action dispatch"
 )
 
 # §5.25 P3: version-string sync — generate include/version.h from the
