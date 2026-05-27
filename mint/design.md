@@ -11833,7 +11833,7 @@ Per architect spec §6.5 "Verification-hints discipline (any optional subsection
 The following items are EXPLICITLY OUT OF SCOPE for §5.36; future slices may consider:
 
 - **`escape_audit_value` extraction to `src/common/escape_util.{hpp,cpp}`** — security M1 + arch M2 + CQ M2 cross-validated theme B from /mint-review 2026-05-27. Deferred to MVP-3.4f.
-- **Dead `BpffsDir` + `XdpAttachment` deletion from `src/loader/raii.hpp`** — code-quality H1, ~75 LOC. Deferred to MVP-3.4f or housekeeping mini.
+- **Dead `BpffsDir` + `XdpAttachment` deletion from `src/loader/raii.hpp`** — code-quality H1, ~75 LOC. Deferred to MVP-3.4f or housekeeping mini. [SUPERSEDED BY §5.38]
 - **Exporter `--bind` non-loopback WARN** — security M2. Deferred to MVP-3.5b (exporter-adjacent).
 - **`apply_internal.hpp` rename to `internal.hpp`** (D-3.4e-1 ripple cleanup) — cosmetic clarity; deferred.
 - **`validate_iface_name` retrofit to `apply_request` / `detach()`** — orthogonal hardening; only KC-3 (reset-counters) covered this slice. If /mint-review surfaces a shape-rejection regression on apply/detach paths, promote in a future slice.
@@ -12511,7 +12511,7 @@ The following items are EXPLICITLY OUT OF SCOPE for §5.37; future slices may co
 
 - **KC-1 closure of the OTHER half — action label defensive escape via `kActionLabels`-anchored allowlist** (security L2 from /mint-review 2026-05-27). Separate slice. This brief ONLY closes the control-char gap (sec M1) — the action label limb remains open. Future MVP-3.4g or sec-hardening slice.
 - **KC-2 — exporter `--bind` non-loopback WARN** (security M2). Separate slice; carry-forward from §5.36 OOS.
-- **Theme C — dead `BpffsDir` + `XdpAttachment` deletion from `src/loader/raii.hpp`** (code-quality H1). Carry-forward from §5.36 OOS; consider housekeeping mini.
+- **Theme C — dead `BpffsDir` + `XdpAttachment` deletion from `src/loader/raii.hpp`** (code-quality H1). Carry-forward from §5.36 OOS; consider housekeeping mini. [SUPERSEDED BY §5.38]
 - **Theme D / CQ M1 — `dispatch_match` helper in `mac_filter.bpf.c`**. Carry-forward.
 - **`xdpmf_logger` OBJECT/STATIC lib promotion** (/mint-review action item #13). Pure-cosmetic; deferred indefinitely.
 - **Module rename `xdpmf::escape_util` → `xdpmf::log_util`** (D-3.4f-2 acknowledged the naming inconsistency). If a 4th log-helper joins (e.g., `level_str` pulled from logger.cpp anon namespace; `format_mac` / `format_cidr` pulled from sidecar.cpp anon namespace), rename in that slice. NEW FENCE.
@@ -12641,3 +12641,169 @@ Per architect spec "design item Z is impossible per platform constraint (cites e
 3. mint-dev-impl notified (informational — no impl change required; escape_util.cpp body still carries `case '\0': out.append("\\0"); break;` per original D-3.4f-3 / D-3.4f-5 + verifiable invariant #15 reviewer-asserts it).
 
 Tester's option (a) (4-of-5 with header NOTE; proceeding inline-merge-able) is COMPATIBLE with this ruling — the EDIT amendments simply formalize the integration-surface limitation as architect-blessed, document the code-review coverage path, and add guard #21 for future cycles. Test ships with the relaxed assertion list per the updated sub-case (b) text above.
+
+---
+
+### §5.38 MVP-3.4g: dead-code delete `BpffsDir` + `XdpAttachment` from `src/lib/raii.hpp` (brownfield housekeeping, 2026-05-27)
+
+#### §5.38 Problem statement
+
+Pure removal of two dead RAII types — `class XdpAttachment` (`src/lib/raii.hpp:74-115`) and `class BpffsDir` (`src/lib/raii.hpp:132-177`) plus the multi-paragraph BpffsDir-preamble comment (`raii.hpp:117-131`). Both classes were superseded by `IfaceDirGuard` (introduced in §5.22, defined in `src/lib/loader.cpp:732`, inherits `BpffsRootFd` symlink defense via fd-relative `unlinkat`/`AT_REMOVEDIR`) AND by direct loader-internal `bpf_xdp_detach` calls — but the old class bodies were left in place at the time per the §5.22 impl-surface table's "stays as-is — single-callsite-rule" carve-out. That carve-out is now obsolete because **Phase A grep confirms ZERO construction sites for either type across `src/`, `tests/`, `include/`**. Closes /mint-review 2026-05-27 Theme C (cross-validated 2-way: code-quality H1 dead-code + architecture L4 overlap with kManagedMaps pattern; CQ's grep covered both classes — severity HIGH). Carry-forward from §5.36 §7 OOS + §5.37 §7 OOS — both now SUPERSEDED.
+
+#### §5.38 Phase A grep verification report (architect-independent — 2026-05-27)
+
+Architect repeated brief-author's Phase 2 greps independently per guard #5. Results match brief's claims:
+
+1. **ZERO construction sites for both types**:
+   - `grep -rnE 'BpffsDir\s*\(|XdpAttachment\s*\(|BpffsDir\{|XdpAttachment\{' src/` → 0 hits (after filtering the `class BpffsDir {`/`class XdpAttachment {` definition lines in `raii.hpp:74,132` themselves).
+   - `grep -rnE 'BpffsDir [a-z]|XdpAttachment [a-z]' src/` → 0 hits (no variable-decl-style construction anywhere).
+2. **ZERO references in tests/ and include/**:
+   - `grep -rn 'BpffsDir\|XdpAttachment' tests/` → 0 hits.
+   - `grep -rn 'BpffsDir\|XdpAttachment' include/` → 0 hits (the project has no `include/` exported header tree — both helpers were never public-surface; class defs were always internal-only in `src/lib/`).
+3. **Total `BpffsDir`/`XdpAttachment` references across `src/`** (all hits accounted for, all in-scope for E-1/E-2 deletion):
+   - `src/lib/raii.hpp:74-115`: XdpAttachment class body (12 hits incl. ctor/dtor/move/private member names).
+   - `src/lib/raii.hpp:117-131`: BpffsDir-preamble multi-paragraph comment block (3 textual hits at :123/:124/:132).
+   - `src/lib/raii.hpp:132-177`: BpffsDir class body (8 hits incl. ctor/dtor/move).
+   - `src/lib/loader.cpp:29`: rollback prose sub-clause "`; XdpAttachment unwinds; `" inside `apply_iface_load` header docstring.
+   - `src/lib/loader.cpp:729-731`: 5-line preamble block above `class IfaceDirGuard` ("Replaces the §5.17 BpffsDir wrapper for new code paths so rollback inherits the symlink defense (raii.hpp BpffsDir stays as-is per §5.22 impl-surface table — single-callsite-rule, BpffsRootFd is not exported).").
+4. **`<filesystem>` sole-user inside raii.hpp**:
+   - `grep -nE 'std::filesystem|<filesystem>|fs::' src/lib/raii.hpp` → 4 hits: `:14` (`#include <filesystem>`), `:122` (comment "`std::filesystem::create_directories()`"), `:125` (comment), `:169` (`std::filesystem::remove_all(path_, ec)` inside `BpffsDir::reset()`). All 4 vanish in lockstep with E-1 deletion.
+5. **CHANGELOG.md frozen prior-cycle reference**:
+   - `grep -n 'BpffsDir\|XdpAttachment' CHANGELOG.md` → 1 hit at `CHANGELOG.md:503` (archived prior-cycle entry "`src/loader/raii.hpp` `BpffsDir` comment — described the real workflow…"). Immutable release history; NOT touched. Reviewer's framework point 5 expects ≤1 hit post-delete.
+6. **design.md archived historical references** (immutable history, NO `[SUPERSEDED BY §5.38]` markers — per HG-3.4g-4):
+   - `design.md:28` (initial FileList row "`src/loader/raii.hpp` | RAII wrappers: `BpfSkeleton`, `XdpAttachment`, `BpffsDir`").
+   - `design.md:569-585` (§5.18 / §5.19 FileList-drift-correction prose).
+   - `design.md:903` (§5.27 finding citation).
+   - These 5 lines are archived design history; per architect spec "Do NOT rewrite prior sections (those are immutable history)" — left untouched. Only the 2 OOS-fence carry-forward records at `:11836` + `:12514` receive `[SUPERSEDED BY §5.38]` inline markers per HG-3.4g-4.
+7. **No other dead RAII types**:
+   - `class.*Guard\|class.*Attachment\|class.*Skeleton\|class.*Dir` sweep of `src/lib/raii.hpp` post-delete → only `class BpfSkeleton` remains (still actively used by loader.cpp + apply_internal.cpp callsites). `IfaceDirGuard` lives in `src/lib/loader.cpp` (not raii.hpp). No additional dead-code surface surfaces during Phase A.
+
+#### §5.38 Human-gate decisions (pre-loaded defaults from brief — confirmed by architect Phase A)
+
+- **HG-3.4g-1: scope of cleanup → strict delete + minimal CHANGELOG** — CONFIRMED. Architect defers on the BpfSkeleton-preamble alternative; raii.hpp's existing top-of-file docstring (lines 1-9) already covers BpfSkeleton lifecycle adequately.
+- **HG-3.4g-2: PI-7-3.4g ZERO-diff fence → YES** — CONFIRMED. 4 fence paths UNTOUCHED.
+- **HG-3.4g-3: NEW ctests → NONE** — CONFIRMED. Pure deletion. Existing 67 ctests stay green by construction. Tester role this cycle: re-run `ctest -j4`, capture log, assert 67/67.
+- **HG-3.4g-4: design.md `[SUPERSEDED BY §5.38]` markers scope → 2 OOS-fence carry-forward records only** — CONFIRMED + APPLIED (markers placed at `:11836` + `:12514` at Phase A).
+
+#### §5.38 Q-decisions (mechanism)
+
+- **Q1 — loader.cpp 2 stale cite-comments**: **A1 (delete entirely, no replacement)**. Both blocks vanish; `IfaceDirGuard` class definition stands on its own (its purpose is evident from the function name + the `§5.22 Item 2` anchor in the docstring, which architect rewrites to NOT mention `BpffsDir`). Rationale: comments described historical design choices (`BpffsDir` superseded by `IfaceDirGuard`) that no longer reflect code reality post-delete. `git blame` + `git log` provide archaeology trail. Operative-semantic per Phase 4.4: if impl judgment prefers a 1-2 line minimal docstring (e.g., `/* §5.22 Item 2 rollback RAII: removes the per-iface dir via the same fd-relative walk used by bpffs_remove_iface(). */`) over the 5-line block, that is `inline-merge` per resolution rule below — but default is A1 strict delete.
+
+#### §5.38 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+**NEW** — (none)
+
+**EDITED** — files touched this slice:
+
+| Path | Role (one line) | Language | LOC delta |
+|---|---|---|---|
+| `src/lib/raii.hpp` | DELETE `#include <filesystem>` (line 14); DELETE `class XdpAttachment` body (lines 74-115); DELETE BpffsDir-preamble comment block (lines 117-131); DELETE `class BpffsDir` body (lines 132-177). PRESERVE top-of-file docstring (lines 1-9), remaining includes (lines 10-23), namespace block, `class BpfSkeleton` (lines 29-64). | C++23 (header-only) | ~-95 |
+| `src/lib/loader.cpp` | EDIT line 29 — drop the "`; XdpAttachment unwinds`" sub-clause from rollback prose, preserving sentence flow (architect-suggested wording: `IfaceDirGuard tears down the per-iface bpffs dir via the same fd-relative walk used by bpffs_remove_iface; BpfSkeleton tears down libbpf state (and the kernel garbage-collects unpinned programs/maps). On success the guards release().`). DELETE lines 727-731 (5-line preamble block above `class IfaceDirGuard` citing the §5.22 impl-surface "stays as-is" carve-out). | C++23 | ~-6 |
+| `mint/design.md` | APPEND §5.38 amendment (this block, ~150 LOC). ADD `[SUPERSEDED BY §5.38]` inline markers at lines 11836 + 12514. NO rewrites to prior §-sections. | markdown | +~152 |
+| `CHANGELOG.md` | ADD 1-line entry at top section anchor: `- src/lib/raii.hpp: dead-code cleanup — BpffsDir + XdpAttachment removed (superseded by IfaceDirGuard since §5.22)`. Impl picks the precise anchor (under existing MVP-3.4 housekeeping sub-block OR a new MVP-3.4g sub-block, mirroring §5.36/§5.37 entries). | markdown | +1 |
+
+**UNCHANGED-BUT-AFFECTED** — ripple-affected files whose behavior MUST remain identical (impl/tester MUST NOT touch; reviewer asserts zero git-diff):
+
+| Path | Why it ripples but stays identical | Check |
+|---|---|---|
+| `src/common/logger.hpp` | PI-7-3.4g-hpp fence path (**13th** consecutive ZERO-diff). | `git diff <pre-§5.38> -- src/common/logger.hpp` empty |
+| `src/lib/config.hpp` | PI-7-3.4g-cpp fence path (**8th** consecutive ZERO-diff). | `git diff <pre-§5.38> -- src/lib/config.hpp` empty |
+| `src/lib/loader.hpp` | PI-7-3.4g-loader-hpp fence path (extension; no new public symbols introduced by this slice — raii.hpp delete is internal). | `git diff <pre-§5.38> -- src/lib/loader.hpp` empty |
+| `src/common/mac_filter.h` | PI-7-3.4g-mac-filter-h fence path (extension; no new/removed constant). | `git diff <pre-§5.38> -- src/common/mac_filter.h` empty |
+| `src/lib/apply_internal.hpp` + `src/lib/sidecar.hpp` + `src/lib/sidecar.cpp` + `src/cli/**` + `src/bpf/**` + `src/exporter/**` + `src/common/escape_util.{hpp,cpp}` + `src/common/logger.cpp` | Did not reference `BpffsDir` or `XdpAttachment` (Phase A grep confirms). No ripple. | `git diff <pre-§5.38> -- src/lib/apply_internal.hpp src/lib/sidecar.* src/cli/ src/bpf/ src/exporter/ src/common/escape_util.* src/common/logger.cpp` empty |
+| `CMakeLists.txt` + `tests/CMakeLists.txt` + `tests/fixtures/**` + `tests/scenarios/**` | raii.hpp is header-only, no build-system entry; no test fixture or scenario references the deleted types (Phase A grep confirms). | `git diff <pre-§5.38> -- CMakeLists.txt tests/` empty |
+
+#### §5.38 DataStructures additions / changes
+
+None. This slice DELETES types; no new struct/class/enum/array introduced.
+
+#### §5.38 Interfaces additions
+
+None. No new function/CLI/env-var/IPC surface. The deletion is internal to `src/lib/`; no public-surface header (`include/`) is touched (the project has no `include/` exported tree; `loader.hpp` is the closest to a public surface and stays byte-identical per PI-7-3.4g-loader-hpp).
+
+#### §5.38 Decisions (with rationale)
+
+- **D-3.4g-1**: Strict delete with no replacement docstring on `class IfaceDirGuard` — because the class name + its `§5.22 Item 2` anchor in the new (post-delete) header line carry the semantic. Q1.A1 default. Operative-semantic inline-merge if impl prefers a 1-2 line minimal docstring.
+- **D-3.4g-2**: Drop `#include <filesystem>` from `raii.hpp` — because Phase A grep confirms sole user is `BpffsDir::reset()` body. Lockstep with class deletion; no other consumer remains.
+- **D-3.4g-3**: NO VERSION bump — per brief OOS + HG-3.4g-1 minimal CHANGELOG discipline. Pure dead-code delete has no operator-observable behavior change; version-string stays at current value. (Architect override only if /mint-review or impl identifies an operator-visible surface — extremely unlikely; not surfaced at Phase A.)
+- **D-3.4g-4**: NO new ctests — because the deleted types had zero callsites (Phase A grep). Existing 67 ctests assert the post-delete behavior by construction. HG-3.4g-3 default. Tester role minimized to ctest re-run + log capture.
+- **D-3.4g-5**: `[SUPERSEDED BY §5.38]` markers limited to the 2 OOS-fence carry-forward records — because architect spec rule "Do NOT rewrite prior sections (those are immutable history)" applies to the 5 other archived references (initial FileList :28, §5.18-19 prose :569-585, §5.27 finding :903). HG-3.4g-4 default applied at Phase A.
+- **D-3.4g-6**: NO renaming `IfaceDirGuard` (Out of scope) — because rename churns 1 file for cosmetic gain with no operator-observable benefit. Carry-forward as NEW FENCE in §7 OOS.
+- **D-3.4g-7**: NO consolidation of `raii.hpp` into a different location (Out of scope) — because architecture-level relocation belongs to a future housekeeping mini, not a dead-code-delete slice. NEW FENCE.
+
+**Resolution rule (architect-stated for this amendment)**: if a prose statement in §5.38 conflicts with the §6.5 invariants-block items below, the invariants-block item wins. If impl deviates from any verifiable-invariants item to satisfy a PI-* contract in §6.5, reviewer's correct disposition is `inline-merge` on the hint text — NOT `[UNRELATED-EDIT]` on impl. Per architect spec §6.5 verification-hints discipline.
+
+#### §5.38 TestStrategy entries
+
+None. Pure deletion + no behavior change → no operator-observable property to assert. Existing 67 ctests stay green by construction. Tester's contract this cycle:
+
+| Test action | Trigger | Observable outcome | Assertion mechanism |
+|---|---|---|---|
+| T-baseline-67 | `ctest --output-on-failure -j4` post-impl-commit on a host where the baseline 67/67 was green pre-§5.38 | All 67 tests PASS or legitimately SKIP (no FAIL) | exit code 0; `ctest --output-on-failure` log captured to `mint/test-run.log` |
+
+No NEW T-N entries. Tester's role this cycle is the SHORTEST in project history. The OPS-canary heuristic in architect spec is N/A (no new invocation path — raii.hpp delete does not alter any runtime context).
+
+#### §6.5 Preserved invariants (§5.38 MVP-3.4g brownfield)
+
+Reviewer's framework point 5 walks this list per architect spec §6.5.
+
+| PI | Property | Check mechanism |
+|---|---|---|
+| **PI-7-3.4g-hpp** | `src/common/logger.hpp` byte-identical. **13th consecutive ZERO-diff cycle**. | `git diff <pre-§5.38> -- src/common/logger.hpp` empty |
+| **PI-7-3.4g-cpp** | `src/lib/config.hpp` byte-identical. **8th consecutive ZERO-diff cycle**. | `git diff <pre-§5.38> -- src/lib/config.hpp` empty |
+| **PI-7-3.4g-loader-hpp** | `src/lib/loader.hpp` byte-identical (no new/removed public symbol). Extension of §5.37 streak. | `git diff <pre-§5.38> -- src/lib/loader.hpp` empty |
+| **PI-7-3.4g-mac-filter-h** | `src/common/mac_filter.h` byte-identical. Extension of §5.37 streak. | `git diff <pre-§5.38> -- src/common/mac_filter.h` empty |
+| **PI-32-3.4b PRESERVED** | Sidecar never throws (orthogonal to raii.hpp delete). | T_SIDECAR_JSON_SHAPE.sh stays GREEN |
+| **PI-3.5-1 PRESERVED** | logger text-mode stderr byte-equivalent (orthogonal). | T_LOG_TEXT_BYTE_EQUIVALENT.sh stays GREEN |
+| **PI-3.5-7 PRESERVED** | No new external build dependency; `<filesystem>` REMOVAL is a dep reduction, not a dep add. | `grep -E 'find_package\|pkg_check_modules\|FetchContent' CMakeLists.txt` returns no new entries |
+| **§5.22 BpffsRootFd / IfaceDirGuard symlink defense PRESERVED** | `IfaceDirGuard`'s fd-relative rollback path (`src/lib/loader.cpp:732+`) UNCHANGED — only its preamble docstring shrinks. | code-review: `class IfaceDirGuard` body byte-equivalent post-delete (only the 5-line preamble at `:727-731` and the rollback-prose sub-clause at `:29` change). |
+| **§5.36 PI-3.4e-1 + PI-3.4e-2 + KC-3 closure PRESERVED** | reset-counters path-traversal refusal + sidecar iface-subdir symlink refusal continue to work — raii.hpp delete is orthogonal. | T_RESET_COUNTERS_PATH_TRAVERSAL.sh + T_SIDECAR_IFACE_SYMLINK_REFUSAL.sh stay GREEN |
+| **§5.37 PI-3.4f-1 / -2 / -3 PRESERVED** | escape_util byte-equivalent behavior continues — raii.hpp delete is orthogonal. | T_BYPASS_AUDIT_CONTROL_CHARS.sh + all JSON-shape + audit-line tests stay GREEN |
+| **PI-3.4g-1 (NEW) — Dead-code deletion is byte-equivalent at runtime** | Removing the two unused class definitions from `raii.hpp` has zero effect on any program's emitted instructions or runtime behavior (the classes had no construction sites — confirmed Phase A grep). | All 67 pre-§5.38 ctests stay GREEN with NO behavior-shape regressions; OPS canaries unchanged. |
+| **PI-3.4g-2 (NEW) — `<filesystem>` header dropped without ripple** | `raii.hpp` no longer includes `<filesystem>` post-delete, AND no other TU implicitly depended on raii.hpp's transitive `<filesystem>` include (i.e., the build doesn't break elsewhere from a missing transitive). | clean `cmake --build build` succeeds; ctest 67/67 green. If a TU breaks from a missing transitive, that TU's `.cpp` would need its OWN `#include <filesystem>` — impl-flexible inline-merge but flag as `[UNRELATED-EDIT]` candidate to architect. |
+| **PI-6 (existing ctest count regression-baseline)** | All 67 pre-§5.38 ctests pass byte-equivalent OR legitimately SKIP. Baseline 67 → 67 (NO new tests, NO removed tests). | `ctest --output-on-failure` returns 67/67 green; baseline diff = 0 NEW, 0 existing-body edits |
+| **PI-10 (additive-only header invariants) — RELAXED for raii.hpp this slice** | All headers in `src/lib/` + `src/cli/` + `src/common/` UNCHANGED except `src/lib/raii.hpp` (which is EDITED, not added). PI-10's "additive-only" property does NOT apply to raii.hpp this cycle because the changes are pure DELETIONS (no new symbols added); the property's intent is "no public-surface breakage" and raii.hpp is internal-to-src/lib (no `include/` export), so the deleted symbols had no public consumers. | `git diff <pre-§5.38> -- src/lib/ src/cli/ src/common/*.hpp src/common/*.h` shows only DELETIONS in `raii.hpp`; no edits to other headers |
+
+#### §5.38 verifiable invariants for reviewer (MAY-default per architect spec §6.5 discipline)
+
+Per architect spec §6.5 "Verification-hints discipline": guidance for reviewer, NOT contracts for impl. Default disposition: items MAY hold (impl-flex inline-merge if impl deviates to satisfy a PI-* contract elsewhere).
+
+1. (MAY) `grep -rn 'BpffsDir\|XdpAttachment' src/ tests/ include/` returns **zero hits** post-impl-commit. (CHANGELOG.md's frozen archive hit at `:503` is OUT of this grep's path scope; reviewer asserts ≤1 total hit including CHANGELOG.md.)
+2. (MAY) `grep -nE 'std::filesystem|<filesystem>|fs::' src/lib/raii.hpp` returns **zero hits** post-impl. If hit, impl missed the include drop.
+3. (MAY) `wc -l src/lib/raii.hpp` returns approximately 80-90 lines post-impl (down from 179; ~-95 LOC delta). Operative-semantic SHOULD-hint per Phase 4.4 — impl-flexible exact LOC.
+4. (MAY) `wc -l src/lib/loader.cpp` shrinks by approximately 5-7 lines post-impl (down ~2280 → ~2274; sub-clause drop at `:29` + 5-line preamble block delete at `:727-731`). Operative-semantic SHOULD-hint.
+5. (MAY) `grep -nE '^class BpfSkeleton' src/lib/raii.hpp` returns exactly 1 hit at approximately `:29` post-impl — confirming `BpfSkeleton` is the only surviving class in raii.hpp.
+6. (MAY) `git diff <pre-§5.38> -- src/common/logger.hpp src/lib/config.hpp src/lib/loader.hpp src/common/mac_filter.h src/lib/apply_internal.hpp src/lib/sidecar.hpp src/lib/sidecar.cpp src/cli/ src/bpf/ src/exporter/ src/common/escape_util.hpp src/common/escape_util.cpp src/common/logger.cpp tests/ CMakeLists.txt tests/CMakeLists.txt tests/fixtures/log_events_v1.txt` returns **empty** (UNCHANGED-BUT-AFFECTED contract).
+7. (MAY) ctest baseline 67 → 67 (NO new ctests; NO removed ctests; ZERO existing ctest body EDITs). `tests/CMakeLists.txt` is byte-identical.
+8. (MAY) Reviewer-side post-delete sweep `grep -rn 'BpffsDir\|XdpAttachment' src/ tests/ include/ docs/ CHANGELOG.md` returns exactly **1 hit** at `CHANGELOG.md:503` (immutable archived prior-cycle entry — frozen release history). If 0 hits → impl removed the prior-cycle entry too (a fence violation; reviewer flags). If >1 hit → some live reference survived.
+9. (MAY) `git diff <pre-§5.38> -- CHANGELOG.md` shows exactly **1 line added** (the E-4 entry) per HG-3.4g-1 minimal-CHANGELOG discipline. Operative-semantic — impl may choose a 2-line entry if a sub-heading is needed under MVP-3.4 housekeeping anchor. Reviewer's correct disposition: inline-merge if impl uses 2 lines for anchor formatting consistency.
+10. (MAY) `grep -nE '\[SUPERSEDED BY §5\.38\]' mint/design.md` returns exactly **2 hits** post-architect-edit at lines 11836 + 12514. (NOT a contract on impl — architect placed these at Phase A.)
+
+#### §7 OOS additions (§5.38 — new fences)
+
+The following items are EXPLICITLY OUT OF SCOPE for §5.38; future slices may consider:
+
+- **Renaming `IfaceDirGuard` to reflect its post-§5.22 canonical-RAII status** — no operator-observable benefit; rename churns 1 file for cosmetic gain. NEW FENCE (D-3.4g-6).
+- **Consolidating `raii.hpp` into a different location** (e.g., `src/lib/internal/raii.hpp` or merging into `apply_internal.hpp`) — architecture-level decision belonging to a future housekeeping mini. NEW FENCE (D-3.4g-7).
+- **Refactoring `BpfSkeleton`'s reset/move semantics** — UNTOUCHED this cycle; orthogonal. NEW FENCE.
+- **Theme C action-item #6 follow-on cleanups** (e.g., other dead RAII types not flagged by /mint-review) — Phase A grep surfaced NO additional dead-code types; if a future /mint-review run surfaces more, address there.
+- **KC-1 closure half (action label defensive escape, sec L2 from /mint-review 2026-05-27)** — carry-forward from §5.37 §7 OOS. Separate slice.
+- **KC-2 (exporter `--bind` non-loopback WARN, sec M2)** — carry-forward from §5.36 + §5.37 §7 OOS. Separate slice.
+- **Theme D / CQ M1 (`dispatch_match` helper in `mac_filter.bpf.c`)** — carry-forward from §5.36 + §5.37 §7 OOS. Separate slice.
+- **`xdpmf_logger` OBJECT/STATIC lib promotion** — carry-forward; pure-cosmetic.
+- **Module rename `xdpmf::escape_util` → `xdpmf::log_util`** — carry-forward from §5.37 §7 OOS.
+- **`xdpmf_common` static lib promotion** — carry-forward from §5.37 §7 OOS.
+- **`sudo_user` env-lookup pattern extraction** — carry-forward from §5.37 §7 OOS.
+- **Tab byte (`0x09`) named-escape disposition in escape_audit** — carry-forward from §5.37 §7 OOS.
+- **JSON-mode `\xHH` parity for `escape_audit`** — carry-forward from §5.37 §7 OOS.
+- **VERSION bump** — D-3.4g-3 + brief OOS. NEW FENCE.
+- **Doc rewrite cascades** — README + HANDOFF + docs/BACKLOG stay UNTOUCHED; only CHANGELOG gets 1 line. NEW FENCE.
+- **`.github/workflows/ci.yml` matrix**, **T_SANITIZER_BUILD refactor**, **TUN/TAP injector for T_DROP_MALFORMED**, **compound exporter scrape perf**, **datapath dispatch helper consolidation**, **logger.cpp OBJECT promo**, **CO-RE field probes** — carry-forward unchanged.
+
+Carry-forward from §5.37 §7 OOS items NOT listed above — UNCHANGED.
+
+#### §5.38 Anti-misdiagnosis institutional learning (per architect-spec §6.6)
+
+No new guard from this slice. **Guard catalog stays at 21**. Rationale: this slice is pure-mechanical dead-code deletion with no novel design surface — the only Phase A discipline exercised is **guard #5 (Phase A code-grep)**, already in the catalog and applied here (Phase A grep verification report above). Guard #13 (fixture cross-reference for retired strings) applies only partially since the deleted entities are SYMBOLS (class names), not strings — and the symbol-grep equivalent was applied at Phase A (Phase A grep report item 2: ZERO fixture hits, ZERO test-body hits). No anti-misdiagnosis class surfaced that future cycles could repeat (the brief-author already cross-validated via /mint-review's 2-way Theme C signal + Phase 2 grep; architect re-verified via Phase A grep; nothing in this slice required institutional learning).
+
+If a future /mint-review surfaces additional dead-code classes in a follow-up cycle, the same Phase A grep discipline (guard #5 — independently re-verify ZERO construction sites for each candidate) applies. Cite §5.38 as a precedent for "minimal-discipline brownfield housekeeping slices where Phase A grep IS the design".
