@@ -25,6 +25,8 @@ loader.attach.fleet_replace
 loader.attach.replace
 loader.trust_model
 logger.warn.unknown_log_format
+reset_counters.activated
+reset_counters.refused.no_pin
 sidecar.warn.lstat_failed
 sidecar.warn.mkdir_failed
 sidecar.warn.root_not_dir

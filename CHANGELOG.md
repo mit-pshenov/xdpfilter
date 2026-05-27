@@ -5,6 +5,62 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-05-27
+
+MVP-3.4d — `reset-counters` subcommand + `rule_counters` axis atomic-swap promotion (brownfield amendment §5.35). Closes the **counter management API** + `rule_counter` atomic-swap split out from §5.34 §7 OOS as the follow-up `reset-counters` fence. Two coupled deliverables — (1) NEW `xdpmacfilter reset-counters --iface X [--rule-id N]` subcommand that explicitly zeros the per-rule packet counters; (2) `rule_counters` PERCPU_ARRAY promoted to parallel `rule_counters_outer` ARRAY_OF_MAPS[2] of `rule_counters_a`/`_b` inner PERCPU_ARRAYs — 5th axis of atomic-swap. **PI-3.4b-2 counter-monotonicity-across-apply EXPLICITLY PRESERVED**: the atomic-swap shape change is structural-only; counters survive `apply -f` via a NEW apply-step per-CPU **copy-forward** from old-active inner to inactive inner BEFORE the active_idx flip. Reset zeroing is operator-action-only via the new CLI.
+
+### Added
+- **`reset-counters` CLI subcommand** — `xdpmacfilter reset-counters --iface X [--rule-id N]` zeros the per-rule counter map(s) on the named iface. Without `--rule-id` → zero all 64 slots; with `--rule-id` → zero only slot N (range [0, 63]; out-of-range → exit 1 + stderr error). Requires the iface to be attached (`${PIN_DIR}/<iface>/rule_counters_a` pin must exist) → exit 1 + stderr `"no rule_counters pin"` substring if absent. Audit-log line emitted at action time mirroring `bypass.activated` shape verbatim (per HG-3.4d-6): `xdpmacfilter: RESET-COUNTERS on <iface> by uid=<N> euid=<M> sudo_user="<X or <none>>" rule_id=<N or "ALL">`.
+- **`rule_counters` axis parallel ARRAY_OF_MAPS** — promoted from single PERCPU_ARRAY to parallel `rule_counters_outer` ARRAY_OF_MAPS[2] of `rule_counters_a` / `rule_counters_b` inner PERCPU_ARRAYs. Single `active_idx` u32 flip now atomically commits **all 5 axes** (MAC HASH inner + CIDR LPM_TRIE inner + defaults + rules inner + rule_counters inner). New pins under `${PIN_DIR}/<iface>/`: `rule_counters_outer`, `rule_counters_a`, `rule_counters_b`.
+- **`bump_rule` helper signature extension** — `bump_rule(__u32 rule_id)` → `bump_rule(__u32 rule_id, __u32 active)`. Both call-sites in `mac_filter_prog` (MAC HASH-hit + CIDR LPM_TRIE-hit branches) pass the existing `active` snapshot. Body changes to `rule_counters_outer[active]` → `rule_counters_inner[rule_id]` → bump (5-axis active_idx-snapshot discipline per D-3.4d-7).
+- **`copy_rule_counters_forward` apply-step helper** — NEW userspace per-rule-id per-CPU loop in `loader.cpp` anon namespace; called from `apply_request` BEFORE the active_idx flip (both reattach and fresh-attach branches). Copies per-CPU rule_counters values from old-active inner to inactive inner so the post-flip new-active inner carries the operator-observable counter state. PI-3.4b-2 PRESERVE-across-apply held.
+- **2 new logger events** — `reset_counters.refused.no_pin` (HG-3.4d-3 iface-not-attached precondition fail) + `reset_counters.activated` (HG-3.4d-6 audit-log). `kEventNames` catalog 33 → 35.
+- **3 new ctests** — `T_CLI_RESET_COUNTERS`, `T_CLI_RESET_COUNTERS_RULE_ID`, `T_CLI_RESET_COUNTERS_NO_IFACE` + 1 conditional `T_RULE_COUNTERS_ATOMIC_SWAP` (LOAD-BEARING canary for PI-3.4b-2 PRESERVE + D-3.4d-3 copy-forward). All take `RESOURCE_LOCK xdp_fixture`.
+
+### Changed
+- **`kManagedMaps[]` table grows 15 → 17 entries** — REMOVE `{rule_counters, RULE_COUNTERS_NAME}`; ADD `{rule_counters_a, RULE_COUNTERS_INNER_A_NAME}` + `{rule_counters_b, RULE_COUNTERS_INNER_B_NAME}` + `{rule_counters_outer, RULE_COUNTERS_OUTER_NAME}`. 4th consecutive HK-9 dividend collected.
+- **Exporter `rule_counters_reader.cpp`** adapted to active_idx-indirection: reads `${PIN_DIR}/<iface>/active_idx` to pick which inner is live ({0,1} → suffix `_a`/`_b`), then opens that inner. Existing per-CPU read + per-rule-id loop UNCHANGED. PI-31-3.4d (exporter READ-ONLY) PRESERVED — exporter touches only `bpf_obj_get` + PERCPU lookup.
+- **`T_CLI_HELP_VERSION` extends `--help` assertions** for new `reset-counters` subcommand line + `--rule-id` flag (per anti-misdiagnosis guard #13 fixture cross-reference).
+- **`T_EXPORTER_METRICS_FORMAT` version-literal bump** `0.9.0 → 0.10.0` at the 4 literal sites (PI-8-3.4d carve-out + guard #11).
+- VERSION 0.9.0 → 0.10.0 (MINOR — operator-observable: NEW CLI subcommand). Both binaries report `0.10.0` via `--version` per shared `version.h` (PI-8-3.4d).
+
+### Removed
+- **Single `rule_counters` PERCPU_ARRAY pin** — `${PIN_DIR}/<iface>/rule_counters` no longer exists; replaced by `rule_counters_outer` + `rule_counters_a` + `rule_counters_b` pins. The `XDPMF_MAP_RULE_COUNTERS_NAME` constant is removed from `src/common/mac_filter.h`.
+
+### Notes
+- **PI-3.4b-2 counter-monotonicity-across-apply EXPLICITLY PRESERVED**. The atomic-swap shape change is **structural-only** per HG-3.4d-5 (LOAD-BEARING). Counters survive `apply -f` exactly as in §5.31 PI-3.4b-2; the mechanism is the NEW apply-step copy-forward (D-3.4d-3). Reset zeroing is ONLY available via the new `reset-counters` CLI. The structural shape enables a hypothetical future "reset-on-apply" semantic (skip the copy step → flip alone resets the now-active view) — NEW FENCE.
+- `reset-counters` zeros BOTH inner_a + inner_b at each chosen slot (D-3.4d-RESET-BOTH — semantically idempotent vs subsequent active_idx flips). Operator mental model: "reset is sticky regardless of apply-induced flip".
+- Helper duplication over extraction (anti-misdiagnosis guard #9): `reset_counters.cpp` duplicates `escape_audit_value` + sudo_user-env-lookup pattern from `bypass.cpp` rather than extracting into a shared `audit_helpers.hpp`. Rule-of-three extraction is a separate concern (NEW FENCE — MVP-3.4e+).
+
+### Preserved invariants
+- **PI-7-3.4d-hpp**: `src/lib/loader.hpp` ZERO diff — **10th consecutive cycle** (strongest PI-7 streak in project history). `src/lib/config.hpp` ZERO diff — **5th consecutive cycle**. No public symbol added; reset-counters CLI is self-contained per D-3.4d-4 (direct `bpf_obj_get` + `bpf_map_update_elem` from `src/cli/reset_counters.cpp`).
+- **PI-7-3.4d-cpp**: `src/lib/loader.cpp` SCOPED EDIT — diffs confined to kManagedMaps[] 15 → 17, NEW `copy_rule_counters_forward` anon-namespace helper, 2 call-site insertions in `apply_request` (reattach + fresh-attach).
+- **PI-10-3.4d**: `src/common/mac_filter.h` ADDITIVE-modulo-deletion (3 added + 1 removed); all other constants/structs/enums byte-equivalent. `XDPMF_RULE_COUNTERS_MAX` alias UNCHANGED (operator-observable index space per §5.31 Q5 R1).
+- **PI-3.4b-2 PRESERVE** (NEW LOAD-BEARING canary this slice): counters survive `apply -f`; mechanism is the apply-step copy-forward (D-3.4d-3). T_RULE_COUNTERS_ATOMIC_SWAP is the operator-grade verification surface.
+- **PI-3.4d-1 (NEW)**: reset-counters CLI behavioral contract — exit 0 on attached iface + audit-log + zero-writes; exit 1 on parse error / out-of-range / iface-not-attached.
+- **PI-3.4d-2 (NEW, structural)**: `rule_counters` axis in parallel-outer atomic-swap shape; `${PIN_DIR}/<iface>/rule_counters_outer` + `rule_counters_a` + `rule_counters_b` pinned.
+- **PI-3.4d-EXPORTER (carve-out)**: exporter adapts to the new pin shape — opens active_idx, picks `rule_counters_<active>`. PI-31-3.4d (exporter READ-ONLY) PRESERVED.
+- **PI-3.5-4 AMENDED**: `kEventNames` count 33 → 35 per HG-3.4d-3 + HG-3.4d-6 NEW events. T_LOG_EVENT_CATALOG_STABILITY reference updates 33 → 35.
+
+### Out-of-scope fences (per §5.35)
+- `reset-counters --all-ifaces` / batch across ifaces — NEW FENCE. Per-iface this slice.
+- `reset-counters --dry-run` — NEW FENCE. Always commits.
+- `reset-counters` without `--iface` (auto-discovery) — NEW FENCE. `--iface` required.
+- `reset-counters --reason "<text>"` — NEW FENCE.
+- `dump-counters` complementary read-side — NEW FENCE (operators already have `bpftool map dump` + Prometheus `/metrics`).
+- Counter zero-on-detach — NEW FENCE (detach preserves pin per D-3.1-4).
+- "Reset-on-apply" semantic flip — atomic-swap shape enables it (skip the copy-forward step), but no operator demand. NEW FENCE.
+- `stats` PERCPU_ARRAY atomic-swap (6th axis) — global counters; not motivated. NEW FENCE.
+- `action_table` parallel-promotion — unchanged from §5.34 carry-forward.
+- Action types beyond `{PASS, DROP}` — carry-forward.
+- Drop-precedence-over-pass / later-rule-wins — carry-forward.
+- Rule-of-three helper extraction (`audit_helpers.hpp` for escape_audit_value + sudo_user lookup) — NEW FENCE; future cycle when 3rd subcommand needs it.
+
+### Build pace
+| Cycle | Slice | Anchor | Source delta |
+|---|---|---|---|
+| MVP-3.4d | reset-counters CLI + rule_counters atomic-swap promotion (structural) | §5.35 | ~9 EDITED + 2 NEW source files (mac_filter.bpf.c map block + bump_rule sig; mac_filter.h constants 3+/1−; loader.cpp kManagedMaps + copy_rule_counters_forward + 2 call-sites; logger.hpp catalog 33→35; cli.cpp + cli.hpp + main.cpp dispatch; reset_counters.{hpp,cpp} NEW; src/cli/CMakeLists.txt entry; rule_counters_reader.cpp exporter adapt; CMakeLists.txt version bump; CHANGELOG.md entry); tests: 3 NEW + 1 conditional NEW + 2 EDITED |
+
 ## [0.9.0] — 2026-05-27
 
 MVP-3.4b cycle 2 — `rules` map atomic-swap promotion + datapath dispatch + schema cycle 2 → 3 shift (brownfield amendment §5.34). Closes the **datapath-consultation half** of the per-rule action machinery deferred from MVP-3.4 Open Q #13 Option 2 + MVP-3.4b cycle 1. The two coupled deliverables — (1) `rules` map promotion to parallel `rules_outer` ARRAY_OF_MAPS[2] of `rules_a` / `rules_b` inner ARRAYs; (2) `mac_filter_prog` consultation of the rules → action_table dispatch chain — ship together because carving them apart creates half-applied state. Operator-observable behavioural change: **drop rules are now operative explicitly** — a `match.mac: X` + `action: drop` rule drops X via the action_table dispatch path rather than via the indirect default-deny fallthrough.

@@ -11,8 +11,9 @@
 #include <string_view>
 #include <variant>
 
-#include "apply.hpp"        // ApplyConfig — §5.26 Q4 G1
-#include "bypass.hpp"       // BypassConfig — §5.29 HG-3.4-2 (MVP-3.4)
+#include "apply.hpp"            // ApplyConfig — §5.26 Q4 G1
+#include "bypass.hpp"           // BypassConfig — §5.29 HG-3.4-2 (MVP-3.4)
+#include "reset_counters.hpp"   // ResetCountersConfig — §5.35 HG-3.4d-1..6 (MVP-3.4d)
 #include "common/mac_filter.h"
 #include "lib/loader.hpp"  // AttachConfig / DetachConfig (moved here in MVP-1.1C §5.21 A1; §5.26 Q1 R1 relocated to lib/)
 
@@ -21,7 +22,9 @@ namespace xdpmf {
 struct HelpRequest    {};
 struct VersionRequest {};
 
-using ParsedCommand = std::variant<AttachConfig, DetachConfig, ApplyConfig, BypassConfig, HelpRequest, VersionRequest>;
+using ParsedCommand = std::variant<AttachConfig, DetachConfig, ApplyConfig,
+                                   BypassConfig, ResetCountersConfig,
+                                   HelpRequest, VersionRequest>;
 
 class CliError : public std::runtime_error {
 public:

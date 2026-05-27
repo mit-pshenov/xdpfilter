@@ -210,20 +210,43 @@ struct {
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } action_table SEC(".maps");
 
-/* §5.31 (MVP-3.4b) PI-3.4b-1: per-rule packet counter PERCPU_ARRAY[64] of
- * __u64. PERCPU semantics — no cross-CPU race, no atomic. max_entries =
- * XDPMF_RULE_COUNTERS_MAX = XDPMF_ALLOWLIST_MAX = 64 — alias used here so
- * the operator-observable index space (operator's YAML `id:` per Q5 R1)
- * and the BPF ARRAY index space share a single literal. Pinned per-iface
- * via LIBBPF_PIN_BY_NAME at ${PIN_DIR}/<iface>/rule_counters; survives
- * apply -f via kManagedMaps[] reuse_fd discipline (D-3.4b-2, PI-3.4b-2). */
-struct {
+/* §5.35 (MVP-3.4d) HG-3.4d-4 + D-3.4d-1: rule_counters axis promoted to
+ * parallel ARRAY_OF_MAPS — DIRECT MIRROR of §5.34 rules-axis shape but with
+ * PERCPU_ARRAY inners (vs ARRAY inners for rules). Template + 2 pinned
+ * inner PERCPU_ARRAY instances + outer ARRAY_OF_MAPS. Single active_idx u32
+ * store atomically commits MAC HASH inner + CIDR LPM_TRIE inner + defaults
+ * + rules inner + rule_counters inner — all FIVE axes share the same
+ * active_idx (§5.27 Q1 AS1 mechanism extended to 5 axes per D-3.4d-7).
+ *
+ * STRUCTURAL-ONLY this slice (HG-3.4d-5): PI-3.4b-2 counter-monotonicity-
+ * across-apply PRESERVED via apply-step per-CPU copy-forward from old-active
+ * inner to inactive inner BEFORE active_idx flip (D-3.4d-3 in loader.cpp's
+ * apply_request). NO semantic change to operator-observed counter values.
+ *
+ * The two instances rule_counters_a / rule_counters_b are pinned MANUALLY
+ * via bpf_map__pin() in loader.cpp's kManagedMaps[] per-iface pin loop
+ * (parallel to allowlist_a/_b, cidr_allowlist_a/_b, rules_a/_b per §5.34
+ * inner-as-AOM-target convention — LIBBPF_PIN_BY_NAME forbidden on
+ * AOM-inner template struct definitions). */
+struct rule_counters_inner {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __type(key, __u32);
     __type(value, __u64);
     __uint(max_entries, XDPMF_RULE_COUNTERS_MAX);
+};
+
+struct rule_counters_inner rule_counters_a SEC(".maps");   /* pinned via kManagedMaps[] at ${PIN_DIR}/<iface>/rule_counters_a */
+struct rule_counters_inner rule_counters_b SEC(".maps");   /* pinned via kManagedMaps[] at ${PIN_DIR}/<iface>/rule_counters_b */
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
+    __uint(max_entries, XDPMF_RULESET_COUNT);
+    __uint(key_size, sizeof(__u32));
     __uint(pinning, LIBBPF_PIN_BY_NAME);
-} rule_counters SEC(".maps");
+    __array(values, struct rule_counters_inner);
+} rule_counters_outer SEC(".maps") = {
+    .values = { &rule_counters_a, &rule_counters_b },
+};
 
 /* PERCPU bump: pointer returned is to this CPU's slot only. No atomic. */
 static __always_inline void bump_stat(__u32 idx)
@@ -240,13 +263,26 @@ static __always_inline void bump_stat(__u32 idx)
  * the SAME helper). Verifier-required bounds check on `rule_id` is folded
  * inline; an out-of-range value is silently dropped (defense-in-depth —
  * loader-side validation at config.cpp:204 already ensures
- * `rule.id < XDPMF_ALLOWLIST_MAX`). */
-static __always_inline void bump_rule(__u32 rule_id)
+ * `rule.id < XDPMF_ALLOWLIST_MAX`).
+ *
+ * §5.35 (MVP-3.4d) D-3.4d-2: signature extends with `active` parameter so
+ * the caller can pass the SAME active_idx snapshot used for MAC / CIDR /
+ * rules lookups (5-axis snapshot discipline per §5.27 Q1 AS1 extended).
+ * Avoids a re-read of active_idx inside the helper, which would be a race-
+ * window split across map families. */
+static __always_inline void bump_rule(__u32 rule_id, __u32 active)
 {
     if (rule_id >= XDPMF_RULE_COUNTERS_MAX) {
         return;
     }
-    __u64 *v = bpf_map_lookup_elem(&rule_counters, &rule_id);
+    if (active >= XDPMF_RULESET_COUNT) {
+        return;
+    }
+    void *inner = bpf_map_lookup_elem(&rule_counters_outer, &active);
+    if (!inner) {
+        return;
+    }
+    __u64 *v = bpf_map_lookup_elem(inner, &rule_id);
     if (v) {
         *v += 1;
     }
@@ -305,7 +341,7 @@ int mac_filter_prog(struct xdp_md *ctx)
      * we fall through to the existing STAT_PASS branch. */
     struct allow_entry *entry = bpf_map_lookup_elem(inner, &key);
     if (entry) {
-        bump_rule(entry->rule_id);
+        bump_rule(entry->rule_id, active);
         __u32 rid = entry->rule_id;
         void *rules_inner_map = bpf_map_lookup_elem(&rules_outer, &active);
         if (rules_inner_map) {
@@ -356,7 +392,7 @@ int mac_filter_prog(struct xdp_md *ctx)
          * extended to the 4th axis. */
         struct allow_entry *cidr_hit = bpf_map_lookup_elem(cidr_inner, &cidr_key);
         if (cidr_hit) {
-            bump_rule(cidr_hit->rule_id);
+            bump_rule(cidr_hit->rule_id, active);
             __u32 c_rid = cidr_hit->rule_id;
             void *c_rules_inner_map = bpf_map_lookup_elem(&rules_outer, &active);
             if (c_rules_inner_map) {

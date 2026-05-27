@@ -153,14 +153,20 @@ struct allow_entry {
     unsigned int  rule_id;     /* offsets 4-7, size 4: rule_id in [0, XDPMF_ALLOWLIST_MAX-1] */
 };                             /* total: 8 bytes */
 
-/* §5.31 (MVP-3.4b): per-rule packet counter map.
+/* §5.31 (MVP-3.4b) + §5.35 (MVP-3.4d): per-rule packet counter map(s).
  *
- * PERCPU_ARRAY[XDPMF_ALLOWLIST_MAX] of __u64. Pinned at
- * ${PIN_DIR}/<iface>/rule_counters. Bumped by `bump_rule(rule_id)` at the
- * MAC HASH-hit and CIDR LPM_TRIE-hit branches in mac_filter_prog. Read by
- * xdpmf-exporter (rule_counters_reader.cpp) for the
+ * §5.35 HG-3.4d-4 + D-3.4d-1: rule_counters axis promoted to parallel
+ * ARRAY_OF_MAPS — DIRECT MIRROR of §5.34 rules-axis shape (only inner-map
+ * type differs: PERCPU_ARRAY vs ARRAY). Single active_idx commits both
+ * axes (and the other three) atomically. Inner PERCPU_ARRAYs each carry
+ * XDPMF_RULE_COUNTERS_MAX (= 64) __u64 slots; bumped by `bump_rule(rule_id,
+ * active)` at the MAC HASH-hit and CIDR LPM_TRIE-hit branches in
+ * mac_filter_prog. Read by xdpmf-exporter (rule_counters_reader.cpp) via
+ * the active inner pin for the
  * `xdpfilter_rule_match_total{iface, rule_id, action}` Prometheus series. */
-#define XDPMF_MAP_RULE_COUNTERS_NAME "rule_counters"
+#define XDPMF_MAP_RULE_COUNTERS_OUTER_NAME    "rule_counters_outer"  /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] of PERCPU_ARRAY fds */
+#define XDPMF_MAP_RULE_COUNTERS_INNER_A_NAME  "rule_counters_a"      /* inner slot 0, PERCPU_ARRAY of __u64 */
+#define XDPMF_MAP_RULE_COUNTERS_INNER_B_NAME  "rule_counters_b"      /* inner slot 1, PERCPU_ARRAY of __u64 */
 /* §5.31 (MVP-3.4b): alias for XDPMF_ALLOWLIST_MAX = 64. Documents that the
  * rule_counters[] index space and the operator's YAML `id:` namespace are
  * IDENTICAL (Q5 R1 + D-3.4b-9 + PI-3.4b-7). */

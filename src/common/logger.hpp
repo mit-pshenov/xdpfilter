@@ -76,8 +76,13 @@ struct Field {
  * with the §5.29 WARN-emission removal at loader.cpp:1557-1574 (the contract
  * it announced — "rules+action_table populated NOT consulted by datapath" —
  * is the operative thing §5.34 retires). Size = 32 emission-site-derived
- * events + 1 logger self-emit (`logger.warn.unknown_log_format`) = 33. */
-inline constexpr std::array<std::string_view, 33> kEventNames = {
+ * events + 1 logger self-emit (`logger.warn.unknown_log_format`) = 33.
+ *
+ * §5.35 (MVP-3.4d): count 33 → 35. Two NEW reset-counters events added
+ * (`reset_counters.refused.no_pin` + `reset_counters.activated`) per
+ * HG-3.4d-3 (iface-attached precondition fail) + HG-3.4d-6 (audit-log at
+ * action time, mirrors bypass.activated shape). */
+inline constexpr std::array<std::string_view, 35> kEventNames = {
     /* loader (xdpmacfilter) — 18 events (was 19 pre-§5.34) */
     "cli.usage_error",                       /* src/cli/main.cpp:100 */
     "cli.usage_text",                        /* src/cli/main.cpp:101 (multi-line usage dump) */
@@ -91,6 +96,8 @@ inline constexpr std::array<std::string_view, 33> kEventNames = {
     "bypass.refused.requires_unsafe",        /* src/cli/bypass.cpp:139 (non-tty without --unsafe) */
     "bypass.cancelled",                      /* src/cli/bypass.cpp:149 (operator typed 'n') */
     "bypass.activated",                      /* src/cli/bypass.cpp:174 — HK-4 audit log */
+    "reset_counters.refused.no_pin",         /* src/cli/reset_counters.cpp — §5.35 HG-3.4d-3 (iface not attached) */
+    "reset_counters.activated",              /* src/cli/reset_counters.cpp — §5.35 HG-3.4d-6 audit log */
     "sidecar.warn.root_symlink",             /* src/lib/sidecar.cpp:259 */
     "sidecar.warn.root_not_dir",             /* src/lib/sidecar.cpp:266 */
     "sidecar.warn.lstat_failed",             /* src/lib/sidecar.cpp:273 */
@@ -116,7 +123,7 @@ inline constexpr std::array<std::string_view, 33> kEventNames = {
     "exporter.scrape.warn.rule_counters_open_failed", /* src/exporter/rule_counters_reader.cpp:137 */
 };
 
-inline constexpr std::size_t kEventCount = kEventNames.size();   // = 33 (§5.34 D-3.4b-c2-4: 34 → 33; rules_skeleton_not_wired retired)
+inline constexpr std::size_t kEventCount = kEventNames.size();   // = 35 (§5.35: 33 → 35; +2 reset_counters events per HG-3.4d-3 + HG-3.4d-6)
 
 /*
  * emit() — write ONE log event to stderr.

@@ -870,3 +870,43 @@ set_tests_properties(T_LOG_EVENT_CATALOG_STABILITY PROPERTIES
     ENVIRONMENT "${TEST_ENV}"
     TIMEOUT 30
 )
+
+# ─────────────────────────────────────────────────────────────────────────
+# MVP-3.4d additions (§5.35 / §6.NN–§6.NN+3 — reset-counters CLI
+# subcommand + rule_counters axis atomic-swap promotion).
+#
+# T_CLI_RESET_COUNTERS          (§6.NN):   `xdpmacfilter reset-counters
+#   --iface X` (no --rule-id) zeros ALL 64 rule_counters slots; subsequent
+#   bumps work from a zero baseline. HG-3.4d-1/HG-3.4d-2/HG-3.4d-6.
+# T_CLI_RESET_COUNTERS_RULE_ID  (§6.NN+1): selective `--rule-id N` zeros
+#   only slot N; out-of-range (64) + non-integer (foo) parse-time
+#   rejections per Q1.A. PI-3.4d-1.
+# T_CLI_RESET_COUNTERS_NO_IFACE (§6.NN+2): iface-not-attached precondition
+#   yields exit 1 + 'no rule_counters pin' stderr substring (HG-3.4d-3);
+#   negation control with attached iface returns exit 0.
+# T_RULE_COUNTERS_ATOMIC_SWAP   (§6.NN+3): LOAD-BEARING canary for
+#   PI-3.4b-2 PRESERVE-across-apply via D-3.4d-3 apply-step copy-forward.
+#   CONDITIONAL — SKIP-77 if D-3.4d-FALLBACK active (atomic-swap deferred;
+#   rule_counters_outer pin absent).
+#
+# All 4 tests touch veth + bpffs pins → RESOURCE_LOCK xdp_fixture per
+# guard #12. Sit alongside the 6 §5.31 + 3 §5.34 rule_counters/rules-axis
+# tests for serialization.
+foreach(T IN ITEMS
+    T_CLI_RESET_COUNTERS
+    T_CLI_RESET_COUNTERS_RULE_ID
+    T_CLI_RESET_COUNTERS_NO_IFACE
+    T_RULE_COUNTERS_ATOMIC_SWAP
+)
+    add_test(
+        NAME ${T}
+        COMMAND bash ${TEST_DIR}/${T}.sh
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    set_tests_properties(${T} PROPERTIES
+        ENVIRONMENT "${TEST_ENV}"
+        RESOURCE_LOCK xdp_fixture
+        TIMEOUT 60
+        SKIP_RETURN_CODE 77
+    )
+endforeach()

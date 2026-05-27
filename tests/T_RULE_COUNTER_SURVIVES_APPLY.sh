@@ -63,10 +63,24 @@ sudo -n rm -rf "${PIN_DIR}" 2>/dev/null || true
 
 setup_veth
 
+# §5.35 (MVP-3.4d) fixture-ripple: single `rule_counters` PERCPU_ARRAY
+# pin RETIRED; replaced by `rule_counters_<a|b>` inners under
+# `rule_counters_outer` ARRAY_OF_MAPS. Reads must follow active_idx.
+# This test specifically validates PI-3.4b-2 PRESERVE-across-apply held
+# via D-3.4d-3 apply-step copy-forward — so reading the CURRENT active
+# inner after each apply observes the preserved values.
+rule_counters_active_pin() {
+    local active; active=$(read_active_idx)
+    case "${active}" in
+        0) echo "${PIN_DIR}/rule_counters_a" ;;
+        1) echo "${PIN_DIR}/rule_counters_b" ;;
+        *) echo "${PIN_DIR}/rule_counters_a" ;;
+    esac
+}
 read_rc_slot() {
-    local id="$1"
-    sudo -n python3 "${TEST_DIR}/lib/read_rule_counters.py" \
-        "${PIN_DIR}/rule_counters" "${id}"
+    local id="$1" pin
+    pin=$(rule_counters_active_pin)
+    sudo -n python3 "${TEST_DIR}/lib/read_rule_counters.py" "${pin}" "${id}"
 }
 
 read_active_idx() {
@@ -93,8 +107,8 @@ if [[ "${rc}" -ne 0 ]]; then
     echo "FAIL[1]: initial apply exit ${rc} (expected 0)" >&2
     fail=1
 fi
-if ! sudo -n test -e "${PIN_DIR}/rule_counters"; then
-    echo "FAIL[1.pin]: ${PIN_DIR}/rule_counters pin missing — cannot proceed" >&2
+if ! sudo -n test -e "${PIN_DIR}/rule_counters_a"; then
+    echo "FAIL[1.pin]: ${PIN_DIR}/rule_counters_a pin missing — cannot proceed" >&2
     exit 1
 fi
 

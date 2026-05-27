@@ -122,13 +122,17 @@ constexpr std::string_view kBpfObjectPathEnv{"XDPMF_BPF_OBJECT_PATH"};
  * The table below replaces the three literals. Member-pointer
  * representation (Q4 T1; D-3.4.5-3) catches a libbpf-skel rename at
  * BUILD time (compiler error) rather than at runtime (cryptic libbpf
- * NULL deref or pin-already-set EEXIST). 15 entries post-§5.34: 14 "real"
+ * NULL deref or pin-already-set EEXIST). 17 entries post-§5.35: 16 "real"
  * maps (walked by all three callsites; pin/reuse loops skip none) + 1
  * legacy alias (`allowlist`, kept ONLY in the clear-list because its actual
  * per-iface pin uses the special-pin path at the legacy alias location).
  * Pre-§5.34: 13 entries (12 real + 1 alias). §5.34 D-3.4b-c2-1 net +2:
  * REMOVE the SHARED `rules` entry; ADD three (`rules_a`, `rules_b`,
- * `rules_outer`) — DIRECT MIRROR of the §5.27 CIDR axis triple. */
+ * `rules_outer`) — DIRECT MIRROR of the §5.27 CIDR axis triple. §5.35
+ * D-3.4d-1 net +2: REMOVE the single `rule_counters` PERCPU entry; ADD
+ * three (`rule_counters_a`, `rule_counters_b`, `rule_counters_outer`) —
+ * DIRECT MIRROR of the §5.34 rules-axis triple (only inner type differs:
+ * PERCPU_ARRAY vs ARRAY). */
 using SkelMapsT = std::remove_reference_t<decltype(std::declval<mac_filter_bpf&>().maps)>;
 
 struct ManagedMapEntry {
@@ -167,10 +171,20 @@ constexpr ManagedMapEntry kManagedMaps[] = {
     { &SkelMapsT::rules_b,          XDPMF_MAP_RULES_INNER_B_NAME,       false },
     { &SkelMapsT::rules_outer,      XDPMF_MAP_RULES_OUTER_NAME,         false },
     { &SkelMapsT::action_table,     XDPMF_MAP_ACTION_TABLE_NAME,        false },
-    /* §5.31 (MVP-3.4b) D-3.4b-13: `rule_counters` PERCPU_ARRAY. The
-     * LIBBPF_PIN_BY_NAME + bpf_map__reuse_fd discipline preserves PERCPU
-     * values across apply per HG-3.4b-2 (Prometheus counter-monotonicity). */
-    { &SkelMapsT::rule_counters,    XDPMF_MAP_RULE_COUNTERS_NAME,       false },
+    /* §5.35 (MVP-3.4d) D-3.4d-1: REMOVE prior single `rule_counters`
+     * PERCPU_ARRAY entry (the single-PERCPU pin retired per HG-3.4d-4);
+     * ADD three new entries `rule_counters_a` / `rule_counters_b` /
+     * `rule_counters_outer` mirroring the §5.34 rules-axis triple
+     * (only inner type differs: PERCPU_ARRAY vs ARRAY). LIBBPF_PIN_BY_NAME
+     * + bpf_map__reuse_fd discipline preserves per-CPU counter values
+     * across apply per HG-3.4b-2 (Prometheus counter-monotonicity);
+     * combined with D-3.4d-3 copy_rule_counters_forward, PI-3.4b-2
+     * PRESERVE-across-apply held. All three call-site loops (clear, pin,
+     * reuse) walk this table — HK-9 dividend collected for the 4th
+     * consecutive cycle. */
+    { &SkelMapsT::rule_counters_a,     XDPMF_MAP_RULE_COUNTERS_INNER_A_NAME,  false },
+    { &SkelMapsT::rule_counters_b,     XDPMF_MAP_RULE_COUNTERS_INNER_B_NAME,  false },
+    { &SkelMapsT::rule_counters_outer, XDPMF_MAP_RULE_COUNTERS_OUTER_NAME,    false },
     { &SkelMapsT::allowlist,        XDPMF_MAP_ALLOWLIST_NAME,           true  },
 };
 
@@ -1275,6 +1289,62 @@ void populate_rules_inner_slot(int rules_inner_fd, const std::vector<Rule>& rule
     }
 }
 
+/* §5.35 (MVP-3.4d) D-3.4d-3: per-rule-id per-CPU copy-forward from old-active
+ * rule_counters inner to inactive rule_counters inner. Called from
+ * apply_request BEFORE the single-u32 active_idx flip; ensures the new-active
+ * inner (post-flip) carries the same per-CPU counter state as the old-active
+ * inner. PI-3.4b-2 PRESERVE-across-apply held by this copy.
+ *
+ * Loop bounded by XDPMF_RULE_COUNTERS_MAX (= 64), NOT by NCPUS — the PERCPU
+ * map ABI ships NCPUS values per lookup/update syscall. Buffer is sized via
+ * libbpf_num_possible_cpus() (matches exporter's existing precedent at
+ * src/exporter/stats_reader.cpp:147 + the new reset_counters.cpp:open path).
+ *
+ * On lookup-fail (rare ENOENT for never-bumped slot): the kernel returns
+ * zero-array for never-bumped PERCPU slots in practice, but we
+ * defensively zero-init the buffer once outside the loop to guard any
+ * errno path — then per-iter lookup overwrites; an explicit -rc != 0
+ * resets the buffer to all-zero so the inactive slot is zeroed (not
+ * carrying stale state from a prior iteration).
+ *
+ * On update-fail: propagate as std::system_error (LoaderError::LoadFailed
+ * via classify) — apply fails and the caller's existing rollback runs (no
+ * active_idx flip). Should never fail at apply time (writes to a fresh
+ * inactive inner are succeed-or-OOM).
+ *
+ * On FIRST apply (initial attach, no prior active): caller is expected to
+ * pass the SAME fd for both (self-copy = no-op). Uniform code path per
+ * architect choice (D-3.4d-3) — no first-apply special case. */
+void copy_rule_counters_forward(int old_active_inner_fd, int inactive_inner_fd)
+{
+    const int num_cpus = ::libbpf_num_possible_cpus();
+    if (num_cpus <= 0) {
+        throw_loader(LoaderError::LoadFailed,
+                     std::format("libbpf_num_possible_cpus returned {} "
+                                 "(copy_rule_counters_forward)", num_cpus));
+    }
+    std::vector<std::uint64_t> buf(static_cast<std::size_t>(num_cpus), 0u);
+    for (std::uint32_t k = 0;
+         k < static_cast<std::uint32_t>(XDPMF_RULE_COUNTERS_MAX);
+         ++k) {
+        const int lk = bpf_map_lookup_elem(old_active_inner_fd, &k, buf.data());
+        if (lk < 0) {
+            /* Never-bumped slot returns -ENOENT in some kernels; treat as
+             * zero (re-zero the buffer to be safe — prior iteration may
+             * have left non-zero values that would otherwise leak forward). */
+            std::fill(buf.begin(), buf.end(), 0u);
+        }
+        const int up = bpf_map_update_elem(inactive_inner_fd, &k,
+                                             buf.data(), BPF_ANY);
+        if (up < 0) {
+            throw_loader(classify(up, LoaderError::LoadFailed),
+                         std::format("bpf_map_update_elem(rule_counters_inactive[{}]"
+                                     " copy-forward): {}",
+                                     k, std::strerror(-up)));
+        }
+    }
+}
+
 /* §5.29 (MVP-3.4): pre-populate action_table with the two reserved actions
  * (PASS=0, DROP=1) per §5.29 apply step 8.5. Idempotent (write-same-value).
  * The action_id field stored in `rules` is an index into THIS array. */
@@ -1800,6 +1870,29 @@ std::uint32_t apply_request(const ApplyRequest& req)
             populate_action_table(at_fd);
         }
 
+        // §5.35 (MVP-3.4d) D-3.4d-3: copy-forward per-CPU rule_counters
+        // values from the OLD-active inner to the INACTIVE inner BEFORE
+        // the active_idx flip. PI-3.4b-2 PRESERVE-across-apply held: the
+        // post-flip new-active inner carries the operator-observable
+        // counter state from the pre-apply state. Combined with
+        // D-3.4d-RESET-BOTH (reset-counters zeros BOTH inners), the reset-
+        // counters → apply sequence keeps the post-apply inner at 0.
+        {
+            bpf_map* old_active_rc_inner = (cur == 0)
+                                                ? skel->maps.rule_counters_a
+                                                : skel->maps.rule_counters_b;
+            bpf_map* inactive_rc_inner   = (inactive == 0)
+                                                ? skel->maps.rule_counters_a
+                                                : skel->maps.rule_counters_b;
+            const int old_rc_fd = bpf_map__fd(old_active_rc_inner);
+            const int inactive_rc_fd = bpf_map__fd(inactive_rc_inner);
+            if (old_rc_fd < 0 || inactive_rc_fd < 0) {
+                throw_loader(LoaderError::LoadFailed,
+                             "rule_counters inner fd unavailable (reattach)");
+            }
+            copy_rule_counters_forward(old_rc_fd, inactive_rc_fd);
+        }
+
         // Atomic prog swap. The OLD prog has been reading from these same
         // (reused) maps; after update_program, the NEW prog reads from them.
         bpf_link* link = bpf_link__open(link_pin_path_for(req.iface).c_str());
@@ -1931,6 +2024,21 @@ std::uint32_t apply_request(const ApplyRequest& req)
             throw_loader(LoaderError::LoadFailed, "action_table map fd unavailable");
         }
         populate_action_table(at_fd);
+    }
+
+    // §5.35 (MVP-3.4d) D-3.4d-3: fresh-attach uniform code path — copy-
+    // forward from rule_counters_a to itself (self-copy, semantically no-op
+    // since both inners are freshly zero-initialized at this point). Calling
+    // the helper here keeps the apply-step structure parallel between the
+    // reattach branch and fresh-attach branch (architect choice: uniform
+    // code path; defense-in-depth — D-3.4d-3 ALWAYS-run discipline).
+    {
+        const int rc_a_fd = bpf_map__fd(skel->maps.rule_counters_a);
+        if (rc_a_fd < 0) {
+            throw_loader(LoaderError::LoadFailed,
+                         "rule_counters_a fd unavailable (fresh attach)");
+        }
+        copy_rule_counters_forward(rc_a_fd, rc_a_fd);
     }
 
     // First attach: create+pin the XDP link with the operator-selected mode.

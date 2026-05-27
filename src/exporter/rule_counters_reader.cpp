@@ -1,12 +1,19 @@
 /*
- * rule_counters_reader.cpp — PERCPU sum reader for `rule_counters` map.
+ * rule_counters_reader.cpp — PERCPU sum reader for `rule_counters_<active>` map.
  *
- * Walks ${bpffs_root}/, for each per-iface directory that contains a
- * `rule_counters` pin: opens it via bpf_obj_get() (RO fd), uses
- * libbpf_num_possible_cpus() + bpf_map_lookup_elem() to sum each of the
- * XDPMF_RULE_COUNTERS_MAX (= 64) slots across CPUs.
+ * Walks ${bpffs_root}/, for each per-iface directory that contains the new
+ * §5.35 atomic-swap rule_counters pins: reads `active_idx[0]` to pick which
+ * inner is live ({0,1} → suffix `_a`/`_b`), opens that inner via
+ * bpf_obj_get() (RO fd), uses libbpf_num_possible_cpus() +
+ * bpf_map_lookup_elem() to sum each of the XDPMF_RULE_COUNTERS_MAX (= 64)
+ * slots across CPUs.
  *
- * PI-31-3.4b: the only BPF syscalls touched are bpf_obj_get + PERCPU
+ * §5.35 PI-3.4d-EXPORTER carve-out: the single `${PIN_DIR}/<iface>/rule_counters`
+ * pin no longer exists (replaced by `rule_counters_a`/`_b`/`_outer`). Exporter
+ * adapts to the active_idx-indirection here; existing per-CPU read + per-rule-id
+ * loop UNCHANGED.
+ *
+ * PI-31-3.4b PRESERVED: the only BPF syscalls touched are bpf_obj_get + PERCPU
  * lookup — NO bpf_map_update_elem / delete / pin / link / prog_load.
  *
  * Failure mode: per-iface errors WARN-and-continue; the daemon survives
@@ -131,13 +138,42 @@ read_rule_counters(std::string_view bpffs_root) noexcept
 
     out.reserve(ifaces.size());
     for (const std::string& iface : ifaces) {
-        std::string pin = std::string{bpffs_root};
-        if (!pin.empty() && pin.back() != '/') {
-            pin.push_back('/');
+        /* §5.35 (MVP-3.4d) PI-3.4d-EXPORTER: read active_idx, then open the
+         * matching `rule_counters_<active>` inner pin (suffix `_a` or `_b`).
+         * On any failure at the active_idx read step OR on out-of-range
+         * active value, fall through to the existing per-iface WARN path
+         * (PI-32 graceful-empty discipline). */
+        std::string iface_dir = std::string{bpffs_root};
+        if (!iface_dir.empty() && iface_dir.back() != '/') {
+            iface_dir.push_back('/');
         }
-        pin += iface;
-        pin += "/";
-        pin += XDPMF_MAP_RULE_COUNTERS_NAME;
+        iface_dir += iface;
+        iface_dir += "/";
+
+        const std::string active_idx_pin = iface_dir + XDPMF_MAP_ACTIVE_IDX_NAME;
+        std::uint32_t active = 0;
+        const int active_fd = ::bpf_obj_get(active_idx_pin.c_str());
+        if (active_fd >= 0) {
+            const std::uint32_t zero_key = 0;
+            std::uint32_t cur = 0;
+            const int lk = ::bpf_map_lookup_elem(active_fd, &zero_key, &cur);
+            if (lk == 0 && cur < XDPMF_RULESET_COUNT) {
+                active = cur;
+            }
+            /* lookup_elem failure (e.g. transient ENOENT) → fall through with
+             * active=0; the matching inner pin open below will either succeed
+             * (slot 0 is also a valid pin) or fail with WARN (existing path). */
+            (void)::close(active_fd);
+        }
+        /* If active_idx pin is absent (ENOENT — half-attached or pre-§5.35
+         * iface), we still try `rule_counters_a` as the canary inner. The
+         * inner-open WARN path below covers both legitimate-missing and
+         * partial-attach cases without a new event-name. */
+
+        std::string pin = iface_dir;
+        pin += (active == 0)
+                ? XDPMF_MAP_RULE_COUNTERS_INNER_A_NAME
+                : XDPMF_MAP_RULE_COUNTERS_INNER_B_NAME;
 
         const int fd = ::bpf_obj_get(pin.c_str());
         if (fd < 0) {
@@ -152,6 +188,10 @@ read_rule_counters(std::string_view bpffs_root) noexcept
             const std::string msg = std::format(
                 "xdpmf-exporter: WARN failed to open rule_counters pin for {}: {}\n",
                 iface, errno_str);
+            /* §5.35: `pin` now points at the active inner (rule_counters_<a|b>)
+             * rather than the retired single `rule_counters` pin; the WARN-
+             * text token "rule_counters" stays as the operator-grep-friendly
+             * substring for parity with prior cycles. */
             const xdpmf::logger::Field fs[] = {
                 xdpmf::logger::Field{"errno_str", std::string_view{errno_str}},
                 xdpmf::logger::Field{"errno",     static_cast<std::int64_t>(saved_errno)},

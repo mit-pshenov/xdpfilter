@@ -18,10 +18,10 @@
 #   (d) Body contains '^# TYPE xdpfilter_packets_total counter$' line.
 #   (e) Body contains ≥1 line matching the sample-line ERE
 #       '^xdpfilter_packets_total\{iface="[^"]+",verdict="(pass|drop_deny|drop_malformed|pass_cidr)"\} [0-9]+$'.
-#   (f) PI-33 smoke: `xdpmf-exporter --version` reports `xdpmf-exporter 0.9.0`
-#       (PI-8-3.4b-c2 version bump per §5.34 — extends PI-33 to 0.9.0;
-#       literal updated via the §5.34 PI-6-3.4b-c2 EDIT carve-out;
-#       precedent: §5.31 EDIT-2 + §5.32 EDIT-2).
+#   (f) PI-33 smoke: `xdpmf-exporter --version` reports `xdpmf-exporter 0.10.0`
+#       (PI-8-3.4d version bump per §5.35 — extends PI-33 to 0.10.0;
+#       literal updated via the §5.35 PI-8-3.4d EDIT carve-out / guard #11;
+#       precedent: §5.31 EDIT-2 + §5.32 EDIT-2 + §5.34 EDIT).
 #
 # Sanity-floor smoke: step (a) + (f) — exporter starts AND --version works.
 # Negation control: none in this test by itself — the failure-path control
@@ -99,8 +99,8 @@ echo "=== xdpmf-exporter --version (PI-33 smoke)"
 ver=$(${EXPORTER_BIN} --version 2>&1 | head -n1 || true)
 echo "version line: '${ver}'"
 fail=0
-if [[ "${ver}" != "xdpmf-exporter 0.9.0" ]]; then
-    echo "FAIL[f]: expected --version output 'xdpmf-exporter 0.9.0', got '${ver}'" >&2
+if [[ "${ver}" != "xdpmf-exporter 0.10.0" ]]; then
+    echo "FAIL[f]: expected --version output 'xdpmf-exporter 0.10.0', got '${ver}'" >&2
     fail=1
 fi
 

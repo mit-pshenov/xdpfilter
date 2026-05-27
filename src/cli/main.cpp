@@ -11,8 +11,9 @@
 #include <system_error>
 #include <variant>
 
-#include "apply.hpp"   // §5.26 Q4 G1: apply subcommand dispatcher
-#include "bypass.hpp"  // §5.29 HG-3.4-2: bypass subcommand dispatcher (MVP-3.4)
+#include "apply.hpp"           // §5.26 Q4 G1: apply subcommand dispatcher
+#include "bypass.hpp"          // §5.29 HG-3.4-2: bypass subcommand dispatcher (MVP-3.4)
+#include "reset_counters.hpp"  // §5.35 HG-3.4d-1..6: reset-counters dispatcher (MVP-3.4d)
 #include "cli.hpp"
 #include "common/logger.hpp"  // §5.32 (MVP-3.5): structured-logging surface
 #include "lib/loader.hpp"
@@ -65,6 +66,16 @@ int run_apply(const xdpmf::ApplyConfig& cfg)
 int run_bypass(const xdpmf::BypassConfig& cfg)
 {
     return xdpmf::bypass_main(cfg);
+}
+
+/* §5.35 HG-3.4d-1..6 (MVP-3.4d): `reset-counters --iface <X> [--rule-id N]`
+ * dispatcher. reset_counters_main() handles iface-attached precondition,
+ * audit-log, and PERCPU zero-write loop on the rule_counters_<a,b> pins
+ * (D-3.4d-RESET-BOTH). Self-contained; does NOT consume loader.hpp public
+ * surface (PI-7-3.4d-hpp 10th consecutive ZERO-diff cycle per D-3.4d-4). */
+int run_reset_counters(const xdpmf::ResetCountersConfig& cfg)
+{
+    return xdpmf::reset_counters_main(cfg);
 }
 
 /* Map an xdpmf LoaderError carried inside std::system_error directly to
@@ -136,6 +147,8 @@ int main(int argc, char* argv[])
                     return run_apply(arg);
                 } else if constexpr (std::is_same_v<T, xdpmf::BypassConfig>) {
                     return run_bypass(arg);
+                } else if constexpr (std::is_same_v<T, xdpmf::ResetCountersConfig>) {
+                    return run_reset_counters(arg);
                 } else {
                     static_assert(sizeof(T) == 0, "unhandled ParsedCommand alternative");
                 }

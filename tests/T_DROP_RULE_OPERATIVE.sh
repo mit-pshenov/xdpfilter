@@ -148,10 +148,21 @@ read_active_idx() {
     if [[ -n "${hex}" && "${hex}" != "null" ]]; then printf '%d\n' "0x${hex}"; fi
 }
 
+# §5.35 (MVP-3.4d) fixture-ripple: single `rule_counters` PERCPU_ARRAY
+# pin RETIRED; replaced by `rule_counters_<a|b>` inners under
+# `rule_counters_outer` ARRAY_OF_MAPS. Reads must follow active_idx.
+rule_counters_active_pin() {
+    local active; active=$(read_active_idx)
+    case "${active}" in
+        0) echo "${PIN_DIR}/rule_counters_a" ;;
+        1) echo "${PIN_DIR}/rule_counters_b" ;;
+        *) echo "${PIN_DIR}/rule_counters_a" ;;
+    esac
+}
 read_rc_slot() {
-    local id="$1"
-    sudo -n python3 "${TEST_DIR}/lib/read_rule_counters.py" \
-        "${PIN_DIR}/rule_counters" "${id}"
+    local id="$1" pin
+    pin=$(rule_counters_active_pin)
+    sudo -n python3 "${TEST_DIR}/lib/read_rule_counters.py" "${pin}" "${id}"
 }
 
 setup_veth
@@ -175,7 +186,7 @@ fi
 
 # ── (b) sanity-floor smoke: new pins exist ───────────────────────────────
 for pin in rules_outer rules_a rules_b action_table allowlist_a allowlist_b \
-           active_idx rule_counters stats; do
+           active_idx rule_counters_outer rule_counters_a rule_counters_b stats; do
     if ! sudo -n test -e "${PIN_DIR}/${pin}"; then
         echo "FAIL[b.${pin}]: ${PIN_DIR}/${pin} pin missing — §5.34 D-1 violated" >&2
         fail=1

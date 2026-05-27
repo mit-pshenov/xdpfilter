@@ -69,10 +69,30 @@ SIDECAR_PATH="${SIDECAR_DIR}/rule_index.json"
 stderr_file=$(mktemp /tmp/xdpmf-droprule-stderr.XXXXXX)
 trap 'cleanup_veth; sudo -n rm -rf "${SIDECAR_DIR}" 2>/dev/null; rm -f "${stderr_file}"' EXIT
 
+# §5.35 (MVP-3.4d) fixture-ripple: single `rule_counters` PERCPU_ARRAY
+# pin RETIRED; replaced by `rule_counters_<a|b>` inners under
+# `rule_counters_outer` ARRAY_OF_MAPS. Reads must follow active_idx.
+read_active_idx() {
+    local raw v hex
+    raw=$(sudo -n bpftool map dump pinned "${PIN_DIR}/active_idx" --json 2>/dev/null)
+    [[ -z "${raw}" ]] && return
+    v=$(printf '%s' "${raw}" | jq -r '.[0].formatted.value // empty' 2>/dev/null)
+    if [[ -n "${v}" && "${v}" != "null" ]]; then echo "${v}"; return; fi
+    hex=$(printf '%s' "${raw}" | jq -r '.[0].value[0] // empty' 2>/dev/null | sed 's/^0x//')
+    if [[ -n "${hex}" && "${hex}" != "null" ]]; then printf '%d\n' "0x${hex}"; fi
+}
+rule_counters_active_pin() {
+    local active; active=$(read_active_idx)
+    case "${active}" in
+        0) echo "${PIN_DIR}/rule_counters_a" ;;
+        1) echo "${PIN_DIR}/rule_counters_b" ;;
+        *) echo "${PIN_DIR}/rule_counters_a" ;;
+    esac
+}
 read_rc_slot() {
-    local id="$1"
-    sudo -n python3 "${TEST_DIR}/lib/read_rule_counters.py" \
-        "${PIN_DIR}/rule_counters" "${id}"
+    local id="$1" pin
+    pin=$(rule_counters_active_pin)
+    sudo -n python3 "${TEST_DIR}/lib/read_rule_counters.py" "${pin}" "${id}"
 }
 
 # MAC → JSON octet array (for inner-allowlist queries).
@@ -152,8 +172,8 @@ if [[ "${rc}" -ne 0 ]]; then
     echo "FAIL[a]: apply exit ${rc} (expected 0)" >&2
     fail=1
 fi
-if ! sudo -n test -e "${PIN_DIR}/rule_counters"; then
-    echo "FAIL[a.pin]: rule_counters pin missing — cannot proceed" >&2
+if ! sudo -n test -e "${PIN_DIR}/rule_counters_a"; then
+    echo "FAIL[a.pin]: rule_counters_a pin missing — cannot proceed" >&2
     exit 1
 fi
 

@@ -6,7 +6,8 @@ add_executable(xdpmacfilter
     main.cpp
     cli.cpp
     apply.cpp
-    bypass.cpp   # §5.29 (MVP-3.4) HG-3.4-2: bypass subcommand
+    bypass.cpp           # §5.29 (MVP-3.4) HG-3.4-2: bypass subcommand
+    reset_counters.cpp   # §5.35 (MVP-3.4d) HG-3.4d-1..6: reset-counters subcommand
 )
 target_include_directories(xdpmacfilter PRIVATE
     ${CMAKE_SOURCE_DIR}/src

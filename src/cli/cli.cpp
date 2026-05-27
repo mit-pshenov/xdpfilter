@@ -8,11 +8,13 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cstring>
 #include <format>
 #include <ranges>
 #include <span>
 #include <string_view>
+#include <system_error>
 
 namespace xdpmf {
 
@@ -82,6 +84,7 @@ std::string usage_text()
         "  {0} detach --iface <IFNAME>\n"
         "  {0} apply  --iface <IFNAME> -f <PATH> [--mode <M>]\n"
         "  {0} bypass --iface <IFNAME> [--unsafe] [--reason \"<text>\"]\n"
+        "  {0} reset-counters --iface <IFNAME> [--rule-id <N>]\n"
         "  {0} --help | --version\n"
         "\n"
         "Options:\n"
@@ -101,6 +104,10 @@ std::string usage_text()
         "                              passed at a tty.\n"
         "  --reason \"<text>\"           bypass: audit-log reason (free-form; default\n"
         "                              UNSPECIFIED; capped at 256 bytes).\n"
+        "  --rule-id <N>               reset-counters: zero only slot <N>\n"
+        "                              (default: zero all {1} slots). Range\n"
+        "                              [0, {1}). Iface must be attached;\n"
+        "                              audit-log line emitted to stderr.\n"
         "\n"
         "Exit codes: 0 ok, 1 usage, 2 load-fail, 3 attach-fail,\n"
         "            4 attach-refused-alien, 5 detach-fail, 6 permission,\n"
@@ -300,6 +307,44 @@ ParsedCommand parse_bypass(std::span<char* const> args)
     return cfg;
 }
 
+/* §5.35 HG-3.4d-1..6 (MVP-3.4d): `reset-counters --iface <X> [--rule-id <N>]`.
+ * --iface is REQUIRED; --rule-id is optional (absent = zero ALL 64 slots;
+ * present = zero only slot N). Per Q1.A: range validation is CLI-parse-time
+ * (early reject; matches existing --allow MAC + --iface timing). */
+ParsedCommand parse_reset_counters(std::span<char* const> args)
+{
+    ResetCountersConfig cfg;
+    std::size_t i = 0;
+    while (i < args.size()) {
+        std::string_view tok{args[i]};
+        if (tok == "--iface" || tok.starts_with("--iface=")) {
+            cfg.iface = std::string{consume_flag_value(args, i, "iface")};
+        } else if (tok == "--rule-id" || tok.starts_with("--rule-id=")) {
+            const std::string_view v = consume_flag_value(args, i, "rule-id");
+            std::uint32_t parsed = 0;
+            const auto* first = v.data();
+            const auto* last  = v.data() + v.size();
+            const auto res = std::from_chars(first, last, parsed);
+            if (res.ec != std::errc{} || res.ptr != last) {
+                throw CliError(std::format(
+                    "reset-counters: --rule-id requires an unsigned integer; got '{}'", v));
+            }
+            if (parsed >= static_cast<std::uint32_t>(XDPMF_RULE_COUNTERS_MAX)) {
+                throw CliError(std::format(
+                    "reset-counters: --rule-id {} out of range [0,{}]",
+                    parsed, XDPMF_RULE_COUNTERS_MAX - 1));
+            }
+            cfg.rule_id = parsed;
+        } else {
+            throw CliError(std::format("unknown reset-counters flag: '{}'", tok));
+        }
+    }
+    if (cfg.iface.empty()) {
+        throw CliError("reset-counters requires --iface <IFNAME>");
+    }
+    return cfg;
+}
+
 }  // namespace
 
 ParsedCommand parse(int argc, char* const argv[])
@@ -326,6 +371,9 @@ ParsedCommand parse(int argc, char* const argv[])
     }
     if (sub == "bypass") {
         return parse_bypass(rest);
+    }
+    if (sub == "reset-counters") {
+        return parse_reset_counters(rest);
     }
     throw CliError(std::format("unknown subcommand: '{}'", sub));
 }

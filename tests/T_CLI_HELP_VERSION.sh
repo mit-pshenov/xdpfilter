@@ -51,6 +51,15 @@ if ! grep -q -F -- '--mode' "${stdout_file}"; then
     echo "FAIL[--help]: stdout missing '--mode' substring (§5.23 Item 3 amendment)" >&2
     fail=1
 fi
+# §5.35 / MVP-3.4d (guard #13 fixture cross-reference): the new
+# `reset-counters` subcommand MUST be discoverable in --help output so
+# operators can find it. Per operative-semantic Phase 4.4 discipline, we
+# only assert the literal subcommand name; the precise flag-description
+# wording is impl-flexible.
+if ! grep -q -F -- 'reset-counters' "${stdout_file}"; then
+    echo "FAIL[--help]: stdout missing 'reset-counters' subcommand (§5.35 E-1)" >&2
+    fail=1
+fi
 
 # ── Sub-case 2: --version ────────────────────────────────────────────────
 echo "=== sub-case 2: --version"

@@ -62,11 +62,31 @@ sudo -n rm -rf "${PIN_DIR}" 2>/dev/null || true
 
 setup_veth
 
-# Helper to read one rule_counters slot via the new lib helper.
+# §5.35 (MVP-3.4d) fixture-ripple: `rule_counters` single PERCPU_ARRAY
+# pin is RETIRED; replaced by `rule_counters_outer` ARRAY_OF_MAPS over
+# `rule_counters_a` + `rule_counters_b` PERCPU inners. Bumps land in the
+# inner indexed by active_idx; read must follow the SAME indirection.
+read_active_idx() {
+    local raw v hex
+    raw=$(sudo -n bpftool map dump pinned "${PIN_DIR}/active_idx" --json 2>/dev/null)
+    [[ -z "${raw}" ]] && return
+    v=$(printf '%s' "${raw}" | jq -r '.[0].formatted.value // empty' 2>/dev/null)
+    if [[ -n "${v}" && "${v}" != "null" ]]; then echo "${v}"; return; fi
+    hex=$(printf '%s' "${raw}" | jq -r '.[0].value[0] // empty' 2>/dev/null | sed 's/^0x//')
+    if [[ -n "${hex}" && "${hex}" != "null" ]]; then printf '%d\n' "0x${hex}"; fi
+}
+rule_counters_active_pin() {
+    local active; active=$(read_active_idx)
+    case "${active}" in
+        0) echo "${PIN_DIR}/rule_counters_a" ;;
+        1) echo "${PIN_DIR}/rule_counters_b" ;;
+        *) echo "${PIN_DIR}/rule_counters_a" ;;  # defensive default
+    esac
+}
 read_rc_slot() {
-    local id="$1"
-    sudo -n python3 "${TEST_DIR}/lib/read_rule_counters.py" \
-        "${PIN_DIR}/rule_counters" "${id}"
+    local id="$1" pin
+    pin=$(rule_counters_active_pin)
+    sudo -n python3 "${TEST_DIR}/lib/read_rule_counters.py" "${pin}" "${id}"
 }
 
 # ── (a) apply + smoke ────────────────────────────────────────────────────
@@ -85,15 +105,21 @@ if [[ "${rc}" -ne 0 ]]; then
     echo "FAIL[a1]: apply exit ${rc} (expected 0)" >&2
     fail=1
 fi
-if ! sudo -n test -e "${PIN_DIR}/rule_counters"; then
-    echo "FAIL[a2]: ${PIN_DIR}/rule_counters pin missing (PI-3.4b-1)" >&2
+# §5.35 fixture-ripple: probe inner_a pin (the rule_counters_a PERCPU_ARRAY).
+# Both inners are pinned in lockstep at attach time; rule_counters_a absent
+# means the iface is not attached (or partially) — same operative meaning
+# as the pre-§5.35 single `rule_counters` pin check.
+if ! sudo -n test -e "${PIN_DIR}/rule_counters_a"; then
+    echo "FAIL[a2]: ${PIN_DIR}/rule_counters_a pin missing (§5.35 PI-3.4d-2)" >&2
     exit 1   # cannot proceed without the pin
 fi
 
 # Verify map shape via bpftool map show --json (robust to text-format drift —
 # libbpf 1.x emits 'value 8B' in text mode, NOT 'value_size 8'; JSON is stable).
 # libbpf 1.x JSON keys: bytes_key, bytes_value (NOT key_size/value_size).
-shape_json=$(sudo -n bpftool map show pinned "${PIN_DIR}/rule_counters" --json 2>&1)
+# §5.35 fixture-ripple: shape-check against the active inner.
+shape_pin=$(rule_counters_active_pin)
+shape_json=$(sudo -n bpftool map show pinned "${shape_pin}" --json 2>&1)
 echo "rule_counters shape JSON: ${shape_json}"
 shape_type=$(echo "${shape_json}" | jq -r '.type // empty' 2>/dev/null)
 shape_max=$( echo "${shape_json}" | jq -r '.max_entries // empty' 2>/dev/null)
@@ -118,7 +144,7 @@ fi
 # Baseline: all 64 slots should be 0 (fresh apply, no traffic yet).
 echo "=== baseline rule_counters dump"
 all_baseline=$(sudo -n python3 "${TEST_DIR}/lib/read_rule_counters.py" \
-               "${PIN_DIR}/rule_counters")
+               "$(rule_counters_active_pin)")
 echo "all 64 slots: ${all_baseline}"
 nonzero_baseline=$(echo "${all_baseline}" | tr ' ' '\n' | grep -cvE '^0$' || true)
 nonzero_baseline=${nonzero_baseline:-0}
@@ -147,7 +173,7 @@ fi
 
 # Other slots must STAY 0 (only slot 5 should have moved).
 all_after_b=$(sudo -n python3 "${TEST_DIR}/lib/read_rule_counters.py" \
-              "${PIN_DIR}/rule_counters")
+              "$(rule_counters_active_pin)")
 echo "all 64 slots after step (b): ${all_after_b}"
 # Check slots 0..4 and 6..63 are all zero.
 idx=0
