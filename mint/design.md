@@ -11329,3 +11329,540 @@ Evidence: `mint/task-brief.md` MVP-3.4d brief (HG-3.4d-1..6 + Q1-Q4 + Items C-1/
 - All 6 affected tests SHOULD continue to PASS post-fixture-ripple (verified by tester Phase B run + reviewer independent re-run; both 64/64 green).
 
 **Anti-misdiagnosis note #16 (NEW; future-cycle guard)**: when promoting a stateful map to atomic-swap parallel shape, identifying the **exporter** carve-out is necessary but NOT sufficient — every test that DIRECTLY reads the retired single-pin (via `bpftool map dump pinned ${PIN_DIR}/<iface>/<map>`) needs the symmetric pin-name-swap adaptation. Pattern: `grep -rln 'pinned.*/<retired-map-name>' tests/ src/` at FileList drafting time → list all hits as fixture-ripple carve-out EDITED entries. Cost: 30 seconds of grep. Benefit: catches THIS class of ripple at design-time vs surfacing as Phase B test failures requiring tester adaptation + reviewer OOT inline-merge. Validated by MVP-3.4d (this slice). Combined with guards #7 (BTF asymmetry), #13 (test-fixture cross-reference for retire/rename emit-sites), and #15 (apply-step state-transfer for PRESERVE): the Phase A discipline now covers BPF-side BTF + retire-string-fixture + state-transfer-userspace + retire-pin-fixture-ripple — 4 distinct ripple classes around map shape changes.
+
+### §5.36 MVP-3.4e: `reset-counters` path-hardening + sidecar iface-subdir symlink defense (brownfield amendment, 2026-05-27)
+
+**Purpose**: bilateral restoration of the §5.22 BpffsRootFd / IfaceDirGuard discipline invariant across two paths that opted out of it in earlier slices. Closure of KC-3 kill-chain surfaced by `/mint-review` round 2026-05-27 (report at `agent-teams-review/runs/mint-review-mint-l2-mac-filter-202605271147/report.md`, security-reviewer H1 + M3 anchors).
+
+Two coupled deliverables:
+
+1. **`reset-counters` path-hardening** — `src/cli/reset_counters.cpp` currently builds raw absolute paths via `pin_path_for(iface, basename)` + `bpf_obj_get(path)` with no shape validation on `iface`. Routes the operator action through a NEW `xdpmf::internal::reset_counters_request()` helper in `src/lib/loader.cpp`'s anon namespace, which composes the existing §5.22 primitives (`validate_iface_name` shape-check → `resolve_ifindex` → `BpffsRootFd` ctor → `iface_entry_is_real_dir`) BEFORE constructing pin paths. KC-3 reset_counters limb closed: `--iface ../<other-prog>` and `--iface <symlink>` both refuse with exit 8 (`LoaderError::PathRefused`).
+
+2. **Sidecar iface-subdir symlink defense** — `src/lib/sidecar.cpp::write_rule_index()` currently does `mkdir_p(dir)` + `::open(path, O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC)` on `/run/xdpmacfilter/<iface>/rule_index.json` with no symlink check at the per-iface depth (§5.31 EDIT-1 hardened only the SIDECAR_ROOT depth). Mirror BpffsRootFd pattern: open SIDECAR_ROOT with `O_PATH | O_DIRECTORY | O_NOFOLLOW`, do `mkdirat` + `fstatat(AT_SYMLINK_NOFOLLOW)` + `openat(O_NOFOLLOW)` + `renameat` at fd-relative depth. On per-iface symlink detection: emit NEW `sidecar.warn.iface_dir_symlink` event + skip-and-return (HG-3.4e-4 — sidecar still NEVER throws; PI-32-3.4b PRESERVED).
+
+KC-3 chained both limbs into a CIS-style hardening regression. **Single architectural fix**: extend the §5.22 invariant to both call-sites bilaterally. Narrow scope per user direction 2026-05-27 (escape_util extraction, dead-BpffsDir delete, exporter bind WARN — DEFERRED to separate slices per §7 OOS additions below).
+
+**Anchor sections**: §5.22 (BpffsRootFd + IfaceDirGuard + `throw_iface_symlink` + `iface_entry_is_real_dir` — DIRECT LOAD-BEARING PRECEDENT for reset-counters routing); §5.22 Q3 (exit code 8 `LoaderError::PathRefused` — REUSED, no new exit code); §5.26 EDIT-1 (apply_internal.hpp internal-helper pattern — DIRECT TEMPLATE for `reset_counters_internal.hpp` shape); §5.31 EDIT-1 + D-3.4b-21 (SIDECAR_ROOT lstat-based defense — UPGRADED to O_PATH|O_NOFOLLOW per HG-3.4e-2 symmetric extension); §5.31 D-3.4b-17 + PI-32-3.4b (sidecar never throws; degrades to exporter `action="unknown"` — PRESERVED per HG-3.4e-4); §5.32 logger event catalog (kEventNames extension — adds 1 entry per HG-3.4e-4); §5.35 (most recent amendment — `reset_counters.cpp` is the file being significantly rewritten this slice).
+
+**Scope contract (§5.36 short form)**:
+
+- NEW source files: **0** (header `src/lib/reset_counters_internal.hpp` is NEW — but the brief listed it as architect-flexible; final pick: extend `apply_internal.hpp` instead — see D-3.4e-1 below).
+- EDITED (source files, 3): `src/cli/reset_counters.cpp` (significant body rewrite — strip raw `pin_path_for` + `bpf_obj_get`; route through `internal::reset_counters_request`), `src/lib/loader.cpp` (NEW anon-namespace + public-internal `reset_counters_request` helper composing §5.22 primitives), `src/lib/apply_internal.hpp` (add `ResetCountersRequest` struct + `reset_counters_request()` declaration).
+- EDITED (source files, 1 — sidecar): `src/lib/sidecar.cpp` (upgrade SIDECAR_ROOT path-based lstat to fd-based `O_PATH|O_NOFOLLOW`; add fd-relative `mkdirat`+`fstatat`+`openat`+`renameat` for per-iface subdir; emit `sidecar.warn.iface_dir_symlink` on per-iface symlink detection).
+- EDITED (shared header): `src/common/logger.hpp` (kEventNames adds 1 entry `sidecar.warn.iface_dir_symlink`; count 35 → 36).
+- NEW ctests (2): `T_RESET_COUNTERS_PATH_TRAVERSAL.sh` (§6.NN), `T_SIDECAR_IFACE_SYMLINK_REFUSAL.sh` (§6.NN+1). Both `RESOURCE_LOCK xdp_fixture` (guard #12; see D-3.4e-T2-LOCK for why `sidecar_root` NEW lock domain is NOT introduced this slice).
+- EDITED (test fixture, lockstep per guard #13): `tests/fixtures/log_events_v1.txt` 35 → 36 lines (one new entry `sidecar.warn.iface_dir_symlink` at alphabetical position between `.iface_dir_symlink` and `.lstat_failed` — specifically: between current line 29 `reset_counters.refused.no_pin` and current line 30 `sidecar.warn.lstat_failed`).
+- EDITED (CMakeLists.txt registration): `tests/CMakeLists.txt` (2 new `add_test` blocks + 2 `set_tests_properties` RESOURCE_LOCK declarations).
+- UNCHANGED-BUT-AFFECTED (zero git-diff fence — PI-7-3.4e-hpp / -cpp): `src/lib/loader.hpp` (**11th consecutive ZERO-diff cycle target**); `src/lib/config.hpp` (**6th consecutive ZERO-diff cycle target**); `src/lib/config.cpp` (no schema change); `src/lib/sidecar.hpp` (`write_rule_index` signature UNCHANGED — only the body changes); `src/cli/cli.hpp`/`cli.cpp`/`main.cpp` (`ResetCountersConfig` + dispatch arms UNCHANGED — the architectural fix is BELOW the CLI parse boundary); `src/bpf/*` (no BPF change); `src/exporter/*` (no exporter change); systemd/ansible files (no caps/env/path changes); `tests/T_CLI_HELP_VERSION.sh` (no new `--help` line — reset-counters CLI surface byte-equivalent per HG-3.4e brief carry-over); `src/common/mac_filter.h` (no new constant — SIDECAR_ROOT + BPFFS_ROOT both already exist; no new event/exit code constants).
+- NO VERSION BUMP (architect decision D-3.4e-VERSION below) — internal security hardening; no operator-observable surface change beyond exit-code/stderr disposition on attack inputs (which is an INTENT-PRESERVING hardening, not a feature).
+
+#### §5.36 Phase A grep verification report (architect-independent — 2026-05-27)
+
+Per architect spec Phase A code-grep discipline (guards #5, #9, #12, #13). Independent re-run of brief author's verification + extensions:
+
+1. **`BpffsRootFd` declaration**: located at `src/lib/loader.cpp:450-539` (anon-namespace, not exported to `raii.hpp` per §5.22 "single-callsite RAII" rule). Constructor handles ELOOP/ENOTDIR/EACCES/EPERM/ENOENT path branches; throws `LoaderError::PathRefused` on symlink/non-dir, `Permission` on EACCES/EPERM, `LoadFailed` on anything else. CONFIRMED.
+2. **`iface_entry_is_real_dir`**: at `src/lib/loader.cpp:545-565`. Signature: `bool iface_entry_is_real_dir(const BpffsRootFd& root, const std::string& iface)`. Returns true on real dir; false on ENOENT; throws `PathRefused` on symlink (via `throw_iface_symlink`) or non-dir (via `throw_iface_not_dir`). CONFIRMED — perfect reuse target for reset_counters.
+3. **`throw_iface_symlink` / `throw_iface_not_dir`**: at `src/lib/loader.cpp:427-439`. Both throw `LoaderError::PathRefused` with stderr literal `refusing to operate` + iface name token + literal `symlink` (or `not a directory`). Load-bearing stderr literals for T-1 grep assertions.
+4. **`resolve_ifindex`**: at `src/lib/loader.cpp:816-825`. Signature: `int resolve_ifindex(const std::string& iface, LoaderError on_fail)`. Calls `if_nametoindex(iface.c_str())`; on 0-return throws `on_fail` with errno-classified code. **DOES NOT do `dev_valid_name`-style shape validation** — the brief's Q2.A1 ("call resolve_ifindex(iface, LoaderError::LoadFailed) — does ifindex lookup + dev_valid_name in one") is **factually imprecise**: `if_nametoindex` returns 0 for any non-existent name (including shape-bad ones like `../foo`), but the errno is ENODEV → translates to LoadFailed (exit 2), NOT PathRefused (exit 8). HG-3.4e-3 requires exit 8 for path-refused. **Architect resolution**: introduce explicit `validate_iface_name(iface)` shape-check BEFORE resolve_ifindex — see Q2 override below.
+5. **`apply_request` declaration**: at `src/lib/apply_internal.hpp:37-43` (struct `ApplyRequest` + free function `apply_request()` in `xdpmf::internal::` namespace). Internal-helper pattern documented as "Per design §5.26 Phase B EDIT-1 (Internal layering helper)". CONFIRMED — direct template for `reset_counters_request` shape.
+6. **`pin_path_for` in `reset_counters.cpp`**: at `src/cli/reset_counters.cpp:72-84`. Builds `XDPMF_BPFFS_ROOT + "/" + iface + "/" + basename`. CONFIRMED — this is the load-bearing unhardened-path-construction site that the §5.36 fix removes from the CLI translation unit (paths now constructed inside `reset_counters_request` AFTER §5.22 primitives have validated the iface).
+7. **`bpf_obj_get` in `reset_counters.cpp`**: at `src/cli/reset_counters.cpp:90` (open_pin_strict helper) + `:137, :204, :209` (call-sites). All call-sites move INTO `reset_counters_request` body in `loader.cpp` (path still constructed via path-string-based `bpf_obj_get` — libbpf has no fd-relative `bpf_obj_get_at`, per §5.22 Q2 Maximum being OOS; **but** the iface name now flows through `validate_iface_name` + `iface_entry_is_real_dir` BEFORE the path is built, so the only path components are the project-controlled bpffs root + validated iface + map-name constant).
+8. **`mkdir_p` + `atomic_write_file` in `sidecar.cpp`**: at `src/lib/sidecar.cpp:167-183` (mkdir_p) + `:188-236` (atomic_write_file). mkdir_p walks path components with `::mkdir(acc, 0755)` — follows symlinks at every depth (this is the per-iface gap). atomic_write_file does `::open(tmp_path, O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC)` — no O_NOFOLLOW (this is the tmpfile gap). `::rename(tmp_path, final_path)` — path-based (could traverse symlinks too, in principle). CONFIRMED — all three need the fd-relative upgrade.
+9. **Existing SIDECAR_ROOT lstat block** (§5.31 EDIT-1): at `src/lib/sidecar.cpp:258-304`. Three emission paths: `sidecar.warn.root_symlink` (line 271), `sidecar.warn.root_not_dir` (line 284), `sidecar.warn.lstat_failed` (line 300). All preserved by name post-§5.36; triggering errno class shifts from `lstat() returning 0 + S_ISLNK` to `open(O_PATH|O_NOFOLLOW) returning -1 + errno=ELOOP` (sidecar.warn.root_symlink), `ENOTDIR` (sidecar.warn.root_not_dir), `other errno != ENOENT` (sidecar.warn.lstat_failed). Event NAMES kept identical for downstream log-shipping pipeline stability (D-3.4e-5).
+10. **`kEventNames` count** (guard #13): at `src/common/logger.hpp:85-124`. Current count 35 (`inline constexpr std::array<std::string_view, 35> kEventNames = { ... };` at line 85; `kEventCount = 35` at line 126 comment). Post-§5.36: 36 (one NEW entry `sidecar.warn.iface_dir_symlink`). Comment block at line 81-84 updates to "§5.36 (MVP-3.4e): count 35 → 36. One NEW event `sidecar.warn.iface_dir_symlink` per HG-3.4e-4 (sidecar iface subdir symlink response)."
+11. **`tests/fixtures/log_events_v1.txt` count** (guard #13 lockstep): 35 lines, sorted alphabetically. CONFIRMED. Post-§5.36: 36 lines; new entry `sidecar.warn.iface_dir_symlink` inserts between current line 29 (`reset_counters.refused.no_pin`) and current line 30 (`sidecar.warn.lstat_failed`) — actually `s` > `r`, and within `sidecar.warn.*`, `iface_dir_symlink` alphabetizes BEFORE `lstat_failed` (`i` < `l`), so insertion at line 30 (pushing `lstat_failed` to 31, etc.). Final count 36. **Operative-semantic per Phase 4.4**: precise sort position is a SHOULD-hint; impl/tester only need byte-equivalent set membership for tester's `comm`-style validation — exact line ordering is an inline-merge-able detail if a different sort convention surfaces.
+12. **`T_BPFFS_ROOT_SYMLINK.sh` template shape**: at `tests/T_BPFFS_ROOT_SYMLINK.sh:1-100+`. Header docs cite §6.15 (MVP-2 Sec / §5.22 Item 2). RESOURCE_LOCK xdp_fixture (CMakeLists.txt:242). Setup: snapshot pre-existing bpffs root state → place symlink → invoke loader → assert exit 8 + stderr substrings. Cleanup: trap-driven, restores real bpffs root, cleans veth. CONFIRMED — direct template for both T-1 and T-2.
+13. **VERSION/CHANGELOG.md state**: project VERSION = `0.10.0` (CMakeLists.txt:13 post-§5.35). Architect decision per D-3.4e-VERSION below: **no version bump this slice** (internal security hardening with no operator-observable feature surface change). CHANGELOG.md MAY get a `### Security` entry under unreleased — but Phase 4.4 operative-semantic SHOULD-hint; impl-flexible.
+14. **`SidecarRootFd`-equivalent precedent**: searched `grep -nE 'O_PATH.*O_DIRECTORY.*O_NOFOLLOW' src/` — only `src/lib/loader.cpp:461, 473, 605` (BpffsRootFd ctor + bpffs_remove_iface flow). No precedent in `src/lib/sidecar.cpp` for fd-based root opening. The §5.36 sidecar upgrade introduces this pattern there for the first time; the impl can either copy the BpffsRootFd shape into a local-anon `SidecarRootFd` class OR use a scope-guard pattern — architect picks the local-anon class shape (matches §5.22 precedent; smaller cognitive jump for reviewer). Operative-semantic SHOULD-hint — impl-flexible per Phase 4.4.
+15. **Discrepancies vs brief**: Brief Q2.A1 said "call `resolve_ifindex(iface, LoaderError::LoadFailed)` — does ifindex lookup + dev_valid_name in one". FALSE per Phase A grep #4 above: resolve_ifindex calls `if_nametoindex` ONLY. Architect overrides to Q2.A2 (split into `validate_iface_name` + `resolve_ifindex`). See §5.36 Q2 override below. This is a factual correction, NOT a contract drift — the brief author was approximate about the body of resolve_ifindex.
+
+#### §5.36 Human-gate decisions (pre-loaded defaults from brief — confirmed by architect Phase A)
+
+- **HG-3.4e-1 — BpffsRootFd reachability for reset_counters = route through NEW `internal::reset_counters_request()` helper (mirror `internal::apply_request` pattern).** Confirmed per brief recommendation. Preserves §5.22 anon-namespace fence on `BpffsRootFd` / `IfaceDirGuard` / `resolve_ifindex` / `iface_entry_is_real_dir`. Reuses existing infrastructure (no duplication; no new shared-header surface). reset_counters.cpp's CLI-side responsibility shrinks to: parse argv (already done in cli.cpp) → emit `reset_counters.activated` audit-log BEFORE the loader call → invoke `internal::reset_counters_request(req)` → map `std::system_error` to exit codes via main.cpp's existing catch arm → return exit 0 on success. The hardening lives entirely in loader.cpp where the precedent infrastructure is.
+
+  **Architectural alternatives rejected**:
+  - **Extract `BpffsRootFd` + `iface_entry_is_real_dir` to `raii.hpp`** — broadens API surface; violates §5.22 "single-callsite anon-namespace RAII" rule explicitly stated at `loader.cpp:443-444`. The reset_counters path is a SECOND callsite — extraction would tip the balance. Architect rejects per §5.22's stated discipline.
+  - **Duplicate minimal version in `reset_counters.cpp`** — function-level duplication of `BpffsRootFd` + `iface_entry_is_real_dir` + `throw_iface_symlink` + `throw_iface_not_dir` (~80 LOC). Guard #9 sanctions helper-level duplication for small ergonomic helpers (`escape_audit_value`) but NOT for security primitives where two copies could drift in their invariants. KC-3 itself surfaced FROM such drift; doubling-down on duplication for the same primitive class is a future kill-chain in disguise.
+
+- **HG-3.4e-2 — Sidecar iface subdir symlink defense = mirror BpffsRootFd pattern.** Confirmed per brief recommendation. Upgrade SIDECAR_ROOT from current lstat-based check (§5.31 EDIT-1) to `O_PATH | O_DIRECTORY | O_NOFOLLOW` open + fd-relative `mkdirat` + `fstatat(AT_SYMLINK_NOFOLLOW)` + `openat(O_NOFOLLOW)` + `renameat`. NEW local-anon `SidecarRootFd` RAII class (mirrors BpffsRootFd shape; lives in sidecar.cpp anon namespace per §5.22 single-callsite discipline). Per-iface symlink detection → emit NEW `sidecar.warn.iface_dir_symlink` event + return. PI-32-3.4b (sidecar never throws) PRESERVED via the existing top-level `try{} catch(...){}` envelope around `write_rule_index` body.
+
+  **Why upgrade SIDECAR_ROOT lstat to O_PATH open** (architect adds rationale not in brief): atomicity. lstat() then later open() has a TOCTOU race window even on /run (root-owned, but a confused-deputy attacker who can write under /run could re-plant the symlink between checks). `O_PATH | O_DIRECTORY | O_NOFOLLOW` is kernel-atomic — `ELOOP` from open at trailing symlink, no separate path lookup. Matches BpffsRootFd discipline exactly; downside is replacing a known-good `lstat`+`S_ISLNK` block with a more invasive open+errno-branch. Event NAMES preserved per D-3.4e-5; trigger semantic shifts.
+
+- **HG-3.4e-3 — Exit code for reset-counters path-refused = `LoaderError::PathRefused` (exit 8).** Confirmed per brief recommendation. Mirrors §5.22 Q3 decision. The shape-rejected iface name (via NEW `validate_iface_name`) AND per-iface symlink (via existing `iface_entry_is_real_dir`) BOTH throw `LoaderError::PathRefused`. NO new exit code introduced. ENODEV-class iface-not-found (legitimate-shape iface that doesn't exist on the host) continues to use exit 2 (LoaderError::LoadFailed) per Phase A #4 — distinct from "path-refused".
+
+- **HG-3.4e-4 — Sidecar iface-subdir symlink response = WARN + skip (PI-32-3.4b PRESERVED).** Confirmed per brief recommendation. Sidecar-never-throws contract from §5.31 EDIT-1 D-3.4b-17: log NEW `sidecar.warn.iface_dir_symlink` event via `xdpmf::logger::emit` and `return` from `write_rule_index`; rule_index.json not refreshed → exporter degrades to `action="unknown"` per existing PI-32-3.4b. Do NOT escalate to fatal apply error. Apply continues + exits 0. Operator alerts go through the existing logger.warn.sidecar.* event series (one new sibling event this slice). Reviewer's framework point 5 walks PI-32-3.4b's check mechanism: T_SIDECAR_IFACE_SYMLINK_REFUSAL (T-2 below) asserts `apply` exit=0 + `sidecar.warn.iface_dir_symlink` substring in stderr + symlink target file absent.
+
+#### §5.36 Q-decisions (mechanism)
+
+##### Q1: `dev_valid_name`-style validation timing in reset-counters → **Q1.A3 (`internal::reset_counters_request()` entry; mirrors apply_request's iface validation timing)**
+
+Per brief recommendation. Fail-closed AT the internal-helper entry, consistent with `apply_request`'s ifindex-resolution timing (`apply_request` resolves ifindex first, then opens bpffs root; we mirror — `validate_iface_name` first, then `resolve_ifindex`, then `BpffsRootFd`). CLI-side argv-parse in `cli.cpp::parse_reset_counters` stays as-is (already does basic non-empty `--iface` check); the cli layer remains the same defensive minimum. The hardening centralizes at `internal::reset_counters_request` entry — operator-observable surface (`--iface ../`-shaped input → exit 8 + literal `refusing to operate` stderr) is achieved here, not earlier.
+
+##### Q2: re-use `resolve_ifindex` directly vs new `validate_iface_name` helper → **Q2.A2 OVERRIDE (split — NEW `validate_iface_name(iface, on_fail)` helper, called BEFORE resolve_ifindex)**
+
+**Architect OVERRIDES brief recommendation (Q2.A1).** The brief recommended A1 ("call `resolve_ifindex(iface, LoaderError::LoadFailed)` — does ifindex lookup + dev_valid_name in one") with rationale "minimize new surface; reset_counters doesn't need ifindex separately; the wasted ifindex lookup is microseconds". Per Phase A grep #4, this is **factually imprecise**: `resolve_ifindex` calls only `if_nametoindex`, which returns 0 (ENODEV) for any non-existent name and CLASSIFIES THE ERROR AS LoaderError::LoadFailed (exit 2) — NOT PathRefused (exit 8). HG-3.4e-3 + T-1 sub-case (a) BOTH require exit 8 on `--iface ../foo`. To deliver exit 8, the shape rejection MUST happen at a layer that throws `LoaderError::PathRefused`, distinct from resolve_ifindex's `on_fail` arm.
+
+Architect picks **Q2.A2**: introduce `validate_iface_name(const std::string& iface, LoaderError on_fail)` helper in `loader.cpp` anon namespace. Validation rules:
+- Non-empty
+- Length ≤ `IFNAMSIZ - 1` (= 15) per kernel `dev_valid_name` precedent
+- Characters in `[A-Za-z0-9._-]` (rejects `/`, whitespace, control chars, NUL, all path-traversal substrings)
+- Explicit reject of `.` and `..` (kernel `dev_valid_name` reserves these per `net/core/dev.c::dev_valid_name`)
+
+On reject: `throw_loader(on_fail, std::format("iface name '{}' is invalid or unsafe — refusing to operate", iface))`. Called from `reset_counters_request` with `on_fail = LoaderError::PathRefused` (exit 8). Stderr token `refusing to operate` is load-bearing (matches §5.22 stderr discipline; T-1 sub-cases (a) + (b) grep for it).
+
+**Why not also retrofit `apply_request` / `detach()` to use `validate_iface_name`**: scope discipline. The existing call-sites' threat-model coverage (BpffsRootFd + iface_entry_is_real_dir + resolve_ifindex's classify-errno path) is empirically sufficient — no /mint-review finding has tagged `apply_request` or `detach()` with shape-rejection regression. Adding the call there is a NEW HARDENING (orthogonal to KC-3 closure), gated for a separate slice if desired. Documented as new OOS fence below.
+
+##### Q3: separate test for sidecar iface-subdir symlink vs fold into existing → **Q3.A1 (NEW T_SIDECAR_IFACE_SYMLINK_REFUSAL.sh standalone)**
+
+Per brief recommendation. Mirrors §5.22 precedent (T_BPFFS_ROOT_SYMLINK is standalone, not folded into T_ATTACH_TAG_MISMATCH). RESOURCE_LOCK isolation cleaner. Clean separation of concerns: T_SIDECAR_JSON_SHAPE (§5.31 §6.50) validates SHAPE; T_SIDECAR_IFACE_SYMLINK_REFUSAL (NEW T-2) validates SECURITY. Both can pass/fail independently, easing failure diagnosis.
+
+##### Q4: sidecar SIDECAR_ROOT lstat (existing §5.31 EDIT-1) vs new iface-subdir lstat — single helper or two → **Q4.A2 (single parameterized approach — but via O_PATH discipline, NOT lstat)**
+
+Brief recommendation was "single `lstat_path_safe(path)` helper covering both — DRY; matches §5.31 EDIT-1 hardening pattern; smaller diff". **Architect partially adopts and partially reshapes.**
+
+DRY adopted: yes, both SIDECAR_ROOT and per-iface depth go through a coherent single discipline. But that discipline is the O_PATH|O_NOFOLLOW open + fstatat pattern per HG-3.4e-2 (mirror BpffsRootFd), NOT the lstat-then-check pattern of §5.31 EDIT-1. Per architect Phase A #14, the new pattern is introduced via local-anon `SidecarRootFd` RAII class — owns the SIDECAR_ROOT fd for the duration of `write_rule_index`. Per-iface check via `iface_entry_is_real_for_sidecar(root, iface)` free-function helper (mirrors `iface_entry_is_real_dir` shape) OR inline fstatat block — impl-flexible per Phase 4.4 operative-semantic SHOULD-hint.
+
+Implementation contract:
+- `SidecarRootFd` ctor: `open(XDPMF_SIDECAR_ROOT, O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)`; on ENOENT: `mkdir(XDPMF_SIDECAR_ROOT, 0755)` once + retry (mirrors BpffsRootFd ctor); on ELOOP/ENOTDIR: SET ERROR STATE (does NOT throw — sidecar contract); on EACCES/EPERM/other: SET ERROR STATE. Caller (`write_rule_index`) inspects state and emits the appropriate `sidecar.warn.*` event + returns. Existing event names PRESERVED per D-3.4e-5.
+- `iface_entry_is_real_for_sidecar(const SidecarRootFd& root, std::string_view iface)`: returns enum `IfaceEntryState` ∈ {`OK`, `SYMLINK`, `NOT_DIR`, `MKDIRAT_FAILED`, `STAT_FAILED`}. Caller branches per state and emits the appropriate event.
+
+**Alternative single-helper shape** (parameterized `lstat_path_safe(int dirfd, const char* relpath)`) is also acceptable per Phase 4.4 — impl picks the cleaner shape. The verifiable invariant is: BOTH root and iface-subdir reach a stat-equivalent check via a NON-symlink-following primitive (fstatat with AT_SYMLINK_NOFOLLOW, OR ELOOP-from-O_PATH-open), and both reject symlinks with an emit-and-return path. Names of the helper(s) are NOT contractual.
+
+#### §5.36 LIFTED PI declarations (none — §5.22 + §5.31 EDIT-1 + PI-32-3.4b all UPHELD)
+
+No prior PI is LIFTED by this slice. The slice bilaterally RESTORES the §5.22 invariant + PRESERVES the §5.31 EDIT-1 + PI-32-3.4b contracts. Reviewer should NOT see any `[SUPERSEDED]` marker on §5.22, §5.31 EDIT-1, or PI-32-3.4b.
+
+NEW PIs declared in §6.5 below (PI-3.4e-1, PI-3.4e-2).
+
+Note: PI-7-3.4e-hpp + PI-7-3.4e-cpp are EXTENSIONS (11th/6th consecutive ZERO-diff cycles on loader.hpp + config.hpp respectively) — not new PIs, just continuation of the streak first established at §5.30 PI-7-3.4.5-hpp.
+
+#### §5.36 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+##### NEW (this slice)
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `tests/T_RESET_COUNTERS_PATH_TRAVERSAL.sh` | Path-traversal-shaped iface rejected by reset-counters with exit 8 + load-bearing stderr substrings (template = T_BPFFS_ROOT_SYMLINK.sh) | bash | ~90 |
+| `tests/T_SIDECAR_IFACE_SYMLINK_REFUSAL.sh` | Per-iface symlink under /run/xdpmacfilter triggers sidecar.warn.iface_dir_symlink + apply exit 0 + attacker-target file absent (template = T_BPFFS_ROOT_SYMLINK.sh adapted to /run path) | bash | ~110 |
+
+##### EDITED (this slice)
+
+| Path | Change shape | Reason |
+|---|---|---|
+| `src/cli/reset_counters.cpp` | Significant rewrite: strip anon-namespace `pin_path_for` + `open_pin_strict` + `zero_one_slot`; strip `bpf_obj_get` precondition probe + per-CPU zero-write loop. Replace with: argv → audit-log `reset_counters.activated` (UNCHANGED shape per §5.35 HG-3.4d-6) → `internal::reset_counters_request(req)`. Exit-code mapping via main.cpp's existing system_error catch arm. `escape_audit_value` helper STAYS DUPLICATED per guard #9 D-3.4d-6. Header includes update: drop `bpf/bpf.h` + `bpf/libbpf.h` (no longer touches BPF objects directly); add internal-header include for `ResetCountersRequest` declaration. | KC-3 reset-counters limb closure; route through §5.22 primitives via internal helper |
+| `src/lib/loader.cpp` | ADD anon-namespace `validate_iface_name(const std::string&, LoaderError)` helper (new ~25 LOC). ADD anon-namespace `reset_counters_request_impl(...)` or equivalently the body of `xdpmf::internal::reset_counters_request(const ResetCountersRequest&)` (~70 LOC). The body: validate_iface_name → resolve_ifindex → BpffsRootFd ctor → iface_entry_is_real_dir → construct pin paths via existing `bpffs_dir_for(iface) + "/" + XDPMF_MAP_RULE_COUNTERS_INNER_A_NAME` shape → bpf_obj_get each inner → libbpf_num_possible_cpus + zero-buffer → loop or single-slot bpf_map_update_elem (mirrors §5.35 zero_one_slot semantics; impl-flexible whether to introduce a local helper or inline). | KC-3 reset-counters helper home (anon-namespace + xdpmf::internal:: surface) |
+| `src/lib/apply_internal.hpp` | ADD `ResetCountersRequest` struct (`std::string iface; std::optional<std::uint32_t> rule_id;`) + `void reset_counters_request(const ResetCountersRequest& req)` declaration in `xdpmf::internal::` namespace. ~12 LOC additive. NO change to existing `ApplyRequest` / `apply_request()` declarations. | Internal-helper surface for reset_counters (mirror §5.26 EDIT-1 pattern) |
+| `src/lib/sidecar.cpp` | Upgrade `write_rule_index` body: introduce local-anon `SidecarRootFd` RAII class (~40 LOC) holding `O_PATH | O_DIRECTORY | O_NOFOLLOW` fd to XDPMF_SIDECAR_ROOT with mkdir-once retry on ENOENT; replace existing `lstat(root, &st_root)` block (lines 258-304) with branches on the new class's state; replace `mkdir_p(dir)` with fd-relative `mkdirat(root.fd(), iface, 0755)` + EEXIST-then-fstatat shape; ADD per-iface `fstatat(root.fd(), iface, &st, AT_SYMLINK_NOFOLLOW)` check; on S_ISLNK → emit NEW `sidecar.warn.iface_dir_symlink` event + return. Replace `::open(tmp_path, ...)` with `openat(root.fd(), "<iface>/rule_index.json.tmp", O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW|O_CLOEXEC, 0644)`. Replace `::rename(tmp_path, final_path)` with `renameat(root.fd(), "<iface>/rule_index.json.tmp", root.fd(), "<iface>/rule_index.json")`. Preserve PI-32-3.4b never-throws via existing top-level `try{} catch(...){}` envelope. ~80 LOC delta (additive class + replacement-in-place). | KC-3 sidecar limb closure |
+| `src/common/logger.hpp` | kEventNames array length 35 → 36; ADD single entry `"sidecar.warn.iface_dir_symlink"` at the canonical position alongside the other `sidecar.warn.*` entries (lines 101-106); kEventCount comment 35 → 36; comment block at line 81-84 amended to cite §5.36 (MVP-3.4e). +2 LOC (1 array entry + 1 comment line). | Logger catalog lockstep with NEW sidecar event |
+| `tests/fixtures/log_events_v1.txt` | +1 line `sidecar.warn.iface_dir_symlink` at sorted position (between current line 29 `reset_counters.refused.no_pin` and current line 30 `sidecar.warn.lstat_failed`). +1 line. | Guard #13 fixture lockstep with kEventNames |
+| `tests/CMakeLists.txt` | ADD 2 `add_test` blocks (T-1, T-2) + 2 `set_tests_properties` blocks declaring `RESOURCE_LOCK xdp_fixture`. ~30 LOC additive. | Test registration |
+
+##### UNCHANGED-BUT-AFFECTED (zero git-diff fence — reviewer asserts `git diff` returns empty)
+
+| Path | Why unchanged + how preserved |
+|---|---|
+| `src/lib/loader.hpp` | **PI-7-3.4e-hpp: 11th consecutive ZERO-diff cycle target.** No new enum value, no new function declaration, no new struct. The `reset_counters_request` API lives in `apply_internal.hpp` (anon-namespace adjacent), NOT in the public `loader.hpp`. Reviewer check: `git diff <pre-§5.36> -- src/lib/loader.hpp` empty. |
+| `src/lib/config.hpp` | **PI-7-3.4e-cpp: 6th consecutive ZERO-diff cycle target.** No schema change this slice. Reviewer check: `git diff <pre-§5.36> -- src/lib/config.hpp` empty. |
+| `src/lib/config.cpp` | No schema change. |
+| `src/lib/sidecar.hpp` | `write_rule_index` signature UNCHANGED (`void write_rule_index(std::string_view iface, std::string_view sidecar_root, const Config& cfg) noexcept`). Internal-impl-only change. |
+| `src/cli/reset_counters.hpp` | `ResetCountersConfig` struct + `reset_counters_main` declaration UNCHANGED (CLI surface byte-equivalent — only the body of `reset_counters_main` is rewritten). |
+| `src/cli/cli.hpp`, `src/cli/cli.cpp`, `src/cli/main.cpp` | No CLI surface change (no new flags; no new dispatch arms; existing `ResetCountersConfig` variant case unchanged). `parse_reset_counters` body UNCHANGED. |
+| `src/common/mac_filter.h` | No new constant (`XDPMF_SIDECAR_ROOT` + `XDPMF_BPFFS_ROOT` already exist; `XDPMF_MAP_RULE_COUNTERS_INNER_*_NAME` already exist post-§5.35). |
+| `src/bpf/*` | No BPF datapath change. |
+| `src/exporter/*` | No exporter change. The new `sidecar.warn.iface_dir_symlink` event fires from loader-side sidecar writes; the exporter's `action="unknown"` degradation (PI-32-3.4b) is the consequence when `rule_index.json` is skipped — but no NEW exporter logic needed. |
+| systemd/ansible files | No new caps, no new env vars, no new mount/path requirements. |
+| `tests/T_CLI_HELP_VERSION.sh` | No `--help` text change (reset-counters CLI surface byte-equivalent). |
+| `tests/T_RESET_COUNTERS_*.sh` (existing §5.35 tests) | Behavior assertions byte-equivalent. The internal-routing change is transparent to legitimate inputs — `reset-counters --iface <real-iface>` still exits 0; `reset-counters --rule-id <out-of-range>` still exits 1 per HG-3.4d-2. NO test-body edits. |
+| `tests/T_SIDECAR_JSON_SHAPE.sh`, `tests/T_DROP_RULE_BUMPS_COUNTER.sh`, `tests/T_EXPORTER_RULE_LABELS.sh` (existing sidecar-reading tests) | Behavior byte-equivalent on legitimate inputs. The fd-relative writes produce identical on-disk JSON. NO test-body edits. |
+| `CHANGELOG.md` | No version bump per D-3.4e-VERSION. MAY get an unreleased-section `### Security` entry (impl-flexible operative-semantic per Phase 4.4); if added, that's a +N-line additive change, NOT a "behavior-affecting" edit per the UNCHANGED-BUT-AFFECTED contract. |
+| `CMakeLists.txt` | No VERSION bump per D-3.4e-VERSION. |
+
+Anything not in NEW, EDITED, or UNCHANGED-BUT-AFFECTED is off-limits for impl. If impl needs to edit a file not listed, that's a design gap — peer-DM architect.
+
+#### §5.36 DataStructures additions / changes
+
+##### `xdpmf::internal::ResetCountersRequest` — NEW struct in `src/lib/apply_internal.hpp`
+
+```
+struct ResetCountersRequest {
+    std::string                   iface;     // CLI --iface; shape-validated inside reset_counters_request()
+    std::optional<std::uint32_t>  rule_id;   // absent = zero ALL 64 slots; present = zero only slot rule_id
+};
+```
+
+Mirrors `ApplyRequest`'s lexical position; lifetime semantic identical (caller owns; helper consumes by const-ref). Field count is operative-semantic per Phase 4.4 — if impl adds a third field (e.g., a `bool dry_run` for future expansion), that's an inline-merge OOT.
+
+##### `SidecarRootFd` — NEW anon-namespace RAII class in `src/lib/sidecar.cpp`
+
+```
+// Local-anon RAII for XDPMF_SIDECAR_ROOT fd held with O_PATH|O_DIRECTORY|O_NOFOLLOW.
+// Mirror of BpffsRootFd's shape (loader.cpp:450-539) — single-callsite-RAII discipline
+// (NOT exported to a header). Ctor handles ENOENT (mkdir-once retry), ELOOP/ENOTDIR
+// (SET ERROR STATE; sidecar never throws — caller emits sidecar.warn.*), and other errno.
+class SidecarRootFd {
+    int  fd_     = -1;
+    enum class State { Ok, RootSymlink, RootNotDir, OpenFailed };
+    State state_ = State::OpenFailed;
+    int   errno_ = 0;
+public:
+    explicit SidecarRootFd(const char* root_path);  // ctor (does NOT throw)
+    ~SidecarRootFd() noexcept;                       // close fd
+    // non-copyable; moveable optional (impl picks)
+    [[nodiscard]] int   fd() const noexcept;
+    [[nodiscard]] State state() const noexcept;
+    [[nodiscard]] int   error_errno() const noexcept;
+};
+```
+
+State enum members are operative-semantic per Phase 4.4 — impl may rename or merge (e.g., collapse `RootSymlink` + `RootNotDir` into a `RootRefused` with a sub-discriminator) as long as the four emit-paths (root_symlink / root_not_dir / lstat_failed / mkdir_failed for the per-iface subdir / iface_dir_symlink for the per-iface depth) reach their corresponding logger events. Names of the helper class members are NOT contractual; the BEHAVIOUR contracts are in §6 below.
+
+#### §5.36 Interfaces additions
+
+##### `src/lib/apply_internal.hpp` — extended
+
+```cpp
+namespace xdpmf::internal {
+
+// (existing) struct ApplyRequest { ... };
+// (existing) [[nodiscard]] std::uint32_t apply_request(const ApplyRequest& req);
+
+/* §5.36 (MVP-3.4e) HG-3.4e-1: reset-counters internal-helper entry. Mirrors
+ * apply_request's pattern — caller (src/cli/reset_counters.cpp) is responsible
+ * for argv-parse + audit-log emission BEFORE calling. This helper does:
+ *   validate_iface_name (shape-check; throws LoaderError::PathRefused on bad shape) →
+ *   resolve_ifindex (existence-check; throws LoaderError::LoadFailed on ENODEV) →
+ *   BpffsRootFd ctor (root symlink/non-dir → PathRefused) →
+ *   iface_entry_is_real_dir (per-iface symlink/non-dir → PathRefused; ENOENT → LoadFailed
+ *     "rule_counters pins absent for iface 'X' — not attached?") →
+ *   bpf_obj_get on inner_a_path + inner_b_path → per-CPU zero buffer →
+ *   bpf_map_update_elem zero-write loop or single-slot (per req.rule_id).
+ *
+ * Throws std::system_error{LoaderError::*, ...} on any failure (caller's main.cpp
+ * catch arm maps to exit codes per existing pattern). Returns void; the operator-
+ * observable outcome is "no exception → exit 0; any exception → mapped exit code". */
+struct ResetCountersRequest {
+    std::string                  iface;
+    std::optional<std::uint32_t> rule_id;
+};
+
+void reset_counters_request(const ResetCountersRequest& req);
+
+}  // namespace xdpmf::internal
+```
+
+##### `src/lib/loader.cpp` — NEW anon-namespace + xdpmf::internal:: bodies
+
+`validate_iface_name` (anon namespace, NEW helper):
+```cpp
+/* §5.36 (MVP-3.4e) Q2.A2: dev_valid_name-style shape check. Called from
+ * reset_counters_request (and only from there this slice; not retrofitted to
+ * apply_request/detach() per Q2.A2 scope discipline). Rejects:
+ *   - empty
+ *   - length > IFNAMSIZ - 1 (= 15)
+ *   - chars outside [A-Za-z0-9._-]
+ *   - exact "." or ".." (kernel reserves)
+ * Throws std::system_error{on_fail, ...} with stderr containing literal
+ * `refusing to operate` + iface name token (load-bearing for T-1 grep). */
+void validate_iface_name(const std::string& iface, LoaderError on_fail);
+```
+
+`xdpmf::internal::reset_counters_request` (free function in xdpmf::internal namespace, body in loader.cpp):
+```cpp
+namespace xdpmf::internal {
+void reset_counters_request(const ResetCountersRequest& req)
+{
+    // 1. shape-check iface (Q2.A2 — throws PathRefused on bad shape)
+    validate_iface_name(req.iface, LoaderError::PathRefused);
+
+    // 2. existence-check iface (resolve_ifindex; throws LoadFailed on ENODEV)
+    (void)resolve_ifindex(req.iface, LoaderError::LoadFailed);
+
+    // 3. bpffs root hardening (§5.22 BpffsRootFd; throws PathRefused on root symlink)
+    BpffsRootFd root{};
+
+    // 4. per-iface depth hardening (§5.22 iface_entry_is_real_dir; throws
+    //    PathRefused on iface symlink/non-dir; returns false on ENOENT → throw
+    //    LoadFailed precondition)
+    if (!iface_entry_is_real_dir(root, req.iface)) {
+        throw_loader(LoaderError::LoadFailed,
+                     std::format("rule_counters pins absent for iface '{}' — not attached?",
+                                 req.iface));
+    }
+
+    // 5. construct pin paths and open inner_a + inner_b via bpf_obj_get
+    // 6. per-CPU zero-write loop (mirrors §5.35 zero_one_slot semantics; impl-flexible
+    //    whether to introduce a local helper or inline)
+    // 7. close fds; return
+    // (full body ~50 LOC of straightforward path-construction + bpf_obj_get + libbpf
+    //  zero-write loop; the security contract is points 1-4 above)
+}
+}  // namespace xdpmf::internal
+```
+
+##### `src/cli/reset_counters.cpp` — significantly rewritten body
+
+The CLI translation unit shrinks. Body shape post-§5.36:
+```cpp
+int reset_counters_main(const ResetCountersConfig& cfg)
+{
+    // 1. defense-in-depth empty-iface check (parser already enforces) — UNCHANGED
+    //    from §5.35 lines 124-130; emits cli.usage_error + returns 1.
+    //
+    // 2. emit reset_counters.activated audit log — UNCHANGED in shape from §5.35
+    //    lines 163-199; mirrors bypass.activated. Fires BEFORE the loader call so
+    //    operator INTENT is recorded even if loader throws.
+    //
+    // 3. invoke internal::reset_counters_request — REPLACES §5.35 lines 132-254
+    //    (precondition probe + open inners + zero-write loop). All of that logic
+    //    moves to loader.cpp's xdpmf::internal:: namespace per HG-3.4e-1.
+    //
+    //    Conversion of catch arms:
+    //    - §5.35 lines 138-152: ENOENT precondition probe emitting
+    //      `reset_counters.refused.no_pin` — REPLACED by the LoadFailed-class
+    //      exception path. main.cpp's existing catch arm maps LoadFailed → exit 2.
+    //      The `reset_counters.refused.no_pin` event REMAINS in the kEventNames
+    //      catalog (logger.hpp:99) — emitted from the new helper site in
+    //      reset_counters_request OR retained as a CLI-side pre-check before
+    //      calling the helper. Architect picks: retain the precondition probe in
+    //      CLI translation unit (cli-side; before loader call) — preserves
+    //      existing `reset_counters.refused.no_pin` event semantics (operator-
+    //      observable "iface not attached" is detected and emitted from CLI
+    //      side; only NEW path-rejection cases throw from loader). Impl-flexible
+    //      per Phase 4.4 — if a different shape is cleaner, inline-merge.
+    //
+    // 4. return 0 on success; std::system_error propagates to main.cpp.
+    //
+    // Helpers removed from this TU: pin_path_for, open_pin_strict, zero_one_slot.
+    // Helper KEPT (per guard #9 D-3.4d-6): escape_audit_value (audit-log fmt).
+}
+```
+
+#### §5.36 Decisions (with rationale)
+
+##### D-3.4e-1 — `reset_counters_request` declaration lives in `apply_internal.hpp` (NOT a NEW header `reset_counters_internal.hpp`) — because
+
+Brief offered both choices. Architect picks `apply_internal.hpp` extension over NEW `reset_counters_internal.hpp` because:
+- `apply_internal.hpp` is documented (`apply_internal.hpp:1-14`) as "PRIVATE header… exposes the single atomic-apply implementation that drives both loader::attach() and apply::apply_config_inmemory()" — the "internal helpers" concept is already there; second struct + function is a small additive extension, not a new conceptual surface.
+- Naming the header `apply_internal.hpp` is slightly inaccurate post-§5.36 (it now hosts BOTH apply + reset-counters helpers). Renaming to a generic `internal.hpp` is preferable architecturally BUT requires cascading include updates across 3-5 source files — out of scope for KC-3 closure.
+- Future cycles MAY rename to `internal.hpp` and split per-subcommand headers; deferred to a polish slice. Documented as new OOS fence below.
+
+##### D-3.4e-2 — `validate_iface_name` lives in `loader.cpp` anon namespace (NOT exported to `raii.hpp` or `apply_internal.hpp`) — because
+
+Single-callsite per §5.22 anon-namespace fence. Although `validate_iface_name` is morally a candidate for sharing across loader paths (apply_request, detach, reset_counters), Q2.A2 scope discipline limits its use to `reset_counters_request` this slice — single callsite — so the §5.22 rule applies. Future slice retrofitting to apply_request/detach (if a /mint-review surfaces a shape-rejection regression there) MAY promote the helper at that time.
+
+##### D-3.4e-3 — `validate_iface_name` rejects `[^A-Za-z0-9._-]` characters + length > 15 + `.`/`..` — because
+
+Mirrors kernel `dev_valid_name` per `net/core/dev.c` (linux ≥3.0):
+- IFNAMSIZ = 16; name length capped at 15 + NUL.
+- Permitted chars: any except `/`, NUL, whitespace, `:`. The architect picks a slightly stricter `[A-Za-z0-9._-]` allowlist (matches POSIX portable filename character set + kernel's actual common-case acceptance — `lo`, `eth0`, `veth_a`, `wlp2s0`, etc.). Stricter is fine for our use: an iface that fails this check would also have been rejected by `if_nametoindex` (ENODEV) — we just classify the rejection as PathRefused (exit 8) instead of LoadFailed (exit 2) to be semantically informative.
+- `.` and `..` explicitly rejected (kernel reserves; matches `dev_valid_name`).
+
+The brief's `dev_valid_name`-equivalent isn't a strict kernel-API mirror but a security-shape-check tailored to the §5.22 invariant. The contract is: "if `validate_iface_name(iface)` accepts, then `iface` cannot be a path-traversal vector AND `pin_path_for(iface, ...)` cannot escape the bpffs root via name shape alone".
+
+##### D-3.4e-4 — Sidecar SIDECAR_ROOT upgrade from path-based lstat (§5.31 EDIT-1) to O_PATH|O_NOFOLLOW open + fstatat — because
+
+§5.31 EDIT-1's `lstat(root, &st_root)` + `S_ISLNK(st_root.st_mode)` check is path-based and TOCTOU-racy in principle: an attacker who can write under /run could race between lstat and the subsequent `mkdir_p` / `::open`. `O_PATH | O_DIRECTORY | O_NOFOLLOW` open is kernel-atomic — ELOOP on trailing symlink, ENOTDIR on non-directory, EACCES/EPERM on permission failure. The trade-off (more invasive replacement of working code) is justified by:
+- Symmetric discipline with §5.22 BpffsRootFd (architect / reviewer / operator mental-model unification).
+- Closes the per-iface gap (the existing lstat block only covers SIDECAR_ROOT; per-iface depth needed a check ANYWAY — extending lstat-based-pattern would require a second separate check, whereas the O_PATH pattern naturally provides the fd that anchors fd-relative per-iface ops).
+- TOCTOU window elimination at the root depth (bonus).
+
+Existing event names (`sidecar.warn.root_symlink`, `sidecar.warn.root_not_dir`, `sidecar.warn.lstat_failed`) PRESERVED — see D-3.4e-5.
+
+##### D-3.4e-5 — Existing 6 `sidecar.warn.*` event names PRESERVED post-§5.36 upgrade — because
+
+`sidecar.warn.root_symlink` / `root_not_dir` / `lstat_failed` / `mkdir_failed` / `write_failed` / `write_exception` are operator-facing stable contract for log-shipping pipelines (Prometheus alert rules, ELK queries, etc.). Renaming events = downstream operator pipeline breakage. The upgrade from lstat to O_PATH open shifts the TRIGGER errno class slightly (`lstat()==0 && S_ISLNK` → `open(O_PATH|O_NOFOLLOW)==-1 && errno==ELOOP` for root_symlink; analogous for root_not_dir; for lstat_failed the trigger becomes "other open errno != ENOENT && != ELOOP && != ENOTDIR && != EACCES && != EPERM"), but the EVENT NAME stays stable. Comment in logger.hpp updates to clarify post-§5.36 trigger semantics — operative-semantic per Phase 4.4 (impl-flexible comment wording).
+
+##### D-3.4e-T2-LOCK — T_SIDECAR_IFACE_SYMLINK_REFUSAL takes ONLY `RESOURCE_LOCK xdp_fixture` (NOT the brief-proposed `xdp_fixture;sidecar_root`) — because
+
+Brief proposed introducing a NEW lock domain `sidecar_root` because "/run/xdpmacfilter is host-global state". Architect rejects as over-engineering for this slice:
+- T-2 sets up + tears down `/run/xdpmacfilter/<iface>` ONLY (per-iface; bounded by IFACE_A). The lock-protected operation is the symlink-plant-and-test transient state, which corresponds 1:1 with the bpffs per-iface state for the same IFACE_A.
+- All existing sidecar-touching ctests (T_SIDECAR_JSON_SHAPE, T_EXPORTER_RULE_LABELS, T_DROP_RULE_BUMPS_COUNTER, T_RULE_COUNTER_*) already serialize via `xdp_fixture` lock domain (per §5.33 D-3.5.5-1).
+- Adding a NEW lock domain ripples through CMakeLists.txt for retroactive declaration — out of scope (not a KC-3 closure mechanism).
+- T-2 inheriting `xdp_fixture` serializes T-2 with T_SIDECAR_JSON_SHAPE etc — sufficient coverage.
+
+If a future slice introduces TRULY ROOT-LEVEL `/run/xdpmacfilter` mutations (e.g., a test that plants a symlink at SIDECAR_ROOT itself, not at /run/xdpmacfilter/<iface>), then the `sidecar_root` lock domain MAY be introduced at that time. Deferred to OOS fence below.
+
+##### D-3.4e-VERSION — NO VERSION BUMP this slice — because
+
+The slice is an INTERNAL SECURITY HARDENING with no operator-observable feature surface change beyond exit-code/stderr disposition on attack inputs (which is intent-preserving — the operator who feeds `--iface ../foo` was already producing undefined behavior; we now reject it cleanly). Per semantic-versioning convention:
+- MAJOR — breaking API change → no (CLI surface byte-equivalent).
+- MINOR — new feature → no (no new flag, no new subcommand, no new env var).
+- PATCH — bug fix / security fix → arguably yes.
+
+Architect picks: leave VERSION at `0.10.0`. Optional CHANGELOG.md `### Security` entry under unreleased — impl-flexible per Phase 4.4 operative-semantic SHOULD-hint. Reviewer should NOT flag the absence of a version bump as a contract drift.
+
+##### D-3.4e-PROBE-PLACEMENT — `reset_counters.refused.no_pin` event STAYS in CLI translation unit (not moved into loader.cpp) — because
+
+§5.35 introduced the `reset_counters.refused.no_pin` event in `src/cli/reset_counters.cpp:148-151` to surface "iface not attached" with the canary inner_a pin path. Post-§5.36, the equivalent check moves logically inside `iface_entry_is_real_dir(root, req.iface)` returning false (→ throw LoadFailed). Two options:
+- A: drop `reset_counters.refused.no_pin` from kEventNames; the LoadFailed exception propagates to main.cpp's `cli.error` arm (exit 2 with `cli.error` event).
+- B: retain the precondition probe in CLI side BEFORE calling `reset_counters_request`; emit `reset_counters.refused.no_pin` from CLI side; if probe passes, call the helper.
+
+Architect picks **B** — operator-facing event semantic stability (downstream log-shipping pipelines may pin to `reset_counters.refused.no_pin` for alerting). The CLI-side probe is a path-construct via `pin_path_for(iface, INNER_A_NAME)` + `bpf_obj_get` — same shape as §5.35 lines 132-158. **This is a partial regression vs the routing-through-internal pattern**: a `pin_path_for(iface, ...)` call survives in the CLI translation unit. BUT: at this probe call-site, `iface` has NOT been shape-validated (`validate_iface_name` lives in `reset_counters_request`). For a path-traversal-shaped iface, `bpf_obj_get(pin_path)` would still open an attacker-controlled BPF pin... but only for the precondition probe (read-only `bpf_obj_get`, NOT `bpf_map_update_elem`). The PROBE alone does NOT mutate. Then the audit-log emits `reset_counters.refused.no_pin` and the CLI returns 1.
+
+Wait — this leaves a subtle attack: with `--iface ../<other-prog>`, the CLI-side probe `bpf_obj_get("/sys/fs/bpf/xdpmacfilter/../<other-prog>/rule_counters_a")` SUCCEEDS if `<other-prog>` has a `rule_counters_a` pin (yields a BPF fd; the CLI immediately closes it). No mutation. CLI then proceeds to call `reset_counters_request(req)` which validates iface name → throws PathRefused → main.cpp emits `cli.error` + exit 8. So the FLOW is: probe-success → call helper → helper throws PathRefused → exit 8. The probe was a no-op in terms of state.
+
+Hmm but this is a code smell. Architect reconsiders: **option B is wrong**. Let me pick **option A**: drop the CLI-side probe entirely. Move the precondition check INTO `reset_counters_request` (after validate_iface_name + resolve_ifindex + BpffsRootFd + iface_entry_is_real_dir → all hardened). If iface_entry_is_real_dir returns false, throw `LoaderError::LoadFailed` with stderr `"rule_counters pins absent for iface '<X>' — not attached?"`. The `reset_counters.refused.no_pin` event becomes UNUSED.
+
+Tradeoff: log-shipping pipelines that pin to `reset_counters.refused.no_pin` break. BUT: the §5.35 event was introduced THIS RELEASE CYCLE — not yet shipped to operators. We have a free hand to consolidate.
+
+**FINAL D-3.4e-PROBE-PLACEMENT decision**: **A** (drop CLI-side probe; consolidate into helper). `reset_counters.refused.no_pin` event STAYS in kEventNames catalog (operator-facing stable; emitted from `reset_counters_request` instead of CLI) — BUT actually: events are emitted from concrete callsites; if no callsite emits it, kEventNames entry is dead-code (logger guard rejects log-with-name-not-in-catalog at build/runtime).
+
+Sub-options:
+- A.1: drop event from kEventNames (kEventNames 35 → 35 minus 1 + 1 NEW = still 35); fixture lockstep updates remove `reset_counters.refused.no_pin` line, add `sidecar.warn.iface_dir_symlink` line. **Net catalog change is 0**.
+- A.2: keep event in kEventNames; emit from `reset_counters_request` LoadFailed throw path via a dedicated emit BEFORE throwing.
+
+Architect picks **A.2** — preserves the event-emission-site discipline (the helper emits the structured log THEN throws; main.cpp's catch arm DOESN'T double-emit because the throw carries a system_error with already-emitted-stderr semantic). Concretely: in `reset_counters_request`, after `iface_entry_is_real_dir` returns false, emit `reset_counters.refused.no_pin` via `xdpmf::logger::emit(...)` with the iface + canary-path field, THEN throw LoadFailed. main.cpp's exit-code arm maps LoadFailed → exit 2.
+
+This way: T_CLI_RESET_COUNTERS_NO_IFACE.sh (existing §5.35 test) still passes byte-equivalent (event fires, exit 2). The catalog stays at 36 (35 + 1 new). The CLI translation unit shrinks: precondition probe removed; only the audit-log emission + helper-invocation pattern remains.
+
+**Final D-3.4e-PROBE-PLACEMENT**: A.2 — drop CLI-side probe; emit `reset_counters.refused.no_pin` from `reset_counters_request` precondition arm BEFORE throwing LoadFailed. CLI translation unit shrinks to argv → audit-log → helper-invocation → return 0 (or main.cpp's catch arm maps thrown exception to exit code).
+
+This is the cleanest shape. Resolves the routing-through-internal-helper intent fully — no path-construction survives in the CLI translation unit.
+
+Re-stated for clarity (this is the final shape, supersedes the within-this-decision option-B exploration):
+
+> **D-3.4e-PROBE-PLACEMENT (FINAL) — A.2**: drop CLI-side precondition probe. `reset_counters.refused.no_pin` event emitted from `reset_counters_request` (in loader.cpp anon-namespace + xdpmf::internal:: surface) BEFORE the LoadFailed throw at the `iface_entry_is_real_dir` returns-false branch. CLI translation unit (`src/cli/reset_counters.cpp`) shrinks to: defense-in-depth empty-iface check (cli.usage_error) → audit-log `reset_counters.activated` emission → `internal::reset_counters_request(req)` invocation → return 0. NO path construction, NO `bpf_obj_get`, NO direct map writes in the CLI translation unit. kEventNames catalog UNCHANGED at the `reset_counters.refused.no_pin` row (event name preserved; emit-site moves loader-side).
+
+#### §5.36 TestStrategy entries
+
+##### T-1: T_RESET_COUNTERS_PATH_TRAVERSAL — `reset-counters --iface <bad-shape>` refused with exit 8 (per HG-3.4e-3, MVP-3.4e)
+
+**Purpose**: KC-3 reset-counters-limb closure. The test asserts that operator inputs targeting path traversal or shape-invalid iface names are refused at the §5.22 invariant layer (exit 8, `LoaderError::PathRefused`), not silently accepted into pin-path construction.
+
+**Setup**:
+- Standard xdp_fixture veth pair (`IFACE_A` available, attached or not — test does NOT require pre-existing attach for sub-cases (a)+(b); negation sub-case (c) requires attach).
+- RESOURCE_LOCK xdp_fixture.
+
+**Sub-case (a) — path-traversal-shaped iface**:
+- Trigger: `xdpmacfilter reset-counters --iface ../foo`
+- Observable: exit code 8.
+- Assertion: stderr contains literal `refusing to operate` substring.
+- Assertion: stderr contains the iface token (`../foo`) or its escaped form (impl-flexible — the literal AS-INVOKED OR a safely-escaped echo).
+- Negation: NO BPF map mutation on any sibling pinned BPF subsystem under /sys/fs/bpf/ (verified by snapshotting a non-xdpmacfilter sibling map if present, OR — simpler — by not pre-creating any sibling and observing no zero-write side effects). Mechanism: pre-snapshot `find /sys/fs/bpf -type f -newer <ref-timestamp>`; post-test, same find should be empty (no new files modified).
+
+**Sub-case (b) — shape-invalid iface (whitespace / control chars)**:
+- Trigger: `xdpmacfilter reset-counters --iface 'invalid name with spaces'`
+- Observable: exit code 8.
+- Assertion: stderr contains literal `refusing to operate` substring.
+- Assertion: stderr contains the iface token or escaped form.
+
+**Sub-case (c) — negation control (legitimate iface still works)**:
+- Setup: `xdpmacfilter attach --iface ${IFACE_A}` (pre-condition for reset-counters per HG-3.4d-3).
+- Trigger: `xdpmacfilter reset-counters --iface ${IFACE_A}`
+- Observable: exit code 0.
+- Assertion: stderr contains `RESET-COUNTERS on ${IFACE_A}` (audit-log per HG-3.4d-6).
+- Teardown: `xdpmacfilter detach --iface ${IFACE_A}`; cleanup_veth.
+
+**Assertion mechanism**: bash stderr capture into a temp file (`stderr_file=$(mktemp)`); `grep -q -F -- 'refusing to operate' "${stderr_file}"` per sub-case; `$?` of binary invocation for exit code. Template: T_BPFFS_ROOT_SYMLINK.sh.
+
+**Resource lock**: `RESOURCE_LOCK xdp_fixture`.
+
+**Failure mode signaling sliced-design break**: if T-1 sub-case (a) yields exit 2 instead of 8, the `validate_iface_name` + PathRefused-on_fail wiring is wrong (Q2.A2 not implemented per design). If sub-case (b) yields exit 0, the validation rejection rules are too permissive. If sub-case (c) yields exit != 0, the routing-through-internal-helper broke legitimate operation. All three are `[INVARIANT-VIOLATED]` per §6.5 PI-3.4e-1.
+
+##### T-2: T_SIDECAR_IFACE_SYMLINK_REFUSAL — per-iface symlink at `/run/xdpmacfilter/<iface>` refused without breaking apply (per HG-3.4e-4, MVP-3.4e)
+
+**Purpose**: KC-3 sidecar-limb closure. Verify per-iface symlink is detected + WARN + skip; apply continues + exits 0 (PI-32-3.4b PRESERVED).
+
+**Setup**:
+- Standard xdp_fixture veth pair (`IFACE_A`).
+- Cleanup pre-existing `/run/xdpmacfilter/${IFACE_A}` if any (idempotent).
+- Pre-create attacker target: `mkdir -p /tmp/xdpmf-fake-iface-attacker`.
+- Plant symlink: `ln -s /tmp/xdpmf-fake-iface-attacker /run/xdpmacfilter/${IFACE_A}`. **Must ensure parent `/run/xdpmacfilter/` exists as real dir** — pre-test step `mkdir -p /run/xdpmacfilter`.
+- RESOURCE_LOCK xdp_fixture (per D-3.4e-T2-LOCK above; no `sidecar_root` lock domain).
+
+**Sub-case (a) — symlink refused; apply continues**:
+- Trigger 1: `xdpmacfilter attach --iface ${IFACE_A}` → exit code 0 (attach unaffected by sidecar state; sidecar fires from `apply`, not `attach`).
+- Trigger 2: `xdpmacfilter apply -f ${TMP_CONFIG} --iface ${IFACE_A}` where TMP_CONFIG has a minimal valid 1-rule config.
+- Observable: exit code 0 (PI-32-3.4b — apply does NOT escalate to fatal).
+- Assertion: combined stderr (apply invocation) contains literal `sidecar.warn.iface_dir_symlink` (event name token — emitted in both text-mode + JSON-mode per §5.32 logger convention).
+- Assertion: stderr also contains literal `symlink` token (semantic phrasing — impl picks exact wording; SHOULD-hint per Phase 4.4).
+- Assertion: `/tmp/xdpmf-fake-iface-attacker/rule_index.json` does NOT exist (no write into attacker-controlled target). Verified via `test ! -e /tmp/xdpmf-fake-iface-attacker/rule_index.json`.
+- Assertion: `/tmp/xdpmf-fake-iface-attacker/rule_index.json.tmp` does NOT exist either.
+
+**Sub-case (b) — negation (no symlink → write succeeds)**:
+- Setup: clean `/run/xdpmacfilter/${IFACE_A}` (rm -rf the symlink + recreate `/run/xdpmacfilter/${IFACE_A}/` as real dir OR let sidecar's mkdirat create it).
+- Trigger: `xdpmacfilter apply -f ${TMP_CONFIG} --iface ${IFACE_A}` → exit code 0.
+- Assertion: `/run/xdpmacfilter/${IFACE_A}/rule_index.json` exists.
+- Assertion: stderr does NOT contain `sidecar.warn.iface_dir_symlink` substring.
+
+**Teardown**: trap-driven cleanup — remove planted symlink, remove attacker dir, detach iface, cleanup_veth, rm stderr_file.
+
+**Assertion mechanism**: stderr capture + grep substring; file-existence via `test -e` / `test ! -e`.
+
+**Resource lock**: `RESOURCE_LOCK xdp_fixture` (per D-3.4e-T2-LOCK).
+
+**Failure mode signaling sliced-design break**: if T-2 sub-case (a) yields exit != 0, sidecar threw (PI-32-3.4b violated). If `/tmp/xdpmf-fake-iface-attacker/rule_index.json` is created, the fd-relative discipline is broken (symlink was followed). If `sidecar.warn.iface_dir_symlink` does NOT appear in stderr, the NEW event isn't being emitted (or is mis-named). If sub-case (b) yields exit != 0 OR no rule_index.json, the upgrade broke the happy-path write. All four are `[INVARIANT-VIOLATED]` per §6.5 PI-3.4e-2.
+
+#### §6.5 Preserved invariants (§5.36 MVP-3.4e brownfield)
+
+Reviewer's framework point 5 walks this list per architect spec §6.5.
+
+| PI | Property | Check mechanism |
+|---|---|---|
+| **PI-7-3.4e-hpp** | `src/lib/loader.hpp` byte-identical (no new public symbols this slice — internal helper home is `apply_internal.hpp`, NOT loader.hpp). **11th consecutive ZERO-diff cycle**. | `git diff <pre-§5.36> -- src/lib/loader.hpp` empty |
+| **PI-7-3.4e-cpp** | `src/lib/config.hpp` byte-identical (no schema change this slice). **6th consecutive ZERO-diff cycle**. | `git diff <pre-§5.36> -- src/lib/config.hpp` empty |
+| **PI-32-3.4b PRESERVED** | Sidecar never throws; per-iface symlink response = WARN + skip; apply continues + exits 0; exporter degrades to `action="unknown"`. | T-2 sub-case (a) asserts apply exit 0; reviewer re-runs T-2 |
+| **§5.22 invariant — bilateral restoration** | All bpffs-touching operator paths (attach + detach + apply + **reset-counters**) compose `validate_iface_name`/`resolve_ifindex` + `BpffsRootFd` + `iface_entry_is_real_dir` BEFORE constructing pin paths. | T-1 sub-cases (a)+(b) assert exit 8 + `refusing to operate` stderr for reset-counters; existing T_BPFFS_ROOT_SYMLINK still passes for attach |
+| **§5.31 EDIT-1 SIDECAR_ROOT discipline — event names preserved** | The 6 existing `sidecar.warn.*` event names (root_symlink, root_not_dir, lstat_failed, mkdir_failed, write_failed, write_exception) PRESERVED post-§5.36 upgrade. | `grep -F 'sidecar.warn.' src/common/logger.hpp` returns the original 6 + 1 NEW (iface_dir_symlink); fixture lockstep |
+| **PI-3.4d-* (counter management + atomic-swap) PRESERVED** | All §5.35 PIs hold (counter monotonicity across apply via copy-forward; reset-counters CLI surface byte-equivalent; pin paths post-flip unchanged). | Existing §5.35 ctests pass byte-equivalent (T_CLI_RESET_COUNTERS, T_CLI_RESET_COUNTERS_RULE_ID, T_CLI_RESET_COUNTERS_NO_IFACE, T_RULE_COUNTER_*); reviewer re-runs |
+| **PI-3.4e-1 (NEW) — reset-counters path-refused via §5.22 invariant** | `reset-counters --iface <path-traversal-shape>` returns exit 8 with stderr `refusing to operate`; NO BPF map mutation on sibling pinned subsystems. | T_RESET_COUNTERS_PATH_TRAVERSAL.sh (T-1) sub-cases (a)+(b) |
+| **PI-3.4e-2 (NEW) — sidecar iface-subdir symlink refusal** | Per-iface symlink at `/run/xdpmacfilter/<iface>` triggers `sidecar.warn.iface_dir_symlink` event + skip-and-return; apply continues + exits 0; no write to symlink target. | T_SIDECAR_IFACE_SYMLINK_REFUSAL.sh (T-2) sub-case (a) |
+| **PI-6 (existing ctest count regression-baseline)** | All 64 pre-§5.36 ctests (post-§5.35) pass byte-equivalent OR legitimately SKIP-77; baseline 64 → 66 (+2 NEW T-1 + T-2). NO existing ctest body EDITs beyond fixture-lockstep (E-1 — log_events_v1.txt). | `ctest --output-on-failure` returns 66/66 green; baseline diff = +2 NEW + 1 fixture-only EDIT |
+| **PI-10 (additive-only header invariants)** | `src/common/mac_filter.h` byte-identical (no new constants, no removed constants this slice). | `git diff <pre-§5.36> -- src/common/mac_filter.h` empty |
+
+#### §5.36 verifiable invariants for reviewer (MAY-default per architect spec §6.5 discipline)
+
+Per architect spec §6.5 "Verification-hints discipline (any optional subsection naming checks for reviewer)": these are guidance for reviewer, NOT contracts for impl. Default disposition: items MAY hold (impl-flex inline-merge if impl deviates to satisfy a PI-* contract elsewhere). Reserve MUST only for PI-* items in §6.5 above (those ARE MUSTs by definition).
+
+**Resolution rule (architect-stated for this amendment)**: if a prose statement in §5.36 conflicts with an invariants-block item in this section, the invariants-block item wins. If impl deviates from any item below to satisfy a PI-* contract in §6.5, reviewer's correct disposition is `inline-merge` on the hint text — NOT `[UNRELATED-EDIT]` on impl.
+
+1. (MAY) `grep -nE 'pin_path_for|bpf_obj_get' src/cli/reset_counters.cpp` returns **zero hits** post-§5.36 (CLI translation unit no longer constructs paths or opens BPF objects directly).
+2. (MAY) `grep -nE 'mkdir_p|::open\(tmp_path|::rename\(' src/lib/sidecar.cpp` returns **zero hits** post-§5.36 (replaced by fd-relative mkdirat/openat/renameat).
+3. (MAY) `grep -nE 'O_PATH.*O_DIRECTORY.*O_NOFOLLOW' src/lib/sidecar.cpp` returns **at least 1 hit** (the new SidecarRootFd ctor).
+4. (MAY) `grep -F 'sidecar.warn.iface_dir_symlink' src/common/logger.hpp` returns 1 hit; same grep on `tests/fixtures/log_events_v1.txt` returns 1 hit. kEventNames array length 35 → 36; fixture line count 35 → 36.
+5. (MAY) `grep -nE 'reset_counters_request|ResetCountersRequest' src/lib/apply_internal.hpp` returns at least 2 hits (struct + function declaration in `xdpmf::internal::`).
+6. (MAY) `grep -nE 'validate_iface_name' src/lib/loader.cpp` returns at least 2 hits (declaration + call from `reset_counters_request`); NOT in any header.
+7. (MAY) The reset_counters.cpp body LOC count shrinks by ~80-120 LOC (the helpers `pin_path_for`/`open_pin_strict`/`zero_one_slot` plus the precondition probe + open-inners + zero-write loop all move out). Operative-semantic SHOULD-hint per Phase 4.4 — exact delta impl-flexible.
+8. (MAY) sidecar.cpp body LOC count grows by ~80 LOC (new SidecarRootFd class + branch logic). Operative-semantic SHOULD-hint.
+9. (MAY) loader.cpp body LOC count grows by ~95 LOC (validate_iface_name helper + reset_counters_request body). Operative-semantic SHOULD-hint.
+10. (MAY) `git diff <pre-§5.36> -- src/lib/loader.hpp src/lib/config.hpp src/lib/config.cpp src/lib/sidecar.hpp src/cli/cli.hpp src/cli/cli.cpp src/cli/main.cpp src/common/mac_filter.h src/bpf/ src/exporter/` empty (UNCHANGED-BUT-AFFECTED contract).
+11. (MAY) ctest baseline 64 → 66 (+2 NEW T-1 + T-2; ZERO existing ctest body EDITs). `tests/fixtures/log_events_v1.txt` is the ONE EDITED fixture (lockstep with kEventNames; +1 line).
+
+#### §7 OOS additions (§5.36 — new fences)
+
+The following items are EXPLICITLY OUT OF SCOPE for §5.36; future slices may consider:
+
+- **`escape_audit_value` extraction to `src/common/escape_util.{hpp,cpp}`** — security M1 + arch M2 + CQ M2 cross-validated theme B from /mint-review 2026-05-27. Deferred to MVP-3.4f.
+- **Dead `BpffsDir` + `XdpAttachment` deletion from `src/loader/raii.hpp`** — code-quality H1, ~75 LOC. Deferred to MVP-3.4f or housekeeping mini.
+- **Exporter `--bind` non-loopback WARN** — security M2. Deferred to MVP-3.5b (exporter-adjacent).
+- **`apply_internal.hpp` rename to `internal.hpp`** (D-3.4e-1 ripple cleanup) — cosmetic clarity; deferred.
+- **`validate_iface_name` retrofit to `apply_request` / `detach()`** — orthogonal hardening; only KC-3 (reset-counters) covered this slice. If /mint-review surfaces a shape-rejection regression on apply/detach paths, promote in a future slice.
+- **`sidecar_root` NEW RESOURCE_LOCK domain** (D-3.4e-T2-LOCK) — over-engineering for this slice; reconsider if a future test plants a symlink at SIDECAR_ROOT level (not per-iface).
+- **§5.22 Maximum (push fd-relative pinning into libbpf — `bpf_obj_get_at`)** — UNCHANGED from §5.22 §7 entry. libbpf upstream API limitation; out of our control.
+- **CIS-style "all-O_NOFOLLOW everywhere" sweep** — limited to KC-3 closure paths this slice; broader sweep is a separate hardening cycle.
+- **`.github/workflows/ci.yml` matrix**, **T_SANITIZER_BUILD refactor**, **TUN/TAP injector for T_DROP_MALFORMED**, **compound exporter scrape perf**, **datapath dispatch helper consolidation**, **logger.cpp OBJECT promo**, **README rewrite + HANDOFF.md**, **CO-RE field probes** — all per task-brief §"Out of scope (explicit)"; carry-forward unchanged.
+
+Carry-forward from §5.35 §7 OOS items NOT listed above — UNCHANGED.
+
+#### §5.36 Anti-misdiagnosis institutional learning (per architect-spec §6.6)
+
+This slice surfaced (via the /mint-review 2026-05-27 KC-3 chain analysis) a **class of misdiagnosis** worth permanent-guard treatment:
+
+**Anti-misdiagnosis note #17 (NEW; future-cycle guard) — invariant-restoration discipline must be bilateral / N-lateral**: when /mint-review (or any external audit) surfaces a security-hardening regression vs an existing project invariant (e.g., §5.22 BpffsRootFd / `O_PATH|O_NOFOLLOW` here), the closure brief MUST identify ALL call-sites that opted out of the invariant + close them in one slice. **One-sided fixes are kill-chain seeds in disguise**: in this slice, fixing ONLY reset-counters (without sidecar) would have left KC-3 chain HALF closed — operator could still chain "clobber sibling BPF subsystem via reset-counters" + "write to executable-on-cron-tick location via sidecar". The /mint-review report had both H1 + M3 anchors precisely because the bilateral nature was already evident; the brief author preserved it; architect must enforce.
+
+**Future-cycle architect rule**: when applying invariant restoration, grep for the ANTI-PATTERN across the WHOLE `src/` tree:
+- For `O_NOFOLLOW` / `O_PATH` / fd-relative discipline:
+  ```bash
+  grep -nE '::open\([^,]+,\s*O_[A-Z_| ]+\)' src/ | grep -v O_NOFOLLOW   # path-based opens without O_NOFOLLOW
+  grep -nE '::mkdir\(|::rename\(|::lstat\(|::stat\(' src/                # path-based fs ops
+  grep -nE 'bpf_obj_get\(' src/                                          # path-based BPF pin opens
+  ```
+- For each hit, ask: "does this run on operator-controlled-input shape?" If yes → invariant-restoration candidate.
+
+Cost: 1-2 minutes of greps during Phase A. Benefit: catches the bilateral / N-lateral nature of invariant regressions before the closure brief ships with a single-limb fix that leaves the kill-chain partially open. **Validated by §5.36 (this slice, 2026-05-27)**: the brief explicitly cited both limbs as KC-3 components; architect re-confirmed via Phase A grep #6-#10 + #14. Combined with prior guards #5 (Phase A code-grep discipline) + #14 (PERCPU-as-inner feasibility) + #15 (apply-step state-transfer for PRESERVE) + #16 (retired-pin-path test-body ripple): the Phase A discipline now covers literals + filesystem semantics + bpftool-API smokes + feasibility probes + state-transfer + retire-fixture-ripple + **bilateral-invariant-restoration** — 7 distinct ripple classes around brownfield amendments.
+
+Cite §5.36 (MVP-3.4e KC-3 closure) as the audit-trail source for this guard.
+
+**Anti-misdiagnosis sub-note (institutional learning specific to brief Q-decision precision)**: brief Q2 recommended Q2.A1 ("call `resolve_ifindex(iface, LoaderError::LoadFailed)` — does ifindex lookup + dev_valid_name in one") on a factual basis that did not survive architect's Phase A grep (resolve_ifindex calls only `if_nametoindex`, NOT `dev_valid_name`). Architect overrode to Q2.A2 (explicit `validate_iface_name` helper). **Lesson**: brief Q-decision recommendations are not contracts; they are starting hypotheses to be validated by Phase A grep. The /mint-briefer + brief-author workflow already includes Phase 2 grep discipline, but the BODY-SEMANTIC of grep'd functions (what they actually do internally) is harder to enforce automatically. Future-cycle architect: when Q recommendation hinges on "function X does Y", verify Y by reading the body, not just locating the declaration. **Validated by §5.36 Q2.A2 override**: Phase A grep located resolve_ifindex's body; the body's `if_nametoindex`-only behaviour invalidated brief's "does it in one" claim; architect picked A2 instead. Documented to help future cycles save the round-trip.
+
+Evidence: `mint/task-brief.md` MVP-3.4e brief (HG-3.4e-1..4 + Q1-Q4); /mint-review report at `agent-teams-review/runs/mint-review-mint-l2-mac-filter-202605271147/report.md` (security-reviewer H1 + M3 anchors for KC-3); §5.22 (BpffsRootFd + IfaceDirGuard + iface_entry_is_real_dir + throw_iface_symlink — DIRECT LOAD-BEARING PRECEDENT); §5.22 Q3 (LoaderError::PathRefused exit 8 — REUSED); §5.26 EDIT-1 (apply_internal.hpp internal-helper pattern); §5.31 EDIT-1 + D-3.4b-21 (SIDECAR_ROOT lstat — UPGRADED to O_PATH discipline per D-3.4e-4); §5.31 D-3.4b-17 + PI-32-3.4b (sidecar never throws — PRESERVED via HG-3.4e-4); §5.32 logger event catalog (kEventNames +1 entry per HG-3.4e-4 — guard #13 lockstep); §5.35 (most recent amendment — `reset_counters.cpp` significant rewrite this slice; `reset_counters.refused.no_pin` + `reset_counters.activated` events preserved in catalog); architect-spec §6.5 Verification-hints discipline + §6.6 Anti-misdiagnosis institutional learning (both applied in this amendment); brief Phase 4.4 operative-semantic SHOULD-hint discipline (applied to: SidecarRootFd helper naming + LOC-count estimates + alphabetical fixture sort position + helper-class member naming + comment wording updates).
