@@ -12807,3 +12807,303 @@ Carry-forward from §5.37 §7 OOS items NOT listed above — UNCHANGED.
 No new guard from this slice. **Guard catalog stays at 21**. Rationale: this slice is pure-mechanical dead-code deletion with no novel design surface — the only Phase A discipline exercised is **guard #5 (Phase A code-grep)**, already in the catalog and applied here (Phase A grep verification report above). Guard #13 (fixture cross-reference for retired strings) applies only partially since the deleted entities are SYMBOLS (class names), not strings — and the symbol-grep equivalent was applied at Phase A (Phase A grep report item 2: ZERO fixture hits, ZERO test-body hits). No anti-misdiagnosis class surfaced that future cycles could repeat (the brief-author already cross-validated via /mint-review's 2-way Theme C signal + Phase 2 grep; architect re-verified via Phase A grep; nothing in this slice required institutional learning).
 
 If a future /mint-review surfaces additional dead-code classes in a follow-up cycle, the same Phase A grep discipline (guard #5 — independently re-verify ZERO construction sites for each candidate) applies. Cite §5.38 as a precedent for "minimal-discipline brownfield housekeeping slices where Phase A grep IS the design".
+
+### §5.39 MVP-3.4h: exporter `--bind` non-loopback startup WARN (brownfield, security-observability)
+
+#### §5.39 Problem statement
+
+When `xdpmf-exporter` is invoked with `--bind <addr>` resolving to a non-loopback IPv4 address (i.e., NOT in `127.0.0.0/8`), emit a startup WARN line via `xdpmf::logger::emit(Level::Warn, "exporter.warn.bind_non_loopback", ...)` BEFORE the existing `exporter.listening` startup signal. No refusal — operator may have legitimate reason (k8s sidecar mesh, monitoring proxy, fleet-wide remote-scrape pattern); the WARN makes the choice visible in audit logs.
+
+Closes /mint-review 2026-05-27 sec M2 (exporter `--bind` non-loopback no WARN) and the **observability half** of KC-2 kill chain. KC-2 mitigation half (auth/TLS for the exposed `/metrics` endpoint) remains OOS — separate slice. Mirrors §5.30 HK-16 W1 startup-warn pattern (PI-32 trust-model-flip / bpffs-root-missing logged at startup so fleet-wide divergence is detectable). Mirrors §5.36 kEventNames-extension carve-out shape (logger.hpp 35→36 there; 36→37 here).
+
+#### §5.39 Phase A grep verification report (architect-independent — 2026-05-27)
+
+Architect re-ran brief's Phase 2 greps independently per guard #5. Results match brief's claims; two factual specifics confirmed:
+
+1. **`parse_bind_addr` declaration** at `src/exporter/http.cpp:261-266`. Signature: `[[nodiscard]] bool parse_bind_addr(std::string_view s, struct in_addr& out)`. Body: copies `s` to a NUL-terminated `std::string` and calls `::inet_pton(AF_INET, copy.c_str(), &out)`. CONFIRMED IPv4-only via `AF_INET`. Returns `true` on success, `false` on parse fail.
+2. **`run(const HttpConfig&)`** at `src/exporter/http.cpp:286-430`. Entry struct-init at `:288`; `parse_bind_addr` call at `:289` (failure path returns 1 via `exporter.bind.invalid_addr` emission at `:296-298`). `::socket()` call at `:301`. **Q1.B emission slot is between line 299 (close-brace of the parse-fail branch) and line 301 (socket call) — the WARN fires AFTER parse success, BEFORE the socket-syscall, BEFORE the existing `exporter.listening` emission at `:362-364`.** CONFIRMED.
+3. **Sibling `exporter.bind.*` event shape** at `src/exporter/http.cpp:290-352`. All four sites (`exporter.bind.invalid_addr`, `exporter.bind.socket_failed`, `exporter.bind.failed`, `exporter.bind.listen_failed`) use `std::format` for `msg` and pass a stack-allocated `Field[]` array. Field-name convention for the address is **`bind_addr`** (string_view of `cfg.bind_addr`), see `:294` + `:330`. New emission MUST use `"bind_addr"` (not `bind`, not `bind_address`).
+4. **kEventNames catalog** at `src/common/logger.hpp:90-130`. Current count = **36** (declared as `std::array<std::string_view, 36>` at `:90`; `kEventCount` computed via `kEventNames.size()` at `:132` — count is auto-tracked but the literal `36` in the array size declaration MUST be bumped). Comment block at `:81-89` traces the 34 → 33 → 35 → 36 history; §5.39 extends to 37 with a new paragraph documenting the bump. Sub-comments: `:91` "loader (xdpmacfilter) — 18 events (was 19 pre-§5.34)" + `:114` "exporter (xdpmf-exporter) — **15 events**". **Exporter sub-comment :114 MUST bump 15 → 16**; loader sub-comment :91 is UNCHANGED (no loader-side event added this slice).
+5. **Alphabetical slot for new event** — `bi` < `bp`, so `exporter.warn.bind_non_loopback` inserts BEFORE `exporter.warn.bpffs_root_missing`. In `kEventNames` (logger.hpp:126), the slot is at line `:126` (between line `:125` `"exporter.shutdown"` and line `:126` `"exporter.warn.bpffs_root_missing"`). In the alphabetical cluster, that places the new entry as the first member of the `exporter.warn.*` sub-group.
+6. **`tests/fixtures/log_events_v1.txt`** current line count = **36** (alphabetically sorted, lines 1-36; trailing newline at line 37 is empty). Alphabetical insertion slot for `exporter.warn.bind_non_loopback` is between current line 21 (`exporter.usage_error`) and current line 22 (`exporter.warn.bpffs_root_missing`) — `bind_non_loopback` becomes new line 22; subsequent lines shift +1; final count = 37.
+7. **`T_LOG_EVENT_CATALOG_STABILITY.sh`** at `tests/T_LOG_EVENT_CATALOG_STABILITY.sh` uses `extract_events()` to grep kEventNames literals from `src/common/logger.hpp` and compares (sorted-cmp + line-count) against `tests/fixtures/log_events_v1.txt`. **The test does NOT pin literal count `36`** — it compares extracted-count to fixture-count. Adding ONE entry to BOTH in lockstep keeps T_LOG_EVENT_CATALOG_STABILITY green by construction. CONFIRMED via Read on the test body lines 95-119.
+8. **`T_LOG_JSON_ENVELOPE_INVARIANTS.sh`** at `tests/T_LOG_JSON_ENVELOPE_INVARIANTS.sh:11` references `kEventNames (catalog from tests/fixtures/log_events_v1.txt)` — also fixture-driven, not literal-count-pinned. CONFIRMED.
+9. **RESOURCE_LOCK precedent** at `tests/CMakeLists.txt:657` — `T_EXPORTER_EXITS_6_ALL_IFACES_EACCES` uses `RESOURCE_LOCK "xdp_fixture;exporter_port_9417"`. The NEW T-1 ctest this slice does NOT touch the veth fixture (no XDP attach, no inject; only spawns the exporter against an ephemeral port and reads stderr). Architect picks **`exporter_port_9417` ONLY** (no xdp_fixture lock) — port-clash serialization is the only shared host state the new test contends for. See D-3.4h-T1-LOCK below.
+10. **Text-mode WARN convention** (guard #19) at `src/exporter/stats_reader.cpp:125-126`: HK-16 line shape is `"xdpmf-exporter: WARN <descriptive prose>\n"` (no colon after `WARN`). New WARN follows this verbatim: `"xdpmf-exporter: WARN --bind <addr> is not loopback (127.0.0.0/8); /metrics will be exposed on a routable interface\n"`. JSON-mode envelope is automatic via logger; structural `bind_addr` field appears in `fields:{}` per Q1=A1 sibling shape (per §5.32 envelope rules).
+11. **HttpConfig field name** at `src/exporter/http.hpp:21-25`: the field is `bind_addr` (default `"127.0.0.1"`). New WARN reads `cfg.bind_addr` and passes a string_view of it into the `Field{"bind_addr", ...}` entry.
+
+**Discrepancies vs brief** (factual corrections):
+
+- Brief item E-2 says "Update array size literal: `std::array<std::string_view, 36>` → `std::array<std::string_view, 37>` at :90" — CONFIRMED at line :90.
+- Brief item E-2 says "Update exporter sub-comment at :114 `15 events` → `16 events`" — CONFIRMED at line :114.
+- Brief item E-2 says "Update kEventCount comment at :132 from `// = 36 (§5.36: ...)` to `// = 37 (§5.39: 36 → 37; +1 exporter.warn.bind_non_loopback per HG-3.4h-3)`" — CONFIRMED at line :132 (the trailing comment after `kEventCount = kEventNames.size();`).
+- Brief item E-2 says "Net LOC: ~+3" — counts: +1 (new array entry) + 0 (size literal mod) + 0 (sub-comment mod) + 0 (kEventCount comment mod) + 0-3 (optional §5.39 paragraph in comment block at `:81-89`). Net **+1 to +4 LOC** depending on whether impl adds a `§5.39` history paragraph. Operative-semantic per Phase 4.4 — impl-flex.
+- Brief item E-1 says "ADD `is_loopback_ipv4()` static helper (~5 LOC)" — architect AGREES; static helper in anon namespace at top of http.cpp (near `parse_bind_addr`).
+- Brief item E-1 says "ADD WARN emission block ... ~20 LOC" — architect estimates **~12-18 LOC** for the emission block (depending on whether `msg` is `std::format`'d inline or pulled into a temp; sibling sites use `std::format` + temp + `Field[]` array, ~7-9 LOC each). Operative-semantic.
+- Brief Phase 2 noted T_LOG_JSON_EXPORTER_EVENTS as possibly pinning kEventCount — Phase A grep confirms it does NOT (it asserts presence of expected event-names via jq, not the catalog total). **No EDIT needed to T_LOG_JSON_EXPORTER_EVENTS.sh** — it stays UNCHANGED-BUT-AFFECTED (its existing exporter sweep does not exercise the non-loopback path; new test T-1 covers that).
+
+#### §5.39 Human-gate decisions (pre-loaded defaults from brief — confirmed by architect Phase A)
+
+- **HG-3.4h-1 — PI-7-3.4h-hpp scoped carve-out for kEventNames extension → YES, mirror §5.36 precedent.** CONFIRMED. 13-cycle PI-7-hpp ZERO-diff streak on `src/common/logger.hpp` ends here by necessity — kEventNames catalog IS the canonical event-name registry; adding a NEW emit-site REQUIRES a catalog extension per guard #10. Architect declares NEW **`PI-3.4h-K`** in §6.5 below (kEventNames-extension-only carve-out: ONE +1 entry + size literal 36→37 + exporter sub-comment 15→16 + kEventCount comment text update + optional comment-block paragraph; **NO other change to logger.hpp**). Baseline re-starts post-§5.39 EDIT-point so future cycles (§5.40+) extend a new PI-7-3.4i-hpp streak from 1. The `loader.hpp` + `config.hpp` + `mac_filter.h` ZERO-diff streaks (PI-7-3.4h-loader-hpp + PI-7-3.4h-cpp 9th cycle + PI-7-3.4h-mac-filter-h) UNAFFECTED — only logger.hpp is scope-carved.
+- **HG-3.4h-2 — loopback detection scope = 127.0.0.0/8 entire range, numerical post-parse check.** CONFIRMED. Detection logic AFTER `parse_bind_addr(cfg.bind_addr, bind_inaddr)` succeeds: `(bind_inaddr.s_addr & htonl(0xff000000)) == htonl(0x7f000000)`. Anything in 127.0.0.0/8 is NOT WARN-worthy; everything else (including `0.0.0.0` wildcard, RFC1918 private, public IPv4) is. NOT just exact `127.0.0.1`. IPv6 `::1` is OOS (parse_bind_addr is IPv4-only via `inet_pton(AF_INET, ...)`); "localhost" string-literal is OOS (rejected with existing `exporter.bind.invalid_addr` exit-1 path before any WARN logic is reached).
+- **HG-3.4h-3 — new kEventNames entry token = `exporter.warn.bind_non_loopback`.** CONFIRMED. Alphabetical slot per Phase A grep #5+#6.
+- **HG-3.4h-4 — NO refusal; WARN-only posture.** CONFIRMED. Emit warn + continue normal startup. KC-2 mitigation half (auth/TLS) explicit OOS — separate slice. Refusal would break legitimate fleet-ops use cases (k8s sidecar mesh) without operator opt-in.
+- **HG-3.4h-5 — NO VERSION bump.** CONFIRMED. Pure observability addition; no operator-observable API change (default `--bind=127.0.0.1` keeps current silent behavior; only non-loopback bind triggers a new line). PI-8 streak preserved.
+
+#### §5.39 Q-decisions (mechanism)
+
+##### Q1: WARN emission placement → **Q1.B (inside `http.cpp::run()` AFTER `parse_bind_addr` success, BEFORE `::socket()`)**
+
+CONFIRMED per brief recommendation (Q1.B over Q1.A). Per architect spec sub-rule "where is X called per-runtime?", the operational codepath is `xdpmf::exporter::run()` (called from `main.cpp:208`). Placing the WARN inside `run()` post-`parse_bind_addr`:
+- Co-locates with sibling `exporter.bind.*` events (same TU, same naming family, same field-name convention).
+- Uses the parsed `struct in_addr` for numerical loopback check (robust against string-prefix edge cases: `"127."` prefix-match would miss trailing whitespace, miss `127a.b.c.d`-shaped malformed inputs that `inet_pton` rejects anyway, etc.).
+- Fires AFTER `parse_bind_addr` validates the input as a real IPv4 address — no risk of warning on a syntactically-invalid address that would have exited 1 a moment later.
+- Fires BEFORE `::socket()` syscall — visible in stderr ordering BEFORE any socket / bind / listen failure.
+
+##### Q2: text-mode WARN message shape (D-decision territory) → **`"xdpmf-exporter: WARN --bind <addr> is not loopback (127.0.0.0/8); /metrics will be exposed on a routable interface\n"`**
+
+CONFIRMED per brief reference shape. Matches HK-16 prose convention from `stats_reader.cpp:125-126` (`xdpmf-exporter: WARN <descriptive prose>` — no colon after `WARN`; single line; trailing `\n`). `<addr>` is the literal `cfg.bind_addr` string (operator's `--bind` argument verbatim, e.g. `0.0.0.0`, `192.168.1.10`, `10.0.0.5`). Explicit `(127.0.0.0/8)` parenthetical tells the operator the policy in one shot; `; /metrics will be exposed on a routable interface` tells the operator the practical consequence.
+
+##### Q3: kEventNames alphabetical placement within array → **first member of `exporter.warn.*` cluster (between `"exporter.shutdown"` and `"exporter.warn.bpffs_root_missing"` in logger.hpp)**
+
+CONFIRMED per brief HG-3.4h-3 + Phase A grep #5. The `exporter.warn.*` sub-cluster grows from 2 to 3 entries (bind_non_loopback, bpffs_root_missing, cpu_count_invalid in alphabetical order). NOT inserted between `exporter.bind.listen_failed` and `exporter.listening` (brief mentioned that as an alternative — rejected for cluster-grouping coherence; reviewer reads the array as a clustered narrative).
+
+##### Q4: RESOURCE_LOCK for NEW ctest → **`exporter_port_9417` ONLY (no xdp_fixture)**
+
+NEW DECISION (brief recommended `exporter_port_9417` but did not fully spell out the no-`xdp_fixture` rationale). The new test does NOT touch veth (no XDP attach, no inject, no L2 fixture). It only spawns the exporter against an ephemeral port, polls for `exporter.listening` emission, asserts a stderr substring, and kills the exporter. Port-clash serialization with sibling exporter tests is the only shared host state. Adding `xdp_fixture` would unnecessarily serialize against the 30+ veth-touching tests and inflate ctest wall-clock. Per architect spec guard #12 — minimize lock surface to actual shared state.
+
+##### Q5: T_LOG_JSON_EXPORTER_EVENTS fixture edit needed? → **NO (Phase A grep confirms it does NOT pin kEventCount)**
+
+CONFIRMED via Phase A grep #7 + #8. T_LOG_JSON_EXPORTER_EVENTS asserts specific event-names appear via jq queries; it does NOT assert the catalog total equals a literal. T_LOG_EVENT_CATALOG_STABILITY is the fixture-vs-catalog cross-check, and it auto-tracks (`wc -l` on both = equality). NO ctest body EDIT needed; the only fixture EDIT is the `+1 line` to `tests/fixtures/log_events_v1.txt`.
+
+#### §5.39 LIFTED PI declarations (none — §5.30 + §5.32 + §5.36 + §5.38 all UPHELD; PI-7-hpp re-scoped via PI-3.4h-K)
+
+No prior PI is LIFTED. PI-7-hpp on `src/common/logger.hpp` is **narrowed (scope-carved) for ONE cycle** via NEW `PI-3.4h-K` (kEventNames-extension carve-out) — analogous to §5.36's 35→36 carve-out (which didn't get a literal PI-name in §5.36 but had the same shape). The carve-out is single-cycle; PI-7-3.4i-hpp restarts at 1 from the §5.39 EDIT-point baseline.
+
+`loader.hpp` + `config.hpp` + `mac_filter.h` ZERO-diff streaks UNCHANGED (PI-7-3.4h-loader-hpp + PI-7-3.4h-cpp 9th cycle + PI-7-3.4h-mac-filter-h extensions). PI-32-3.4b (sidecar never throws) UNCHANGED (no sidecar touch). PI-3.5-1 (logger text-mode byte-equivalence) UNCHANGED (new emission only fires on non-loopback `--bind`; default `--bind=127.0.0.1` path stays byte-equivalent to pre-§5.39).
+
+#### §5.39 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+##### NEW (this slice)
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `tests/T_EXPORTER_BIND_NON_LOOPBACK_WARN.sh` | NEW ctest §6.59: assert non-loopback `--bind` triggers WARN + event-name in JSON mode; default + 127.0.0.2 negation sub-cases. Template = `T_EXPORTER_NO_ATTACHED_IFACE.sh` shape (spawn exporter on ephemeral port + curl + grep stderr). | bash | ~80-120 |
+
+##### EDITED (this slice)
+
+| Path | Change shape | LOC est |
+|---|---|---|
+| `src/exporter/http.cpp` | (a) ADD anon-namespace static helper `is_loopback_ipv4(struct in_addr addr) -> bool` near `parse_bind_addr` at `:261`. Body: `return (addr.s_addr & htonl(0xff000000)) == htonl(0x7f000000);`. ~5 LOC. (b) ADD WARN emission block inside `run()` between `:299` (close of parse-fail branch) and `:301` (`::socket()` call). Body: `if (!is_loopback_ipv4(bind_inaddr)) { /* std::format msg + Field[] + logger::emit(Warn, "exporter.warn.bind_non_loopback", msg, fs); */ }`. ~12-18 LOC. (c) Includes: `<arpa/inet.h>` already transitively available via `<netinet/in.h>` (existing); `htonl` available. NO new includes needed. | ~+17-23 |
+| `src/common/logger.hpp` | (PI-3.4h-K scoped carve-out) (a) Bump array size literal at `:90` from `36` → `37`. (b) ADD ONE entry `"exporter.warn.bind_non_loopback",` at the alphabetical slot (between `"exporter.shutdown"` and `"exporter.warn.bpffs_root_missing"` per Q3). (c) Bump exporter sub-comment at `:114` from `15 events` → `16 events`. (d) Update kEventCount comment at `:132` from `// = 36 (§5.36: 35 → 36; +1 sidecar.warn.iface_dir_symlink per HG-3.4e-4)` to `// = 37 (§5.39: 36 → 37; +1 exporter.warn.bind_non_loopback per HG-3.4h-3)`. (e) OPTIONAL: add a §5.39 paragraph to the history comment block at `:81-89` documenting the bump (impl-flex). | ~+1 to +4 |
+| `tests/fixtures/log_events_v1.txt` | ADD one line `exporter.warn.bind_non_loopback` at alphabetical sort position between current line 21 (`exporter.usage_error`) and current line 22 (`exporter.warn.bpffs_root_missing`). Final line count 36 → 37. | +1 |
+| `tests/CMakeLists.txt` | ADD `add_test(...) + set_tests_properties(...)` block for `T_EXPORTER_BIND_NON_LOOPBACK_WARN` with `RESOURCE_LOCK exporter_port_9417`, `TIMEOUT 60`, `SKIP_RETURN_CODE 77`, env from `TEST_ENV`. Mirror the §6.46 `T_EXPORTER_EXITS_6_ALL_IFACES_EACCES` block shape (lines :650-660). NO xdp_fixture lock per Q4. | ~+12-18 |
+| `mint/design.md` | APPEND §5.39 amendment (this block; ~250-350 LOC final). NO rewrites to prior §-sections. | ~+250-350 |
+| `CHANGELOG.md` | OPTIONAL ~1 line entry under `[Unreleased]` Security subsection: e.g. `- xdpmf-exporter: emit startup WARN (event exporter.warn.bind_non_loopback) when --bind resolves to a non-loopback IPv4 address; /metrics endpoint exposure is now audit-visible (closes sec M2; KC-2 observability half).` Operative-semantic per Phase 4.4 — impl-flex on exact wording. | +1 |
+
+##### UNCHANGED-BUT-AFFECTED (zero git-diff fence; behaviour must hold)
+
+| Path | Why it ripples but stays identical | Check |
+|---|---|---|
+| `src/lib/loader.hpp` | **PI-7-3.4h-loader-hpp** fence path — no public API change. | `git diff <pre-§5.39> -- src/lib/loader.hpp` empty |
+| `src/lib/config.hpp` | **PI-7-3.4h-cpp 9th consecutive ZERO-diff cycle**. | `git diff <pre-§5.39> -- src/lib/config.hpp` empty |
+| `src/common/mac_filter.h` | **PI-7-3.4h-mac-filter-h** fence path. No new constant. | `git diff <pre-§5.39> -- src/common/mac_filter.h` empty |
+| `src/exporter/http.hpp` | `HttpConfig` struct UNCHANGED; `run()` / `last_exit_six_total()` / `install_signal_handlers()` UNCHANGED. Only the `http.cpp` body grows. | `git diff <pre-§5.39> -- src/exporter/http.hpp` empty |
+| `src/exporter/main.cpp` | UNCHANGED. `main.cpp:208` still dispatches to `xdpmf::exporter::run(cfg)`; the WARN fires inside `run()`. No exporter-CLI grammar change. | `git diff <pre-§5.39> -- src/exporter/main.cpp` empty |
+| `src/exporter/stats_reader.cpp` + `.hpp` | UNCHANGED. HK-16/HK-17 codepaths orthogonal to bind-address policy. | `git diff <pre-§5.39> -- src/exporter/stats_reader.*` empty |
+| `src/exporter/rule_counters_reader.cpp` + `prom_format.*` + `sidecar_reader.*` | UNCHANGED. Orthogonal to bind-address path. | `git diff <pre-§5.39> -- ...` empty |
+| `src/cli/**`, `src/bpf/**`, `src/lib/loader.cpp`, `src/lib/sidecar.cpp`, `src/lib/apply_internal.hpp`, `src/lib/cidr.*`, `src/lib/yaml_subset.*`, `src/lib/config.cpp`, `src/lib/raii.hpp`, `src/common/logger.cpp`, `src/common/escape_util.{hpp,cpp}` | UNCHANGED. No bind-address logic anywhere outside exporter. | `git diff <pre-§5.39> -- ...` empty |
+| `src/common/logger.cpp` | UNCHANGED. The emit() impl is signature-stable; new event is consumed via the same `kEventNames` array (logger.cpp does NOT validate event names against the catalog at runtime per §5.32 D-3.5; T_LOG_EVENT_CATALOG_STABILITY is the compile-time-ish check). | `git diff <pre-§5.39> -- src/common/logger.cpp` empty |
+| `tests/T_LOG_JSON_EXPORTER_EVENTS.sh` | UNCHANGED per Q5 (does not pin kEventCount; default `--bind=127.0.0.1` path stays silent so existing exporter sweep is unaffected). | `git diff <pre-§5.39> -- tests/T_LOG_JSON_EXPORTER_EVENTS.sh` empty |
+| `tests/T_LOG_EVENT_CATALOG_STABILITY.sh` | UNCHANGED. Set-equality test auto-tracks both kEventNames bump + fixture +1 line via wc-l + sorted-cmp. | `git diff <pre-§5.39> -- tests/T_LOG_EVENT_CATALOG_STABILITY.sh` empty |
+| `tests/T_LOG_JSON_ENVELOPE_INVARIANTS.sh` | UNCHANGED. Fixture-driven envelope sweep. | `git diff <pre-§5.39> -- tests/T_LOG_JSON_ENVELOPE_INVARIANTS.sh` empty |
+| `tests/T_EXPORTER_METRICS_FORMAT.sh`, `tests/T_EXPORTER_VALUES_MATCH_STATS.sh`, `tests/T_EXPORTER_NO_ATTACHED_IFACE.sh`, `tests/T_EXPORTER_RULE_LABELS.sh`, `tests/T_EXPORTER_EXITS_6_ALL_IFACES_EACCES.sh` | UNCHANGED. All run with default `--bind=127.0.0.1` (or its equivalent inherited via `TEST_ENV` / ephemeral-port logic); none invoke `--bind <non-loopback>`. The WARN does NOT fire on their default paths → stderr captures byte-equivalent. | `git diff <pre-§5.39> -- tests/T_EXPORTER_*.sh` empty (except the NEW T-1) |
+| All 67 pre-§5.39 ctest BODIES (other than the 0 EDITED above) | UNCHANGED — PI-3.4h-CTEST-BASELINE: 67 → 68 with **zero** existing-body EDITs. | `git diff <pre-§5.39> -- tests/T_*.sh tests/T_*.py` shows ONLY 1 NEW file |
+| `CMakeLists.txt` (top-level) | UNCHANGED. No VERSION bump per HG-3.4h-5; no new compile flag; no new source file added to any target (`http.cpp` already in `xdpmf-exporter` target). | `git diff <pre-§5.39> -- CMakeLists.txt` empty |
+| systemd/ansible files | UNCHANGED. No new env/caps/path requirements. | `git diff <pre-§5.39> -- systemd/ ansible/` empty |
+| `docs/*.md`, `README.md`, `HANDOFF.md`, `docs/BACKLOG.md` | UNCHANGED. Doc update is part of doc-backlog separate slice (carry-forward fence). Only optional `CHANGELOG.md` +1 line per E-row above. | `git diff <pre-§5.39> -- docs/ README.md HANDOFF.md` empty |
+
+Anything not in NEW, EDITED, or UNCHANGED-BUT-AFFECTED is off-limits for impl. If impl needs to edit a file not listed, that's a design gap — peer-DM architect.
+
+#### §5.39 DataStructures additions / changes
+
+None. No new struct, no new enum, no new class. The new `is_loopback_ipv4(struct in_addr)` helper is a free function with a primitive return; no DataStructures-level surface.
+
+The kEventNames catalog gains ONE string-view entry — that's a literal extension, not a new data structure.
+
+#### §5.39 Interfaces additions
+
+None — no new public function, no new CLI flag, no new env var, no new IPC. The static helper `is_loopback_ipv4` lives in `http.cpp` anon namespace — NOT exposed via `http.hpp`.
+
+##### Caller idiom (impl-reference; NOT a contract on impl)
+
+Inside `xdpmf::exporter::run()` after `parse_bind_addr` success (Q1.B placement; ~ between current lines `:299` and `:301`):
+
+```
+if (!is_loopback_ipv4(bind_inaddr)) {
+    /* §5.39 (MVP-3.4h) HG-3.4h-3 + Q2: byte-equivalent text-mode WARN +
+     * bind_addr field in JSON envelope. Process-scoped (no iface). */
+    const std::string msg = std::format(
+        "xdpmf-exporter: WARN --bind {} is not loopback (127.0.0.0/8); "
+        "/metrics will be exposed on a routable interface\n",
+        cfg.bind_addr);
+    const xdpmf::logger::Field fs[] = {
+        xdpmf::logger::Field{"bind_addr", std::string_view{cfg.bind_addr}},
+    };
+    xdpmf::logger::emit(xdpmf::logger::Level::Warn,
+                        "exporter.warn.bind_non_loopback", msg, fs);
+}
+```
+
+Operative-semantic per Phase 4.4 — impl-flex on exact wrapping, temp-var introduction, formatting; the CONTRACTS are: (a) emission fires ONLY on non-loopback parsed `bind_inaddr`; (b) event-name is exact string `"exporter.warn.bind_non_loopback"`; (c) Level is `Warn`; (d) at least one `Field{"bind_addr", ...}` in `fields:{}`; (e) text-mode prose matches Q2 verbatim (load-bearing for guard #19); (f) fires BEFORE `::socket()` call and BEFORE `"exporter.listening"` emission.
+
+#### §5.39 Decisions (with rationale)
+
+##### D-3.4h-1 — WARN placement = Q1.B (inside `http.cpp::run()` post-parse, pre-socket) — because
+
+Per architect spec sub-rule "where is X called per-runtime?": the operational codepath is `run()`, not `main()`. Co-locating with sibling `exporter.bind.*` events keeps the bind-side narrative in one TU. Numerical loopback check on the parsed `struct in_addr` is robust against string-prefix edge cases (`"127."` prefix-match would miss whitespace/case/etc.). Fires after `parse_bind_addr` validates input as a real IPv4 address → no risk of warning on a syntactically-invalid string that would have exited 1.
+
+##### D-3.4h-2 — Loopback detection = numerical bitmask 127.0.0.0/8 (`(s_addr & htonl(0xff000000)) == htonl(0x7f000000)`) — because
+
+Per HG-3.4h-2. The full 127.0.0.0/8 range (16 777 216 addresses) is reserved by the kernel as loopback (RFC 1122 §3.2.1.3 + Linux kernel `INADDR_LOOPNET`). Operators legitimately use `127.0.0.2` / `127.1.0.1` / etc. for sidecar separation patterns. Network-byte-order bitmask compare is correct against `inet_pton`-parsed `s_addr` (already in network byte order). `htonl(0x7f000000)` = `0x0000007f` on little-endian hosts; compiler folds constants → zero runtime cost.
+
+##### D-3.4h-3 — Event-name token = `exporter.warn.bind_non_loopback` — because
+
+Per HG-3.4h-3. Dotted-snake_case follows §5.32 Q3 E1 convention. Subsystem prefix `exporter.` matches the binary; `warn.` matches the cluster of similar WARN events (bpffs_root_missing, cpu_count_invalid); `bind_non_loopback` is descriptive of the trigger condition. Alphabetical slot per Phase A grep #5 + #6.
+
+##### D-3.4h-4 — WARN-only posture, no refusal — because
+
+Per HG-3.4h-4. KC-2 mitigation half (auth/TLS for `/metrics`) is explicitly a separate slice. Refusing non-loopback bind here would break legitimate fleet-ops patterns (k8s sidecar mesh, monitoring proxy) without operator opt-in. The audit-visibility WARN is the minimum-viable observability fix; refusal is over-correction without a paired mitigation slice.
+
+##### D-3.4h-5 — NO VERSION bump — because
+
+Per HG-3.4h-5. Pure observability addition; no operator-observable API change on the default path (`--bind=127.0.0.1` keeps silent behavior). The new WARN line is the OPPOSITE of an operator-observable surface change in the sense that triggers — it's a NEW emission on an INPUT that previously emitted nothing, AND the input that triggered it was already operator-visible (operator passed `--bind <non-loopback>` themselves). PI-8 streak preserved; CHANGELOG.md `[Unreleased]` Security subsection is the only release-notes touch.
+
+##### D-3.4h-6 — kEventNames alphabetical slot = first member of `exporter.warn.*` cluster — because
+
+Per Q3 above + Phase A grep #5. Inserting at the cluster boundary (between `exporter.shutdown` and `exporter.warn.bpffs_root_missing`) keeps the `exporter.warn.*` group contiguous in source order. Reviewer scanning kEventNames reads the file as a narrative; cluster-grouping aids comprehension. The alternative (inserting between `exporter.bind.listen_failed` and `exporter.listening` per brief-mentioned option) would scatter `warn.*` entries across the file.
+
+##### D-3.4h-7 — Text-mode WARN prose = `"xdpmf-exporter: WARN --bind {} is not loopback (127.0.0.0/8); /metrics will be exposed on a routable interface\n"` — because
+
+Per Q2 + Phase A grep #10. Matches HK-16 convention (no colon after `WARN`; trailing `\n`). Explicit `(127.0.0.0/8)` parenthetical tells operator the policy; `/metrics will be exposed on a routable interface` tells operator the consequence. The `--bind <addr>` substring is grep-able from a test sub-case.
+
+##### D-3.4h-T1-LOCK — NEW ctest gets `exporter_port_9417` lock only, NOT `xdp_fixture` — because
+
+Per Q4 above. New test does NOT touch veth (no XDP attach, no inject). Only port-clash serialization is needed. Adding `xdp_fixture` would unnecessarily serialize against 30+ veth-touching tests and inflate ctest wall-clock. Mirrors the principle of minimizing the lock surface to actual shared state.
+
+##### D-3.4h-T1-SKIP — NEW ctest SKIPs on curl-absent OR (no other system dep) — because
+
+Mirrors `T_EXPORTER_NO_ATTACHED_IFACE.sh` shape. The test uses `curl` to poll exporter readiness (or polls `lsof`-style; impl-flex). If `curl` is absent, SKIP via exit 77 (`SKIP_RETURN_CODE` honored by ctest). No `require_passwordless_sudo` needed — exporter spawns under the calling test-runner uid; no privilege escalation needed for this test. Architect picks: tester adds `command -v curl >/dev/null || { echo "SKIP: curl missing" >&2; exit 77; }` at the top of T-1.
+
+##### D-3.4h-PROSE-VS-INVARIANTS — Resolution rule (architect-stated for this amendment) — because
+
+If a prose statement in §5.39 conflicts with the §6.5 invariants-block / §5.39 verifiable-invariants section items below, the invariants-block items WIN. If impl deviates from any verifiable-invariants item to satisfy a PI-* contract in §6.5, reviewer's correct disposition is `inline-merge` on the hint text — NOT `[UNRELATED-EDIT]` on impl. Per architect spec §6.5 verification-hints discipline.
+
+#### §5.39 TestStrategy entries
+
+##### T-1 — `T_EXPORTER_BIND_NON_LOOPBACK_WARN` — non-loopback `--bind` triggers WARN; loopback negation; 127.0.0.0/8 sub-range silent
+
+Maps to: PI-3.4h-1 (NEW), HG-3.4h-2, HG-3.4h-3, HG-3.4h-4, D-3.4h-7 prose contract.
+
+**Trigger**: spawn `xdpmf-exporter --bind <addr> --port <ephemeral>` in background; poll stderr (or `curl http://<addr>:<port>/metrics` then read stderr-capture file) until `exporter.listening` emission observed (signals startup complete); kill the exporter; inspect captured stderr.
+
+**Sub-cases**:
+
+| ID | --bind value | Expected outcome |
+|---|---|---|
+| (a) PRIMARY positive | `0.0.0.0` | stderr contains literal prose substring `WARN --bind 0.0.0.0 is not loopback` AND substring `(127.0.0.0/8)` AND substring `/metrics will be exposed on a routable interface`; exporter starts (listening line follows the WARN). |
+| (b) RFC1918 positive | `127.0.0.1` is the default; for this sub-case pick a `--bind` value that resolves on the test host without external dep — `0.0.0.0` covers wildcard; sub-case (a) is the primary. Optional additional sub-case: pick `127.255.255.255` to prove the WARN does NOT fire on the upper edge of 127.0.0.0/8 (negation in-range). Operative-semantic; impl-flex on whether (b) is realized. |
+| (c) DEFAULT negation | (no `--bind` flag — default `127.0.0.1`) | stderr does NOT contain `bind_non_loopback` substring AND does NOT contain `exporter.warn.bind_non_loopback` event token; exporter starts normally. |
+| (d) 127.0.0.0/8 NON-DEFAULT negation | `--bind 127.0.0.2` | stderr does NOT contain `bind_non_loopback` substring; exporter starts normally. Proves HG-3.4h-2 full-range coverage (not just exact 127.0.0.1). |
+| (e) JSON-mode positive (OPTIONAL) | `--bind 0.0.0.0` with `XDPMF_LOG_FORMAT=json` | stderr line(s) include ONE NDJSON object with `event` == `"exporter.warn.bind_non_loopback"` AND `level` == `"warn"` AND `fields.bind_addr` == `"0.0.0.0"`. Validates the structured-logging surface for the new event. Operative-semantic — tester picks whether to include. |
+
+**Assertion mechanism**: stderr captured to tmpfile via shell redirect (`xdpmf-exporter ... 2>"${stderr_file}" &`); `grep -qE 'WARN --bind .* is not loopback'` on substring match (default mode); for sub-case (e), `jq -e '.event=="exporter.warn.bind_non_loopback" and .level=="warn" and .fields.bind_addr=="0.0.0.0"'`.
+
+**Failure-mode signaling**: SKIP-77 if `curl` absent OR `command -v xdpmf-exporter` fails (binary not built). FAIL if WARN absent on positive cases OR WARN present on negation cases.
+
+**Resource lock**: `exporter_port_9417` ONLY (per Q4 + D-3.4h-T1-LOCK). NO `xdp_fixture`.
+
+**Cleanup**: trap-driven kill of exporter PID; tmpfile rm.
+
+**OPS canary heuristic**: this is the canary for the new invocation path. Default-bind ctests don't exercise the non-loopback codepath; without T-1 the WARN ships silently. T-1's contract: "catches behaviour the existing test infrastructure can't because it uses the default --bind invocation pattern".
+
+##### T-EXISTING — UNCHANGED-BUT-AFFECTED ctest baseline (67 of 67)
+
+All 67 pre-§5.39 ctests stay GREEN by construction. Default `--bind=127.0.0.1` (or equivalent inherited via TEST_ENV) keeps the WARN dormant on every existing test. T_LOG_EVENT_CATALOG_STABILITY auto-tracks the +1 lockstep (kEventNames + log_events_v1.txt). T_LOG_JSON_ENVELOPE_INVARIANTS fixture-driven sweep continues to pass. ctest baseline 67 → 68 with ZERO existing-body EDITs.
+
+#### §6.5 Preserved invariants (§5.39 MVP-3.4h brownfield)
+
+Reviewer's framework point 5 walks this list per architect spec §6.5. Items in this section are **MUST contracts**; reviewer reports `[INVARIANT-VIOLATED]` per failed check.
+
+| PI | Property | Check mechanism |
+|---|---|---|
+| **PI-3.4h-K (NEW; scoped carve-out)** | `src/common/logger.hpp` diff is CONFINED to: (1) array size literal `36`→`37` at `:90`, (2) ONE new entry `"exporter.warn.bind_non_loopback",` in the `exporter.warn.*` cluster, (3) exporter sub-comment `15 events`→`16 events` at `:114`, (4) `kEventCount` trailing-comment text update at `:132`, (5) OPTIONAL §5.39 paragraph in history comment block at `:81-89`. NO other change. | `git diff <pre-§5.39> -- src/common/logger.hpp` shows EXACTLY items (1)-(5); reviewer walks each. Any OTHER change → `[INVARIANT-VIOLATED]`. |
+| **PI-7-3.4h-cpp** | `src/lib/config.hpp` byte-identical. **9th consecutive ZERO-diff cycle.** | `git diff <pre-§5.39> -- src/lib/config.hpp` empty |
+| **PI-7-3.4h-loader-hpp** | `src/lib/loader.hpp` byte-identical. Extension of §5.36/§5.37/§5.38 streak. | `git diff <pre-§5.39> -- src/lib/loader.hpp` empty |
+| **PI-7-3.4h-mac-filter-h** | `src/common/mac_filter.h` byte-identical. Extension of §5.37/§5.38 streak. | `git diff <pre-§5.39> -- src/common/mac_filter.h` empty |
+| **PI-3.4h-1 (NEW) — non-loopback `--bind` triggers exactly ONE WARN at startup, before listening signal** | `xdpmf-exporter --bind 0.0.0.0 --port <N>` emits EXACTLY ONE `exporter.warn.bind_non_loopback` event to stderr BEFORE the `exporter.listening` emission. `--bind 127.0.0.1` (default) emits ZERO `bind_non_loopback` events. `--bind 127.0.0.2` (in-range non-default) emits ZERO. | T_EXPORTER_BIND_NON_LOOPBACK_WARN positive sub-case (a) + negation sub-cases (c) + (d). |
+| **PI-3.4h-CTEST-BASELINE (NEW)** | 67 pre-§5.39 ctests stay GREEN with ZERO existing-body EDITs; baseline 67 → 68 (+T-1 NEW). | `git diff <pre-§5.39> -- tests/T_*.sh tests/T_*.py` shows ONLY 1 NEW file; `ctest --output-on-failure -j4` 68/68 (or all pass + legitimate SKIPs). |
+| **PI-32-3.4b PRESERVED** | Sidecar never throws (orthogonal). | T_SIDECAR_JSON_SHAPE + T_SIDECAR_IFACE_SYMLINK_REFUSAL stay GREEN. |
+| **PI-3.5-1 PRESERVED** | Logger text-mode stderr byte-equivalent on default-bind paths (all existing exporter ctests run with default `--bind=127.0.0.1`; WARN does NOT fire → no new stderr lines on their captures). | T_LOG_TEXT_BYTE_EQUIVALENT stays GREEN; T_EXPORTER_METRICS_FORMAT + T_EXPORTER_VALUES_MATCH_STATS + T_EXPORTER_NO_ATTACHED_IFACE + T_EXPORTER_RULE_LABELS + T_EXPORTER_EXITS_6 stay GREEN unmodified. |
+| **PI-3.5-4 PRESERVED (event catalog stability)** | kEventNames catalog is the locked set; one additive entry per slice is the allowed mutation. | T_LOG_EVENT_CATALOG_STABILITY stays GREEN (auto-tracks kEventNames + log_events_v1.txt lockstep). |
+| **PI-3.5-7 PRESERVED** | No new external build dependency. | `grep -E 'find_package\|pkg_check_modules\|FetchContent' CMakeLists.txt` — no new entries. |
+| **PI-8 (VERSION-string stability)** | CMakeLists.txt VERSION unchanged from prior cycle. | `git diff <pre-§5.39> -- CMakeLists.txt` shows no VERSION line edit. |
+| **PI-6 (existing ctest count regression-baseline) — extended** | 67 → 68 (+T-1). ZERO existing-body EDITs. | `ctest --output-on-failure` returns 68/68 green; baseline diff = 1 NEW, 0 existing-body edits. |
+| **§5.36 PI-3.4e-1 + PI-3.4e-2 + KC-3 closure PRESERVED** | reset-counters path-traversal refusal + sidecar iface-subdir symlink refusal continue to work — bind-WARN is orthogonal. | T_RESET_COUNTERS_PATH_TRAVERSAL + T_SIDECAR_IFACE_SYMLINK_REFUSAL stay GREEN. |
+| **§5.37 PI-3.4f-* PRESERVED** | escape_util byte-equivalent behavior continues — orthogonal. | T_BYPASS_AUDIT_CONTROL_CHARS + all JSON-shape + audit-line tests stay GREEN. |
+| **§5.38 PI-3.4g-* PRESERVED** | raii.hpp dead-code-delete byte-equivalence continues — orthogonal. | ctest baseline holds. |
+
+#### §5.39 verifiable invariants for reviewer (MAY-default per architect spec §6.5 discipline)
+
+Per architect spec §6.5 "Verification-hints discipline": guidance for reviewer, NOT contracts for impl. Default disposition: items MAY hold (impl-flex inline-merge if impl deviates to satisfy a PI-* contract elsewhere).
+
+**Resolution rule (architect-stated for this amendment, per §6.5 + D-3.4h-PROSE-VS-INVARIANTS)**: if a prose statement in §5.39 conflicts with an invariants-block item in this section OR §6.5 above, the invariants-block / §6.5 item wins. If impl deviates from any item below to satisfy a PI-* contract in §6.5, reviewer's correct disposition is `inline-merge` on the hint text — NOT `[UNRELATED-EDIT]` on impl.
+
+1. (MAY) `grep -nF 'exporter.warn.bind_non_loopback' src/common/logger.hpp` returns 1 hit; same grep on `tests/fixtures/log_events_v1.txt` returns 1 hit.
+2. (MAY) `wc -l tests/fixtures/log_events_v1.txt` returns 37 post-impl (was 36; +1 line for alphabetical insert).
+3. (MAY) `grep -nE 'std::array<std::string_view, 37>' src/common/logger.hpp` returns 1 hit at approximately `:90` post-impl.
+4. (MAY) `grep -nE '16 events' src/common/logger.hpp` returns 1 hit in the exporter sub-comment area (~`:114`) post-impl.
+5. (MAY) `grep -nE 'is_loopback_ipv4' src/exporter/http.cpp` returns ≥2 hits (helper declaration + 1 call from `run()`); NOT in any header.
+6. (MAY) `grep -nE 'exporter\.warn\.bind_non_loopback' src/exporter/http.cpp` returns 1 hit (the `logger::emit` call).
+7. (MAY) `grep -nE 'WARN --bind' src/exporter/http.cpp` returns 1 hit (the text-mode prose substring).
+8. (MAY) `grep -nE 'htonl\(0x7f000000\)|htonl\(0xff000000\)' src/exporter/http.cpp` returns 2 hits (mask + compare in `is_loopback_ipv4` body). Operative-semantic per Phase 4.4 — impl-flex on whether the constants are split or combined (e.g., `(addr.s_addr & htonl(0xff000000)) == htonl(0x7f000000)` vs other byte-equivalent shapes).
+9. (MAY) `git diff <pre-§5.39> -- src/lib/loader.hpp src/lib/config.hpp src/common/mac_filter.h src/exporter/http.hpp src/exporter/main.cpp src/exporter/stats_reader.cpp src/exporter/stats_reader.hpp src/exporter/rule_counters_reader.cpp src/exporter/prom_format.cpp src/exporter/prom_format.hpp src/exporter/sidecar_reader.cpp src/exporter/sidecar_reader.hpp src/cli/ src/bpf/ src/lib/loader.cpp src/lib/sidecar.cpp src/lib/apply_internal.hpp src/lib/cidr.* src/lib/yaml_subset.* src/lib/config.cpp src/lib/raii.hpp src/common/logger.cpp src/common/escape_util.hpp src/common/escape_util.cpp` returns **empty** (UNCHANGED-BUT-AFFECTED contract).
+10. (MAY) ctest baseline 67 → 68 (+T-1; ZERO existing ctest body EDITs). `tests/CMakeLists.txt` shows ONLY 1 new `add_test`+`set_tests_properties` block.
+11. (MAY) `git diff <pre-§5.39> -- CMakeLists.txt` empty (no VERSION bump per D-3.4h-5).
+12. (MAY) `git diff <pre-§5.39> -- CHANGELOG.md` shows at most 1 added line under `[Unreleased]` Security subsection. Operative-semantic — impl may choose 2-line entry for anchor formatting; reviewer inline-merge if so.
+13. (MAY) `grep -nE 'exporter_port_9417' tests/CMakeLists.txt` returns the existing hits PLUS 1 new (in the NEW T-1 `set_tests_properties` block). NO new occurrence of `xdp_fixture` lock for T-1.
+14. (MAY) `grep -nE '"event":"exporter.warn.bind_non_loopback"' <T-1 captured stderr>` (with `XDPMF_LOG_FORMAT=json`) returns 1 hit per non-loopback positive sub-case. OPTIONAL T-1 sub-case (e).
+15. (MAY) Approximate LOC delta in `src/exporter/http.cpp` is +17 to +23 LOC (helper +5; emission block +12-18). Operative-semantic per Phase 4.4.
+
+#### §7 OOS additions (§5.39 — new fences)
+
+The following items are EXPLICITLY OUT OF SCOPE for §5.39; future slices may consider:
+
+- **KC-2 mitigation half (auth/TLS for `/metrics`)** — separate slice; explicit OOS. §5.39 closes the observability gap ONLY. NEW FENCE.
+- **IPv6 `::1` loopback detection** — parse_bind_addr is IPv4-only via `inet_pton(AF_INET, ...)`; IPv6 binding explicitly OOS per existing `http.cpp:259-260` comment. NEW FENCE.
+- **String-literal `"localhost"` detection** — parse_bind_addr rejects `"localhost"` with existing `exporter.bind.invalid_addr` exit-1 path; no WARN needed (different error class). NEW FENCE.
+- **Rate-limiting the WARN** — one-shot startup emission; no per-scrape repetition (mirrors W1 HK-16 design). NEW FENCE.
+- **REFUSAL on non-loopback** — operator legitimate reasons exist; WARN-only per HG-3.4h-4. NEW FENCE.
+- **Refusal escalation under a future `--strict-loopback` opt-in flag** — not designed this slice; if a future operator workflow needs hard refusal, that's a separate CLI-grammar slice with its own scope. NEW FENCE.
+- **Migrating other binaries' `--bind`-style flags to symmetric WARN posture** — only `xdpmf-exporter` exposes a network bind surface; loader/cli/sidecar do NOT. If a future binary adds a network-bind surface, that slice carries its own WARN. NEW FENCE.
+- **VERSION bump** — D-3.4h-5 + brief OOS. NEW FENCE.
+- **README / fleet-ops docs update** — minimal CHANGELOG entry (1 line) is the only doc touch; README/HANDOFF/docs/BACKLOG.md updates are part of doc-backlog separate slice. NEW FENCE.
+- **`exporter.warn.bind_non_loopback` event extension to carry richer fields** (e.g., the operator's effective `EUID`, the parent process name, the host's primary interface IP) — speculative; current `bind_addr` field is sufficient for fleet-ops audit-pipeline correlation. NEW FENCE.
+- **OOS carry-forward from §5.38 NOT listed above** — UNCHANGED (KC-1 closure half, Theme D `dispatch_match` helper, `xdpmf_logger` OBJECT promo, module rename to `xdpmf::log_util`, `xdpmf_common` static lib promo, `sudo_user` env-lookup pattern extraction, Tab byte `0x09` named-escape, JSON-mode `\xHH` parity for `escape_audit`, README+HANDOFF rewrites, CI/CD matrix, T_SANITIZER_BUILD refactor, TUN/TAP injector, compound exporter scrape perf, datapath dispatch helper consolidation, CO-RE field probes).
+
+Carry-forward from §5.38 §7 OOS items NOT listed above — UNCHANGED.
+
+#### §5.39 Anti-misdiagnosis institutional learning (per architect-spec §6.6)
+
+No new guard from this slice. **Guard catalog stays at 21**. Rationale: this slice is a clean, mechanical extension of well-precedented patterns:
+- Guard #5 (Phase A code-grep) — applied and documented in `§5.39 Phase A grep verification report` above; brief's 2 invocation errors confirmed (LOC undercount + PI-7-hpp 14th streak target impossibility) and corrected.
+- Guard #10 (catalog arithmetic) — applied via the §5.36 kEventNames-extension precedent; PI-3.4h-K declares the carve-out shape explicitly.
+- Guard #12 (RESOURCE_LOCK) — applied via Q4 + D-3.4h-T1-LOCK (port-only lock, no veth).
+- Guard #13 (fixture cross-reference) — applied via E-3 fixture +1 line, lockstep with E-2 kEventNames bump.
+- Guard #19 (logger text-mode prose vs event-name token convention) — applied via D-3.4h-7 prose contract (event-name token lives in JSON-mode envelope; text-mode emits prose only).
+
+None of these surfaced a NEW anti-misdiagnosis class — they are all well-rehearsed from prior cycles. If a future /mint-review or impl peer-DM surfaces a class of bug specific to OPS-canary placement (test-runner's default `--bind` invocation pattern masking the operator's non-default invocation), that would warrant a new guard. None expected this slice (T-1 IS the OPS canary; the brief author + architect already cross-validated).
+
+Cite §5.39 as a precedent for "small observability slices that extend the §5.36 kEventNames-carve-out shape and the §5.30 W1 startup-warn shape in one move".
+
+Evidence: `mint/task-brief.md` MVP-3.4h brief (HG-3.4h-1..5 + Q1-Q2); /mint-review report at `agent-teams-review/runs/mint-review-mint-l2-mac-filter-202605271147/report.md` (sec M2 + KC-2 anchors); §5.30 HK-16 W1 startup-warn precedent (`validate_bpffs_root_or_warn` shape at `stats_reader.cpp:131`); §5.32 logger module (`logger::emit` signature; PI-3.5-1 byte-equivalence); §5.36 kEventNames-extension precedent (35→36 carve-out shape; PI-3.4h-K mirrors); §5.38 minimal-brownfield-slice precedent (PI-7-loader-hpp + PI-7-mac-filter-h streak extension via UNCHANGED-BUT-AFFECTED zero-diff fence).
