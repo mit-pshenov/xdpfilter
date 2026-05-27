@@ -1,4 +1,4 @@
-# §6.47..§6.52 fixture (MVP-3.4b cycle 1 / §5.31).
+# §6.47..§6.52 + §6.NN..§6.NN+2 fixture (MVP-3.4b cycle 1 / §5.31 + cycle 2 / §5.34).
 #
 # Sparse rule_id allocation (per Q5 R1 — operator's `id:` IS the BPF
 # rule_counters[] array index directly). The 4 ids 0, 5, 17, 42 are spread
@@ -7,10 +7,14 @@
 # Mix of match kinds:
 #   - id=0  : MAC-only PASS (baseline allow)
 #   - id=5  : MAC-only PASS (used by §6.47 hit-bumps + §6.49 survives-apply)
-#   - id=17 : MAC-only DROP (used by §6.52 — drop rule populated into `rules`
-#             map per HG-3.4b-4 + §5.29 forward-compat, but MAC NOT added to
-#             inner-allowlist per §5.26 schema cycle 2 contract; rule_counters
-#             stays 0 because datapath never reaches bump_rule for that MAC)
+#   - id=17 : MAC-only DROP (used by §6.52 + §6.NN T_DROP_RULE_OPERATIVE —
+#             POST-§5.34 schema cycle 3: drop rule populated into BOTH `rules`
+#             outer/inners AND inner-allowlist; datapath reaches bump_rule +
+#             rules→action_table dispatch; rule_counters[17] BUMPS per
+#             HG-3.4b-c2-5; XDP_DROP via action_table[DROP] per HG-3.4b-c2-4.
+#             PRE-§5.34 cycle-2 contract — "MAC NOT in inner-allowlist,
+#             rule_counters stays 0, drop via defaults-fallthrough" — RETIRED.
+#             T_DROP_RULE_BUMPS_COUNTER assertions inverted per Q3.A.)
 #   - id=42 : CIDR-only PASS (used by §6.48 CIDR hit-bumps)
 default_action: drop
 rules:
