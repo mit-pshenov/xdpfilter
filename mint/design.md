@@ -8943,7 +8943,7 @@ This is the load-bearing PI-3.5-1 contract. ANY decoration = breaking change req
 
 `src/common/` is the established home for cross-binary shared code (mirror `mac_filter.h` precedent). Adding `logger.cpp` to BOTH `xdpmf_internal` AND `xdpmf-exporter` CMake target source lists costs one extra compile of a ~220-LOC TU — negligible vs. introducing a new static library target (B2) that adds an empty wrapper for one TU. Future cycle CAN refactor to a `xdpmf_common` static lib if a 2nd shared TU surfaces (e.g. if D-3.5-2 reverses and `src/common/json.cpp` joins as a 2nd shared TU); cycle 1 stays minimal.
 
-##### D-3.5-2 — `json_escape` + `format_timestamp_utc` DUPLICATED in logger.cpp, NOT extracted to shared module — because
+##### D-3.5-2 — `json_escape` + `format_timestamp_utc` DUPLICATED in logger.cpp, NOT extracted to shared module — because [SUPERSEDED BY §5.37 — see D-3.4f-1 (guard #9 EXPLICIT OVERRIDE via rule-of-three)]
 
 The existing helpers at `src/lib/sidecar.cpp:38-158` (~50 LOC combined) work and are stable. Extracting to `src/common/json.{cpp,hpp}` would:
 - Add 2 new files + 1 CMake target dependency wiring (sidecar.cpp would need to include common/json.hpp; logger.cpp same).
@@ -11041,7 +11041,7 @@ PI-7-3.4d-hpp (10th consecutive ZERO-diff on loader.hpp) is preserved by self-co
 
 The `stats` PERCPU_ARRAY (lines 152-158 area of mac_filter.bpf.c, `XDPMF_MAP_STATS_NAME = "stats"`) carries global verdict buckets (STAT_PASS, STAT_DROP_DENY, STAT_DROP_MALFORMED, STAT_PASS_CIDR). It's a small (STAT_MAX=4 entries) global counter, NOT a per-rule-id counter. Promoting `stats` to atomic-swap would add no operator value (global counters don't have apply-reset semantic considerations; Prometheus monotonicity is already preserved via reuse_fd discipline on the SHARED single pin). NEW FENCE in §7 OOS.
 
-##### D-3.4d-6 — helper duplication (escape_audit_value, sudo_user lookup) over extraction — because
+##### D-3.4d-6 — helper duplication (escape_audit_value, sudo_user lookup) over extraction — because [PARTIALLY SUPERSEDED BY §5.37 — `escape_audit_value` extracted to `src/common/escape_util.{hpp,cpp}` as `escape_audit` per D-3.4f-1 (guard #9 EXPLICIT OVERRIDE via rule-of-three); `sudo_user` env-lookup pattern STAYS duplicated this slice (only 2 callsites, below rule-of-three threshold)]
 
 Per anti-misdiagnosis guard #9 (brownfield discipline — helper-location duplication-over-extraction). reset_counters.cpp DUPLICATES `escape_audit_value` (bypass.cpp:48-64) + the sudo_user-env-lookup pattern (bypass.cpp:199-207). Extraction into a shared `audit_helpers.hpp` would: (a) add a new header for 2 functions — overhead, (b) churn bypass.cpp imports — unnecessary brownfield disruption, (c) defer the extraction until a 3rd subcommand needs it (rule of three; we're at 2 now). Architect explicitly chooses duplication; future MVP-3.4e+ rule-of-three extraction is a separate concern (NEW FENCE).
 
@@ -12042,3 +12042,506 @@ Trigger: reviewer round-1 verdict `pass`, 0 framework findings, 2 OOT both `inli
 Guard #18 amended: "when removing netns-dependent operations from a helper (e.g. dropping `if_nametoindex`), verify that downstream tests' NSEXEC-vs-HOST choice is no longer behaviorally meaningful — both should pass; stylistic alignment is impl-flexible".
 
 Aggregate impact: zero PI changes; zero scope changes; zero new fences. Ready to ship.
+
+### §5.37 MVP-3.4f: `src/common/escape_util.{hpp,cpp}` extraction + audit-escape policy extension (brownfield amendment, 2026-05-27)
+
+**Purpose**: rule-of-three extraction of the three Theme B duplicated helpers (`json_escape`, `escape_audit_value`, `format_timestamp_utc`) into a NEW shared module `src/common/escape_util.{hpp,cpp}`, AND extension of the `escape_audit` policy to cover ALL bytes `<0x20 || == 0x7F` as `\xHH` (lowercase hex) — currently only the 5 named escapes (`\\`, `\"`, `\n`, `\r`, `\0`) are covered, leaving 0x01-0x08, 0x0B, 0x0C, 0x0E-0x1F, 0x7F passing through raw (sec M1 finding from /mint-review 2026-05-27).
+
+Closes /mint-review 6-dim Theme B (cross-validated 3-way: sec M1 + arch M2 + CQ M2) and partially closes KC-1 log-injection kill chain (control-char gap). KC-1 fully closes when the companion slice ships the `action label defensive escape` (security L2) — out-of-scope for this brief. KC-2 (exporter `--bind` non-loopback WARN) is a separate slice.
+
+**Anchor sections**: §5.32 D-3.5-2 (origin of `json_escape` + `format_timestamp_utc` duplication; guard #9 rationale — NOW SUPERSEDED via D-3.4f-1 rule-of-three escape valve); §5.35 D-3.4d-6 (origin of `escape_audit_value` duplication — PARTIALLY SUPERSEDED for the escape helper; sudo_user env-lookup stays duplicated per scope); §5.36 §7 OOS (where `escape_audit_value` extraction was explicitly fenced as deferred to MVP-3.4f — this slice is the closure); §6.5 invariants summary (PI-7-3.4e-hpp 11th + PI-7-3.4e-cpp 6th ZERO-diff streaks to be extended to 12th + 7th here).
+
+**Scope contract (§5.37 short form)**:
+
+- NEW source files: **2** — `src/common/escape_util.hpp` + `src/common/escape_util.cpp`.
+- NEW ctests: **1** — `T_BYPASS_AUDIT_CONTROL_CHARS.sh` (control-char policy operational evidence per HG-3.4f-3). RESOURCE_LOCK xdp_fixture per guard #12 (veth-shape; integration test via real `xdpmacfilter bypass` rather than C++ unit harness — see D-3.4f-T1 below).
+- EDITED (source files, 4): `src/common/logger.cpp` (drop local `json_escape` + `format_timestamp_utc`; include `common/escape_util.hpp`; convert 5 call-sites to `escape_util::escape_json`); `src/lib/sidecar.cpp` (drop local `json_escape` + `format_timestamp_utc`; include `common/escape_util.hpp`; convert 1 + 1 call-sites); `src/cli/bypass.cpp` (drop local `escape_audit_value`; include `common/escape_util.hpp`; convert 2 call-sites to `escape_util::escape_audit`); `src/cli/reset_counters.cpp` (drop local `escape_audit_value` + the DUP-INTENT comment; include `common/escape_util.hpp`; convert 1 call-site).
+- EDITED (build): `CMakeLists.txt` — ADD `src/common/escape_util.cpp` to BOTH `xdpmf_internal` source list (line 118 area) AND `xdpmf-exporter` source list (line 146 area), mirroring the §5.32 logger.cpp dup-TU pattern (Q6=B1 precedent).
+- EDITED (tests): `tests/CMakeLists.txt` — ADD 1 `add_test` block + 1 `set_tests_properties` block declaring `RESOURCE_LOCK xdp_fixture` for T-1.
+- UNCHANGED-BUT-AFFECTED (zero git-diff fence — PI-7-3.4f-* streak extension): `src/common/logger.hpp`, `include/xdpmf/config.hpp` (does not exist at that path — true header is `src/lib/config.hpp` per §5.36 fence convention; we extend the same fence), `src/common/mac_filter.h`, `src/lib/loader.hpp`, all CLI headers, all BPF sources, all existing JSON-shape + audit-line ctests.
+- NO VERSION BUMP per D-3.4f-VERSION below (per brief OOS — internal refactor + intent-preserving policy hardening with no operator-observable feature surface change).
+- NO `mac_filter.h` ABI change.
+- NO `loader.hpp` public-surface change.
+
+#### §5.37 Phase A grep verification report (architect-independent — 2026-05-27)
+
+Per architect spec Phase A code-grep discipline (guards #5, #9, #11, #12, #13). Independent re-run of brief author's verification:
+
+1. **Helper bodies — byte-identical in pairs (CODE-IDENTICAL; comments differ)**:
+   - `format_timestamp_utc`: logger.cpp:49-63 vs sidecar.cpp:70-87. Bodies CODE-IDENTICAL (same `std::time` → `gmtime_r` → `std::format` chain; same fallback `"1970-01-01T00:00:00Z"`). sidecar.cpp has 3 extra lines of comment INSIDE the `if (::gmtime_r == nullptr)` branch ("gmtime_r failure is unprecedented but never-throw contract: emit a clearly-broken timestamp that still matches the ERE shape so the exporter's regex-based parser doesn't choke"). Logger.cpp lacks those comment lines. Decision impact: NONE — both compile to byte-equivalent machine code; canonical form for `escape_util.cpp` is the sidecar.cpp variant (richer doc-comment).
+   - `json_escape`: logger.cpp:68-92 vs sidecar.cpp:93-117. Bodies CODE-IDENTICAL (5 named escapes + `<0x20` → `\u00xx` lowercase via `std::format("\\u{:04x}", ...)`). Comment-block before the function differs slightly (sidecar.cpp's comment mentions "jq + line-regex parser" UTF-8-safety rationale; logger.cpp's comment cites D-3.5-2). Decision impact: NONE — canonical form for `escape_util.cpp` is the merged comment plus the (byte-identical) body.
+   - `escape_audit_value`: bypass.cpp:48-64 vs reset_counters.cpp:55-71. Bodies CODE-IDENTICAL (5 named escapes: `\\`, `\"`, `\n`, `\r`, `\0`; default → push raw byte). Comments differ (bypass.cpp's preamble references the `prom_format::escape_label_value`-style discipline rationale + truncation-budget constants nearby; reset_counters.cpp's preamble cites D-3.4d-6 DUP-INTENT). Decision impact: NONE.
+
+   **Architect ruling**: all 3 pairs are byte-equivalent for code purposes; extraction to `escape_util.cpp` MUST preserve the byte-equivalent body shape for `escape_json` + `format_timestamp_utc` and EXTEND `escape_audit` per HG-3.4f-1. No divergence-driven D-decision needed.
+
+2. **Call-site enumeration (exhaustive grep `src/` + `include/`)**:
+   - `json_escape(` — 8 hits: logger.cpp:68 (def) + 5 callers (149, 191, 197, 205, 216) + sidecar.cpp:93 (def) + 1 caller (129). CONFIRMED matches brief Phase 2 count.
+   - `escape_audit_value(` — 5 hits: bypass.cpp:48 (def) + 2 callers (196, 206) + reset_counters.cpp:55 (def) + 1 caller (112). CONFIRMED.
+   - `format_timestamp_utc(` — 4 hits: logger.cpp:49 (def) + 1 caller (183) + sidecar.cpp:70 (def) + 1 caller (131). CONFIRMED.
+   - `grep` against `tests/` for all three returns ZERO hits → these are internal C++ symbols, NOT bash-test grep surface. Confirms ZERO ctest-body EDITs required for the refactor itself (only the NEW T-1 ctest).
+   - `grep` against `include/` returns ZERO hits → no public-header surface to preserve.
+
+3. **CMakeLists.txt source-list anchor lines**:
+   - `xdpmf_internal` target source list ends at line 118 (`src/common/logger.cpp` is the last entry — `# §5.32 (MVP-3.5) — XDPMF_LOG_FORMAT={text,json} envelope`). escape_util.cpp insertion goes here as a new line BEFORE the closing `)`, with a comment `# §5.37 (MVP-3.4f) — escape_util.cpp (rule-of-three Theme B extraction)`.
+   - `xdpmf-exporter` target source list ends at line 146 (logger.cpp again, with the dup-TU comment `# §5.32 (MVP-3.5) — Q6=B1 dup-TU compile across binaries`). escape_util.cpp insertion goes here symmetrically.
+   - NO `src/common/CMakeLists.txt` subfile exists (CONFIRMED — `src/common/` is just a directory carrying source files compiled into the parent targets, NOT a separate CMake target). Dup-TU pattern from §5.32 Q6=B1 holds 1:1.
+
+4. **PI-7-3.4f-hpp / -cpp fence smoke (pre-commit reviewer check)**:
+   - `git diff <pre-§5.37>..HEAD -- src/common/logger.hpp src/lib/loader.hpp src/lib/config.hpp src/common/mac_filter.h` MUST be empty after impl + tester complete. Documented in §6.5 PI block below.
+   - Note: brief mentioned `include/xdpmf/config.hpp` — that path does NOT exist in this tree (actual config header is `src/lib/config.hpp`). Architect corrects the fence path; the PI-7-3.4e-cpp streak operates on `src/lib/config.hpp` per §5.36's UNCHANGED fence table. Brief was loosely-quoting the canonical fence.
+
+5. **Existing test fixture impact (guard #13 territory)**:
+   - `grep -F 'has"quote'` in `tests/` returns hits ONLY in `tests/T_LOG_JSON_BYPASS_AUDIT.sh:27,28,208,239` — the `\"` escape preservation test. POLICY PRESERVED per HG-3.4f-1 (5 named escapes unchanged). Test stays GREEN.
+   - `grep -nE '\\\\u00|\\\\x[0-9a-fA-F]'` in `tests/` returns ZERO hits → no fixture currently pins extended-policy literal output. The NEW T-1 ctest INTRODUCES the first such literal-output assertion.
+
+6. **Existing audit-line ERE tests (no body EDITs required)**:
+   - `grep -lE 'RESET-COUNTERS|BYPASS .*by uid' tests/` confirms audit-line ERE tests at `T_BYPASS_REQUIRES_UNSAFE_NONINTERACTIVE`, `T_BYPASS_CMD_DETACHES`, `T_CLI_RESET_COUNTERS*` — all assert on prose tokens for `\\`, `\"`, `\n`, `\r`, `\0` which stay byte-equivalent. No assertions on bytes outside the named-5 set. Confirms zero ctest-body EDITs for the refactor.
+
+7. **Include-path convention**:
+   - `grep -n '^#include' src/lib/sidecar.cpp | head -20` shows `#include "common/logger.hpp"` (line 38) — the established convention is `common/<file>.hpp` with `${CMAKE_SOURCE_DIR}/src` as a private include dir (set in CMakeLists.txt:120-123 for xdpmf_internal + symmetrically for xdpmacfilter at src/cli/CMakeLists.txt:12-15 + xdpmf-exporter at CMakeLists.txt:148-151). escape_util.hpp follows: `#include "common/escape_util.hpp"`.
+
+8. **Rename impact (E-1 recommendation adopted — see D-3.4f-5)**:
+   - Post-edit grep `grep -rn 'json_escape\|escape_audit_value' src/ include/` MUST return zero hits. Tester / reviewer asserts this in verifiable invariants block.
+   - `format_timestamp_utc` name PRESERVED (already verb-first) — no rename.
+
+9. **VERSION/CHANGELOG.md state**: project VERSION = `0.10.0` (CMakeLists.txt:13 unchanged since §5.35). D-3.4f-VERSION below: NO bump this slice. CHANGELOG.md MAY get a `### Security` + `### Refactoring` entry under unreleased — operative-semantic SHOULD-hint per Phase 4.4 (impl-flexible).
+
+10. **Throw-semantic preservation (PI-32-3.4b)**:
+    - escape_util functions return `std::string` (NOT `noexcept`) — same as the originals. `bad_alloc` propagates identically: sidecar.cpp's `write_rule_index` has a top-level `try{} catch(...){}` envelope (§5.31 EDIT-1 D-3.4b-17) that swallows any allocator failure. logger.cpp's `emit()` is `noexcept` with internal catch-all per §5.32 D-3.5-4. bypass.cpp / reset_counters.cpp call escape from main bodies; bad_alloc propagates to main.cpp's catch arm (exit non-zero) — same as today. PI-32-3.4b PRESERVED by construction.
+
+11. **Anti-pattern grep (Theme B exhaustiveness, post-edit)**:
+    - `grep -rnE '^[[:space:]]*\[\[nodiscard\]\] std::string (json_escape|escape_audit_value|format_timestamp_utc)\(' src/` MUST return ZERO hits post-edit. Documented as verifiable invariant.
+
+12. **Operative-semantic per Phase 4.4**: LOC counts in this amendment (~80 LOC of net duplication eliminated; ~80-100 LOC in escape_util.cpp; etc.) are SHOULD-level orientation, not contracts. Impl deviations (alternative file split, different LOC budget, different doc-comment wording) are `inline-merge` per resolution rule below.
+
+#### §5.37 Human-gate decisions (pre-loaded defaults from brief — confirmed by architect Phase A)
+
+- **HG-3.4f-1 — extended `escape_audit` policy = keep 5 named + add `\xHH` (lowercase) for `c < 0x20 || c == 0x7F`.** Confirmed per brief recommendation. The 5 named escapes (`\\`, `\"`, `\n`, `\r`, `\0`) preserved EXACTLY (preserves byte-equivalence with `T_LOG_JSON_BYPASS_AUDIT` step (i) + all audit-line ERE assertions). The `default` branch gains an inner conditional: `if (c < 0x20 || c == 0x7F) → std::format("\\x{:02x}", c); else → push raw byte`. Audit-line is plain-text-mode emission (NOT JSON), so `\xHH` C-style escape matches operator-readable convention; lowercase hex matches `json_escape`'s `\u00xx` format.
+
+- **HG-3.4f-2 — PI-7-3.4f ZERO-diff fence: YES, preserve streak.** Confirmed. `src/common/logger.hpp` + `src/lib/loader.hpp` + `src/lib/config.hpp` + `src/common/mac_filter.h` all UNTOUCHED. escape_util ships with its OWN header (`src/common/escape_util.hpp`); the 4 callers `#include "common/escape_util.hpp"` and drop their local helper defs. Result: PI-7-3.4f-hpp = **12th consecutive ZERO-diff** (extending PI-7-3.4e-hpp's 11-streak); PI-7-3.4f-cpp = **7th consecutive** for `src/lib/config.hpp` (extending 6-streak). NEW: PI-7-3.4f-mac-filter-h = 1st explicit-named for `src/common/mac_filter.h` (the file was already implicitly tracked as UNCHANGED across §5.30..§5.36 — this slice tracks it explicitly).
+
+- **HG-3.4f-3 — NEW ctest for extended-policy operational evidence: YES, at least ONE.** Confirmed. T-1 = `T_BYPASS_AUDIT_CONTROL_CHARS.sh` (NEW) exercises ALL extended-policy bytes (NOT just one sample) via `xdpmacfilter bypass --iface IFACE_A --unsafe --reason $'\x01\x07\x1f\x7f literal'`. Shape: integration test via real bypass (architect picks integration over pure-unit — see D-3.4f-T1 below). RESOURCE_LOCK xdp_fixture per guard #12 (veth-shape).
+
+- **HG-3.4f-4 — guard #9 EXPLICIT OVERRIDE with rule-of-three rationale citation.** Confirmed. §5.37 D-3.4f-1 (below) cites §5.32 D-3.5-2 + §5.35 D-3.4d-6 (helper-location duplication-over-extraction discipline) and explains the rule-of-three escape valve. /mint-review Theme B cross-validation across 3 dimensions (security M1 + architecture M2 + code-quality M2) is the operational signal that the rule-of-three threshold has been crossed.
+
+#### §5.37 Q-decisions (mechanism)
+
+##### Q1: scope of consolidation — include `format_timestamp_utc` in escape_util.cpp → **Q1.A1 (include)**
+
+Per brief recommendation. The /mint-review Theme B cluster spans all THREE helpers (the report explicitly groups them); consolidating in one cycle / one file is the right shape. Module name `escape_util` is mildly inaccurate (timestamp ≠ escape) but the alternative is shipping the same refactor twice. See D-3.4f-2 for the rationale ledger; future-cycle rename to `xdpmf::log_util` is OOS-deferrable.
+
+##### Q2: extended-byte escape notation — `\xHH` vs `\u00HH` → **Q2.A1 (`\xHH` lowercase)**
+
+Per brief recommendation. Audit-line is text-mode emission via stderr prose, NOT JSON. Mixing JSON-syntax escapes (`\u00HH`) in text-mode log lines confuses operators (especially when grepping audit-line ERE). The two policies stay SEPARATE: `escape_json` continues to use `\u00xx` for JSON envelopes (the existing `json_escape` policy is PRESERVED byte-equivalent in the extraction — see D-3.4f-7); `escape_audit` uses `\xHH` for text-mode audit prose. PI-3.5-1 byte-equivalence preserved (the 5 named escapes are byte-identical in both before/after; the extended `\xHH` policy is ADDITIVE — bytes that previously passed through raw now get escaped, but no pre-existing test pins raw-control-char output per Phase A grep #5).
+
+##### Q3: namespace + header naming → **`xdpmf::escape_util` namespace; `src/common/escape_util.{hpp,cpp}` file path** (matches /mint-review prescription verbatim)
+
+Architect picks `xdpmf::escape_util` matching the file name `escape_util.hpp`. Consistent with the existing sibling `xdpmf::logger` (logger.hpp:28) under the same `src/common/` directory. Function names `escape_json`, `escape_audit`, `format_timestamp_utc` live directly under the `xdpmf::escape_util::` qualifier; callers write `xdpmf::escape_util::escape_json(...)`.
+
+Alternative `xdpmf::common::escape` / `xdpmf::common::strings` rejected — adds a `common::` intermediate that no other module uses (logger is `xdpmf::logger`, NOT `xdpmf::common::logger`). Consistency wins.
+
+Alternative `xdpmf::log_util` rejected for this cycle — would force renaming the file too (`log_util.hpp`), diverging from /mint-review's verbatim prescription `escape_util`. Future-cycle rename if a 4th log-helper joins is OOS-deferrable.
+
+##### Q4: include-path style — relative `"../common/..."` vs include-dir-rooted `"common/..."` → **include-dir-rooted `#include "common/escape_util.hpp"`** (matches §5.32 logger.hpp precedent)
+
+Per Phase A grep #7 — `src/lib/sidecar.cpp:38` already does `#include "common/logger.hpp"` with `${CMAKE_SOURCE_DIR}/src` as the include-dir root. No new include-dir wiring needed: xdpmf_internal (CMakeLists.txt:120-123), xdpmacfilter (src/cli/CMakeLists.txt:12-15), and xdpmf-exporter (CMakeLists.txt:148-151) ALL set `${CMAKE_SOURCE_DIR}/src` as a private include dir. escape_util.hpp uses the same pattern.
+
+#### §5.37 LIFTED PI declarations (none — all prior PIs UPHELD; D-3.5-2 + D-3.4d-6 are SUPERSEDED-by-extraction, not lifted)
+
+No prior PI is LIFTED by this slice. Two prior **decisions** (D-3.5-2 and D-3.4d-6) are SUPERSEDED by D-3.4f-1's rule-of-three escape valve — supersession markers added inline at their original locations (search for `[SUPERSEDED BY §5.37`). Both decisions sanctioned helper DUPLICATION under guard #9; this slice EXTRACTS the helpers under a documented escape valve (rule of three + /mint-review 3-dim cross-validation), which is the orderly evolution path that those decisions themselves anticipated ("Future cycle MAY extract if a 3rd JSON emitter surfaces" — D-3.5-2; "future cycle when a 3rd subcommand needs the same helpers" — D-3.4d-6). The supersession is NOT a contract drift — it is the explicit escape valve those decisions documented.
+
+NEW PIs declared in §6.5 below (PI-3.4f-1, PI-3.4f-2, PI-3.4f-3).
+
+Note: PI-7-3.4f-hpp + PI-7-3.4f-cpp are EXTENSIONS (12th/7th consecutive ZERO-diff cycles on `src/common/logger.hpp` + `src/lib/config.hpp` respectively) — not new PIs, just continuation of the streak first established at §5.30 PI-7-3.4.5-hpp.
+
+#### §5.37 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+##### NEW (this slice)
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `src/common/escape_util.hpp` | Public surface for the 3 extracted helpers (`escape_json`, `escape_audit`, `format_timestamp_utc`) under namespace `xdpmf::escape_util` | C++23 header | ~40 |
+| `src/common/escape_util.cpp` | Definitions of the 3 helpers; `escape_audit` policy extended to `\xHH` for `c < 0x20 || c == 0x7F` per HG-3.4f-1; `escape_json` + `format_timestamp_utc` byte-equivalent to the prior logger.cpp / sidecar.cpp versions | C++23 | ~90 |
+| `tests/T_BYPASS_AUDIT_CONTROL_CHARS.sh` | Operational evidence of extended-`escape_audit` policy via real `xdpmacfilter bypass` invocation with control-char `--reason`; assertions on stderr audit-line content (template = T_LOG_JSON_BYPASS_AUDIT.sh + T_BYPASS_REQUIRES_UNSAFE_NONINTERACTIVE.sh shape mix) | bash | ~90 |
+
+##### EDITED (this slice)
+
+| Path | Change shape | Reason |
+|---|---|---|
+| `src/common/logger.cpp` | DROP local `format_timestamp_utc` (lines 49-63) + DROP local `json_escape` (lines 68-92); ADD `#include "common/escape_util.hpp"` near top; REPLACE 5 call-sites `json_escape(...)` → `xdpmf::escape_util::escape_json(...)` (lines 149, 191, 197, 205, 216) + REPLACE 1 call-site `format_timestamp_utc()` → `xdpmf::escape_util::format_timestamp_utc()` (line 183). Net LOC: ~ -40 to -50 (defs removed) + 6 namespace-prefix changes. | Rule-of-three Theme B extraction (D-3.4f-1) |
+| `src/lib/sidecar.cpp` | DROP local `format_timestamp_utc` (lines 70-87) + DROP local `json_escape` (lines 93-117); ADD `#include "common/escape_util.hpp"`; REPLACE 1 call-site `json_escape(iface)` (line 129) + REPLACE 1 call-site `format_timestamp_utc()` (line 131). Net LOC: ~ -45 to -55. | Rule-of-three Theme B extraction (D-3.4f-1); preserves §5.31 regional-diff fence outside the helper-removal range |
+| `src/cli/bypass.cpp` | DROP local `escape_audit_value` (lines 48-64); ADD `#include "common/escape_util.hpp"`; REPLACE 2 call-sites `escape_audit_value(...)` → `xdpmf::escape_util::escape_audit(...)` (lines 196, 206). Net LOC: ~ -20. | Rule-of-three Theme B extraction (D-3.4f-1) + rename per D-3.4f-5 |
+| `src/cli/reset_counters.cpp` | DROP local `escape_audit_value` (lines 55-71) + DROP the DUP-INTENT comment block at lines 51-54 (reference to D-3.4d-6 — now obsolete; OPTIONAL replacement comment `// escape via common/escape_util.hpp (§5.37)` is impl-flexible); ADD `#include "common/escape_util.hpp"`; REPLACE 1 call-site `escape_audit_value(...)` → `xdpmf::escape_util::escape_audit(...)` (line 112). Net LOC: ~ -20. | Rule-of-three Theme B extraction (D-3.4f-1) + rename per D-3.4f-5 |
+| `CMakeLists.txt` | ADD `src/common/escape_util.cpp` to `xdpmf_internal` source list (insert between line 117 `yaml_subset.cpp` and line 118 `logger.cpp` OR after `logger.cpp` — impl-flexible alphabetical-or-grouped order); ADD same to `xdpmf-exporter` source list (symmetric, near line 146 `logger.cpp`). 2 lines added; with comment `# §5.37 (MVP-3.4f) — escape_util (rule-of-three Theme B extraction)`. NO change to include-dirs (already present per Phase A #7). | Dup-TU pattern preservation (Q6=B1 from §5.32) |
+| `tests/CMakeLists.txt` | ADD 1 `add_test` block for T_BYPASS_AUDIT_CONTROL_CHARS.sh + 1 `set_tests_properties` block declaring `RESOURCE_LOCK xdp_fixture` (guard #12). ~15 LOC additive. | Test registration |
+
+##### UNCHANGED-BUT-AFFECTED (zero git-diff fence — reviewer asserts `git diff` returns empty)
+
+| Path | Why unchanged + how preserved |
+|---|---|
+| `src/common/logger.hpp` | **PI-7-3.4f-hpp: 12th consecutive ZERO-diff cycle target.** Extraction lives in a NEW sibling header `escape_util.hpp`, NOT in logger.hpp. Reviewer check: `git diff <pre-§5.37> -- src/common/logger.hpp` empty. |
+| `src/lib/config.hpp` | **PI-7-3.4f-cpp: 7th consecutive ZERO-diff cycle target.** No schema change. Reviewer check: `git diff <pre-§5.37> -- src/lib/config.hpp` empty. |
+| `src/lib/loader.hpp` | **PI-7-3.4f-loader-hpp: extension of §5.36 streak.** No new public symbol. Reviewer check: `git diff <pre-§5.37> -- src/lib/loader.hpp` empty. |
+| `src/common/mac_filter.h` | **PI-7-3.4f-mac-filter-h: extension of §5.36 streak.** No new constant, no removed constant. Reviewer check: `git diff <pre-§5.37> -- src/common/mac_filter.h` empty. |
+| `src/lib/apply_internal.hpp` | No new struct, no new function declaration. ResetCountersRequest + ApplyRequest UNCHANGED. |
+| `src/lib/sidecar.hpp` | Public surface UNCHANGED (`write_rule_index` signature byte-equivalent). Only the .cpp body changes — minimally, in the helper-removal range. |
+| `src/cli/cli.hpp`, `src/cli/cli.cpp`, `src/cli/main.cpp`, `src/cli/apply.cpp`, `src/cli/bypass.hpp`, `src/cli/reset_counters.hpp` | No CLI surface change. No new flags. No new dispatch arms. |
+| `src/bpf/*` | No BPF datapath change. |
+| `src/exporter/*` | No exporter change. The exporter target dup-TU compiles `escape_util.cpp` for symbol symmetry with logger.cpp (same as §5.32 Q6=B1) but no exporter code calls escape_util directly — the dup-TU just keeps both binaries linkable from the same source list pattern. NO source-file edit in `src/exporter/`. |
+| systemd/ansible files | No caps/env/path changes. |
+| `tests/T_CLI_HELP_VERSION.sh` | No `--help` text change (CLI surface byte-equivalent). |
+| `tests/T_LOG_JSON_BYPASS_AUDIT.sh` | step (i) `--reason 'has"quote'` test — `escape_json` policy byte-equivalent for `\"`; jq-decoded round-trip works identically. NO test-body edit. |
+| `tests/T_LOG_JSON_LOADER_EVENTS.sh`, `T_LOG_JSON_EXPORTER_EVENTS.sh`, `T_LOG_JSON_ENVELOPE_INVARIANTS.sh` | JSON envelope shape byte-equivalent (json_escape policy unchanged). NO test-body edits. |
+| `tests/T_SIDECAR_JSON_SHAPE.sh` | sidecar rule_index.json shape byte-equivalent (json_escape + format_timestamp_utc both byte-preserved by extraction). NO test-body edit. |
+| Audit-line ERE tests (`T_BYPASS_CMD_DETACHES.sh`, `T_BYPASS_REQUIRES_UNSAFE_NONINTERACTIVE.sh`, `T_CLI_RESET_COUNTERS*.sh`, etc.) | Audit-line shape byte-equivalent for the 5 named escapes (`\\`, `\"`, `\n`, `\r`, `\0`). Extended policy (`\xHH` for `<0x20 \|\| ==0x7F`) is ADDITIVE — no pre-existing test pins raw-control-char output per Phase A grep #5. NO test-body edits. |
+| `tests/fixtures/log_events_v1.txt` | No kEventNames change this slice. `escape_util.{hpp,cpp}` carries NO new event names. NO fixture edit. |
+| `CHANGELOG.md` | No version bump per D-3.4f-VERSION. MAY get unreleased-section `### Security` + `### Refactoring` entries (impl-flexible per Phase 4.4 SHOULD-hint). |
+| `README.md`, `docs/BACKLOG.md`, `docs/HANDOFF.md` | OOS this slice. README is in CRITICAL backlog state per B1 (separate slice); BACKLOG.md gets a cross-out for B-Theme-B-extraction item from §5.36's OOS list — operative-semantic SHOULD-hint, impl-flexible. |
+
+Anything not in NEW, EDITED, or UNCHANGED-BUT-AFFECTED is off-limits for impl. If impl needs to edit a file not listed, that's a design gap — peer-DM architect.
+
+#### §5.37 DataStructures additions / changes
+
+None. escape_util introduces only FREE FUNCTIONS in namespace `xdpmf::escape_util`; no structs, no enums, no constants exposed at the cross-module boundary.
+
+(The internal helper-state of `escape_audit` body — i.e., the inner conditional on `c < 0x20 || c == 0x7F` — is implementation detail of the .cpp body, not a cross-boundary contract.)
+
+#### §5.37 Interfaces additions
+
+##### `src/common/escape_util.hpp` — NEW public surface
+
+```cpp
+// §5.37 (MVP-3.4f) Theme B rule-of-three extraction. Consolidates the 3
+// helpers that were duplicated across logger.cpp + sidecar.cpp + bypass.cpp +
+// reset_counters.cpp per D-3.5-2 + D-3.4d-6. Guard #9 EXPLICIT OVERRIDE per
+// D-3.4f-1 (rule-of-three: 6 duplicate bodies × 4 modules; /mint-review
+// 2026-05-27 Theme B 3-dim cross-validation).
+//
+// NO new external dependency (PI-3.5-7 carry): stdlib `<string>` `<string_view>`
+// `<format>` `<ctime>` only.
+//
+// All functions return std::string by value. NOT noexcept — std::string ops
+// CAN throw bad_alloc. Throw semantic identical to the originals (PI-32-3.4b
+// preserved by construction; callers' existing catch-all envelopes swallow
+// bad_alloc identically to the duplicated-helper world).
+
+#pragma once
+
+#include <string>
+#include <string_view>
+
+namespace xdpmf::escape_util {
+
+// RFC 8259 JSON string escape. Backslash / double-quote / control chars get
+// backslash-escaped; non-ASCII bytes pass through verbatim. Used for JSON
+// envelope construction in logger.cpp + sidecar.cpp.
+//
+// Body byte-equivalent to pre-§5.37 `json_escape` at logger.cpp:68-92 /
+// sidecar.cpp:93-117.
+[[nodiscard]] std::string escape_json(std::string_view raw);
+
+// Text-mode audit-line escape (NOT JSON). Policy per HG-3.4f-1:
+//   5 named escapes: `\\`, `\"`, `\n`, `\r`, `\0` (byte-equivalent to
+//                    pre-§5.37 `escape_audit_value` at bypass.cpp:48-64 /
+//                    reset_counters.cpp:55-71).
+//   EXTENDED (Q2.A1): bytes in [0x01,0x08] ∪ {0x0B,0x0C} ∪ [0x0E,0x1F] ∪
+//                     {0x7F} → `\xHH` (lowercase hex). Closes sec M1 control-
+//                     char gap from /mint-review 2026-05-27.
+//   Printable ASCII (0x20..0x7E except `\`,`"`) + non-ASCII (>=0x80) pass
+//   through verbatim.
+//
+// Operator-readable convention: `\xHH` C-style escape (NOT JSON `\u00HH`).
+// Lowercase hex matches the existing `\u00xx` lowercase precedent in
+// escape_json.
+[[nodiscard]] std::string escape_audit(std::string_view raw);
+
+// ISO-8601 UTC `YYYY-MM-DDTHH:MM:SSZ`. Single trailing 'Z'; no fractional
+// seconds. gmtime_r failure yields the broken-but-shape-valid
+// "1970-01-01T00:00:00Z" so regex parsers don't choke. CLOCK_REALTIME via
+// std::time (no clock injection — caller cannot mock; matches pre-§5.37
+// behavior of both logger.cpp and sidecar.cpp).
+//
+// Body byte-equivalent to pre-§5.37 `format_timestamp_utc` at logger.cpp:49-63
+// / sidecar.cpp:70-87.
+[[nodiscard]] std::string format_timestamp_utc();
+
+}  // namespace xdpmf::escape_util
+```
+
+##### `src/common/escape_util.cpp` — definitions
+
+Body shape:
+- 3 function definitions per the declarations above.
+- `escape_json` body BYTE-EQUIVALENT to the existing logger.cpp:68-92 / sidecar.cpp:93-117 form (same switch over 5 named + `<0x20 → \u00xx` via `std::format("\\u{:04x}", static_cast<unsigned char>(c))`).
+- `escape_audit` body EXTENDED form:
+  ```
+  switch (c) {
+      case '\\': out.append("\\\\"); break;
+      case '"':  out.append("\\\""); break;
+      case '\n': out.append("\\n");  break;
+      case '\r': out.append("\\r");  break;
+      case '\0': out.append("\\0");  break;
+      default:
+          if (c < 0x20 || c == 0x7F) {
+              out.append(std::format("\\x{:02x}",
+                                      static_cast<unsigned char>(c)));
+          } else {
+              out.push_back(static_cast<char>(c));
+          }
+          break;
+  }
+  ```
+  Operative-semantic per Phase 4.4: impl-flexible whether to write the inner conditional as `if` or `(c < 0x20 || c == 0x7F)` branch; the OPERATIVE contract is that bytes in `{[0x01,0x08] ∪ {0x0B,0x0C} ∪ [0x0E,0x1F] ∪ {0x7F}}` are escaped as `\xHH` lowercase, AND the 5 named escapes (`\\`, `\"`, `\n`=0x0A, `\r`=0x0D, `\0`=0x00) hit the named branches FIRST (so they emit `\\n` not `\x0a`).
+- `format_timestamp_utc` body BYTE-EQUIVALENT to existing logger.cpp:49-63 / sidecar.cpp:70-87 (canonical form is the richer-comment sidecar variant; comment merge impl-flexible).
+
+##### Callers (regional-diff)
+
+Each of the 4 EDITED .cpp files: `#include "common/escape_util.hpp"` near top of include block (after `#include "<this-file>.hpp"`, alongside `#include "common/logger.hpp"`). Local helper defs DROPPED in the line-ranges enumerated in the FileList EDITED rows. Call-sites use the `xdpmf::escape_util::escape_json(...)` / `xdpmf::escape_util::escape_audit(...)` / `xdpmf::escape_util::format_timestamp_utc()` form. Each .cpp may add a `using namespace xdpmf::escape_util;` (or `using xdpmf::escape_util::escape_json;` etc.) at file-scope to shorten the call-site if impl prefers — operative-semantic SHOULD-hint per Phase 4.4 (the FQN form is preferable for clarity, but `using`-elision is acceptable inline-merge).
+
+#### §5.37 Decisions (with rationale)
+
+##### D-3.4f-1 — Guard #9 EXPLICIT OVERRIDE via rule-of-three (helper-location duplication-over-extraction → extraction-into-shared-module) — because
+
+§5.32 D-3.5-2 sanctioned DUPLICATING `json_escape` + `format_timestamp_utc` from sidecar.cpp into logger.cpp; §5.35 D-3.4d-6 sanctioned DUPLICATING `escape_audit_value` from bypass.cpp into reset_counters.cpp. Both decisions cited guard #9 ("brownfield discipline — helper-location duplication-over-extraction") and explicitly anticipated this escape valve: D-3.5-2 says *"Future cycle MAY extract if a 3rd JSON emitter surfaces"*; D-3.4d-6 says *"defer the extraction until a 3rd subcommand needs it (rule of three; we're at 2 now)"*.
+
+This slice is the orderly evolution path those decisions documented:
+- **Body count**: 6 duplicated function bodies (2 × `json_escape` + 2 × `escape_audit_value` + 2 × `format_timestamp_utc`).
+- **Module count**: 4 modules carry duplicates (`src/common/logger.cpp`, `src/lib/sidecar.cpp`, `src/cli/bypass.cpp`, `src/cli/reset_counters.cpp`).
+- **LOC reduction**: ~80 LOC net (3 × ~25-30 LOC bodies × 2 copies = ~150-160 LOC duplicated; replaced by ~90 LOC in escape_util.cpp + ~40 LOC in escape_util.hpp + 4 × `#include` + ~6 namespace-prefix changes — net ~ -80 LOC).
+- **External signal**: /mint-review 2026-05-27 6-dim run flagged the duplication in THREE INDEPENDENT DIMENSIONS (security M1: control-char gap in escape_audit_value; architecture M2: rule-of-three threshold crossed; code-quality M2: duplicated definitions across 4 TUs). Cross-dimensional cross-validation is the operational signal that the duplication has crossed the rule-of-three line.
+
+Guard #9 remains in force for OTHER small helpers (e.g., the `sudo_user` env-lookup pattern at bypass.cpp:199-207 / reset_counters.cpp:103-110 — still 2 callsites; below rule-of-three). The escape valve is per-helper, NOT a wholesale repeal.
+
+**Future-cycle architect rule**: when contemplating extraction of duplicated helpers under guard #9, check:
+1. Body count ≥ 3? (rule of three)
+2. Independent quality signal (external audit / multiple-reviewer findings / cross-dimensional concern)?
+3. Cost of extraction (header churn, target-list edits) vs cost of N+1th duplication (drift risk, especially for security-relevant logic)?
+
+If all three → extraction (document with a D-decision citing this template). If only one → DUPLICATE under guard #9.
+
+##### D-3.4f-2 — `format_timestamp_utc` consolidated into escape_util.cpp despite name mismatch (Q1.A1) — because
+
+The /mint-review Theme B cluster spans all THREE helpers. Shipping a `time_util.{hpp,cpp}` carve-out for just `format_timestamp_utc` would mean two refactor cycles for one Theme; the second cycle would touch logger.cpp + sidecar.cpp again (re-EDITing the regional-diff fence; second round of CMakeLists.txt source-list churn). One pass is cheaper.
+
+The naming inconsistency (timestamp helper inside `escape_util`) is acknowledged. Future-cycle rename to `xdpmf::log_util` (broader umbrella for all log-emission helpers) is OOS-deferrable. The cost of the rename later is small (rename namespace + file + 4 `#include` updates); the benefit of the consolidated cycle NOW is the closure of Theme B in a single pass + closure of sec M1 via the extended `escape_audit` policy.
+
+Documented as OOS fence below: "module rename `escape_util` → `log_util` if a 4th log-helper joins (e.g., level_str pulled from logger.cpp anon namespace)".
+
+##### D-3.4f-3 — Extended `escape_audit` policy = `\xHH` lowercase for `c < 0x20 || c == 0x7F` (Q2.A1) — because
+
+Per HG-3.4f-1 + brief recommendation. Audit-line is text-mode emission via stderr prose. `\xHH` C-style escape matches operator-readable convention for stderr logs. The 5 named escapes (`\\`, `\"`, `\n`, `\r`, `\0`) are checked FIRST in the switch — they hit the named branches and emit `\\n` (etc.), NOT `\x0a`. This preserves byte-equivalence with `T_LOG_JSON_BYPASS_AUDIT` step (i) (`\"` test) + all audit-line ERE assertions.
+
+The byte set `{[0x01,0x08] ∪ {0x0B,0x0C} ∪ [0x0E,0x1F] ∪ {0x7F}}` is the complement of `{0x00 (named), 0x09 (TAB — debate), 0x0A (named), 0x0D (named)} ∪ printable-ASCII ∪ non-ASCII`. **Tab `0x09`**: the policy emits `\x09` (extended-policy branch hits because `0x09 < 0x20`); this WAS passing through raw pre-§5.37 (tabs broke audit-line tabular grep). Architect choice: tab gets escaped (consistent with the "no raw control bytes in audit-line" sec M1 intent). Operative-semantic per Phase 4.4 — impl-flexible if a different tab disposition is preferred (e.g., named `\\t` — but the brief explicitly does NOT add tab to the named-5; sticks with the original named set). Reviewer accepts either tab disposition as inline-merge.
+
+Non-ASCII bytes (>=0x80) pass through verbatim. Rationale: the audit-line is operator-emitted prose; an operator running `xdpmacfilter bypass --reason 'отказ'` should see the UTF-8 bytes in the audit-line, not `\xd0\xbe\xd1\x82\xd0\xba\xd0\xb0\xd0\xb7`. (The companion KC-1 closure for action-label defensive escape — out of scope this slice — may revisit; this slice ONLY closes the control-char gap.)
+
+##### D-3.4f-4 — Namespace `xdpmf::escape_util`; file path `src/common/escape_util.{hpp,cpp}` (Q3) — because
+
+Per Q3 above. Matches /mint-review prescription verbatim. Consistent with sibling `xdpmf::logger` (no intermediate `common::` qualifier). FQN call-site form `xdpmf::escape_util::escape_json(...)` is the canonical reference; `using` elision at file-scope is acceptable inline-merge per Phase 4.4.
+
+##### D-3.4f-5 — Rename `json_escape → escape_json`, `escape_audit_value → escape_audit`; `format_timestamp_utc` PRESERVED — because
+
+Per brief recommendation. Verb-first convention for the two escape helpers improves readability (`escape_util::escape_json(x)` reads naturally; `escape_util::json_escape(x)` was always slightly awkward). `escape_audit_value` → `escape_audit` drops the `_value` redundancy (the function takes a value; the redundancy is in the name, not the signature). `format_timestamp_utc` already verb-first; no rename.
+
+The rename is purely cosmetic per the brief ("flags rename as recommendation, not contract"). Architect adopts because:
+- Single-pass consistency: post-extraction, the public surface has all 3 helpers verb-first (escape_json + escape_audit + format_timestamp_utc) — clean.
+- Migration path: callers move from `json_escape(x)` → `xdpmf::escape_util::escape_json(x)`; from `escape_audit_value(x)` → `xdpmf::escape_util::escape_audit(x)`. Mechanical sed; no semantic change.
+- No public-surface compat break: the OLD names are private (anon-namespace static or file-scope `[[nodiscard]] std::string`); renaming touches only the 4 EDITED .cpp files + the NEW .hpp/.cpp.
+
+If impl wishes to keep original names (e.g., `json_escape` + `escape_audit_value` in escape_util surface), architect accepts as inline-merge per Phase 4.4 — the rename is SHOULD-hint, not contract. Reviewer disposition on a deviating impl is `inline-merge`, NOT `[UNRELATED-EDIT]`.
+
+##### D-3.4f-6 — Include-path convention `#include "common/escape_util.hpp"` (Q4) — because
+
+Per Q4 + Phase A grep #7. Matches `#include "common/logger.hpp"` precedent at sidecar.cpp:38 + bypass.cpp:19. All three target binaries (xdpmf_internal, xdpmacfilter, xdpmf-exporter) carry `${CMAKE_SOURCE_DIR}/src` as a private include dir, so the include-dir-rooted form just works without new wiring.
+
+Alternative relative-path `#include "../common/escape_util.hpp"` rejected — relative includes are brittle across moves, fight the established convention, and have no advantage. Verbose project-absolute `#include "/.../src/common/escape_util.hpp"` rejected — fights basic CMake portability.
+
+##### D-3.4f-7 — `escape_util.cpp` dup-TU compiled into BOTH `xdpmf_internal` AND `xdpmf-exporter` (Q6=B1 pattern preservation) — because
+
+Mirror of §5.32 D-3.5-1 (logger.cpp dup-TU). Adding escape_util.cpp to the existing `xdpmf_internal` source list serves xdpmacfilter (xdpmacfilter → links xdpmf_internal → carries escape_util). Adding to `xdpmf-exporter` source list serves the exporter binary (xdpmf-exporter compiles + links its own copy of escape_util.cpp for linker symbol symmetry with logger.cpp).
+
+Exporter doesn't CALL any escape_util function directly this slice — the exporter's emission sites use logger.cpp's `xdpmf::logger::emit(...)` which internally calls `escape_util::escape_json` via the logger TU. So the exporter's escape_util.cpp TU is technically "compiled but symbols used via the dup-TU logger.cpp variant inside xdpmf-exporter". This is the same pattern as logger.cpp itself (xdpmf-exporter's own logger.cpp TU calls into its own escape_util.cpp TU; xdpmf_internal's logger.cpp TU calls into its own escape_util.cpp TU; ODR is preserved because the symbols have internal linkage from the inline-template-ish `[[nodiscard]] std::string` declarations — actually no, they have external linkage; the rule that saves us is that BOTH definitions are byte-identical so ODR is technically satisfied even if both TUs of escape_util.cpp end up in the same linker invocation — but they DON'T: xdpmf_internal is a STATIC lib linked only into xdpmacfilter, and xdpmf-exporter is a SEPARATE executable; each binary has exactly ONE copy of escape_util.cpp linked).
+
+To be precise: xdpmacfilter ← xdpmf_internal (which contains escape_util.cpp + logger.cpp). xdpmf-exporter ← xdpmf_internal (transitively) PLUS its own direct logger.cpp + escape_util.cpp source list entries. Wait — re-reading CMakeLists.txt:155 — `target_link_libraries(xdpmf-exporter PRIVATE xdpmf_internal)` — so xdpmf-exporter LINKS xdpmf_internal. And xdpmf-exporter's own source list at lines 139-147 lists logger.cpp directly. So xdpmf-exporter ends up with TWO copies of logger.cpp's symbols (one from its own direct compile, one from xdpmf_internal's linked-in static lib).
+
+This is the existing §5.32 D-3.5-1 pattern — and it WORKS because the linker resolves duplicate symbol definitions from a static lib + direct object: the direct-object definitions WIN, and the static-lib copies are NOT pulled in (their symbols are already satisfied). So xdpmf-exporter effectively uses its OWN compile of logger.cpp + escape_util.cpp. xdpmacfilter uses xdpmf_internal's compile of logger.cpp + escape_util.cpp (since xdpmacfilter has no direct logger.cpp in its source list — confirmed at src/cli/CMakeLists.txt:5-11 — only main, cli, apply, bypass, reset_counters).
+
+Net effect: 2 TUs of escape_util.cpp compiled total — one inside xdpmf_internal.a, one inside xdpmf-exporter executable's direct object. ODR not violated (each binary has exactly one copy). Pattern matches §5.32 Q6=B1 exactly.
+
+Alternative B2 (extract `xdpmf_common` static lib with logger.cpp + escape_util.cpp) — REJECTED — same rationale as §5.32 D-3.5-1: adds a CMake target for what is now a 2-file lib. Future cycle MAY promote if a 3rd common TU joins (e.g., audit_helpers.cpp). NEW FENCE.
+
+##### D-3.4f-8 — Throw-semantic + PI-32-3.4b PRESERVED by construction — because
+
+escape_util functions are NOT `noexcept`. They return `std::string` by value; `std::string` ctor + `append` + `push_back` + `std::format` formatting CAN throw `std::bad_alloc` on allocator failure. The throwing behaviour is BYTE-EQUIVALENT to the pre-§5.37 duplicated helpers (which also weren't noexcept). Specifically:
+
+- sidecar.cpp `write_rule_index` has top-level `try{} catch(...){}` envelope (§5.31 EDIT-1 D-3.4b-17 / PI-32-3.4b). Any bad_alloc from `xdpmf::escape_util::escape_json(iface)` inside `build_body` is caught + sidecar.warn.write_exception emitted + return. PI-32-3.4b PRESERVED.
+- logger.cpp `emit()` is `noexcept` with internal `try{} catch(...){}` per §5.32 D-3.5-4. Any bad_alloc from `xdpmf::escape_util::escape_json(...)` inside emit body is caught + silent-drop. §5.32 D-3.5-4 PRESERVED.
+- bypass.cpp / reset_counters.cpp call escape_audit from main bodies; bad_alloc propagates to main.cpp's top-level catch arm (existing behavior — exit non-zero with `cli.error` event). UNCHANGED.
+
+NO new `noexcept` annotation needed on escape_util functions; NO new catch-all in escape_util.cpp body. The existing call-site envelopes remain authoritative.
+
+##### D-3.4f-T1 — T-1 shape: integration test via real `xdpmacfilter bypass` (NOT pure-unit-test harness) — because
+
+The brief offers two test shapes (pure-unit-test of `escape_util::escape_audit()` via a tiny C++ harness; OR integration test via real `xdpmacfilter bypass --reason $'\x01...'`). Architect picks **integration**:
+
+- **No precedent for unit-test binaries in this project**: existing ctests are bash scripts that invoke `xdpmacfilter` / `xdpmf-exporter` binaries + assert on stderr / exit-code / fs state. Adding a NEW C++ test harness binary is a precedent shift; not justified for a single policy test.
+- **Operational evidence stronger via integration**: the audit-line emission path goes through `escape_audit` → `std::format("...by uid=... reason=\"{}\"", escape_audit(reason_raw))` → logger.cpp text-mode `write_stderr(msg)`. Pure-unit-test of `escape_audit` alone proves the function output; integration test proves the entire emission path delivers the escaped form to stderr without intermediate corruption (e.g., a future cycle accidentally adds a second escape pass; integration catches it, pure-unit doesn't).
+- **Cost**: integration shape requires veth + RESOURCE_LOCK xdp_fixture (guard #12). Acceptable cost — most existing audit-line ctests already pay this (the lock is shared across all veth-touching tests per §5.33 D-3.5.5-1).
+
+Pure-unit-test shape is acceptable inline-merge per Phase 4.4 if tester finds the integration shape painful — but architect's default is integration.
+
+##### D-3.4f-VERSION — NO VERSION BUMP this slice — because
+
+Per brief OOS — internal refactor (rule-of-three extraction) + intent-preserving policy hardening (extended `escape_audit` adds escaping for bytes that PREVIOUSLY passed through raw — operator who fed control bytes was already producing undefined audit-line output; we now escape them cleanly). Per semantic-versioning convention:
+- MAJOR — breaking API change → no (CLI surface byte-equivalent; helper rename is internal-only).
+- MINOR — new feature → no (no new flag, no new subcommand).
+- PATCH — bug fix / security fix → arguably yes for the sec M1 closure, but the OPERATOR-OBSERVABLE delta is limited to "audit-line for previously-undefined-input now well-defined" — not a CHANGELOG-worthy feature.
+
+Architect picks: leave VERSION at `0.10.0`. Optional CHANGELOG.md `### Security` (control-char audit-escape) + `### Refactoring` (escape_util extraction) entries under unreleased — impl-flexible per Phase 4.4 SHOULD-hint. Reviewer should NOT flag the absence of a version bump as a contract drift.
+
+#### §5.37 TestStrategy entries
+
+##### T-1: T_BYPASS_AUDIT_CONTROL_CHARS — extended `escape_audit` policy escapes control chars + 0x7F in audit-line (per HG-3.4f-3, MVP-3.4f)
+
+**Purpose**: operational evidence of the extended `escape_audit` policy (sec M1 closure). Asserts that bytes in `{[0x01,0x08] ∪ {0x0B,0x0C} ∪ [0x0E,0x1F] ∪ {0x7F}}` are escaped as `\xHH` lowercase in the audit-line emitted by `xdpmacfilter bypass` — AND that the 5 named escapes (`\\`, `\"`, `\n`, `\r`, `\0`) continue to use named-form. PI-3.4f-2 evidence.
+
+**Setup**:
+- Standard xdp_fixture veth pair (`IFACE_A` available).
+- `xdpmacfilter attach --iface ${IFACE_A} --allow MAC_GOOD` (pre-condition for bypass to have something to detach).
+- RESOURCE_LOCK xdp_fixture per guard #12 (veth-shape).
+
+**Sub-case (a) — extended-policy bytes get `\xHH`**:
+- Trigger: `xdpmacfilter bypass --iface ${IFACE_A} --unsafe --reason $'\x01\x07\x0b\x0e\x1f\x7f tail'`
+- Observable: exit code 0 (bypass succeeds; the reason is just a label).
+- Assertion: stderr captured into a temp file contains the literal substring `\x01\x07\x0b\x0e\x1f\x7f`. Mechanism: `grep -q -F -- '\x01\x07\x0b\x0e\x1f\x7f' "${stderr_file}"`.
+- Assertion (anti-theatricality): stderr contains the literal `tail` token AFTER the escaped sequence (proves no early-truncation; the audit-line emits the full escaped reason).
+- Assertion (negation): stderr does NOT contain a raw `0x01` byte. Mechanism: `grep -qP '\x01' "${stderr_file}"` returns FAILURE (no match). [or `awk` byte-check].
+
+**Sub-case (b) — 5 named escapes still use named form (NOT `\xHH`)**:
+- Trigger: `xdpmacfilter bypass --iface ${IFACE_A} --unsafe --reason $'has\\backslash and \"quote and\nnewline and\rCR and\0NUL'`
+  - Note: bash `$'...'` interprets `\\`, `\"`, `\n`, `\r`, `\0`; the actual reason bytes are `has\backslash and "quote and<LF>newline and<CR>CR and<NUL>NUL`.
+- Observable: exit code 0.
+- Assertion: stderr audit-line contains the substring `\\backslash` (the backslash got `\\`).
+- Assertion: stderr audit-line contains the substring `\"quote` (the dquote got `\"`).
+- Assertion: stderr audit-line contains the substring `\nnewline` (the LF got `\n`, NOT `\x0a`).
+- Assertion: stderr audit-line contains the substring `\rCR` (the CR got `\r`, NOT `\x0d`).
+- Assertion: stderr audit-line contains the substring `\0NUL` (the NUL got `\0`, NOT `\x00`).
+- Assertion (anti-theatricality): stderr does NOT contain `\x0a` or `\x0d` or `\x00` (named escapes win over the extended-policy default branch).
+
+**Sub-case (c) — negation: printable ASCII unchanged**:
+- Trigger: `xdpmacfilter bypass --iface ${IFACE_A} --unsafe --reason 'simple_safe-reason.42'`
+- Observable: exit code 0.
+- Assertion: stderr audit-line contains the literal `simple_safe-reason.42` (no `\x` sequences, no name-escapes — printable ASCII passes through verbatim).
+- Assertion: stderr audit-line contains NO `\x` substring (negation for control-char absence).
+
+**Teardown**: trap-driven `xdpmacfilter detach --iface ${IFACE_A}` + cleanup_veth + `rm -f ${stderr_file}`.
+
+**Assertion mechanism**: bash stderr capture into `stderr_file=$(mktemp)`; `grep -q -F -- '<literal>' "${stderr_file}"` for positive substring assertions; `grep -q -F -- '<literal>' "${stderr_file}"` with negated `!` for negation assertions; `od -c` or `grep -qP` (perl-regex byte class) for raw-byte negation if needed.
+
+**Resource lock**: `RESOURCE_LOCK xdp_fixture` (per guard #12; veth-shape integration).
+
+**SKIP conditions**: none new (uses existing veth fixture).
+
+**Failure mode signaling sliced-design break**:
+- Sub-case (a) literal `\x01\x07\x0b\x0e\x1f\x7f` not found → extended-policy branch not implemented OR escaped to wrong form (`\u00xx` mistake, uppercase hex, etc.).
+- Sub-case (a) raw `0x01` byte found in stderr → extended-policy branch not active (default fall-through still copies raw).
+- Sub-case (b) `\x0a` / `\x0d` / `\x00` found in stderr → named-escape switch fell through to default branch (switch order broken — extended check fires BEFORE named cases somehow).
+- Sub-case (c) `\x` substring found → printable-ASCII branch broken (default branch escapes too aggressively).
+
+All four are `[INVARIANT-VIOLATED]` per §6.5 PI-3.4f-2.
+
+**Maps to**: HG-3.4f-1 (extended policy), HG-3.4f-3 (operational evidence), D-3.4f-3 (policy details), PI-3.4f-2 (operational policy contract), PI-3.4f-3 (5 named escapes byte-equivalent backward-compat).
+
+##### T-EXISTING: existing JSON-shape + audit-line ctests stay GREEN by construction
+
+Reviewer's framework point 5 walks the UNCHANGED-BUT-AFFECTED tests above. All assertions on `\\`, `\"`, `\n`, `\r`, `\0` are byte-equivalent (policy preserved). All JSON-envelope tests are byte-equivalent (`escape_json` policy preserved). All `format_timestamp_utc` tests are byte-equivalent (helper preserved). Concrete tests to walk:
+
+- `T_LOG_JSON_BYPASS_AUDIT.sh` step (i): `--reason 'has"quote'` → jq decodes to `has"quote` (escape_json `\"` policy preserved). GREEN.
+- `T_LOG_JSON_LOADER_EVENTS.sh` / `T_LOG_JSON_EXPORTER_EVENTS.sh` / `T_LOG_JSON_ENVELOPE_INVARIANTS.sh`: JSON envelope shape byte-equivalent. GREEN.
+- `T_SIDECAR_JSON_SHAPE.sh`: rule_index.json bytes byte-equivalent. GREEN.
+- `T_BYPASS_CMD_DETACHES.sh` / `T_BYPASS_REQUIRES_UNSAFE_NONINTERACTIVE.sh`: audit-line ERE on `BYPASS .*by uid=N euid=N sudo_user="..." reason="..."` byte-equivalent (no fixture uses control-char reason). GREEN.
+- `T_CLI_RESET_COUNTERS*.sh`: audit-line ERE on `RESET-COUNTERS .*by uid=N` byte-equivalent. GREEN.
+
+If any of these FAIL after the refactor, it's a contract drift — reviewer flags as `[INVARIANT-VIOLATED]` per PI-3.4f-3 (byte-equivalence for 5 named escapes + printable ASCII).
+
+#### §6.5 Preserved invariants (§5.37 MVP-3.4f brownfield)
+
+Reviewer's framework point 5 walks this list per architect spec §6.5.
+
+| PI | Property | Check mechanism |
+|---|---|---|
+| **PI-7-3.4f-hpp** | `src/common/logger.hpp` byte-identical (no new public symbol; helper extraction goes to NEW sibling `escape_util.hpp`). **12th consecutive ZERO-diff cycle**. | `git diff <pre-§5.37> -- src/common/logger.hpp` empty |
+| **PI-7-3.4f-cpp** | `src/lib/config.hpp` byte-identical (no schema change this slice). **7th consecutive ZERO-diff cycle**. | `git diff <pre-§5.37> -- src/lib/config.hpp` empty |
+| **PI-7-3.4f-loader-hpp** | `src/lib/loader.hpp` byte-identical (no new public symbol). Extension of §5.36 streak. | `git diff <pre-§5.37> -- src/lib/loader.hpp` empty |
+| **PI-7-3.4f-mac-filter-h** | `src/common/mac_filter.h` byte-identical (no new/removed constant). Extension of §5.36 streak — explicit naming this slice for clarity. | `git diff <pre-§5.37> -- src/common/mac_filter.h` empty |
+| **PI-32-3.4b PRESERVED** | Sidecar never throws. `escape_util` functions are NOT noexcept but throw semantic identical to pre-§5.37 duplicates; sidecar.cpp's `write_rule_index` top-level `try{} catch(...){}` envelope catches any bad_alloc identically. | T_SIDECAR_JSON_SHAPE.sh stays GREEN; legitimate-input apply continues to exit 0 |
+| **PI-3.5-1 PRESERVED** | logger text-mode stderr byte-equivalent to pre-§5.32 (and pre-§5.37) emissions. `escape_json` policy byte-preserved by extraction; logger.cpp dup-helper-elimination doesn't change rendered output. | T_LOG_TEXT_BYTE_EQUIVALENT.sh (§6.53) stays GREEN |
+| **PI-3.5-7 PRESERVED** | No new external build dependency. escape_util uses stdlib only (`<string>` `<string_view>` `<format>` `<ctime>`). | `grep -E 'find_package\|pkg_check_modules\|FetchContent' CMakeLists.txt` returns no new entries |
+| **§5.36 PI-3.4e-1 + PI-3.4e-2 + KC-3 closure PRESERVED** | reset-counters path-traversal refusal + sidecar iface-subdir symlink refusal continue to work — escape_util refactor is orthogonal to path-hardening logic. | T_RESET_COUNTERS_PATH_TRAVERSAL.sh + T_SIDECAR_IFACE_SYMLINK_REFUSAL.sh stay GREEN |
+| **PI-3.4f-1 (NEW) — Theme B extraction with byte-equivalent escape_json + format_timestamp_utc** | escape_util.cpp's `escape_json` + `format_timestamp_utc` produce bytewise-identical output to the pre-§5.37 helpers for ALL input bytes. | All JSON-shape + audit-line tests stay GREEN; specifically T_LOG_JSON_BYPASS_AUDIT step (i) (`\"` escape) + T_SIDECAR_JSON_SHAPE.sh + T_LOG_TEXT_BYTE_EQUIVALENT.sh |
+| **PI-3.4f-2 (NEW) — extended `escape_audit` policy escapes control chars + 0x7F** | For input bytes in `{[0x01,0x08] ∪ {0x0B,0x0C} ∪ [0x0E,0x1F] ∪ {0x7F}}`, escape_audit emits `\xHH` (lowercase hex). | T_BYPASS_AUDIT_CONTROL_CHARS.sh (T-1) sub-case (a) |
+| **PI-3.4f-3 (NEW) — 5 named escapes byte-equivalent backward-compat for escape_audit** | For input bytes `{\\, ", \n=0x0A, \r=0x0D, \0=0x00}`, escape_audit emits the named form (`\\\\`, `\\"`, `\\n`, `\\r`, `\\0`) — NOT the extended `\xHH` form. Switch-order preserves precedence. | T-1 sub-case (b) + all existing audit-line ERE tests stay GREEN |
+| **PI-6 (existing ctest count regression-baseline)** | All 66 pre-§5.37 ctests (post-§5.36) pass byte-equivalent OR legitimately SKIP. Baseline 66 → 67 (+1 NEW T-1). NO existing ctest body EDITs. | `ctest --output-on-failure` returns 67/67 green; baseline diff = +1 NEW, 0 existing-body edits |
+| **PI-10 (additive-only header invariants)** | All headers in `src/lib/` + `src/cli/` + `src/common/` UNCHANGED except the NEW `src/common/escape_util.hpp`. | `git diff <pre-§5.37> -- src/lib/ src/cli/ src/common/*.hpp src/common/*.h` shows only ADDITIONS in escape_util.hpp; no edits to existing headers |
+
+#### §5.37 verifiable invariants for reviewer (MAY-default per architect spec §6.5 discipline)
+
+Per architect spec §6.5 "Verification-hints discipline": these are guidance for reviewer, NOT contracts for impl. Default disposition: items MAY hold (impl-flex inline-merge if impl deviates to satisfy a PI-* contract elsewhere). Reserve MUST only for PI-* items in §6.5 above (those ARE MUSTs by definition).
+
+**Resolution rule (architect-stated for this amendment)**: if a prose statement in §5.37 conflicts with an invariants-block item in this section, the invariants-block item wins. If impl deviates from any item below to satisfy a PI-* contract in §6.5, reviewer's correct disposition is `inline-merge` on the hint text — NOT `[UNRELATED-EDIT]` on impl.
+
+1. (MAY) `grep -rn '^\s*\[\[nodiscard\]\] std::string \(json_escape\|escape_audit_value\|format_timestamp_utc\)(' src/` returns **zero hits** post-§5.37 (all duplicated bodies are GONE; only the NEW escape_util.cpp carries `escape_json` + `escape_audit` + `format_timestamp_utc` — verb-first names).
+2. (MAY) `grep -rn 'json_escape\|escape_audit_value' src/ include/` returns **zero hits** post-rename (D-3.4f-5). Old names are gone everywhere.
+3. (MAY) `grep -rn '#include "common/escape_util.hpp"' src/` returns **exactly 4 hits** (logger.cpp + sidecar.cpp + bypass.cpp + reset_counters.cpp). Operative-semantic SHOULD-hint per Phase 4.4 — if escape_util.cpp itself also includes its own header (it should), the count is 5; impl-flex.
+4. (MAY) `grep -rn 'xdpmf::escape_util::' src/` returns **at least 8 hits** (logger.cpp: 5 call-sites for escape_json + 1 for format_timestamp_utc; sidecar.cpp: 1 + 1; bypass.cpp: 2; reset_counters.cpp: 1). Total ≥ 11 if FQN form is consistent; ≤ 11 if some call-sites adopt `using` elision (acceptable inline-merge per D-3.4f-5).
+5. (MAY) `grep -nE 'escape_util\.cpp' CMakeLists.txt` returns **exactly 2 hits** (both target source lists). Operative-semantic SHOULD-hint.
+6. (MAY) `src/common/escape_util.hpp` file size approximately 30-50 LOC (declarations + doc-comments only). `src/common/escape_util.cpp` approximately 70-110 LOC (3 function bodies + doc-comments). Operative-semantic per Phase 4.4 — exact LOC impl-flexible.
+7. (MAY) `src/common/logger.cpp` LOC count shrinks by approximately 40-50 (the dropped `json_escape` + `format_timestamp_utc` bodies, net of `#include` add). Operative-semantic SHOULD-hint.
+8. (MAY) `src/lib/sidecar.cpp` LOC count shrinks by approximately 45-55 LOC. Operative-semantic.
+9. (MAY) `src/cli/bypass.cpp` LOC count shrinks by approximately 20 LOC. Operative-semantic.
+10. (MAY) `src/cli/reset_counters.cpp` LOC count shrinks by approximately 20-25 LOC (helper + DUP-INTENT comment block). Operative-semantic.
+11. (MAY) `git diff <pre-§5.37> -- src/common/logger.hpp src/lib/loader.hpp src/lib/config.hpp src/common/mac_filter.h src/lib/apply_internal.hpp src/lib/sidecar.hpp src/cli/cli.hpp src/cli/main.cpp src/bpf/ src/exporter/ tests/fixtures/log_events_v1.txt` returns **empty** (UNCHANGED-BUT-AFFECTED contract).
+12. (MAY) ctest baseline 66 → 67 (+1 NEW T-1; ZERO existing ctest body EDITs). `tests/CMakeLists.txt` gains a single `add_test` + `set_tests_properties` block for T-1.
+13. (MAY) Post-§5.37 sweep grep `grep -rn '^\s*\[\[nodiscard\]\] std::string escape_audit\?(' src/common/escape_util.{hpp,cpp}` returns exactly 2 hits (.hpp declaration + .cpp definition) — confirming the rename adoption AND the no-duplicates invariant.
+14. (MAY) `grep -nE 'static_cast<unsigned char>\(c\) < 0x20.*\|\| .*c == 0x7F' src/common/escape_util.cpp` returns at least 1 hit (the extended-policy inner conditional in escape_audit body). Operative-semantic — impl-flexible wording of the conditional (`if (c < 0x20 || c == 0x7F)`, or `if ((unsigned char)c < 0x20 ...)`, or `if (uc < 0x20 || uc == 0x7F)`).
+
+#### §7 OOS additions (§5.37 — new fences)
+
+The following items are EXPLICITLY OUT OF SCOPE for §5.37; future slices may consider:
+
+- **KC-1 closure of the OTHER half — action label defensive escape via `kActionLabels`-anchored allowlist** (security L2 from /mint-review 2026-05-27). Separate slice. This brief ONLY closes the control-char gap (sec M1) — the action label limb remains open. Future MVP-3.4g or sec-hardening slice.
+- **KC-2 — exporter `--bind` non-loopback WARN** (security M2). Separate slice; carry-forward from §5.36 OOS.
+- **Theme C — dead `BpffsDir` + `XdpAttachment` deletion from `src/loader/raii.hpp`** (code-quality H1). Carry-forward from §5.36 OOS; consider housekeeping mini.
+- **Theme D / CQ M1 — `dispatch_match` helper in `mac_filter.bpf.c`**. Carry-forward.
+- **`xdpmf_logger` OBJECT/STATIC lib promotion** (/mint-review action item #13). Pure-cosmetic; deferred indefinitely.
+- **Module rename `xdpmf::escape_util` → `xdpmf::log_util`** (D-3.4f-2 acknowledged the naming inconsistency). If a 4th log-helper joins (e.g., `level_str` pulled from logger.cpp anon namespace; `format_mac` / `format_cidr` pulled from sidecar.cpp anon namespace), rename in that slice. NEW FENCE.
+- **`xdpmf_common` static lib promotion** (D-3.4f-7 — currently 2 TUs `logger.cpp` + `escape_util.cpp` dup-TU'd via Q6=B1). If a 3rd common TU joins, promote to a STATIC lib then. NEW FENCE.
+- **`sudo_user` env-lookup pattern extraction** (D-3.4d-6 PARTIAL supersession — the `escape_audit_value` half is extracted this slice; the `sudo_user` env-lookup half stays duplicated at 2 callsites: bypass.cpp:199-207 + reset_counters.cpp:103-110). If a 3rd subcommand needs the same lookup, extract then. NEW FENCE.
+- **Tab byte (`0x09`) disposition in escape_audit** — currently escaped as `\x09` per extended-policy branch (D-3.4f-3). If operator-feedback or future review surfaces a need for named `\t`, add to the named-5 (making it the named-6) in a future slice. NEW FENCE.
+- **JSON-mode `\xHH` parity for `escape_audit`** — currently `escape_audit` uses `\xHH` for text-mode prose (operator-readable convention); operators who want JSON-mode `\u00HH` parity could request via a future slice. Not in scope here (audit-line is text-mode by construction; JSON-mode emission of the audit-line uses logger.cpp's separate JSON-envelope renderer which calls `escape_json`, not `escape_audit`). NEW FENCE.
+- **VERSION bump** — per D-3.4f-VERSION + brief OOS. If a future cycle aggregates §5.37 + future sec-hardening slices into a `0.10.1` patch, bump there.
+- **README rewrite + HANDOFF.md** — carry-forward; B1 backlog item.
+- **CO-RE field probes, T_SANITIZER_BUILD refactor, TUN/TAP injector, .github/workflows/ci.yml matrix, compound exporter scrape perf, logger.cpp OBJECT promo** — carry-forward from §5.36 OOS.
+
+Carry-forward from §5.36 §7 OOS items NOT listed above — UNCHANGED.
+
+#### §5.37 Anti-misdiagnosis institutional learning (per architect-spec §6.6)
+
+This slice surfaced (via the rule-of-three escape valve activation) a **class of design-evolution discipline** worth permanent-guard treatment:
+
+**Anti-misdiagnosis note #20 (NEW; future-cycle guard) — rule-of-three escape-valve activation discipline**: when guard #9 (helper-location duplication-over-extraction) is the standing discipline AND a /mint-review (or any external multi-dimension audit) flags the same duplication cluster in 3+ independent dimensions (security + architecture + code-quality, etc.), the cross-dimensional signal is the operational rule-of-three trigger. Closure brief MUST:
+1. Identify ALL duplicate bodies + ALL modules they span (rule-of-three count).
+2. Cite the prior guard-#9 D-decisions explicitly (e.g., D-3.5-2, D-3.4d-6) and add SUPERSEDED-BY markers inline at their original locations.
+3. Document the escape-valve activation as a D-decision (e.g., D-3.4f-1) referencing the cross-dimensional /mint-review signal as the operational trigger.
+4. Reserve guard #9 for OTHER helpers that have NOT crossed the rule-of-three threshold — partial supersession is normal (e.g., D-3.4d-6 PARTIALLY SUPERSEDED here: `escape_audit_value` extracted, `sudo_user` lookup stays).
+5. Add NEW OOS fences for "module rename if 4th helper joins" + "static lib promotion if 3rd common TU joins" so the next escape-valve activation has documented precedent + threshold.
+
+**Future-cycle architect rule**: when a /mint-review flags Theme N as cross-dimensional, BEFORE drafting the closure brief grep `grep -rn '^\s*\[\[nodiscard\]\] std::string <helper>(' src/` for each helper in the Theme. If count ≥ 3 AND the count crosses module boundaries → activate the escape valve in the brief with explicit rule-of-three citation. If count = 2 → keep guard #9 + duplicate again with a fresh D-decision; documenting the duplication-vs-extraction tension is the institutional value.
+
+Cost: 30 seconds of grep + 2-3 D-decisions in the brief. Benefit: orderly evolution of the helper-extraction discipline; no surprise rewrites; reviewer can audit the rule-of-three threshold mechanically. **Validated by §5.37 (this slice, 2026-05-27)**: D-3.4f-1 activated guard #9 escape valve cleanly; partial supersession of D-3.4d-6 documented; future-cycle template established.
+
+Combined with prior guards #5 (Phase A code-grep), #9 (helper-location duplication-over-extraction), #14 (PERCPU-as-inner feasibility), #15 (apply-step state-transfer for PRESERVE), #16 (retired-pin-path test-body ripple), #17 (bilateral invariant restoration), #18 (helper-body host-vs-netns asymmetry audit), #19 (logger text-mode byte-equivalent prose): the Phase A discipline now covers literals + filesystem semantics + bpftool-API smokes + feasibility probes + state-transfer + retire-fixture-ripple + bilateral-invariant-restoration + helper-body-semantic-asymmetry + logger-text-mode-observability + **rule-of-three-escape-valve activation** — 10 distinct ripple classes around brownfield amendments.
+
+Cite §5.37 (MVP-3.4f Theme B closure) as the audit-trail source for guard #20.
+
+Evidence: `mint/task-brief.md` MVP-3.4f brief (HG-3.4f-1..4 + Q1-Q4); /mint-review report at `agent-teams-review/runs/mint-review-mint-l2-mac-filter-202605271147/report.md` lines 108-112 (Theme B Resolution) + 127-128 (KC-1) + 143 (top-actionable item #5); §5.32 D-3.5-1 + D-3.5-2 (logger.cpp + json_escape duplication origin; Q6=B1 dup-TU pattern); §5.35 D-3.4d-6 (escape_audit_value duplication origin); §5.36 §7 OOS (where escape_util was explicitly fenced as deferred to MVP-3.4f — this slice is the closure); architect-spec §6.5 Verification-hints discipline + §6.6 Anti-misdiagnosis institutional learning (both applied in this amendment); brief Phase 4.4 operative-semantic SHOULD-hint discipline (applied to: rename adoption, FQN-vs-using elision, LOC budgets, doc-comment merge form, CHANGELOG.md entry shape).
