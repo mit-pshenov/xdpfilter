@@ -12417,16 +12417,16 @@ Architect picks: leave VERSION at `0.10.0`. Optional CHANGELOG.md `### Security`
 - Assertion (anti-theatricality): stderr contains the literal `tail` token AFTER the escaped sequence (proves no early-truncation; the audit-line emits the full escaped reason).
 - Assertion (negation): stderr does NOT contain a raw `0x01` byte. Mechanism: `grep -qP '\x01' "${stderr_file}"` returns FAILURE (no match). [or `awk` byte-check].
 
-**Sub-case (b) — 5 named escapes still use named form (NOT `\xHH`)**:
-- Trigger: `xdpmacfilter bypass --iface ${IFACE_A} --unsafe --reason $'has\\backslash and \"quote and\nnewline and\rCR and\0NUL'`
-  - Note: bash `$'...'` interprets `\\`, `\"`, `\n`, `\r`, `\0`; the actual reason bytes are `has\backslash and "quote and<LF>newline and<CR>CR and<NUL>NUL`.
+**Sub-case (b) — 4 of 5 named escapes still use named form (NOT `\xHH`)** — see §5.37 EDIT-1 below for the `\0NUL` integration-surface limitation:
+- Trigger: `xdpmacfilter bypass --iface ${IFACE_A} --unsafe --reason $'has\\backslash and \"quote and\nnewline and\rCR tail'`
+  - Note: bash `$'...'` interprets `\\`, `\"`, `\n`, `\r`; the actual reason bytes are `has\backslash and "quote and<LF>newline and<CR>CR tail`. `\0` is INTENTIONALLY OMITTED per EDIT-1 (argv-truncation at NUL).
 - Observable: exit code 0.
 - Assertion: stderr audit-line contains the substring `\\backslash` (the backslash got `\\`).
 - Assertion: stderr audit-line contains the substring `\"quote` (the dquote got `\"`).
 - Assertion: stderr audit-line contains the substring `\nnewline` (the LF got `\n`, NOT `\x0a`).
 - Assertion: stderr audit-line contains the substring `\rCR` (the CR got `\r`, NOT `\x0d`).
-- Assertion: stderr audit-line contains the substring `\0NUL` (the NUL got `\0`, NOT `\x00`).
-- Assertion (anti-theatricality): stderr does NOT contain `\x0a` or `\x0d` or `\x00` (named escapes win over the extended-policy default branch).
+- Assertion (anti-theatricality): stderr does NOT contain `\x0a` or `\x0d` (named escapes win over the extended-policy default branch for LF + CR).
+- **DROPPED per EDIT-1**: `\0NUL` assertion (unreachable via `execve(2)` argv truncation at NUL — see §5.37 EDIT-1).
 
 **Sub-case (c) — negation: printable ASCII unchanged**:
 - Trigger: `xdpmacfilter bypass --iface ${IFACE_A} --unsafe --reason 'simple_safe-reason.42'`
@@ -12545,3 +12545,99 @@ Combined with prior guards #5 (Phase A code-grep), #9 (helper-location duplicati
 Cite §5.37 (MVP-3.4f Theme B closure) as the audit-trail source for guard #20.
 
 Evidence: `mint/task-brief.md` MVP-3.4f brief (HG-3.4f-1..4 + Q1-Q4); /mint-review report at `agent-teams-review/runs/mint-review-mint-l2-mac-filter-202605271147/report.md` lines 108-112 (Theme B Resolution) + 127-128 (KC-1) + 143 (top-actionable item #5); §5.32 D-3.5-1 + D-3.5-2 (logger.cpp + json_escape duplication origin; Q6=B1 dup-TU pattern); §5.35 D-3.4d-6 (escape_audit_value duplication origin); §5.36 §7 OOS (where escape_util was explicitly fenced as deferred to MVP-3.4f — this slice is the closure); architect-spec §6.5 Verification-hints discipline + §6.6 Anti-misdiagnosis institutional learning (both applied in this amendment); brief Phase 4.4 operative-semantic SHOULD-hint discipline (applied to: rename adoption, FQN-vs-using elision, LOC budgets, doc-comment merge form, CHANGELOG.md entry shape).
+
+#### §5.37 EDIT-1 — Phase B test-shape correction: drop `\0NUL` assertion from T-1 sub-case (b) (argv-truncation platform constraint) (2026-05-27, dialog with mint-dev-tester)
+
+**Trigger**: mint-dev-tester Phase B peer-DM with concrete platform-constraint evidence that the T-1 sub-case (b) assertion `stderr audit-line contains '\0NUL'` cannot be satisfied through the chosen integration test surface.
+
+**Evidence (tester-supplied, paraphrased)**: `execve(2)` truncates argv at the first NUL byte. The bash invocation `$'has\\backslash and \"quote and\nnewline and\rCR and\0NUL'` produces a literal 0x00 byte mid-string; the xdpmacfilter process receives `has\backslash and "quote and<LF>newline and<CR>CR and` — everything from `\0` onward is dropped before xdpmacfilter parses argv. The trailing literal `NUL` text and the 0x00 byte never reach `escape_audit`, so the `\0NUL` assertion is unreachable through the integration shape mandated by D-3.4f-T1.
+
+Team-lead's spawn-prompt summary had already trimmed the named-escape preservation check to `\n` / `\\` / `"` (omitting both `\r` and `\0`), suggesting team-lead anticipated this constraint. `\r` IS argv-passable through `execve(2)` (only 0x00 is special) — so `\rCR` stays in sub-case (b).
+
+**Root cause** (architect over-specification + platform-semantic gap):
+§5.37 D-3.4f-T1 picked integration shape over pure-unit-test ("no precedent for unit-test binaries; integration gives stronger operational evidence; RESOURCE_LOCK xdp_fixture cost acceptable") — which is correct for 4 of 5 named escapes. The 5th named escape (`\0`) is fundamentally NOT exercisable via `execve(2)` argv-passed `--reason` in ANY shell-driven integration test. The architect's T-1 sub-case (b) inherited the 5-named-escape list from the policy spec without auditing each named byte against the integration surface's IO model.
+
+Symmetric in shape to §5.36 EDIT-2 (architect over-confidence about a logger convention that survived Phase A grep but failed Phase 2.5): a design-time over-confidence about a platform IO semantic that survived Phase A grep but surfaced at tester Phase 2. Tester peer-DM caught it cleanly via [[impl-role-discipline]] tester-corollary.
+
+**Disposition**: D-3.4f-EDIT-1-NUL-INTEGRATION-OOS (NEW) — supersedes T-1 sub-case (b) `\0NUL` assertion; clarifies PI-3.4f-3 coverage mechanism.
+
+##### D-3.4f-EDIT-1-NUL-INTEGRATION-OOS — `\0` named-escape verified via code-review + escape_util.cpp body inspection, NOT integration test through argv — because
+
+`execve(2)` argv-NUL truncation is a Linux kernel ABI constant (`Documentation/admin-guide/sysctl/kernel.rst` + libc man pages — `execve(2)`: "the argv ... is terminated by a NULL pointer ... each string is itself terminated by a NULL byte"). No shell can pass a literal NUL byte through argv to a non-shell process. This is NOT a `xdpmacfilter` defect, NOT a `escape_audit` defect, NOT a tester-rig defect — it is the platform IO model.
+
+PI-3.4f-3 covers the 5 named escapes byte-equivalent backward-compat. T-1 sub-case (b) post-EDIT-1 covers 4 of 5 (`\\`, `\"`, `\n`, `\r`) operationally via the integration shape. The 5th (`\0`) is verified by:
+
+1. **Code-review of `src/common/escape_util.cpp` body**: reviewer asserts the named-case switch carries the line `case '\0': out.append("\\0"); break;` (or operative-semantic equivalent) — verifiable by `grep -nE "case '\\\\0'" src/common/escape_util.cpp` returning exactly 1 hit.
+2. **Code-review of the byte-equivalence claim**: the pre-§5.37 `escape_audit_value` body at bypass.cpp:48-64 had `case '\0': out.append("\\0"); break;`; the post-§5.37 `escape_audit` body MUST carry the identical line. Reviewer compares.
+
+These two checks together provide PI-3.4f-3 coverage for `\0` via code-inspection rather than integration test — sufficient for the slice's purpose (a refactor that preserves byte-equivalence on the 5 named escapes; the byte-equivalence claim is verifiable structurally, not behaviorally, when the behavioral test surface is platform-blocked).
+
+**Alternative considered + REJECTED — add a NEW C++ unit-test harness binary just for `\0`**: deviates from D-3.4f-T1 ("no precedent for unit-test binaries in this project"). Cost-benefit for a single named-escape byte that's already byte-equivalent-by-construction with a previous-cycle-shipped helper body: not worth the precedent shift. NEW OOS fence added below.
+
+**Alternative considered + REJECTED — substitute a non-argv carrier (stdin, env var, file) for `--reason`**: `xdpmacfilter bypass --reason` is argv-only by design (it's a CLI flag). Adding a stdin / env-var / file reader for the SOLE purpose of NUL-byte coverage in tests would add a new attack surface for log-injection (operator could redirect `/dev/random` to stdin). Operational cost > test coverage benefit.
+
+##### §5.37 T-1 sub-case (b) — UPDATED assertion list (supersedes §5.37 TestStrategy T-1 sub-case (b))
+
+T-1 sub-case (b) — 4 of 5 named escapes still use named form — UPDATED assertion list per EDIT-1:
+- Trigger: `xdpmacfilter bypass --iface ${IFACE_A} --unsafe --reason $'has\\backslash and \"quote and\nnewline and\rCR tail'`
+- Observable: exit code 0.
+- Assertion: stderr audit-line contains the substring `\\backslash` (named `\\`).
+- Assertion: stderr audit-line contains the substring `\"quote` (named `\"`).
+- Assertion: stderr audit-line contains the substring `\nnewline` (named `\n`).
+- Assertion: stderr audit-line contains the substring `\rCR` (named `\r`).
+- Assertion (anti-theatricality): stderr does NOT contain raw `\x0a` or `\x0d` (named escapes win over extended-policy default branch for LF + CR).
+- **DROPPED**: `\0NUL` substring assertion (argv-truncation unreachable per D-3.4f-EDIT-1-NUL-INTEGRATION-OOS; PI-3.4f-3 coverage of `\0` is via code-review of escape_util.cpp body, NOT this integration test).
+
+If tester wants belt-and-suspenders coverage of the `\0` named-case branch, an OPTIONAL approach (NOT contractual; tester-flexible) is a `grep -nE "case '\\\\0'" src/common/escape_util.cpp` assertion in a separate test or as a build-time check — but this duplicates reviewer's code-inspection role and is NOT recommended.
+
+##### §5.37 verifiable invariants — NEW item #15 (post-EDIT-1)
+
+15. (MAY) `grep -nE "case '\\\\0':" src/common/escape_util.cpp` returns **exactly 1 hit** (the `\0` → `\\0` named-escape branch in escape_audit). Reviewer verifies via code-inspection per D-3.4f-EDIT-1-NUL-INTEGRATION-OOS (PI-3.4f-3 coverage of `\0` byte through the code-review mechanism, NOT through T-1 integration shape).
+
+##### §5.37 OOS additions (NEW from EDIT-1)
+
+- **`\0` byte argv-integration test** — UNREACHABLE through `xdpmacfilter bypass --reason` due to `execve(2)` argv NUL-truncation. PI-3.4f-3 coverage of `\0` is via code-review per D-3.4f-EDIT-1-NUL-INTEGRATION-OOS. Future cycle MAY introduce a pure-unit-test C++ harness binary if the precedent shift is worth it (currently NOT worth it — see D-3.4f-T1 + D-3.4f-EDIT-1-NUL-INTEGRATION-OOS rejections of the unit-test-binary alternative). NEW FENCE.
+
+##### PI-3.4f-3 — clarification (post-EDIT-1)
+
+Property restated: "For input bytes `{\\, ", \n=0x0A, \r=0x0D, \0=0x00}`, escape_audit emits the named form (`\\\\`, `\\"`, `\\n`, `\\r`, `\\0`) — NOT the extended `\xHH` form. Switch-order preserves precedence."
+
+Check mechanism (UPDATED): T-1 sub-case (b) covers `\\`, `\"`, `\n`, `\r` operationally through integration; `\0` covered via code-inspection of escape_util.cpp body per D-3.4f-EDIT-1-NUL-INTEGRATION-OOS (verifiable invariant #15). Reviewer's framework point 5 walks both mechanisms.
+
+##### Anti-misdiagnosis institutional learning (NEW guard #21)
+
+**Add to anti-misdiagnosis notes after #20 (rule-of-three escape-valve activation):**
+
+21. **TestStrategy assertion list MUST be audited against the test-shape's IO model BEFORE publication**. When picking an integration shape (D-*-T* style decision) that constrains the byte-carrier (`execve(2)` argv, stdin pipe, env-var, file content, BPF map value, etc.), architect MUST enumerate each assertion-byte against the carrier's IO constraints. Specifically for `execve(2)` argv:
+    - 0x00 (NUL): TRUNCATES argv — UNREACHABLE.
+    - 0x01-0x08, 0x0B-0x0C, 0x0E-0x1F, 0x7F: PASSABLE (kernel does not filter; shell `$'...'` interprets the escape).
+    - 0x09 (TAB): PASSABLE.
+    - 0x0A (LF): PASSABLE (NOT truncating — that's only NUL).
+    - 0x0D (CR): PASSABLE.
+    - 0x20-0x7E printable: PASSABLE.
+    - 0x80-0xFF non-ASCII: PASSABLE (UTF-8 multibyte sequences flow through).
+
+    For stdin pipe / env-var / file content carriers, NUL passes through (no truncation), but other constraints apply (TTY line discipline, env-var size limits, file path resolution, etc.).
+
+    Phase A grep pattern to enforce: `grep -nE "execve|--reason|--iface|argv" <design-file>` then for each assertion-byte in TestStrategy, cross-reference against the carrier's IO table. Cost: 1-2 minutes per TestStrategy block. Benefit: avoids design-vs-platform-IO-semantic-gap that surfaces as a Phase 2 tester peer-DM requiring Phase B EDIT.
+
+    Validated by §5.37 EDIT-1 (this slice, 2026-05-27). Cite §5.37 EDIT-1 as audit-trail.
+
+Catalog now at **21 guards** (was 20 post-§5.37). Combined coverage from #5/#9/#14/#15/#16/#17/#18/#19/#20/#21: literal verification + helper duplication policy + feasibility smokes + state-transfer + retired-fixture-ripple + bilateral-invariant-restoration + host-vs-netns + logger-text-mode + rule-of-three-escape-valve + **test-shape-IO-model-audit** = 11 distinct ripple classes covered.
+
+##### §5.37 EDIT-1 — PI accounting (no PI semantic changes; coverage-mechanism clarifications only)
+
+- PI-3.4f-3: property unchanged; check mechanism split — 4 named escapes via T-1 sub-case (b) integration; 1 named escape (`\0`) via code-review of escape_util.cpp body. Reviewer walks both.
+- PI-3.4f-1 + PI-3.4f-2: UNCHANGED.
+- PI-32-3.4b PRESERVED: UNCHANGED (no test-shape change affects sidecar throw semantic).
+- PI-7-3.4f-* streaks: UNCHANGED.
+- PI-6 (ctest baseline): UNCHANGED — still +1 NEW T-1; ZERO existing ctest body EDITs. T-1 sub-case (b) assertion list relaxed (4 of 5 named) but the test itself is the same NEW file.
+
+##### Notifications dispatched (§5.37 EDIT-1 closure)
+
+Per architect spec "design item Z is impossible per platform constraint (cites evidence)" — substantive design correction:
+1. team-lead notified via SendMessage at correction-flag time with the EDIT-1 diff summary + rationale.
+2. mint-dev-tester notified with the EDIT-1 ruling (option (b) adopted: drop `\0NUL`, retain `\r`; OOS fence + verifiable invariant #15 added; PI-3.4f-3 check mechanism split between integration + code-review).
+3. mint-dev-impl notified (informational — no impl change required; escape_util.cpp body still carries `case '\0': out.append("\\0"); break;` per original D-3.4f-3 / D-3.4f-5 + verifiable invariant #15 reviewer-asserts it).
+
+Tester's option (a) (4-of-5 with header NOTE; proceeding inline-merge-able) is COMPATIBLE with this ruling — the EDIT amendments simply formalize the integration-surface limitation as architect-blessed, document the code-review coverage path, and add guard #21 for future cycles. Test ships with the relaxed assertion list per the updated sub-case (b) text above.

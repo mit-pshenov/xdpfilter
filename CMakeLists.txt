@@ -116,6 +116,7 @@ add_library(xdpmf_internal STATIC
     src/lib/sidecar.cpp       # §5.31 (MVP-3.4b) — rule_index.json writer
     src/lib/yaml_subset.cpp
     src/common/logger.cpp     # §5.32 (MVP-3.5) — XDPMF_LOG_FORMAT={text,json} envelope
+    src/common/escape_util.cpp # §5.37 (MVP-3.4f) — escape_util (rule-of-three Theme B extraction)
 )
 target_include_directories(xdpmf_internal PRIVATE
     ${CMAKE_SOURCE_DIR}/src
@@ -144,6 +145,7 @@ add_executable(xdpmf-exporter
     src/exporter/rule_counters_reader.cpp  # §5.31 (MVP-3.4b) — PERCPU sum for rule_counters
     src/exporter/sidecar_reader.cpp        # §5.31 (MVP-3.4b) — rule_index.json parser
     src/common/logger.cpp                  # §5.32 (MVP-3.5) — Q6=B1 dup-TU compile across binaries
+    src/common/escape_util.cpp             # §5.37 (MVP-3.4f) — escape_util (Q6=B1 dup-TU; rule-of-three Theme B)
 )
 target_include_directories(xdpmf-exporter PRIVATE
     ${CMAKE_SOURCE_DIR}/src

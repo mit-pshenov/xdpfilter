@@ -21,10 +21,12 @@
  *                          AFTER validate_iface_name + iface_entry_is_real_dir)
  *   - open_pin_strict    (bpf_obj_get call-sites moved to loader.cpp)
  *   - zero_one_slot      (bpf_map_update_elem moved to loader.cpp)
- * Helper KEPT (per anti-misdiagnosis guard #9 — D-3.4d-6 DUP-INTENT):
- *   - escape_audit_value (audit-log fmt; duplicated from bypass.cpp by
- *                          design to keep the audit-log emission shape
- *                          local to the CLI TU that emits it).
+ *
+ * §5.37 (MVP-3.4f) — D-3.4d-6 DUP-INTENT escape helper PARTIALLY SUPERSEDED:
+ * the local `escape_audit_value` body is gone (rule-of-three extraction to
+ * src/common/escape_util.cpp). The `sudo_user` env-lookup half stays
+ * duplicated at 2 call-sites (here + bypass.cpp) under guard #9 — below
+ * rule-of-three threshold for now (NEW §7 OOS fence).
  *
  * The reset_counters.refused.no_pin event NOW emits from loader.cpp's
  * reset_counters_request body at the iface_entry_is_real_dir-returns-false
@@ -33,6 +35,7 @@
  */
 #include "reset_counters.hpp"
 
+#include "common/escape_util.hpp" // §5.37 (MVP-3.4f) — escape_audit
 #include "common/logger.hpp"      // §5.32 (MVP-3.5) — structured-logging emit
 #include "lib/apply_internal.hpp" // §5.36 — internal::reset_counters_request
 
@@ -45,32 +48,6 @@
 #include <unistd.h>     // getuid, geteuid
 
 namespace xdpmf {
-
-namespace {
-
-/* §5.35 D-3.4d-6 (anti-misdiagnosis guard #9 DUP-INTENT): DUPLICATED from
- * bypass.cpp's escape_audit_value. Operator log-injection mitigation:
- * backslash, double-quote, newline, CR, NUL are escaped so the audit-line
- * stays single-line + safe to embed in double-quoted stderr fields. */
-[[nodiscard]] std::string escape_audit_value(std::string_view raw)
-{
-    std::string out;
-    out.reserve(raw.size());
-    for (char raw_c : raw) {
-        const auto c = static_cast<unsigned char>(raw_c);
-        switch (c) {
-            case '\\': out.append("\\\\"); break;
-            case '"':  out.append("\\\""); break;
-            case '\n': out.append("\\n");  break;
-            case '\r': out.append("\\r");  break;
-            case '\0': out.append("\\0");  break;
-            default:   out.push_back(static_cast<char>(c)); break;
-        }
-    }
-    return out;
-}
-
-}  // namespace
 
 int reset_counters_main(const ResetCountersConfig& cfg)
 {
@@ -109,7 +86,7 @@ int reset_counters_main(const ResetCountersConfig& cfg)
         ? std::string{sudo_user_env}
         : std::string{"<none>"};
     const std::string sudo_user_audit = have_sudo_user
-        ? escape_audit_value(sudo_user_raw)
+        ? xdpmf::escape_util::escape_audit(sudo_user_raw)
         : std::string{"<none>"};
     const std::string rule_id_str = cfg.rule_id.has_value()
         ? std::to_string(*cfg.rule_id)

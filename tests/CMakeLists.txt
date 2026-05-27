@@ -912,6 +912,33 @@ foreach(T IN ITEMS
 endforeach()
 
 # ─────────────────────────────────────────────────────────────────────────
+# MVP-3.4f addition (§5.37 / T-1 — Theme B / sec M1 closure: extended
+# escape_audit policy escapes control chars + 0x7F via `\xHH` while
+# preserving the 4 argv-passable named escapes `\\` / `\"` / `\n` / `\r`).
+#
+# T_BYPASS_AUDIT_CONTROL_CHARS (§5.37 T-1): integration test via real
+#   `xdpmacfilter bypass --iface IFACE_A --unsafe --reason <bytes>` with
+#   3 sub-cases (a) control-char bytes → `\xHH`; (b) named escapes use
+#   named form (NOT `\xHH`); (c) NEGATION — printable ASCII produces no
+#   `\x` substring. PI-3.4f-2 + PI-3.4f-3 operational evidence.
+#
+# Takes RESOURCE_LOCK xdp_fixture per anti-misdiagnosis guard #12 —
+# uses setup_veth + per-iface attach (touches veth pair + bpffs pin).
+# TIMEOUT 60 matches sibling bypass-shape tests (T_BYPASS_CMD_DETACHES /
+# T_LOG_JSON_BYPASS_AUDIT). SKIP_RETURN_CODE 77 for require_passwordless_sudo.
+add_test(
+    NAME T_BYPASS_AUDIT_CONTROL_CHARS
+    COMMAND bash ${TEST_DIR}/T_BYPASS_AUDIT_CONTROL_CHARS.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_BYPASS_AUDIT_CONTROL_CHARS PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 60
+    SKIP_RETURN_CODE 77
+)
+
+# ─────────────────────────────────────────────────────────────────────────
 # MVP-3.4e additions (§5.36 / T-1 + T-2 — KC-3 closure: reset-counters
 # path-hardening + sidecar iface-subdir symlink defense).
 #

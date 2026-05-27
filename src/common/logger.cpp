@@ -6,17 +6,19 @@
  * pre-§5.32 emission (PI-3.5-1 load-bearing canary). JSON mode emits one
  * NDJSON object per event with a fixed-order envelope per HG-3.5-2.
  *
- * Helpers `json_escape` + `format_timestamp_utc` are DUPLICATED from
- * src/lib/sidecar.cpp (lines 38-158) per D-3.5-2: keeping the helpers
- * scope-contained avoids touching sidecar.cpp's §5.31 regional-diff fence.
+ * §5.37 (MVP-3.4f): Theme B rule-of-three extraction — `json_escape` +
+ * `format_timestamp_utc` MOVED to src/common/escape_util.{hpp,cpp} (D-3.4f-1
+ * supersedes D-3.5-2's duplication directive). Call-sites use the
+ * `xdpmf::escape_util::escape_json` / `::format_timestamp_utc` FQNs.
  *
  * NO external build dependency (PI-3.5-7): stdlib only.
  */
 #include "common/logger.hpp"
 
+#include "common/escape_util.hpp"  // §5.37 (MVP-3.4f) — escape_json + format_timestamp_utc
+
 #include <cstdio>
 #include <cstdlib>
-#include <ctime>
 #include <format>
 #include <mutex>
 #include <string>
@@ -42,54 +44,13 @@ std::once_flag g_init_once;
 bool        g_emit_unknown_warn = false;
 std::string g_unknown_warn_value;
 
-/* ISO-8601 UTC `YYYY-MM-DDTHH:MM:SSZ` — duplicated from sidecar.cpp:57-76
- * per D-3.5-2 (NOT extracted to a shared module). Single trailing 'Z'; no
- * fractional seconds; gmtime_r failure yields the canonical broken-but-
- * shape-valid `1970-01-01T00:00:00Z` so jq-parsers don't choke. */
-[[nodiscard]] std::string format_timestamp_utc()
-{
-    const std::time_t now = std::time(nullptr);
-    std::tm           tm_buf{};
-    if (::gmtime_r(&now, &tm_buf) == nullptr) {
-        return "1970-01-01T00:00:00Z";
-    }
-    return std::format("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-                       tm_buf.tm_year + 1900,
-                       tm_buf.tm_mon  + 1,
-                       tm_buf.tm_mday,
-                       tm_buf.tm_hour,
-                       tm_buf.tm_min,
-                       tm_buf.tm_sec);
-}
-
-/* JSON string escape per RFC 8259 — duplicated from sidecar.cpp:78-106 per
- * D-3.5-2. Backslash / double-quote / control chars get backslash-escaped;
- * non-ASCII bytes pass through verbatim. */
-[[nodiscard]] std::string json_escape(std::string_view raw)
-{
-    std::string out;
-    out.reserve(raw.size() + 2);
-    for (char c : raw) {
-        switch (c) {
-            case '\\': out.append("\\\\"); break;
-            case '"':  out.append("\\\""); break;
-            case '\n': out.append("\\n");  break;
-            case '\r': out.append("\\r");  break;
-            case '\t': out.append("\\t");  break;
-            case '\b': out.append("\\b");  break;
-            case '\f': out.append("\\f");  break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20) {
-                    out.append(std::format("\\u{:04x}",
-                                            static_cast<unsigned char>(c)));
-                } else {
-                    out.push_back(c);
-                }
-                break;
-        }
-    }
-    return out;
-}
+/* §5.37 (MVP-3.4f) D-3.4f-1: `json_escape` + `format_timestamp_utc`
+ * extracted to src/common/escape_util.{hpp,cpp} under namespace
+ * `xdpmf::escape_util`. D-3.5-2's "duplicate-don't-extract" directive
+ * SUPERSEDED by the rule-of-three escape valve (3rd JSON emitter surfaced;
+ * /mint-review Theme B 3-dim cross-validation). Call-sites use the
+ * fully-qualified `xdpmf::escape_util::escape_json` / `::format_timestamp_utc`
+ * — see render_field_value + build_json_line below. */
 
 [[nodiscard]] constexpr std::string_view level_str(Level lvl) noexcept
 {
@@ -146,7 +107,7 @@ void render_field_value(std::string& out, const FieldValue& fv)
 {
     if (const auto* sv = std::get_if<std::string_view>(&fv)) {
         out.push_back('"');
-        out.append(json_escape(*sv));
+        out.append(xdpmf::escape_util::escape_json(*sv));
         out.push_back('"');
     } else if (const auto* iv = std::get_if<std::int64_t>(&fv)) {
         out.append(std::format("{}", *iv));
@@ -161,7 +122,7 @@ void render_field_value(std::string& out, const FieldValue& fv)
  *   ts → level → event → iface → msg → fields
  * One line terminated by '\n'. A trailing '\n' on the caller's msg is
  * stripped before embedding (D-3.5-6); embedded '\n's between content lines
- * are JSON-escaped via json_escape (surface as `\n` in the rendered JSON). */
+ * are JSON-escaped via escape_json (surface as `\n` in the rendered JSON). */
 [[nodiscard]] std::string build_json_line(Level                              level,
                                           std::string_view                   event,
                                           std::optional<std::string_view>    iface,
@@ -180,7 +141,7 @@ void render_field_value(std::string& out, const FieldValue& fv)
     out.push_back('{');
 
     out.append("\"ts\":\"");
-    out.append(format_timestamp_utc());
+    out.append(xdpmf::escape_util::format_timestamp_utc());
     out.append("\",");
 
     out.append("\"level\":\"");
@@ -188,13 +149,13 @@ void render_field_value(std::string& out, const FieldValue& fv)
     out.append("\",");
 
     out.append("\"event\":\"");
-    out.append(json_escape(event));
+    out.append(xdpmf::escape_util::escape_json(event));
     out.append("\",");
 
     out.append("\"iface\":");
     if (iface.has_value()) {
         out.push_back('"');
-        out.append(json_escape(*iface));
+        out.append(xdpmf::escape_util::escape_json(*iface));
         out.push_back('"');
     } else {
         out.append("null");
@@ -202,7 +163,7 @@ void render_field_value(std::string& out, const FieldValue& fv)
     out.push_back(',');
 
     out.append("\"msg\":\"");
-    out.append(json_escape(msg));
+    out.append(xdpmf::escape_util::escape_json(msg));
     out.append("\",");
 
     out.append("\"fields\":{");
@@ -213,7 +174,7 @@ void render_field_value(std::string& out, const FieldValue& fv)
         }
         first = false;
         out.push_back('"');
-        out.append(json_escape(f.key));
+        out.append(xdpmf::escape_util::escape_json(f.key));
         out.append("\":");
         render_field_value(out, f.value);
     }

@@ -16,7 +16,8 @@
  */
 #include "bypass.hpp"
 
-#include "common/logger.hpp"   // §5.32 (MVP-3.5) — structured-logging emit
+#include "common/escape_util.hpp"  // §5.37 (MVP-3.4f) — escape_audit
+#include "common/logger.hpp"       // §5.32 (MVP-3.5) — structured-logging emit
 #include "lib/loader.hpp"
 
 #include <cstdint>
@@ -40,34 +41,20 @@ namespace {
  * ellipsis); inputs ≤253 pass through untruncated, >253 get rewind-safe UTF-8
  * truncation + ellipsis. After truncation we ALSO escape control bytes per
  * `prom_format::escape_label_value`-style discipline (\ -> \\, " -> \", \n
- * -> \\n, \r -> \\r, \0 -> \\0) so the audit-log line is safe to embed in a
- * double-quoted stderr field — operator log-injection mitigation. */
+ * -> \\n, \r -> \\r, \0 -> \\0) — §5.37 (MVP-3.4f) D-3.4f-3 extends this
+ * policy to escape ALL bytes in {[0x01,0x08] ∪ {0x0B,0x0C} ∪ [0x0E,0x1F] ∪
+ * {0x7F}} as `\xHH` (operator log-injection mitigation; sec M1 closure).
+ * The escape helper now lives in src/common/escape_util.cpp; this TU just
+ * delegates via `xdpmf::escape_util::escape_audit`. */
 constexpr std::size_t kReasonMaxBytes        = 256;
 constexpr std::size_t kReasonTruncationBudget = 253;  // 256 - 3 for "…"
 
-[[nodiscard]] std::string escape_audit_value(std::string_view raw)
-{
-    std::string out;
-    out.reserve(raw.size());
-    for (char raw_c : raw) {
-        const auto c = static_cast<unsigned char>(raw_c);
-        switch (c) {
-            case '\\': out.append("\\\\"); break;
-            case '"':  out.append("\\\""); break;
-            case '\n': out.append("\\n");  break;
-            case '\r': out.append("\\r");  break;
-            case '\0': out.append("\\0");  break;
-            default:   out.push_back(static_cast<char>(c)); break;
-        }
-    }
-    return out;
-}
-
 /* Truncate raw operator reason to the 253+3-byte budget WITHOUT applying
  * the audit-escape. Returns the truncated-only form — caller applies
- * escape_audit_value separately to build the audit-line msg, OR passes the
- * raw-truncated form to logger's JSON fields where logger's own json_escape
- * handles quoting (avoids double-escape — §5.32 PI-3.5-5 contract). */
+ * xdpmf::escape_util::escape_audit separately to build the audit-line msg,
+ * OR passes the raw-truncated form to logger's JSON fields where logger's
+ * own escape_json handles quoting (avoids double-escape — §5.32 PI-3.5-5
+ * contract). */
 [[nodiscard]] std::string truncate_reason_raw(std::string_view raw)
 {
     std::string truncated;
@@ -185,15 +172,15 @@ int bypass_main(const BypassConfig& cfg)
     /* §5.32 (MVP-3.5) PI-3.5-5: keep TWO views of reason + sudo_user — the
      * audit-escaped form goes into the text-mode msg (preserving HK-4
      * byte-equivalence); the RAW-truncated form goes into the JSON
-     * `fields.reason` so logger's json_escape handles quoting on its own
-     * (avoids double-escape: jq-decoded `.fields.reason` matches the
-     * operator's input verbatim per design §6.56). */
+     * `fields.reason` so logger's escape_json (§5.37) handles quoting on
+     * its own (avoids double-escape: jq-decoded `.fields.reason` matches
+     * the operator's input verbatim per design §6.56). */
     const std::string reason_raw = cfg.reason.empty()
         ? std::string{"UNSPECIFIED"}
         : truncate_reason_raw(cfg.reason);
     const std::string reason_audit = cfg.reason.empty()
         ? std::string{"UNSPECIFIED"}
-        : escape_audit_value(reason_raw);
+        : xdpmf::escape_util::escape_audit(reason_raw);
     const auto uid  = ::getuid();
     const auto euid = ::geteuid();
     const char* sudo_user_env = std::getenv("SUDO_USER");
@@ -203,7 +190,7 @@ int bypass_main(const BypassConfig& cfg)
         ? std::string{sudo_user_env}
         : std::string{"<none>"};
     const std::string sudo_user_audit = have_sudo_user
-        ? escape_audit_value(sudo_user_raw)
+        ? xdpmf::escape_util::escape_audit(sudo_user_raw)
         : std::string{"<none>"};
     /* §5.32 (MVP-3.5) HG-3.5-3 + PI-3.5-5: text-mode emits the audit-line
      * byte-equivalent to MVP-3.4.5 HK-4 (PI-3.5-1); JSON-mode also exposes

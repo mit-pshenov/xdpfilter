@@ -26,7 +26,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <ctime>
 #include <format>
 #include <string>
 #include <string_view>
@@ -35,8 +34,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "common/logger.hpp"     // §5.32 (MVP-3.5) structured-logging surface
-#include "common/mac_filter.h"   // xdpmf_mac, xdpmf_cidr_v4
+#include "common/escape_util.hpp"  // §5.37 (MVP-3.4f) escape_json + format_timestamp_utc
+#include "common/logger.hpp"       // §5.32 (MVP-3.5) structured-logging surface
+#include "common/mac_filter.h"     // xdpmf_mac, xdpmf_cidr_v4
 
 namespace xdpmf::sidecar {
 
@@ -65,56 +65,11 @@ namespace {
     return std::format("{}.{}.{}.{}/{}", a, b, d, e, c.prefixlen);
 }
 
-/* ISO-8601 UTC `YYYY-MM-DDTHH:MM:SSZ` (single trailing `Z`; no fractional
- * seconds — per D-3.4b-20 grep-friendliness). CLOCK_REALTIME via std::time. */
-[[nodiscard]] std::string format_timestamp_utc()
-{
-    const std::time_t now = std::time(nullptr);
-    std::tm           tm_buf{};
-    if (::gmtime_r(&now, &tm_buf) == nullptr) {
-        /* gmtime_r failure is unprecedented but never-throw contract: emit
-         * a clearly-broken timestamp that still matches the ERE shape so
-         * the exporter's regex-based parser doesn't choke. */
-        return "1970-01-01T00:00:00Z";
-    }
-    return std::format("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-                       tm_buf.tm_year + 1900,
-                       tm_buf.tm_mon  + 1,
-                       tm_buf.tm_mday,
-                       tm_buf.tm_hour,
-                       tm_buf.tm_min,
-                       tm_buf.tm_sec);
-}
-
-/* JSON string escape per RFC 8259: backslash, double-quote, and control
- * characters get backslash-escaped; non-ASCII bytes pass through verbatim
- * (sidecar consumers we care about — jq + our own line-regex parser — are
- * UTF-8 safe; iface names in practice are constrained to [A-Za-z0-9._-]). */
-[[nodiscard]] std::string json_escape(std::string_view raw)
-{
-    std::string out;
-    out.reserve(raw.size() + 2);
-    for (char c : raw) {
-        switch (c) {
-            case '\\': out.append("\\\\"); break;
-            case '"':  out.append("\\\""); break;
-            case '\n': out.append("\\n");  break;
-            case '\r': out.append("\\r");  break;
-            case '\t': out.append("\\t");  break;
-            case '\b': out.append("\\b");  break;
-            case '\f': out.append("\\f");  break;
-            default:
-                if (static_cast<unsigned char>(c) < 0x20) {
-                    out.append(std::format("\\u{:04x}",
-                                            static_cast<unsigned char>(c)));
-                } else {
-                    out.push_back(c);
-                }
-                break;
-        }
-    }
-    return out;
-}
+/* §5.37 (MVP-3.4f) D-3.4f-1: `format_timestamp_utc` + `json_escape`
+ * extracted to src/common/escape_util.{hpp,cpp}. D-3.5-2's "duplicate"
+ * directive SUPERSEDED by the rule-of-three escape valve. Call-sites
+ * below use `xdpmf::escape_util::format_timestamp_utc` /
+ * `xdpmf::escape_util::escape_json`. */
 
 /* Build the rule_index.json body for `cfg` under `iface`. Stable
  * source-order (matches Config::rules vector order). Per D-3.4b-20:
@@ -126,9 +81,11 @@ namespace {
     body.reserve(256 + cfg.rules.size() * 96);
 
     body.append("{\n");
-    body.append(std::format("  \"iface\": \"{}\",\n", json_escape(iface)));
+    body.append(std::format("  \"iface\": \"{}\",\n",
+                            xdpmf::escape_util::escape_json(iface)));
     body.append("  \"schema_version\": 1,\n");
-    body.append(std::format("  \"applied_at\": \"{}\",\n", format_timestamp_utc()));
+    body.append(std::format("  \"applied_at\": \"{}\",\n",
+                            xdpmf::escape_util::format_timestamp_utc()));
     body.append("  \"rules\": [");
 
     bool first = true;
