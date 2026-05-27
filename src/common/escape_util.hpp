@@ -26,7 +26,7 @@
 namespace xdpmf::escape_util {
 
 /* RFC 8259 JSON string escape. Backslash / double-quote / control chars get
- * backslash-escaped (5 named: `\\`, `\"`, `\n`, `\r`, `\t`, `\b`, `\f`;
+ * backslash-escaped (7 named: `\\`, `\"`, `\n`, `\r`, `\t`, `\b`, `\f`;
  * other <0x20 → `\u00xx` lowercase); non-ASCII bytes pass through verbatim.
  * Used for JSON envelope construction in logger.cpp + sidecar.cpp.
  *

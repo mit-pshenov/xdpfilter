@@ -12069,7 +12069,7 @@ Per architect spec Phase A code-grep discipline (guards #5, #9, #11, #12, #13). 
 
 1. **Helper bodies — byte-identical in pairs (CODE-IDENTICAL; comments differ)**:
    - `format_timestamp_utc`: logger.cpp:49-63 vs sidecar.cpp:70-87. Bodies CODE-IDENTICAL (same `std::time` → `gmtime_r` → `std::format` chain; same fallback `"1970-01-01T00:00:00Z"`). sidecar.cpp has 3 extra lines of comment INSIDE the `if (::gmtime_r == nullptr)` branch ("gmtime_r failure is unprecedented but never-throw contract: emit a clearly-broken timestamp that still matches the ERE shape so the exporter's regex-based parser doesn't choke"). Logger.cpp lacks those comment lines. Decision impact: NONE — both compile to byte-equivalent machine code; canonical form for `escape_util.cpp` is the sidecar.cpp variant (richer doc-comment).
-   - `json_escape`: logger.cpp:68-92 vs sidecar.cpp:93-117. Bodies CODE-IDENTICAL (5 named escapes + `<0x20` → `\u00xx` lowercase via `std::format("\\u{:04x}", ...)`). Comment-block before the function differs slightly (sidecar.cpp's comment mentions "jq + line-regex parser" UTF-8-safety rationale; logger.cpp's comment cites D-3.5-2). Decision impact: NONE — canonical form for `escape_util.cpp` is the merged comment plus the (byte-identical) body.
+   - `json_escape`: logger.cpp:68-92 vs sidecar.cpp:93-117. Bodies CODE-IDENTICAL (7 named escapes — `\\`, `\"`, `\n`, `\r`, `\t`, `\b`, `\f` — plus `<0x20` → `\u00xx` lowercase via `std::format("\\u{:04x}", ...)`). Comment-block before the function differs slightly (sidecar.cpp's comment mentions "jq + line-regex parser" UTF-8-safety rationale; logger.cpp's comment cites D-3.5-2). Decision impact: NONE — canonical form for `escape_util.cpp` is the merged comment plus the (byte-identical) body.
    - `escape_audit_value`: bypass.cpp:48-64 vs reset_counters.cpp:55-71. Bodies CODE-IDENTICAL (5 named escapes: `\\`, `\"`, `\n`, `\r`, `\0`; default → push raw byte). Comments differ (bypass.cpp's preamble references the `prom_format::escape_label_value`-style discipline rationale + truncation-budget constants nearby; reset_counters.cpp's preamble cites D-3.4d-6 DUP-INTENT). Decision impact: NONE.
 
    **Architect ruling**: all 3 pairs are byte-equivalent for code purposes; extraction to `escape_util.cpp` MUST preserve the byte-equivalent body shape for `escape_json` + `format_timestamp_utc` and EXTEND `escape_audit` per HG-3.4f-1. No divergence-driven D-decision needed.
@@ -12272,7 +12272,7 @@ namespace xdpmf::escape_util {
 
 Body shape:
 - 3 function definitions per the declarations above.
-- `escape_json` body BYTE-EQUIVALENT to the existing logger.cpp:68-92 / sidecar.cpp:93-117 form (same switch over 5 named + `<0x20 → \u00xx` via `std::format("\\u{:04x}", static_cast<unsigned char>(c))`).
+- `escape_json` body BYTE-EQUIVALENT to the existing logger.cpp:68-92 / sidecar.cpp:93-117 form (same switch over 7 named — `\\`, `\"`, `\n`, `\r`, `\t`, `\b`, `\f` — plus `<0x20 → \u00xx` via `std::format("\\u{:04x}", static_cast<unsigned char>(c))`).
 - `escape_audit` body EXTENDED form:
   ```
   switch (c) {
