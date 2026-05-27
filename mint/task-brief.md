@@ -1,118 +1,146 @@
-# Task brief — MVP-3.4g: dead-code delete `BpffsDir` + `XdpAttachment` from `src/lib/raii.hpp` (brownfield, housekeeping)
+# Task brief — MVP-3.4h: exporter `--bind` non-loopback startup WARN (brownfield, security-observability)
 
 ## Goal
 
-Pure removal of the two dead RAII types `BpffsDir` (`src/lib/raii.hpp:132`) and `XdpAttachment` (`src/lib/raii.hpp:74`). Neither has any construction site in active code per Phase 2 grep — only the class definitions themselves + 2 stale comment references in `src/lib/loader.cpp`. Both types were superseded by the §5.22 `IfaceDirGuard` (which inherits the BpffsRootFd symlink defense and is the canonical rollback RAII for per-iface bpffs directories) without the old types being removed at the time.
+Emit a startup WARN line via `xdpmf::logger::emit(Level::Warn, "exporter.warn.bind_non_loopback", ...)` when `xdpmf-exporter` is invoked with `--bind <addr>` resolving to a non-loopback IPv4 address (i.e., NOT in `127.0.0.0/8`). No refusal — operator may have legitimate reason (k8s sidecar mesh, monitoring proxy, fleet-wide remote-scrape pattern); the WARN makes the choice visible in audit logs.
 
-Closes /mint-review 2026-05-27 Theme C (cross-validated 2-way: **code-quality H1** dead-code + **architecture L4** overlap with kManagedMaps pattern; severity HIGH retained per CQ's stronger evidence — CQ grep covered both classes, arch only saw BpffsDir overlap).
+Closes /mint-review 2026-05-27 sec M2 (exporter `--bind` non-loopback no WARN) and the **observability half** of KC-2 kill chain. KC-2 mitigation half (auth/TLS for the exposed `/metrics` endpoint) remains OOS — separate slice.
 
-**Source of truth**: `/home/user/agent-teams-review/runs/mint-review-mint-l2-mac-filter-202605271147/report.md` lines 114-115 (Theme C) + line 144 (top-actionable item #6). Carry-forward from §5.36 §7 OOS + §5.37 §7 OOS.
+Mirrors §5.30 HK-16 W1 startup-warn pattern (PI-32 trust-model-flip / bpffs-root-missing logged at startup so fleet-wide divergence is detectable).
+
+**Source of truth**: `/home/user/agent-teams-review/runs/mint-review-mint-l2-mac-filter-202605271147/report.md` (sec M2; KC-2 lines 127-129 + line 144 top-actionable item #10).
 
 ## Context: prior work
 
-- All prior briefs: archived in `mint/task-brief-*.md` (27 prior cycles)
-- Existing design: `mint/design.md` §5.37 + EDIT-1 (MVP-3.4f, commit `7519ae3`)
-- Architecture doc: `mint/architecture-v2.md` — no row for this slice (housekeeping; treat as §5.38 brownfield amendment, mirroring §5.30 / §5.33 / §5.36 / §5.37 housekeeping/hardening precedents)
-- Phase A code-grep verification: brief-author ran exhaustive Phase 2 greps (see "Notes for architect Phase A code-grep discipline" footer); architect repeats independently
-- PI continuity: PI-7-3.4f-hpp 12th + PI-7-3.4f-cpp 7th + loader-hpp + mac-filter-h ZERO-diff streaks active. This slice targets **13th + 8th** consecutive ZERO-diff on the 4 fence paths. `src/lib/raii.hpp` is NOT in the fence list — editing it is in-scope EDIT, not fence violation.
+- All prior briefs: archived in `mint/task-brief-*.md` (28 prior cycles)
+- Existing design: `mint/design.md` §5.38 (MVP-3.4g dead-code delete, commit `315a6e7`)
+- Architecture doc: `mint/architecture-v2.md` — no row for this slice (security-observability hardening from /mint-review; treat as §5.39 brownfield amendment, mirroring §5.30 / §5.36 / §5.37 / §5.38 hardening precedents)
+- Phase A code-grep verification: brief-author ran exhaustive Phase 2 greps (see "Notes for architect Phase A code-grep discipline" footer)
+- PI continuity: PI-7-3.4g-hpp 13th + cpp 8th + loader-hpp + mac-filter-h ZERO-diff streaks active post-MVP-3.4g.
+
+**Critical: PI-7-3.4h-hpp streak BREAKS this cycle**. kEventNames catalog at `src/common/logger.hpp:90` (`std::array<std::string_view, 36>`) MUST extend to 37 entries to register the new event-name token — `logger.hpp` cannot stay byte-identical. This carve-out is well-precedented: §5.36 MVP-3.4e also extended kEventNames (35→36) with explicit PI-3.4e-K scoped carve-out. Brief proposes the same shape for §5.39: scoped catalog-extension carve-out at PI-3.4h-K; baseline re-starts post-§5.39 EDIT-point. **PI-7-3.4h-cpp = 9th** + loader-hpp + mac-filter-h streaks continue cleanly.
 
 ## Workflow rules (brownfield)
 
-- **Architect**: read §5.22 (origin of IfaceDirGuard superseding BpffsDir; established §5.22 impl-surface table that explicitly carved BpffsDir as "stays as-is — single-callsite-rule" — that carve-out is now obsolete since no callsite exists) + §5.37 §7 OOS (where this slice was carried forward). EDIT design.md in place; append §5.38. Phase A code-grep MUST independently re-verify ZERO construction sites for both types.
-- **Impl**: FileList interpretation per brownfield mode — strict in-scope EDIT on `src/lib/raii.hpp` (delete 2 classes + their comment block + `<filesystem>` include); strict in-scope EDIT on `src/lib/loader.cpp` (delete 2 stale cite-comments); strict additive on UNCHANGED files (4 PI-7 fence paths).
-- **Tester**: NO new ctests. Pure deletion has no operator-observable behavior change. Existing 67 ctests stay green by construction. Tester's role this cycle is the SHORTEST in project history — just confirm `ctest -j4` passes 67/67 + capture log.
-- **Reviewer**: 5-point brownfield framework. Special attention items: (a) PI-7-3.4g-hpp / cpp / loader-hpp / mac-filter-h ZERO-diff fences (13th + 8th + loader-hpp + mac-filter-h streaks); (b) reviewer-side independent grep confirms ZERO live references to `BpffsDir` / `XdpAttachment` in src/, tests/, include/, docs/ post-delete; (c) `<filesystem>` include actually drops from raii.hpp (no other user remains); (d) baseline 67/67 ctest holds with ZERO regressions; (e) net LOC reduction ≥ ~75 (matching /mint-review estimate, operative-semantic SHOULD-hint per Phase 4.4).
+- **Architect**: read §5.30 HK-16 W1 startup-warn precedent (the W1-vs-W2 placement decision; `validate_bpffs_root_or_warn()` helper pattern in stats_reader.cpp:130) + §5.36 PI-3.4e-K kEventNames carve-out precedent + §5.32 (MVP-3.5 logger spec; emit() signature; PI-3.5-1 byte-equivalence for text mode) + §6.5 invariants summary. EDIT design.md in place; append §5.39. Phase A code-grep MUST re-verify parse_bind_addr IPv4-only constraint + sibling exporter.bind.* events placement.
+- **Impl**: FileList interpretation per brownfield mode — strict in-scope EDIT on `src/exporter/http.cpp` (WARN emission) + `src/common/logger.hpp` (kEventNames +1 entry + 2 sub-comment counts) + `tests/fixtures/log_events_v1.txt` (+1 alphabetical line); NEW `tests/T_EXPORTER_BIND_NON_LOOPBACK_WARN.sh` + EDIT `tests/CMakeLists.txt` (+15 LOC add_test block). NO touch to UNCHANGED-BUT-AFFECTED files (3 PI-7 fence paths minus logger.hpp).
+- **Tester**: 1 NEW ctest target. Existing ctests stay green by construction (PI-3.4h-1 byte-equivalence on default --bind=127.0.0.1 paths; existing T_LOG_JSON_EXPORTER_EVENTS may need fixture-cross-reference EDIT if it pins kEventCount or sub-counts — Phase 2 grep flags this for architect re-check).
+- **Reviewer**: 5-point brownfield framework. Special attention items: (a) PI-3.4h-K scoped carve-out rationale citation in §5.39; (b) PI-7-3.4h-cpp + loader-hpp + mac-filter-h ZERO-diff fences (3 paths, NOT 4 this cycle); (c) NEW ctest exercises BOTH loopback (negation control) AND non-loopback (positive) cases; (d) text-mode WARN line shape matches `xdpmf-exporter: WARN ...\n` convention per guard #19; (e) kEventNames alphabetical placement of `exporter.warn.bind_non_loopback` (slots before `exporter.warn.bpffs_root_missing` since `bi` < `bp`).
 
 ## Human-gate decisions (defaults applied — architect overrides at Phase A)
 
-### HG-3.4g-1: scope of cleanup → **strict delete + minimal CHANGELOG only**
+### HG-3.4h-1: PI-7-3.4h-hpp scoped carve-out for kEventNames extension → **YES, mirror §5.36 PI-3.4e-K precedent**
 
-Strict delete of: (a) `XdpAttachment` class def at raii.hpp:74-121; (b) BpffsDir-preamble comment block at raii.hpp:122-130; (c) `BpffsDir` class def at raii.hpp:132-178; (d) `#include <filesystem>` at raii.hpp:14 (only used inside `BpffsDir::reset()` per Phase 2 grep); (e) 2 stale cite-comments in `src/lib/loader.cpp` at :29 ("XdpAttachment unwinds" in apply_iface_load header) + :725-731 (the "BpffsDir stays as-is per §5.22 impl-surface table" block above IfaceDirGuard); (f) ONE-LINE CHANGELOG entry under §5.38. The pre-existing CHANGELOG:503 archived prior-cycle entry ("`src/loader/raii.hpp` `BpffsDir` comment — described the real") stays as immutable release history — do NOT retroactively edit. Architect may flip on (b/c) if a `BpfSkeleton`-class-preamble lifecycle comment is preferred over deleting the standalone comment block — but default is strict delete.
+13-cycle PI-7-hpp ZERO-diff streak ends here by necessity — kEventNames catalog is the canonical event-name registry, and adding a NEW emit-site REQUIRES a catalog extension per guard #10. Architect documents new `PI-3.4h-K` (kEventNames-extension-only carve-out: ONE +1 entry + size literal 36→37 + 2 sub-comment counts) in §6.5; reviewer's framework point 5 walks the carve-out instead of asserting full byte-identical. Baseline re-starts post-§5.39 EDIT-point so future cycles (§5.40+) extend a new PI-7-3.4i-hpp streak from 1.
 
-### HG-3.4g-2: PI-7-3.4g ZERO-diff fence → **YES, preserve streak**
+### HG-3.4h-2: loopback detection scope → **127.0.0.0/8 entire range, numerical post-parse check**
 
-`src/common/logger.hpp` (12th → 13th hpp); `src/lib/config.hpp` (7th → 8th cpp); `src/lib/loader.hpp` (extension); `src/common/mac_filter.h` (extension). All 4 fence paths UNTOUCHED. raii.hpp is NOT in the fence list — its EDIT is in-scope per FileList. Result: strongest streaks in project history extend cleanly.
+Detection logic: after `parse_bind_addr(cfg.bind_addr, bind_inaddr)` succeeds in `http.cpp::run()`, check `(bind_inaddr.s_addr & htonl(0xff000000)) == htonl(0x7f000000)`. Anything in 127.0.0.0/8 (kernel loopback range) is NOT WARN-worthy; everything else (including 0.0.0.0 wildcard, RFC1918 private, public IPv4) is. NOT just exact 127.0.0.1 — operators legitimately use 127.0.0.2 / 127.1.0.1 / etc. for sidecar separation. IPv6 `::1` and string-literal "localhost" are OOS (parse_bind_addr is IPv4-only via `inet_pton(AF_INET, ...)`; "localhost" gets rejected with existing `exporter.bind.invalid_addr`).
 
-### HG-3.4g-3: NEW ctests → **NONE**
+### HG-3.4h-3: new kEventNames entry token → **`exporter.warn.bind_non_loopback`**
 
-Pure deletion; no behavior change to verify. Existing 67 ctests stay green by construction. Reviewer's framework point 3 (Code ↔ Tests) satisfied by 67/67 baseline holding. Architect may flag a NEW canary if they identify some non-obvious behavior dependent on the dead types (extremely unlikely — Phase 2 grep showed no callsites) — but default is NO.
+Slots alphabetically in log_events_v1.txt BEFORE `exporter.warn.bpffs_root_missing` (since `bi` < `bp`). In logger.hpp:90-130 array, slots within the "exporter (xdpmf-exporter)" sub-comment group between `exporter.bind.listen_failed` and `exporter.listening` (alphabetical within group) OR at end of `exporter.warn.*` cluster — architect's tactical D-decision.
 
-### HG-3.4g-4: design.md `[SUPERSEDED BY §5.38]` markers scope → **2 OOS-fence carry-forward records only**
+### HG-3.4h-4: NO refusal — WARN-only posture → **CONFIRMED**
 
-Architect adds `[SUPERSEDED BY §5.38]` inline markers at the 2 records that explicitly fence this slice as deferred: design.md:11836 (§5.36 §7 OOS) + :12514 (§5.37 §7 OOS). Other 5 archived historical refs (design.md:28 initial FileList, :569-585 §5.18-19 prose, :903 §5.27 A2 finding) are immutable archived sections — architect spec rule "Do NOT rewrite prior sections (those are immutable history)" applies; no markers there.
+Emit warn + continue normal startup. KC-2 mitigation half (auth/TLS for `/metrics`) explicit OOS — separate slice. Refusal would break legitimate fleet-ops use cases (k8s sidecar mesh) without operator opt-in.
 
-## Open mechanism questions (architect decides; document in §5.38)
+### HG-3.4h-5: NO VERSION bump → **CONFIRMED**
 
-### Q1: `src/lib/loader.cpp` 2 stale cite-comments — delete entirely vs replace with anchor?
+Pure observability addition; no operator-observable API change (default --bind=127.0.0.1 keeps current silent behavior; only non-loopback bind triggers new line). Architect overrides only if KC-2 mitigation also lands same cycle (it won't — explicit OOS).
 
-- **A1**: delete both blocks entirely (no replacement). The "XdpAttachment unwinds" mention at :29 is replaced by silence; the "BpffsDir stays as-is per §5.22 impl-surface table — single-callsite-rule, BpffsRootFd is not exported" block at :725-731 is replaced by silence (IfaceDirGuard's purpose is self-evident from its docstring and §5.22 context).
-- **A2**: replace each with a short anchor comment (`// see §5.38 for raii.hpp shape post-cleanup`). Preserves audit-trail for git-archaeologists looking up "why was this comment removed?".
-- **Recommendation**: **A1**. The comments described historical design choices that no longer reflect code reality. A1 is cleanest; future archaeology has `git blame` + `git log` for traceability. If architect's judgment leans toward A2 for `:725-731` specifically (that block has more historical context value), brief accepts the split — but default = A1 uniform.
+## Open mechanism questions (architect decides; document in §5.39)
 
-## Scope (cycle MVP-3.4g — concrete items)
+### Q1: WARN emission placement — main.cpp helper (Option A) vs http.cpp::run() post-parse (Option B)?
 
-### Item E-1 — EDIT `src/lib/raii.hpp` (~-95 LOC delete + 1 LOC include drop)
+- **A**: helper called from `main()` after cmdline parse, BEFORE `http::run()`. Matches §5.30 HK-16 W1 precedent (`validate_bpffs_root_or_warn` shape). Uses `cfg.bind_addr` STRING; loopback check string-based (case-insensitive prefix match for `127.`). Fail-fast: warns before socket() syscall.
+- **B**: inside `http.cpp::run()` AFTER `parse_bind_addr(cfg.bind_addr, bind_inaddr)` succeeds, BEFORE `::socket()`. Sibling to existing `exporter.bind.*` events at http.cpp:288-330. Uses parsed `struct in_addr`; loopback check numerical `(s_addr & htonl(0xff000000)) == htonl(0x7f000000)`. Cleaner per architect spec sub-rule "where is X executed per-runtime".
+- **Recommendation**: **B**. Per-runtime correctness; numerical loopback check is robust (string-prefix `"127."` misses edge-cases like trailing whitespace OR matches non-loopback "127a.b.c.d"); same TU as siblings simplifies code review + future maintenance. If architect flips to A, the brief accepts — both options satisfy HG-3.4h-2 contract; only the helper-location + check-mechanism differ.
 
-**Where**: `src/lib/raii.hpp` (current 179 LOC)
+### Q2: text-mode WARN message shape — D-decision territory
+
+Architect picks at Phase A per guard #19. Reference shape (NOT contractual): `"xdpmf-exporter: WARN: --bind <addr> is not loopback (127.0.0.0/8); /metrics will be exposed on a routable interface\n"`. JSON-mode envelope is automatic per logger.hpp Q1=A1 structured field shape (`bind_addr` field).
+
+## Scope (cycle MVP-3.4h — concrete items)
+
+### Item E-1 — EDIT `src/exporter/http.cpp` (Option B default per Q1) — WARN emission
+
+**Where**: `src/exporter/http.cpp` (current 17501 bytes; `run()` entry @:288; `parse_bind_addr` @:261)
+Diff (if Q1.B):
+- ADD `is_loopback_ipv4()` static helper (~5 LOC) — takes `struct in_addr`, returns `bool`; bitmask check 127.0.0.0/8 per HG-3.4h-2.
+- ADD WARN emission block after `parse_bind_addr()` success at run() entry, BEFORE `::socket()` call. ~20 LOC: `if (!is_loopback_ipv4(bind_inaddr)) { ... logger::emit(...Warn, "exporter.warn.bind_non_loopback", msg, fs); }`. Includes structured field `bind_addr` (matches sibling `exporter.bind.*` field shape).
+- Net LOC: ~+25 in http.cpp.
+
+If Q1.A picked, swap to main.cpp + helper file/path; mechanism otherwise unchanged.
+
+### Item E-2 — EDIT `src/common/logger.hpp` (PI-3.4h-K scoped carve-out)
+
+**Where**: `src/common/logger.hpp:90-132`
 Diff:
-- DELETE line 14: `#include <filesystem>` (sole user is `BpffsDir::reset()` per Phase 2 grep — verifies on Phase A re-grep)
-- DELETE lines 74-121: `class XdpAttachment` (~48 LOC including class body + dtor + move ctors)
-- DELETE lines 122-130: BpffsDir-preamble comment block (~9 LOC; the multi-paragraph rationale block describing the owner workflow with `std::filesystem::create_directories()`)
-- DELETE lines 132-178: `class BpffsDir` (~47 LOC)
-- PRESERVE lines 1-73: license/header/includes (minus `<filesystem>`) + `class BpfSkeleton` (still actively used; loader.cpp:14 + :30 references it)
-- PRESERVE namespace boilerplate (line 25 + closing `}`)
-- Net LOC: ~-95 (Theme C estimated ~-75; the extra ~20 is comment-block-density that Phase 2 grep surfaced — operative-semantic SHOULD-hint per Phase 4.4).
+- Update array size literal: `std::array<std::string_view, 36>` → `std::array<std::string_view, 37>` at :90.
+- ADD ONE new entry `"exporter.warn.bind_non_loopback",` alphabetically placed within the "exporter (xdpmf-exporter)" sub-comment cluster — architect picks exact position (between `exporter.bind.listen_failed` + `exporter.listening` OR among `exporter.warn.*` group).
+- Update exporter sub-comment at :114 `15 events` → `16 events`.
+- Update kEventCount comment at :132 from `// = 36 (§5.36: 35 → 36; +1 sidecar.warn.iface_dir_symlink per HG-3.4e-4)` to mirror new shape: `// = 37 (§5.39: 36 → 37; +1 exporter.warn.bind_non_loopback per HG-3.4h-3)`.
+- Net LOC: ~+3 (1 new entry + 2 count adjustments).
 
-### Item E-2 — EDIT `src/lib/loader.cpp` (~-5 LOC delete)
+### Item E-3 — EDIT `tests/fixtures/log_events_v1.txt` (guard #13 fixture lockstep)
 
-**Where**: `src/lib/loader.cpp` (current ~2280 LOC)
-Diff:
-- DELETE the "XdpAttachment unwinds" mention at line ~29 (inside apply_iface_load header comment) per HG-3.4g-1.(e) + Q1.A1 — the surrounding sentence flow needs to be preserved (architect picks: drop the whole sub-clause OR rewrite the sentence to retain BpfSkeleton-only unwind description).
-- DELETE lines ~725-731: the 7-line comment block "Replaces the §5.17 BpffsDir wrapper for new code paths so rollback inherits the symlink defense (raii.hpp BpffsDir stays as-is per §5.22 impl-surface table — single-callsite-rule, BpffsRootFd is not exported)." per Q1.A1. Operative-semantic note: brief estimates ~5 LOC; impl may need ~3-7 depending on adjacent whitespace preservation (Phase 4.4 SHOULD-hint).
-- NO other changes to loader.cpp; remaining ~2275 LOC byte-equivalent.
+**Where**: `tests/fixtures/log_events_v1.txt` (current 36 lines, alphabetical)
+Diff: ADD one line `exporter.warn.bind_non_loopback` slotted alphabetically BEFORE `exporter.warn.bpffs_root_missing` (since `bi` < `bp`). Net +1 LOC.
 
-### Item E-3 — EDIT `mint/design.md` (~2 SUPERSEDED markers)
+### Item T-1 — NEW `tests/T_EXPORTER_BIND_NON_LOOPBACK_WARN.sh`
 
-**Where**: `mint/design.md` lines 11836 + 12514 (architect re-confirms by `grep -nE '^[[:space:]]*- \*\*Theme C|^[[:space:]]*- \*\*Dead .BpffsDir' mint/design.md`)
-Diff: inline `[SUPERSEDED BY §5.38]` marker added per architect spec rule. Two 1-line additions. The 5 other archived refs are immutable history — NO markers there.
+**Where**: `tests/T_EXPORTER_BIND_NON_LOOPBACK_WARN.sh` (NEW)
+Body (high-level — impl/tester picks exact shape):
+- **PRIMARY** (positive): launch `xdpmf-exporter --bind 0.0.0.0 --port <ephemeral>` (background); poll for "listening" emit; assert stderr contains `WARN.*bind.*not.*loopback` regex OR `exporter.warn.bind_non_loopback` event-name in JSON mode; kill exporter.
+- **NEGATION** (default loopback): launch `xdpmf-exporter --port <ephemeral>` (default --bind=127.0.0.1); poll for listening; assert stderr does NOT contain bind_non_loopback WARN regex; kill.
+- **Sub-case** (127.0.0.0/8 non-default loopback): launch `xdpmf-exporter --bind 127.0.0.2 --port <ephemeral>`; assert NO WARN (127.0.0.0/8 covers entire range per HG-3.4h-2).
+- RESOURCE_LOCK: `exporter_port_9417` (port-clash serialization with sibling exporter tests; mirror `T_EXPORTER_NO_ATTACHED_IFACE` shape at tests/CMakeLists.txt:657). xdp_fixture lock NOT required (no veth/loader interaction).
+- SKIP: passwordless sudo (exporter doesn't need sudo for self-test; but mirror project convention for consistency — architect picks).
 
-### Item E-4 — EDIT `CHANGELOG.md` (+1 LOC entry)
+### Item E-4 — EDIT `tests/CMakeLists.txt` — add_test block
 
-**Where**: `CHANGELOG.md` (current top section, architect picks anchor — under "MVP-3.4 housekeeping" sub-block, mirroring §5.36/§5.37 entries, OR a new "MVP-3.4g" sub-block).
-Diff: single-line entry: `- src/lib/raii.hpp: dead-code cleanup — BpffsDir + XdpAttachment removed (superseded by IfaceDirGuard since §5.22)`. Minimal prose discipline; release-notes are operator-facing, not designer-prose.
+**Where**: `tests/CMakeLists.txt`
+Diff: ~+15 LOC `add_test(...) + set_tests_properties(... RESOURCE_LOCK exporter_port_9417 TIMEOUT 60 SKIP_RETURN_CODE 77)` block, mirroring `T_EXPORTER_NO_ATTACHED_IFACE` shape.
 
-### NO new items, NO new ctests
+### Item T-EXISTING — UNCHANGED-BUT-AFFECTED ctest carve-out
 
-This is the SHORTEST scope of any MVP-3.4x slice. Pure deletion + 2 stale comment cleanups + 1 CHANGELOG line + 2 design.md SUPERSEDED markers.
+**Where**: §6.5 invariants block in design.md §5.39
+List existing tests that touch kEventNames or exporter startup as UNCHANGED-BUT-AFFECTED zero-diff fence:
+- `T_LOG_JSON_EXPORTER_EVENTS.sh` — consumes kEventNames indirectly via JSON envelope assertions; verify Phase A grep — does it pin kEventCount (36) or full count? If yes, +1 EDIT needed; if no, byte-equivalent.
+- Existing exporter ctests (`T_EXPORTER_*`) — default --bind=127.0.0.1 path stays silent per HG-3.4h-2; ZERO regressions.
+
+Reviewer point 5 confirms zero diff via `git diff` against prior cycle baseline.
 
 ## Out of scope (explicit)
 
-- **Renaming `IfaceDirGuard` to reflect its post-§5.22 canonical-RAII status** — no operator-observable benefit; rename churns 1 file for cosmetic gain. NEW FENCE.
-- **Consolidating `raii.hpp` into a different location** (e.g., `src/lib/internal/raii.hpp` or merging into `apply_internal.hpp`) — architecture-level decision belonging to a future housekeeping mini; not this slice. NEW FENCE.
-- **Refactoring `BpfSkeleton`'s reset/move semantics** — UNTOUCHED; orthogonal to this slice. NEW FENCE.
-- **VERSION bump** — pure deletion + no operator-observable behavior change → no bump. (Architect override only if they identify some operator-visible surface — extremely unlikely.)
-- **Doc rewrite cascades** — CHANGELOG gets ONE line; README + HANDOFF + docs/BACKLOG stay UNTOUCHED. NEW FENCE.
-- **Theme C action item #6 follow-on cleanups** (e.g., other dead RAII types not flagged by /mint-review) — if Phase A grep surfaces additional dead types, architect adds them in a separate §5.38b/c amendment OR carves them as NEW FENCE for a follow-up slice.
-- **KC-1 closure half (action label defensive escape, sec L2)** — separate slice per /mint-review backlog.
-- **KC-2 (exporter --bind non-loopback WARN)** — separate slice per /mint-review backlog.
-- **Theme D / CQ M1 (dispatch_match helper)** — separate slice.
+- **KC-2 mitigation half (auth/TLS for `/metrics`)** — separate slice; explicit OOS. This slice closes observability gap ONLY.
+- **IPv6 `::1` loopback detection** — parse_bind_addr is IPv4-only via inet_pton(AF_INET); IPv6 binding explicitly OOS per existing http.cpp:260 comment. NEW FENCE.
+- **String-literal "localhost" detection** — parse_bind_addr rejects "localhost" with existing `exporter.bind.invalid_addr`; no WARN needed (different error class). NEW FENCE.
+- **Rate-limiting the WARN** — one-shot startup emission; no per-scrape repetition needed (mirrors W1 HK-16 design). NEW FENCE.
+- **REFUSAL on non-loopback** — operator legitimate reasons exist; WARN-only per HG-3.4h-4. NEW FENCE.
+- **VERSION bump** — pure observability addition; no operator-observable API change. NEW FENCE.
+- **README / fleet-ops docs update** — minimal CHANGELOG entry (1 line under Security section in [Unreleased]) is the only doc touch; README updates are part of B1 doc-backlog slice. NEW FENCE.
+- **Other /mint-review backlog items** (KC-1 escape-action-label-defensive, Theme D dispatch_match helper, perf compound, TUN/TAP injector, CI/CD) — all separate slices.
 
 ## Definition of done
 
-- §5.38 amendment in `mint/design.md` (estimated ~80-120 LOC: scope + HG/Q resolutions + D-decisions + FileList table + PI block + OOS block + Phase A grep notes). This is the SHORTEST §-amendment expected since §5.33 mini housekeeping.
+- §5.39 amendment in `mint/design.md` (estimated ~120-180 LOC: scope + HG/Q resolutions + D-decisions + FileList table + PI block including PI-3.4h-K carve-out + OOS block + Phase A grep notes)
 - PI continuity:
-  - PI-7-3.4g-hpp = **13th** consecutive ZERO-diff on `src/common/logger.hpp`
-  - PI-7-3.4g-cpp = **8th** consecutive ZERO-diff on `src/lib/config.hpp`
-  - PI-7-3.4g-loader-hpp + PI-7-3.4g-mac-filter-h extensions (continuing from §5.37)
-  - All §6.5 prior invariants PRESERVED (no behavior change → all checks pass by construction)
-- ctest baseline: 67 → 67 (NO new ctests; reviewer confirms zero existing-test regressions)
+  - PI-3.4h-K NEW (scoped kEventNames-extension carve-out for logger.hpp; mirrors §5.36 PI-3.4e-K)
+  - PI-7-3.4h-cpp = **9th** consecutive ZERO-diff on `src/lib/config.hpp`
+  - PI-7-3.4h-loader-hpp + PI-7-3.4h-mac-filter-h extensions
+  - PI-3.5-1 byte-equivalence text-mode emissions preserved (new WARN follows existing emit() shape)
+  - PI-32-3.4b sidecar-never-throws preserved (no sidecar changes)
+- ctest baseline: 67 → 68 (+T_EXPORTER_BIND_NON_LOOPBACK_WARN)
+- CHANGELOG.md `[Unreleased]` Security subsection: +1 line entry for §5.39 / sec M2 closure
 - mint/review.md round-1 verdict = pass
 - One git commit per phase boundary
 
 ## Dependencies
 
-- C++23 stdlib only — drops `<filesystem>` dep from raii.hpp
-- No CMake changes (raii.hpp is header-only, already in xdpmf_internal include path)
+- C++23 stdlib (`<arpa/inet.h>` already included via `<netinet/in.h>` in http.cpp; `htonl` for bitmask)
+- No CMake changes (escape_util already wired; logger.hpp is header-only)
 - No kernel/platform deps
 - No external BPF/libbpf changes
 
@@ -131,45 +159,53 @@ packs:
 
 ## Pre-brief sanity check (per [[mint-hld-scope-discipline]])
 
-- **Multi-axis design space?** No. One axis: delete-the-dead-code (chosen) vs leave-as-is (rejected by /mint-review Theme C HIGH severity).
-- **Brief-author uncertain across ≥2 axes?** No. /mint-review report prescribes the resolution verbatim ("Delete dead BpffsDir + XdpAttachment from raii.hpp (~75 LOC)").
-- **Expensive to undo?** No. Pure deletion; rollback = revert single commit.
-- **≥3 distinct viable options?** No. Delete is the one viable option per cross-validated /mint-review signal.
-- **Mechanical-answer check**: ✓ yes — answer falls out of /mint-review report's Theme C Resolution prose + Phase 2 grep confirming ZERO construction sites.
-- **Has /mint-hld been run?** No — not needed. Single-architect `/mint-dev` handles it.
-- **Brief-author overconfidence flag**: Phase 2 grep was exhaustive (construction sites + member-type uses + type aliases + public-surface + test fixtures + doc cross-refs). Architect repeats per guard #5.
+- **Multi-axis design space?** No. One mechanism axis (Q1 placement A vs B); answer falls out of per-runtime-correctness rule.
+- **Brief-author uncertain across ≥2 axes?** No. /mint-review prescribes resolution + §5.30 HK-16 + §5.36 kEventNames-extension precedents both apply directly.
+- **Expensive to undo?** No. Pure observability addition + 1 NEW ctest; rollback = revert single commit.
+- **≥3 distinct viable options?** No. WARN emission is the one viable mechanism per /mint-review signal.
+- **Mechanical-answer check**: ✓ yes — extension of established precedent.
+- **Has /mint-hld been run?** No — not needed.
+- **Brief-author overconfidence flag**: ⚠ initial brief invocation had 2 wrong claims (LOC estimate 3x too low; PI-7-hpp 14th streak target impossible). Phase 2 grep corrected both. Architect repeats Phase 2 greps per guard #5.
 
-**Verdict**: this slice is the most mechanical of any MVP-3.4x. `/mint-hld` overkill. Proceed with `/mint-dev`.
+**Verdict**: mechanical extension; `/mint-hld` overkill. Proceed with `/mint-dev`.
 
 ## Notes for architect Phase A code-grep discipline (per architect spec rules)
 
 Brief-author already ran these greps per Phase 2 — architect re-verifies + extends:
 
-1. **Confirm ZERO construction sites for both types** (load-bearing):
-   - `grep -rnE 'BpffsDir\s*\(|XdpAttachment\s*\(|BpffsDir\{|XdpAttachment\{' src/` — expect zero hits (class defs in raii.hpp match pattern but with `class` prefix; architect filters)
-   - `grep -rnE 'BpffsDir [a-z]|XdpAttachment [a-z]' src/` — variable-decl-style construction; expect zero hits
-   - `grep -rn '\.release()\|->release()' src/ | grep -v 'IfaceDirGuard\|BpfSkeleton'` — RAII release-pattern callsites; confirm no caller still uses the deleted types' release method
+1. **Confirm Q1 placement**:
+   - `grep -nE 'parse_bind_addr|run\(const HttpConfig' src/exporter/http.cpp` — should match :261 parse_bind_addr + :288 run() entry.
+   - `grep -nE 'cfg\.bind_addr|consume_flag_value.*bind' src/exporter/main.cpp` — :140 default + :177-178 parse loop.
+   - Verify Option B is the per-runtime-correct placement vs Option A per spec sub-rule.
 
-2. **Confirm `<filesystem>` sole-user is `BpffsDir::reset()`**:
-   - `grep -nE 'std::filesystem|fs::|<filesystem>' src/lib/raii.hpp` — expect ALL hits inside the BpffsDir class body (so deletion drops them in lockstep)
-   - Brief-author confirmed Phase 2: 3 hits at lines 122-125 (comment), 169 (`std::filesystem::remove_all(path_, ec)` in reset()), 14 (include). Architect re-confirms post-Phase-A grep.
+2. **Confirm sibling exporter.bind.* event shape + Field schema**:
+   - `grep -nE 'exporter\.bind\.|exporter\.warn\.' src/exporter/ src/common/logger.hpp | head -20` — observe field-name conventions; new emit must match (`bind_addr` field name, std::string_view type, etc.).
 
-3. **2 stale cite-comments in loader.cpp surgery** (per Q1.A1 default):
-   - `grep -nE 'XdpAttachment|BpffsDir' src/lib/loader.cpp` — expect 3 hits: line ~29 (XdpAttachment in apply_iface_load header), lines ~729-731 (BpffsDir block above IfaceDirGuard class). Brief-author confirmed Phase 2; architect picks exact sentence-flow restoration on the :29 cleanup.
+3. **Confirm kEventNames catalog position**:
+   - `grep -nE 'exporter\.warn\.bpffs_root_missing|exporter\.warn\.cpu_count_invalid' src/common/logger.hpp` — slot new entry alphabetically in the cluster.
 
-4. **design.md `[SUPERSEDED BY §5.38]` marker placement** (per HG-3.4g-4):
-   - `grep -nE 'Theme C.*BpffsDir|Dead.*BpffsDir.*XdpAttachment.*deletion' mint/design.md` — expect 2 hits at lines ~11836 + ~12514 (the 2 OOS-fence carry-forward records). 5 other archived refs at lines 28, 569-585, 903 are IMMUTABLE HISTORY — no markers.
+4. **PI-3.4h-K carve-out fence smoke (pre-commit)**:
+   - `git diff 315a6e7..HEAD -- src/common/logger.hpp` MUST show EXACTLY: +1 entry, size literal 36→37, 2 sub-comment count updates. No other changes (no struct edits, no Field type changes, no emit() signature changes). Architect documents fence in §5.39 PI block.
 
-5. **Reviewer-side post-delete sweep** (architect documents in §5.38 invariants block):
-   - Reviewer's framework point 5 walks: `grep -rn 'BpffsDir\|XdpAttachment' src/ tests/ include/ docs/ CHANGELOG.md` post-impl-commit returns at most ONE hit: `CHANGELOG.md:503` archived prior-cycle entry (`src/loader/raii.hpp BpffsDir comment...`). That's expected — frozen release history. Operative-semantic per Phase 4.4: hint is ≤1 hit, not literal zero.
+5. **Test fixture cross-reference (guard #13)**:
+   - `grep -nE 'kEventCount|kEventNames' tests/` — find tests that pin the catalog count. If `T_LOG_JSON_EXPORTER_EVENTS.sh` or `T_LOG_JSON_ENVELOPE_INVARIANTS.sh` asserts exact kEventCount=36, +1 EDIT body adjustment needed.
+   - `grep -c '^' tests/fixtures/log_events_v1.txt` — currently 36; will become 37 post-impl. Alphabetical placement verified by reviewer.
 
-6. **`<filesystem>` sole-user post-delete** (architect documents invariant):
-   - Reviewer confirms: `grep -nE 'std::filesystem|<filesystem>' src/lib/raii.hpp` returns ZERO hits post-impl. If hit, impl missed the include drop.
+6. **RESOURCE_LOCK for NEW ctest (guard #12)**:
+   - `grep -nE 'RESOURCE_LOCK.*exporter_port|T_EXPORTER_NO_ATTACHED_IFACE' tests/CMakeLists.txt` — confirm precedent shape at :657; mirror for NEW ctest.
+
+7. **Text-mode prose vs event-name convention (guard #19)**:
+   - `grep -nE '"xdpmf-exporter: WARN' src/exporter/` — observe existing prose convention; new WARN follows verbatim shape.
 
 ### Anti-misdiagnosis guards applicable to this slice (per Phase 3)
 
-- **Guard #5 (Phase A code-grep discipline)**: ✓ applies; architect repeats brief-author's Phase 2 greps independently. This slice is the most grep-load-bearing of any MVP-3.4x since the verification IS the design (no behavior change to verify other than "the deleted types had no callers").
-- **Guards #9 / #10 / #11 / #12 / #17 / #18 / #19 / #20 / #21**: N/A — no helper extraction, no constexpr tables, no VERSION bump, no new ctests, no bilateral invariants, no host-vs-netns, no logger text-mode, no rule-of-three trigger, no NEW test IO-model.
-- **Guard #13 (fixture cross-reference for retired strings)**: ⚠ partial — applies for retired SYMBOLS not strings; brief-author ran symbol-grep equivalent at Phase 2 (✓ zero fixture hits, ✓ zero test-body hits). Architect re-confirms.
+- **Guard #5 (Phase A code-grep)**: ✓ applies; architect repeats brief-author's Phase 2 greps independently. Phase 2 caught 2 brief-invocation errors (LOC undercount + PI-7-hpp 14th streak impossibility) — guard discipline pays off again.
+- **Guard #8 (interactive-vs-log distinction)**: ✓ trivially — exporter daemon; no UI primitive surface. NEW emit is unambiguously log-class.
+- **Guard #10 (catalog arithmetic)**: ✓ **LOAD-BEARING** — kEventNames 36→37 with size literal + sub-comment + fixture lockstep. Architect MUST cite §5.36 PI-3.4e-K precedent in §5.39 D-decision for PI-3.4h-K scoped carve-out.
+- **Guard #11 (VERSION-bump test-literal propagation)**: N/A — no VERSION bump (per HG-3.4h-5 + §7 OOS).
+- **Guard #12 (RESOURCE_LOCK for shared host state)**: ✓ NEW ctest needs `exporter_port_9417` lock (mirror tests/CMakeLists.txt:657 precedent). NO xdp_fixture lock needed (no veth interaction).
+- **Guard #13 (fixture cross-reference)**: ✓ `tests/fixtures/log_events_v1.txt` +1 alphabetical line. Reviewer point 5 grep-checks alphabetical placement.
+- **Guard #19 (logger text-mode prose vs event-name token convention)**: ✓ text-mode WARN prose follows `xdpmf-exporter: WARN: ...\n` precedent; event-name token follows `exporter.warn.*` cluster convention.
+- **Guards #17 / #18 / #20 / #21**: N/A — no bilateral invariants, no host-vs-netns, no rule-of-three trigger, no NEW test IO-model.
 
-**Operative-semantic discipline reminder (Phase 4.4)**: counts in this brief (~75 LOC `/mint-review estimate`; ~95 LOC `brief-author re-grep`; 2 cite-comments; 3 hits in raii.hpp for filesystem; 7 archived design.md refs vs 2 OOS-fence-carry-forward records) are SHOULD-level orientation, not contracts. Impl deviations on those (slightly different LOC delta, different sentence-flow restoration on loader.cpp:29, marginally different CHANGELOG anchor) are `inline-merge` per design's resolution rule.
+**Operative-semantic discipline reminder (Phase 4.4)**: counts in this brief (~25 LOC E-1; +3 LOC E-2; +1 LOC E-3; ~80-120 LOC T-1; +15 LOC E-4; net ~+120-160 LOC) are SHOULD-level orientation, not contracts. Impl deviations on those (different LOC delta, different position in catalog cluster, different ctest sub-case count, different text-mode prose shape per guard #19) are `inline-merge` per design's resolution rule. Architect SHOULD explicitly include the prose-vs-invariants conflict resolution rule in §5.39 per [[mint-human-gate-self-approve]] + §5.37/§5.38 precedent.
