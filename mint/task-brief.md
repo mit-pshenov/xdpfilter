@@ -1,166 +1,179 @@
-# Task brief — MVP-3.4e: reset-counters path-hardening + sidecar iface-subdir symlink defense (brownfield, security-hardening)
+# Task brief — MVP-3.4f: extract `src/common/escape_util.{hpp,cpp}` + extend audit-escape policy (brownfield, code-quality + security-hardening)
 
 ## Goal
 
-Closure of KC-3 kill-chain surfaced by 2026-05-27 `/mint-review` (report at `agent-teams-review/runs/mint-review-mint-l2-mac-filter-202605271147/report.md`). Two coupled architectural regressions of the §5.22 BpffsRootFd invariant:
+Consolidate the three Theme B duplicated helpers (`json_escape`, `escape_audit_value`, `format_timestamp_utc`) from `src/common/logger.cpp` + `src/lib/sidecar.cpp` + `src/cli/bypass.cpp` + `src/cli/reset_counters.cpp` into a NEW shared module `src/common/escape_util.{hpp,cpp}`, AND extend the `escape_audit_value` policy to escape ALL bytes <0x20 + 0x7F as `\xHH` (currently only the 5 named escapes `\\`/`\"`/`\n`/`\r`/`\0` are covered, leaving 0x01-0x08, 0x0B, 0x0C, 0x0E-0x1F, 0x7F passing through raw — sec M1 finding from /mint-review 2026-05-27).
 
-1. **`reset-counters` path-hardening** — `src/cli/reset_counters.cpp` builds raw absolute paths via `pin_path_for(iface, basename) = XDPMF_BPFFS_ROOT + "/" + iface + "/" + basename` (no validation, no symlink defense, no `O_NOFOLLOW`) and passes them to `bpf_obj_get(path.c_str())`. Operator with CAP_BPF + sudoers can `reset-counters --iface ../../tmp/x` → zero-write any PERCPU pin under `/sys/fs/bpf/`. Unlike `apply_request` + `detach()` paths which call `resolve_ifindex(iface, ...)` + use `BpffsRootFd` + fd-relative `openat`/`mkdirat`/`unlinkat`.
+Closes /mint-review 6-dim run Theme B (cross-validated 3-way: sec M1 + arch M2 + CQ M2) and partially closes KC-1 log-injection kill chain (control-char gap). KC-1 fully closes when the companion slice ships the `action label defensive escape` (security L2) — out-of-scope for this brief. KC-2 (exporter --bind non-loopback WARN) is a separate slice.
 
-2. **Sidecar iface-subdir symlink defense gap** — `src/lib/sidecar.cpp` `mkdir_p(dir)` + `atomic_write_file` (`::open(O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC)` — no `O_NOFOLLOW`) on `/run/xdpmacfilter/<iface>/rule_index.json`. §5.31 EDIT-1 hardened the SIDECAR_ROOT-level lstat but per-iface subdir creation follows symlinks. Attacker with root + write to `/run/xdpmacfilter/` can pre-create iface as symlink → loader writes attacker-controlled JSON to chosen target.
-
-KC-3 chains the two: clobber sibling BPF subsystem (reset-counters) + write to executable-on-cron-tick location (sidecar). Both individually need root; together = CIS-style hardening regression vs §5.22 invariant. **Single architectural fix**: extend `BpffsRootFd` + `IfaceDirGuard` discipline to BOTH paths.
-
-Narrow scope per user direction 2026-05-27 (bonus items from mint-review — escape_util extraction, BpffsDir delete, exporter bind WARN — deferred to separate slices).
+**Source of truth**: `/home/user/agent-teams-review/runs/mint-review-mint-l2-mac-filter-202605271147/report.md` lines 108-112 (Theme B Resolution) + 127-128 (KC-1) + 143 (top-actionable item #5).
 
 ## Context: prior work
 
-- All prior briefs archived in `mint/task-brief-*.md`. Most recent: `task-brief-mvp-3.4d.md` (reset-counters CLI + rule_counters atomic-swap).
-- Existing design: `mint/design.md` §5.35 (MVP-3.4d amendment) — D-3.4d-3 copy_rule_counters_forward, D-3.4d-FEAS/FALLBACK pattern, 2 new anti-misdiagnosis guards (#14 + #15).
-- §5.22 + §5.31 EDIT-1 are the load-bearing precedents for this slice's hardening pattern.
-- /mint-review report KC-3 evidence:
-  - security-reviewer H1 + M3 (anchors)
-  - Validated by synthesizer with `±5-line` Read at each citation
-- Phase A code-grep verification: brief author ran `grep -nE "bpf_obj_get|resolve_ifindex|pin_path_for|BpffsRootFd|O_NOFOLLOW" src/cli/reset_counters.cpp`; `grep -nE "mkdir_p|atomic_write|::open|::lstat|S_ISLNK|O_NOFOLLOW|openat|mkdirat" src/lib/sidecar.cpp`; `grep -nE "BpffsRootFd|IfaceDirGuard|resolve_ifindex" src/lib/loader.cpp`. Confirmed: `BpffsRootFd` is anon-namespace in `loader.cpp` (not exposed via `raii.hpp` — there's a separate dead `BpffsDir` per code-quality H1 which is OOS for this slice).
-- PI continuity: PI-7-3.4e-hpp = **11th consecutive ZERO-diff cycle target** on `loader.hpp`; PI-7-3.4e-cpp = **6th consecutive** on `config.hpp`. PI-32-3.4b (sidecar never throws; exporter degrades to `action="unknown"`) PRESERVED — sidecar symlink response is WARN + skip per HG-3.4e-4. New PIs needed: PI-3.4e-1 (reset-counters path-refused via §5.22 invariant), PI-3.4e-2 (sidecar iface-subdir symlink refusal).
+- All prior briefs: archived in `mint/task-brief-*.md` (26 prior cycles)
+- Existing design: `mint/design.md` §5.36 (MVP-3.4e KC-3 closure, commit `c55f6e5`)
+- Architecture doc: `mint/architecture-v2.md` — no row for this slice (out-of-roadmap code-quality + security hardening from /mint-review; treat as §5.37 brownfield amendment, mirroring §5.30 / §5.33 / §5.34 / §5.35 / §5.36 housekeeping/hardening precedents)
+- Phase A code-grep verification: brief-author ran exhaustive Phase 2 greps (see "Notes for architect Phase A code-grep discipline" footer); architect repeats independently
+- PI continuity: PI-7-3.4e-hpp 11th + PI-7-3.4e-cpp 6th ZERO-diff streaks active. This slice targets **12th + 7th** consecutive ZERO-diff on `src/common/logger.hpp` + `include/xdpmf/config.hpp`. No public-surface touch to `mac_filter.h`. PI-3.5-1 byte-equivalence (text-mode pre-§5.32 emissions) preserved by construction — `json_escape` policy is bytewise UNCHANGED.
 
 ## Workflow rules (brownfield)
 
-- **Architect**: read §5.22 (BpffsRootFd hardening invariant — load-bearing precedent), §5.31 EDIT-1 (sidecar SIDECAR_ROOT lstat — symmetric to this slice's per-iface subdir gap), §5.34 + §5.35 (recent context); EDIT `design.md` in place; append §5.36 (architect picks §-number). Apply anti-misdiagnosis guards #5 + #9 + #12 (see footer). HG-3.4e-1 architectural choice (extract vs route-through-internal-helper vs duplicate) is the load-bearing Phase A decision.
-- **Impl**: FileList = DIFF. Brownfield discipline. PI-7-3.4e-hpp/cpp ZERO-diff target. [[impl-role-discipline]] holds.
-- **Tester**: 2 NEW ctests (T_RESET_COUNTERS_PATH_TRAVERSAL + T_SIDECAR_IFACE_SYMLINK_REFUSAL). Template = T_BPFFS_ROOT_SYMLINK.sh. Brief estimate is upper bound.
-- **Reviewer**: 5-point brownfield. Special attention: (a) PI-3.4e-1 + PI-3.4e-2 new contracts cleanly written; (b) PI-32-3.4b sidecar-never-throws PRESERVED (no escalation to fatal); (c) §5.22 invariant restored bilaterally (reset-counters + sidecar).
+- **Architect**: read §5.32 D-3.5-2 (origin of helper duplication + guard #9 rationale) + §5.35 D-3.4d-6 (reset_counters DUP-INTENT comment) + §5.36 §7 OOS (where escape_util was explicitly fenced out as deferred) + §6.5 invariants summary. EDIT design.md in place; append §5.37. Phase A code-grep MUST re-verify the 4 helper bodies are byte-identical to each other in pairs (or document any divergence).
+- **Impl**: FileList interpretation per brownfield mode — strict additive on UNCHANGED files (logger.hpp, config.hpp, mac_filter.h); regional-diff fences on EDITED .cpp files (only the helper-removal + #include + zero call-site changes).
+- **Tester**: NEW ctest(s) target ≥1 (control-char policy evidence per HG-3.4f-3). Existing 5 JSON-shape ctests + audit-line ERE tests stay green by construction (json_escape policy byte-equivalent; escape_audit_value extended-NOT-changed for existing 5 named escapes).
+- **Reviewer**: 5-point brownfield framework. Special attention items: (a) guard #9 EXPLICIT OVERRIDE rationale citation in §5.37; (b) PI-7-3.4f-hpp + PI-7-3.4f-cpp + PI-7-3.4f-mac-filter-h ZERO-diff fences; (c) NEW ctest exercises ALL extended bytes (not just one sample); (d) byte-equivalence of remaining 5 named escapes preserved for backward-compat with T_LOG_JSON_BYPASS_AUDIT + audit-line ERE tests.
 
 ## Human-gate decisions (defaults applied — architect overrides at Phase A)
 
-### HG-3.4e-1: BpffsRootFd reachability for reset_counters → **route through new `internal::reset_counters_request()` (mirror `internal::apply_request` pattern)**
+### HG-3.4f-1: extended `escape_audit_value` policy form → **keep 5 named + add `\xHH` (lowercase) for the rest**
 
-Preserves §5.22 anon-namespace fence on `BpffsRootFd`/`IfaceDirGuard`/`resolve_ifindex`. Reuses existing infrastructure (no duplication, no new shared-header surface). reset_counters.cpp's CLI-side responsibility shrinks to: parse argv → call `internal::reset_counters_request(iface, optional<rule_id>)` → emit audit-log → return exit code. The hardening lives entirely in loader.cpp where the precedent infrastructure is. Alternatives: extract to shared header (broadens API surface vs §5.22 fence); duplicate minimal version (guard #9 violation at function level — distinct from helper-duplication which is acceptable).
+Existing audit-line escape policy at `bypass.cpp:48-67` (DUP at `reset_counters.cpp:55-74`) covers ONLY `\\` `\"` `\n` `\r` `\0` via the switch's named cases; all other bytes (including 0x01-0x08, 0x0B-0x0C, 0x0E-0x1F, 0x7F) fall through `default` and emit raw. Extended policy: keep the 5 named escapes EXACTLY (preserves byte-equivalence with T_LOG_JSON_BYPASS_AUDIT step (i) + all audit-line ERE assertions); add an inner conditional in `default` for `c < 0x20 || c == 0x7F` → `\xHH` lowercase. Rationale: (a) audit-line is plain-text-mode emission (NOT JSON), so `\xHH` C-style escape matches operator-readable convention; (b) lowercase hex matches `json_escape`'s `\u00xx` format already in use at logger.cpp:82; (c) preserves backward-compat with existing 5 named escapes used in audit-line tests. Architect may flip to "all <0x20 + 0x7F → `\xHH` uniform" if they see a reason — but default = backward-compat preserving.
 
-### HG-3.4e-2: sidecar iface subdir symlink defense → **mirror BpffsRootFd pattern**
+### HG-3.4f-2: PI-7-3.4f ZERO-diff fence → **YES, preserve streak**
 
-Open SIDECAR_ROOT with `O_PATH | O_DIRECTORY | O_NOFOLLOW`; use `mkdirat(root_fd, "<iface>", 0755)` + `openat(root_fd, "<iface>/rule_index.json.tmp", O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW, 0644)`. Reject `S_ISLNK` on `fstatat(root_fd, "<iface>", AT_SYMLINK_NOFOLLOW)` lstat-equivalent BEFORE write. Mechanical mirror of §5.22's bpffs hardening + §5.31 EDIT-1's existing SIDECAR_ROOT pattern. Architect picks exact shape per existing precedent.
+`src/common/logger.hpp` + `include/xdpmf/config.hpp` + `src/common/mac_filter.h` all UNTOUCHED. The new escape_util has its OWN header (`src/common/escape_util.hpp`); logger.cpp + sidecar.cpp + bypass.cpp + reset_counters.cpp `#include "escape_util.hpp"` and drop their local helper defs. Result: PI-7-3.4f-hpp = **12th consecutive ZERO-diff** (extending PI-7-3.4e-hpp's 11-streak); PI-7-3.4f-cpp = **7th consecutive** for config.hpp (extending 6-streak). Architect may carve out if a deeply pragmatic reason surfaces — but the default is strong: this streak is the strongest in project history per session handoff memory.
 
-### HG-3.4e-3: exit code for reset-counters path-refused → **exit 8 (PathRefused)**
+### HG-3.4f-3: NEW ctest for extended-policy operational evidence → **YES, at least ONE**
 
-Mirrors §5.22 — operator gets semantic-meaningful code consistent with loader's `--iface ../` rejection. Alternative exit 1 (generic CliError) is less informative + breaks the precedent that PathRefused = "the input was a symlink/bad-path; refused to operate". `LoaderError::PathRefused` enum value already exists; no new exit code introduced.
+Sec M1 closure needs operational evidence. At minimum ONE NEW ctest exercises the extended-policy bytes (e.g., `xdpmacfilter bypass --iface IFACE_A --unsafe --reason $'\x01\x07\x1f\x7f'` → stderr audit-line contains `\x01\x07\x1f\x7f` literal). Shape choice (impl/tester): pure-unit-test of `escape_util::escape_audit_value()` directly (preferred — no veth needed; no RESOURCE_LOCK; ~30-50 LOC bash invoking a small C++ test harness OR exit-code via xdpmacfilter subcommand) vs full integration test via real bypass (heavy; needs xdp_fixture lock per guard #12). Architect picks; default = at least ONE NEW ctest, shape flexible. Existing 5 JSON-shape ctests + audit-line ERE tests need NO body edits (escape_util preserves prior policies for those bytes).
 
-### HG-3.4e-4: sidecar iface-subdir symlink response → **WARN + skip (PI-32-3.4b PRESERVED)**
+### HG-3.4f-4: explicit guard #9 OVERRIDE → **YES, with rule-of-three rationale citation in §5.37**
 
-Sidecar-never-throws contract from §5.31 EDIT-1: log a NEW `sidecar.warn.iface_dir_symlink` event via `logger.emit` and skip the write (rule_index.json not refreshed → exporter degrades to `action="unknown"` per existing PI-32-3.4b). Do NOT escalate to fatal apply error. Apply continues + exits 0. Operator alerts go through logger.warn.sidecar.* event series (mirrors §5.31 EDIT-1 event class).
+§5.37 MUST explicitly cite §5.32 D-3.5-2's guard #9 ("helper-location duplication-over-extraction; prefer duplication of small <100 LOC helpers in brownfield slices") and explain why THIS slice escapes it: rule-of-three trigger — 6 duplicate function bodies × 4 modules (`json_escape` × 2 + `escape_audit_value` × 2 + `format_timestamp_utc` × 2) total ≈80 LOC of duplication. /mint-review Theme B cross-validation across 3 independent dimensions (security + architecture + code-quality) is the operational signal that the rule-of-three line has been crossed. Architect documents this as a §5.37 D-decision (e.g., `D-3.4f-1 — guard #9 escape valve via rule-of-three`).
 
-## Open mechanism questions (architect decides; document in §<new>)
+## Open mechanism questions (architect decides; document in §5.37)
 
-### Q1: `dev_valid_name` validation timing in reset-counters
-- **A1**: CLI-parse-time (in `parse_reset_counters` in cli.cpp)
-- **A2**: `reset_counters_main` entry
-- **A3**: `internal::reset_counters_request()` entry (mirrors apply_request)
-- **Recommendation: A3** — fail-closed AT the internal-helper entry consistent with apply_request's iface validation. CLI-side argv-parse stays minimal (already does basic non-empty check).
+### Q1: scope of consolidation — include `format_timestamp_utc` OR carve out?
 
-### Q2: re-use `resolve_ifindex` directly vs new `validate_iface_name` helper
-- **A1**: call `resolve_ifindex(iface, LoaderError::LoadFailed)` — does ifindex lookup + dev_valid_name in one
-- **A2**: split into `validate_iface_name(iface)` + `resolve_ifindex(iface)` for callers that don't need ifindex
-- **Recommendation: A1** — minimize new surface; reset_counters doesn't need ifindex separately; the wasted ifindex lookup is microseconds.
+- **A1**: include `format_timestamp_utc()` in `src/common/escape_util.{hpp,cpp}` alongside the 2 escape helpers (one cycle, one file, ~10-15 extra LOC).
+- **A2**: defer `format_timestamp_utc` to a separate `src/common/time_util.{hpp,cpp}` carve-out (cleaner semantic separation; second cycle of effort).
+- **Recommendation**: **A1**. Same D-3.5-2 source duplication; same Theme B cluster framing; consolidates the 3 Theme B helpers in one pass. Module name `escape_util` is mildly inaccurate (timestamp ≠ escape) but the alternative is shipping the same refactor twice. Naming alternatives if A1: rename module to `xdpmf::common::format_util` OR `xdpmf::common::log_helpers` (architect's call at Phase A — D-decision territory). If architect prefers A2, brief accepts; the carve-out is shippable in the same cycle if scope still fits.
 
-### Q3: separate test for sidecar iface-subdir symlink vs fold into existing
-- **A1**: NEW T_SIDECAR_IFACE_SYMLINK_REFUSAL.sh standalone (mirrors T_BPFFS_ROOT_SYMLINK precedent)
-- **A2**: fold into existing T_BPFFS_ROOT_SYMLINK with new sub-case
-- **A3**: fold into T_SIDECAR_JSON_SHAPE
-- **Recommendation: A1** — clean separation, mirrors §5.22 precedent's standalone test, RESOURCE_LOCK isolation cleaner.
+### Q2: extended-byte escape notation — `\xHH` vs `\u00HH`?
 
-### Q4: sidecar SIDECAR_ROOT lstat (existing §5.31 EDIT-1) vs new iface-subdir lstat — single helper or two
-- **A1**: two helpers (`lstat_sidecar_root` existing + new `lstat_iface_subdir`)
-- **A2**: one parameterized helper `lstat_path_safe(path)` covering both
-- **Recommendation: A2** — DRY; matches §5.31 EDIT-1 hardening pattern; smaller diff.
+- **A1**: `\xHH` (C-style; 4 chars per escape). The /mint-review report cites this verbatim ("escape all bytes <0x20 + 0x7F as `\xHH`").
+- **A2**: `\u00HH` (RFC 8259 / JSON Unicode escape; 6 chars per escape; matches `json_escape`'s policy internal at logger.cpp:82).
+- **Recommendation**: **A1**. Audit-line is text-mode emission via stderr prose, NOT JSON. Mixing JSON-syntax escapes in text-mode log lines confuses operators (especially when grepping audit-line ERE). The two policies stay SEPARATE: `json_escape` continues to use `\u00xx` for JSON envelopes; `escape_audit_value` uses `\xHH` for text-mode audit prose. PI-3.5-1 byte-equivalence preserved (those 5 named escapes are byte-identical in both before/after).
 
-## Scope (MVP-3.4e — concrete items)
+### Q3: namespace + header naming (D-decision territory; architect picks at Phase A)
 
-### Item S-1 — Loader: NEW `internal::reset_counters_request()` helper
-**Where**: `src/lib/loader.cpp` (anon-namespace + `xdpmf::internal::` adjacent to `apply_request`) + `src/lib/apply_internal.hpp` (or NEW `src/lib/reset_counters_internal.hpp` — architect picks)
+- Options: `xdpmf::escape_util` (matches /mint-review prescription); `xdpmf::common::escape`; `xdpmf::common::strings`; `xdpmf::common` (if format_util consolidated per Q1.A1).
+- Architect resolves via Phase A grep + style consistency with existing `xdpmf::logger` (logger.hpp:28) and `xdpmf::internal` (apply_internal.hpp).
 
-- Signature: `void reset_counters_request(const ResetCountersRequest&)` taking iface + `std::optional<std::uint32_t> rule_id`.
-- Body: `resolve_ifindex(req.iface, LoaderError::LoadFailed)` (Q1.A3 + Q2.A1) → `BpffsRootFd root{}` → assert per-iface dir exists + is real dir (reuse `iface_entry_is_real_dir(root, req.iface)`) → `openat(root_fd, "<iface>/rule_counters_a", O_RDWR|O_NOFOLLOW)` → `openat(root_fd, "<iface>/rule_counters_b", O_RDWR|O_NOFOLLOW)` → zero-write per HG-3.4d-1 + D-3.4d-RESET-BOTH semantics.
-- Throws `std::system_error{LoaderError::PathRefused}` (HG-3.4e-3) on any O_NOFOLLOW + ELOOP / S_ISLNK path; propagates ENOENT-tolerant ifindex-not-found as `LoaderError::LoadFailed`.
+## Scope (cycle MVP-3.4f — concrete items)
 
-### Item S-2 — Reset_counters CLI: route through new internal helper
-**Where**: `src/cli/reset_counters.cpp` (significant rewrite)
+### Item E-1 — NEW `src/common/escape_util.hpp`
 
-- Strip `pin_path_for(iface, basename)` + the direct `bpf_obj_get` calls. CLI-side keeps: argv-parse → audit-log emit BEFORE writes → `internal::reset_counters_request(req)` → exit-code mapping from `std::system_error` catch arm (existing main.cpp pattern).
-- `escape_audit_value` stays (guard #9 — function-level duplication intentional per D-3.4d-6; NOT in this slice's scope per Narrow decision).
-- The `precondition probe` semantics shift: instead of `bpf_obj_get(rule_counters_a_path)` → `LoaderError::PathRefused (8)` if O_NOFOLLOW fires OR `LoaderError::LoadFailed (2)` on ENOENT (= "iface not attached"). Audit-log refused event extends to cover the new exit-8 case.
+**Where**: `src/common/escape_util.hpp` (NEW)
+Public surface:
+- `[[nodiscard]] std::string escape_json(std::string_view raw)` — moved verbatim from logger.cpp:68-94 / sidecar.cpp:93-119 (RFC 8259; `\\` `\"` `\n` `\r` `\t` `\b` `\f` + `\u00xx` for <0x20).
+- `[[nodiscard]] std::string escape_audit(std::string_view raw)` — moved + EXTENDED from bypass.cpp:48-67 / reset_counters.cpp:55-74. Policy per HG-3.4f-1: 5 named escapes preserved; ADD `\xHH` (lowercase) for `c < 0x20 || c == 0x7F` in the `default` branch.
+- `[[nodiscard]] std::string format_timestamp_utc()` — moved from logger.cpp:49-66 / sidecar.cpp:70-92 (IF Q1.A1).
 
-### Item S-3 — Sidecar: iface-subdir symlink defense
-**Where**: `src/lib/sidecar.cpp` (`mkdir_p` + `atomic_write_file` callers around `write_rule_index`)
+Naming convention notes: rename `json_escape` → `escape_json` (verb-first; preserves call-site shape `escape_json(x)`); rename `escape_audit_value` → `escape_audit` (verb-first; drops `_value` redundancy). Architect may opt to keep original names if preferred — brief flags rename as recommendation, not contract.
 
-- Open SIDECAR_ROOT (`/run/xdpmacfilter`) with `O_PATH | O_DIRECTORY | O_NOFOLLOW` once at the top of `write_rule_index` (RAII via new local class OR scope guard).
-- Replace `mkdir_p(dir)` with `mkdirat(root_fd, "<iface>", 0755)` (ENOENT-tolerant — create if missing); on ENOTDIR / EEXIST + `fstatat(root_fd, "<iface>", AT_SYMLINK_NOFOLLOW)` returning S_ISLNK → emit NEW `sidecar.warn.iface_dir_symlink` event (HG-3.4e-4) + return non-fatal.
-- Replace `::open(tmp_path.c_str(), O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0644)` with `openat(root_fd, "<iface>/rule_index.json.tmp", O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW|O_CLOEXEC, 0644)`.
-- Replace `::rename(tmp_path.c_str(), final_path.c_str())` with `renameat(root_fd, "<iface>/rule_index.json.tmp", root_fd, "<iface>/rule_index.json")`.
-- New helper per Q4.A2: `lstat_path_safe(...)` covering both SIDECAR_ROOT (existing) + new iface-subdir check (refactor existing §5.31 EDIT-1 lstat block to call it).
+### Item E-2 — NEW `src/common/escape_util.cpp`
 
-### Item S-4 — Logger: NEW event `sidecar.warn.iface_dir_symlink`
-**Where**: `src/common/logger.hpp` (kEventNames extension)
+**Where**: `src/common/escape_util.cpp` (NEW)
+Body: 3 function defs (or 2 if Q1.A2 splits timestamp out). Compiles with C++23. NO new external deps (stdlib `<string>` `<string_view>` `<format>` `<ctime>` only). Approximate size: ~80-100 LOC including comments + the 5-line policy table doc-comment for `escape_audit`.
 
-- Add 1 entry → kEventNames 35 → 36.
-- Emit-site: `src/lib/sidecar.cpp` per HG-3.4e-4 + Item S-3.
-- Fixture lockstep (Phase 2.7a): `tests/fixtures/log_events_v1.txt` 35 → 36 lines.
+### Item E-3 — EDIT `src/common/logger.cpp`
 
-### Item T-1 — NEW ctest: `T_RESET_COUNTERS_PATH_TRAVERSAL.sh`
-**Where**: NEW; entry in `tests/CMakeLists.txt`
-**Template**: `tests/T_BPFFS_ROOT_SYMLINK.sh` (verified existing).
+**Where**: `src/common/logger.cpp` (current 318 LOC)
+Diff:
+- `#include "escape_util.hpp"` near top
+- DELETE local `format_timestamp_utc()` def at :49-66 (IF Q1.A1) — keep if Q1.A2
+- DELETE local `json_escape()` def at :68-94
+- REPLACE 5 call-sites: `json_escape(...)` → `xdpmf::escape_util::escape_json(...)` at :149, :191, :197, :205, :216 (5 callers per Phase 2 grep; namespace path TBD by Q3)
+- REPLACE 1 call-site: `format_timestamp_utc()` → `xdpmf::escape_util::format_timestamp_utc()` at :183 (IF Q1.A1)
+- Net LOC: -40 to -50 (removed defs) + 5-6 namespace-prefix changes (~5 LOC longer total); ~35-45 LOC net reduction in logger.cpp.
 
-- Setup: attach iface normally.
-- Sub-case (a): `reset-counters --iface ../foo` → exit 8 (PathRefused) + stderr matches `"path-refused"` or `"refusing to operate"` substring per §5.22 phrasing.
-- Sub-case (b): `reset-counters --iface invalid name with spaces` → exit 8 (dev_valid_name reject).
-- Negation: `reset-counters --iface <real-iface>` → exit 0 + audit-log emitted (regression-baseline).
-- RESOURCE_LOCK: `xdp_fixture` (per guard #12).
+### Item E-4 — EDIT `src/lib/sidecar.cpp`
 
-### Item T-2 — NEW ctest: `T_SIDECAR_IFACE_SYMLINK_REFUSAL.sh`
-**Where**: NEW; entry in `tests/CMakeLists.txt`
-**Template**: `T_BPFFS_ROOT_SYMLINK.sh` + adapt for `/run/xdpmacfilter` path.
+**Where**: `src/lib/sidecar.cpp` (current 521 LOC)
+Diff (symmetric with E-3):
+- `#include "escape_util.hpp"` (or relative path via `<>`/`""` per project convention)
+- DELETE local `format_timestamp_utc()` def at :70-92 (IF Q1.A1)
+- DELETE local `json_escape()` def at :93-119
+- REPLACE 1 call-site: `json_escape(...)` → `escape_json(...)` at :129
+- REPLACE 1 call-site: `format_timestamp_utc()` at :131 (IF Q1.A1)
+- Net LOC: -45 to -55 in sidecar.cpp.
 
-- Setup: pre-create `/run/xdpmacfilter/<iface>` as symlink to `/tmp/attacker_target`.
-- Sub-case (a): `attach --iface <iface>` followed by `apply -f <config>` → apply rc=0 (sidecar warn + skip per PI-32-3.4b); stderr contains `sidecar.warn.iface_dir_symlink` event; `/tmp/attacker_target/rule_index.json` NOT created.
-- Sub-case (b) negation: clean `/run/xdpmacfilter/<iface>/` (no symlink) → apply rc=0 + sidecar writes successfully (rule_index.json present).
-- RESOURCE_LOCK: `xdp_fixture;sidecar_root` (NEW lock domain since iface subdir is host-global state under `/run`).
+### Item E-5 — EDIT `src/cli/bypass.cpp`
 
-### Item E-1 — EDITED fixture: `tests/fixtures/log_events_v1.txt`
-**Where**: existing fixture
-- Add `sidecar.warn.iface_dir_symlink` entry per S-4. Lockstep with kEventNames 35→36.
+**Where**: `src/cli/bypass.cpp` (current 246 LOC)
+Diff:
+- `#include "escape_util.hpp"` (path relative to src/common/ per `#include "../common/escape_util.hpp"` OR via include-dir if CMake adds src/common as PUBLIC include — architect picks)
+- DELETE local `escape_audit_value()` def at :48-67
+- REPLACE 2 call-sites: `escape_audit_value(...)` → `escape_audit(...)` at :196, :206
+- Net LOC: -20 in bypass.cpp.
+
+### Item E-6 — EDIT `src/cli/reset_counters.cpp`
+
+**Where**: `src/cli/reset_counters.cpp` (current 155 LOC)
+Diff (symmetric with E-5):
+- `#include "escape_util.hpp"`
+- DELETE local `escape_audit_value()` def at :55-74 + the DUP-INTENT comment at :49-54 (now obsolete; replace with brief `// escape via escape_util.hpp` if architect prefers, or no comment)
+- REPLACE 1 call-site: `escape_audit_value(...)` → `escape_audit(...)` at :112
+- Net LOC: -20 in reset_counters.cpp.
+
+### Item E-7 — EDIT `CMakeLists.txt` (top-level)
+
+**Where**: `CMakeLists.txt` lines 118-119 (xdpmf_internal target) + line 146-147 (xdpmf-exporter target) per Phase 2 grep
+Diff: ADD `src/common/escape_util.cpp` to BOTH `xdpmf_internal` and `xdpmf-exporter` source lists (mirroring `src/common/logger.cpp`'s Q6=B1 dup-TU pattern from §5.32). Two 1-line additions; total ~2 LOC. NO change to include-dirs UNLESS architect picks the relative-path `#include` route (then no include-dir change needed) vs the project-wide approach (then add src/common to include path — but project already does this via `${CMAKE_SOURCE_DIR}/src/common/mac_filter.h` extraction at line 68, so the pattern is established).
+
+### Item T-1 — NEW ctest exercising extended-policy bytes
+
+**Where**: `tests/T_BYPASS_AUDIT_CONTROL_CHARS.sh` (NEW) — name impl-flexible
+Body (high-level — impl/tester decides exact shape):
+- Setup: setup_veth + attach (default mode) on IFACE_A with allow=MAC_GOOD.
+- Invocation: `xdpmacfilter bypass --iface IFACE_A --unsafe --reason $'\x01\x07\x1f\x7f literal'` (or pure-unit-test variant calling escape_audit() directly via a tiny test harness binary IF architect prefers; pure-unit shape is preferred — no veth, no RESOURCE_LOCK).
+- Assertions: stderr audit-line contains literal `\x01\x07\x1f\x7f` (4 escaped bytes, each as `\x` + 2 hex chars); existing 5 named escapes (`\n`/`\r`/etc.) NOT replaced for sample reason containing newline (preservation check for backward-compat).
+- NEGATION control: reason with ONLY printable ASCII → no `\x` sequences in audit-line.
+- Shape decision is impl/tester's; brief specifies the policy contract (HG-3.4f-1), not the test mechanics.
+- RESOURCE_LOCK (guard #12): IF veth-shape → `xdp_fixture`; IF pure-unit-shape (no veth) → no lock declaration needed.
+
+### Item T-2 — UNCHANGED ctest carve-out attestation
+
+**Where**: §6.5 invariants block in design.md §5.37
+List all existing escape-policy-sensitive ctests as UNCHANGED-BUT-AFFECTED zero-diff fence:
+- T_SIDECAR_JSON_SHAPE — uses `json_escape` via real loader; output byte-equivalent.
+- T_LOG_JSON_LOADER_EVENTS / T_LOG_JSON_EXPORTER_EVENTS / T_LOG_JSON_ENVELOPE_INVARIANTS — JSON envelope tests; byte-equivalent.
+- T_LOG_JSON_BYPASS_AUDIT — includes step (i) `has"quote` escape check; byte-equivalent (`\"` is in the 5 named).
+- Audit-line ERE tests (T_BYPASS_CMD_DETACHES, T_BYPASS_REQUIRES_UNSAFE_NONINTERACTIVE, T_CLI_RESET_COUNTERS*, etc.) — audit-line shape byte-equivalent for the 5 named escapes.
+
+Reviewer's point 5 walks each + confirms zero diff in git diff of each test body.
 
 ## Out of scope (explicit)
 
-Per Narrow scope decision (2026-05-27 inline). Bonus items from mint-review deferred to separate slices:
-
-- **escape_util.{hpp,cpp} extraction** (sec M1 + arch M2 + CQ M2 cross-validated theme B) — defer to MVP-3.4f.
-- **Dead BpffsDir + XdpAttachment delete from raii.hpp** (CQ H1, ~75 LOC) — defer to MVP-3.4f or housekeeping mini.
-- **Exporter --bind non-loopback WARN** (sec M2) — defer to MVP-3.5b (exporter-adjacent).
-- **`.github/workflows/ci.yml` matrix** (testing H1 cascades) — separate infra cycle, not /mint-dev.
-- **T_SANITIZER_BUILD ctest-recurse refactor** (testing H2) — depends on CI cycle.
-- **TUN/TAP injector for T_DROP_MALFORMED** (testing H3) — depends on CI cycle OR independent test-infra cycle.
-- **Compound exporter scrape-path perf** (perf compound, ~88% reduction max-fleet) — separate perf cycle.
-- **datapath dispatch helper consolidation** (CQ M1, mac_filter.bpf.c MAC vs CIDR branch) — defer.
-- **logger.cpp dup-TU promotion to OBJECT lib** (arch M1) — defer.
-- **README rewrite + HANDOFF.md + Ansible Jinja** — doc backlog (docs/BACKLOG.md, manual prose).
-- **CO-RE field probes + T_CORE_FIELD_PROBE** (testing M1) — defer.
-- **Exit-code 8 vs 1 generalization** — Q3 picked 8; future cycles MAY revisit if new path-class additions surface.
-
-Carry-forward from §5.35 §7 OOS unless noted — unchanged.
+- **KC-1 closure of the OTHER half** (security L2 — action label defensive escape via `kActionLabels`-anchored allowlist instead of raw value). Separate slice; this brief ONLY closes the control-char gap (sec M1).
+- **KC-2 (exporter --bind non-loopback WARN)** — separate slice per /mint-review action item #10.
+- **Theme C (dead BpffsDir + XdpAttachment delete from raii.hpp)** — separate slice per /mint-review action item #6.
+- **Theme D / CQ M1 (dispatch_match helper in mac_filter.bpf.c)** — separate slice per action item #12.
+- **xdpmf_logger OBJECT/STATIC lib promotion** (/mint-review action item #13) — NEW FENCE; pure-cosmetic; deferred indefinitely.
+- **VERSION bump** — pure refactor + sec hardening; no operator-observable API change; no bump. (Architect overrides if they conclude the extended audit-escape policy IS an observable operator surface needing a 0.10.1 patch bump — defaultable but flag-worthy.)
+- **Doc updates** (CHANGELOG.md / README.md / docs/BACKLOG.md cross-out for this item) — minimal CHANGELOG entry SHOULD be added (single-line under MVP-3.4f or §5.37 anchor); README untouched (it's still in CRITICAL backlog state per B1 — separate prose-work slice).
+- **Renaming `json_escape` → `escape_json` and `escape_audit_value` → `escape_audit`** is recommended in E-1 but NOT contractual; architect MAY keep originals if preferred — brief defers naming to architect's tactical D-decisions.
 
 ## Definition of done
 
-- §5.36 amendment (or architect-named §) in design.md covering: HG-3.4e-1..4 + Q1-Q4 + 2 new PIs.
-- PI-1..PI-34 + PI-3.4b-* + PI-3.4d-* preserved; PI-32-3.4b explicitly upheld (sidecar never throws).
-- PI-7-3.4e-hpp/cpp: 11th/6th consecutive ZERO-diff.
-- ctest baseline 64 → 66 (+2 NEW T-1 + T-2). No EDITED ctests beyond fixture-lockstep (E-1).
-- `mint/review.md` round-1 verdict = pass (5-point brownfield).
-- One git commit per phase boundary.
+- §5.37 amendment in `mint/design.md` (estimated ~150-250 lines: scope + HG/Q resolutions + D-decisions + FileList tables + PI block + OOS block + Phase A notes)
+- PI continuity:
+  - PI-7-3.4f-hpp = **12th** consecutive ZERO-diff on `src/common/logger.hpp`
+  - PI-7-3.4f-cpp = **7th** consecutive ZERO-diff on `include/xdpmf/config.hpp`
+  - PI-3.5-1 byte-equivalence text-mode emissions preserved
+  - PI-32-3.4b sidecar-never-throws preserved (escape_util has no throws — pure stdlib `std::string` ops)
+  - Existing 5 named escapes byte-equivalent in escape_audit (backward-compat fence)
+- ctest baseline: 66 → ≥67 (T-1 NEW; possibly +1 more if architect splits into 2 ctests for veth-vs-unit shapes)
+- mint/review.md round-1 verdict = pass
+- One git commit per phase boundary
 
 ## Dependencies
 
-- Build: libbpf 1.x (no new deps).
-- Runtime: kernel BPF support (existing).
-- Platform: `/run/xdpmacfilter/` tmpfs path (existing); `/sys/fs/bpf/xdpmacfilter/` bpffs (existing).
-- No new caps required (sidecar already uses CAP_BPF + write perms; reset-counters re-uses).
+- C++23 stdlib (`<string>`, `<string_view>`, `<format>`, `<ctime>`) — already required by current logger/sidecar code; no new deps.
+- CMake source-list edits in top-level CMakeLists.txt (xdpmf_internal + xdpmf-exporter dup-TU pattern preserved per §5.32 Q6=B1).
+- No kernel/platform deps.
+- No external BPF/libbpf changes.
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 
@@ -173,59 +186,56 @@ packs:
   reviewer:   []
 ```
 
-(No packs — established 18-cycle precedent sufficient.)
-
 ---
 
 ## Pre-brief sanity check (per [[mint-hld-scope-discipline]])
 
-- Slice goal stated in one sentence: ✓ (KC-3 closure via §5.22 hardening pattern bilateral extension).
-- Multi-axis check: slight — resolved inline 2026-05-27 to Narrow scope (only KC-3; bonus items deferred). NOT multi-axis enough for /mint-hld.
-- Mechanical-answer check: ✓ — §5.22 + §5.31 EDIT-1 precedents are direct templates.
-- Brief author overconfidence check: ⚠ — third dogfood of `/mint-briefer`; Phase 2.7b + Phase 1.5 PRESERVE-vs-RESET both N/A this slice; Phase 4.4 operative-semantic discipline applied.
-- Phase 1.5 PRESERVE-vs-RESET check: N/A — no stateful-map atomic-swap promotion.
+- **Multi-axis design space?** No. One axis: extract-pattern (chosen) vs status-quo-duplication (rejected by /mint-review).
+- **Brief-author uncertain across ≥2 axes?** No. /mint-review report prescribes the resolution verbatim (Theme B → `src/common/escape_util.{hpp,cpp}` + extend policy).
+- **Expensive to undo?** No. Pure refactor + additive policy extension; rollback = revert single commit.
+- **≥3 distinct viable options?** No. Extract pattern is the one viable option per cross-validated /mint-review signal.
+- **Mechanical-answer check**: ✓ yes — answer falls out of /mint-review report's Theme B Resolution prose + rule-of-three trigger met (escape from guard #9 documented).
+- **Has /mint-hld been run?** No — not needed. Single-architect `/mint-dev` handles it.
+- **Brief-author overconfidence flag**: Phase 2 grep was exhaustive (file/symbol/call-site/test-fixture); architect repeats independently per guard #5.
+
+**Verdict**: this slice is mechanical extension of /mint-review prescription. `/mint-hld` overkill. Proceed with `/mint-dev`.
 
 ## Notes for architect Phase A code-grep discipline (per architect spec rules)
 
-Brief author already ran Phase 2 greps. Architect re-verifies INDEPENDENTLY + extends:
+Brief-author already ran these greps per Phase 2 — architect re-verifies + extends:
 
-```bash
-# Confirm BpffsRootFd + resolve_ifindex location (anon-namespace in loader.cpp)
-grep -nE "class BpffsRootFd|IfaceDirGuard|^.*resolve_ifindex" src/lib/loader.cpp | head -15
+1. **Confirm 4 helper bodies byte-identical in pairs** (or document divergence):
+   - `diff <(sed -n '49,66p' src/common/logger.cpp) <(sed -n '70,92p' src/lib/sidecar.cpp)` (format_timestamp_utc)
+   - `diff <(sed -n '68,94p' src/common/logger.cpp) <(sed -n '93,119p' src/lib/sidecar.cpp)` (json_escape)
+   - `diff <(sed -n '48,67p' src/cli/bypass.cpp) <(sed -n '55,74p' src/cli/reset_counters.cpp)` (escape_audit_value)
+   - If any pair diverges, architect documents the divergence as a D-decision + picks the canonical form for escape_util.
 
-# Confirm reset_counters.cpp's current unsafe-path-construction sites
-grep -nE "pin_path_for|bpf_obj_get|XDPMF_BPFFS_ROOT" src/cli/reset_counters.cpp | head
+2. **Call-site enumeration (exhaustive)**:
+   - `grep -rn 'json_escape(' src/ include/` — expect 6 internal callers + 2 defs (8 total grep hits per Phase 2)
+   - `grep -rn 'escape_audit_value(' src/ include/` — expect 3 internal callers + 2 defs (5 total)
+   - `grep -rn 'format_timestamp_utc(' src/ include/` — expect 2 internal callers + 2 defs (4 total)
+   - Architect spot-checks no additional callers were added between brief-time and design-time.
 
-# Confirm sidecar.cpp's current per-iface-subdir handling
-grep -nE "mkdir_p|atomic_write_file|::open|::rename|::lstat|S_ISLNK" src/lib/sidecar.cpp | head -15
+3. **CMakeLists.txt source-list pattern** (Q6=B1 dup-TU mirror):
+   - `grep -nE 'logger\.cpp|src/common' CMakeLists.txt` to locate the 2 anchor lines (118 + 146 per Phase 2 grep); confirm escape_util.cpp goes in BOTH; confirm no src/common/CMakeLists.txt subfile exists (it doesn't per Phase 2).
 
-# Confirm T_BPFFS_ROOT_SYMLINK precedent (template for both NEW ctests)
-sed -n '1,40p' tests/T_BPFFS_ROOT_SYMLINK.sh
+4. **PI-7-3.4f-hpp fence smoke** (pre-commit):
+   - `git diff f2122c7..HEAD -- src/common/logger.hpp include/xdpmf/config.hpp src/common/mac_filter.h` MUST be empty after impl + tester complete. Architect documents the fence in §5.37 PI block.
 
-# Verify §5.22 BpffsRootFd hardening invariant — read the design section for the load-bearing precedent
-grep -nE "§5.22|BpffsRootFd|O_PATH.*O_DIRECTORY.*O_NOFOLLOW" mint/design.md | head -15
+5. **Existing test fixture / regex impact (guard #13 territory)**:
+   - `grep -rn 'has\"quote\|\\\\u00\|\\\\x[0-9a-fA-F]' tests/` — Phase 2 confirmed no fixture stores extended-policy literal output; T_LOG_JSON_BYPASS_AUDIT step (i) covers `\"` (preserved by HG-3.4f-1).
+   - `grep -rn 'json_escape\|escape_audit_value\|format_timestamp_utc' tests/` — should return NO hits (helpers are internal C++ symbols, not bash-test surface). Confirms zero ctest body EDITs are needed for the refactor itself.
 
-# Verify §5.31 EDIT-1 sidecar SIDECAR_ROOT lstat — symmetric to this slice's per-iface gap
-grep -nE "§5\.31 EDIT-1|sidecar.*symlink|SIDECAR_ROOT" mint/design.md | head -15
-
-# kEventNames count consistency
-grep -nE "kEventNames|kEventCount|fixtures/log_events_v1.txt" src/common/logger.hpp tests/
-
-# Confirm PI-32-3.4b preserved-contract (sidecar never throws)
-grep -nE "PI-32-3.4b|sidecar.*never.*throws|action=.unknown." mint/design.md | head -10
-```
+6. **Rename impact (E-1 recommendation)**: IF architect adopts `escape_json`/`escape_audit` rename, run `grep -rn 'json_escape\|escape_audit_value' src/ include/` AFTER edit — must return zero hits. Else (kept original names), no rename grep needed.
 
 ### Anti-misdiagnosis guards applicable to this slice (per Phase 3)
 
-- **Guard #5 (Phase A code-grep discipline)** — always applies; architect re-runs above.
-- **Guard #9 (helper-location duplication-over-extraction)** — HG-3.4e-1 architectural choice (extract `BpffsRootFd` vs route-through-internal-helper vs duplicate). Default = route-through-internal — preserves §5.22 anon-namespace fence + DRY. Architect picks with evidence.
-- **Guard #12 (RESOURCE_LOCK for shared host state)** — T-1 needs `xdp_fixture`; T-2 needs `xdp_fixture;sidecar_root` (NEW lock domain because /run/xdpmacfilter is host-global writable state).
-- **Guard #13 (fixture cross-reference)** — Item S-4 NEW logger event → fixture E-1 lockstep update (kEventNames 35→36 + tests/fixtures/log_events_v1.txt +1 line). Pre-listed in scope.
+- **Guard #5 (Phase A code-grep discipline)**: ✓ applies; architect repeats brief-author's Phase 2 greps independently.
+- **Guard #9 (helper-location duplication-over-extraction, MVP-3.5-specific)**: ⚠ **EXPLICIT OVERRIDE this slice** — rule-of-three trigger (6 duplicates × 4 modules ≈80 LOC) escapes the brownfield-duplication-preference fence. /mint-review Theme B cross-validation (3 dims) is the documented signal. Architect MUST cite this override in §5.37 as a D-decision (`D-3.4f-1 — guard #9 escape valve via rule-of-three`).
+- **Guard #10 (catalogue arithmetic)**: N/A — `kEventNames` (36 entries) UNTOUCHED.
+- **Guard #11 (VERSION-bump test-literal propagation)**: N/A — no VERSION bump (per OOS).
+- **Guard #12 (RESOURCE_LOCK for shared host state)**: ⚠ conditional — IF T-1 takes veth-shape, `RESOURCE_LOCK xdp_fixture` REQUIRED; IF pure-unit-shape (preferred), no lock needed. Architect's pick at Phase A.
+- **Guard #13 (fixture cross-reference for retired strings)**: N/A — no strings retired; policy is additive (existing 5 named escapes preserved).
+- **Guards #14–#19**: N/A — netns/map-shape/bilateral-invariant territory; not applicable to pure-refactor + policy-extension slice.
 
-### Cycle-specific anti-misdiagnosis (potentially new guards)
-
-- **Symmetric §5.22 invariant restoration discipline (NEW candidate guard #17)**: when mint-review surfaces a security hardening regression vs an existing invariant (§5.22 here), the brief MUST locate ALL call-sites that opted out of the invariant + close them in one slice (bilateral). One-sided fix is half-measure. Validated this cycle: reset-counters + sidecar both deviate from §5.22; both fixed in same amendment. Future-cycle guard for architect: when applying invariant-restoration, `grep` for the ANTI-PATTERN (e.g., raw `::open` without O_NOFOLLOW, raw `bpf_obj_get(abspath)` without root-fd) ACROSS THE WHOLE src/ tree to confirm bilateral coverage.
-
-### Operative-semantic SHOULD-hint discipline (per /mint-briefer Phase 4.4)
-
-Counts/sizes in verifiable-invariants block are **operative-semantic, not literal-precise**. Impl deviations on small details (exact O_NOFOLLOW placement order, helper file naming `lstat_path_safe` vs `lstat_safe_path`, audit-log refused-event wording tweaks, ctest sub-case ordering) are `inline-merge` per design's resolution rule — NOT `[CONTRACT-DRIFT]` per reviewer.
+**Operative-semantic discipline reminder (Phase 4.4)**: counts in this brief (~80 LOC duplication; ~10 LOC net reduction; 6 callers; 3 callers; 2 callers) are SHOULD-level orientation, not contracts. Impl deviations on those (different namespace pick, different rename choice, different ctest shape, marginally different LOC reduction) are `inline-merge` per design's resolution rule. Architect documents the operative shape in §5.37; reviewer verifies the shape, not the literal numbers.
