@@ -10427,3 +10427,875 @@ This slice carries forward all 12 anti-misdiagnosis guards from prior cycles + a
 - **Consolidated anti-misdiagnosis guards file** — workflow-level; outside /mint-dev scope.
 
 Evidence: `mint/task-brief.md` MVP-3.4b cycle 2 brief (HG-3.4b-c2-1..5 + Q1-Q4 + Items D-1/D-2/L-1..L-4/T-1..T-3/E-1/E-2/V-1/V-2); `mint/architecture-v2.md` §"§MVP-3.4 Open Question #13 RESOLUTION" Option 2 + Caveat (b) (the load-bearing pre-decision, committed 2d4b31a 2026-05-24); §5.26 Q1 AS1 + Q2 A1 (atomic-swap parent pattern); §5.27 Q1 AS1 (CIDR axis precedent — DIRECT MIRROR for rules axis); §5.29 HG-3.4-1 + Q3 (rules+action_table SKELETON declared + populated + WARN — the contract LIFTED this slice); §5.30 HK-9 kManagedMaps[] (the landmine refactor; 3rd consecutive cycle's dividend); §5.31 D-3.4b-13 + D-3.4b-15 (`MacRule` / `CidrRule` anon-namespace shape — precedent for rule_id-carrying intermediate vectors); §5.31 PI-13-3.4b + PI-28-3.4b + PI-29-3.4b (the cycle-1 ancestor's contracts; PI-13-3.4b PRESERVED; PI-28/29-3.4b LIFTED per LIFTED PI declarations block); §5.32 EDIT-1 catalogue arithmetic precedent (D-3.4b-c2-4 catalog count adjustment 34 → 33 follows same shape); §5.32 EDIT-2 PI-6 carve-out language + §5.31 EDIT-2 PI-6 3-EDIT carve-out (PI-6-3.4b-c2 2-EDIT carve-out follows same precedent); §5.33 PI-7-3.5.5-cpp ZERO-diff strongest cycle (this slice intentionally breaks the streak with the D-1/D-2/L-1..L-4 edits per the operative operative point of the slice); architect-spec §6.5 Verification-hints discipline + §6.6 Anti-misdiagnosis institutional learning (both applied in this amendment per the standard discipline).
+
+### §5.35 MVP-3.4d: `reset-counters` subcommand + `rule_counters` atomic-swap promotion (brownfield amendment, 2026-05-27)
+
+**Purpose**: ship the **counter management API** deferred from MVP-3.4b cycle 2 §7 OOS (`reset-counters` follow-up fence). Two coupled deliverables:
+
+1. **NEW `xdpmacfilter reset-counters --iface X [--rule-id N]` subcommand** — explicit operator-initiated zero-write of the per-rule packet counter PERCPU map(s). Without `--rule-id` flag = zero all 64 slots; with flag = zero only slot N. State requirement: iface MUST be attached (rule_counters pin(s) must exist). Audit-stderr line at action time mirroring `bypass` shape verbatim. Closes §5.34 §7 OOS "`reset-counters` subcommand" fence.
+
+2. **`rule_counters` atomic-swap promotion (structural-only)** — promote `rule_counters` PERCPU_ARRAY to parallel ARRAY_OF_MAPS shape mirroring §5.34 4-axis pattern, adding the **5th axis** (`rule_counters_outer + rule_counters_a + rule_counters_b`). **PI-3.4b-2 counter-monotonicity-across-apply PRESERVED** (semantic UNCHANGED per HG-3.4d-5) — counters survive `apply -f` via a NEW apply-step per-CPU **copy-forward** from old-active rule_counters inner to inactive rule_counters inner BEFORE active_idx flip (D-3.4d-3). Atomic-swap shape is structural prep for a hypothetical future "reset-on-apply" semantic (SKIP the copy step → flip alone resets the inactive view). NOT a behaviour change THIS slice. Reset zeroing comes ONLY via the new CLI (HG-3.4d-5).
+
+**Anchor sections**: §5.26 Q1 AS1 + Q2 A1 (atomic-swap parent pattern); §5.27 Q1 AS1 (CIDR-axis parallel-outer precedent); §5.29 HG-3.4-2 + §5.30 HK-4 (`bypass` subcommand — DIRECT TEMPLATE for `reset-counters`); §5.31 PI-3.4b-2 (counter-monotonicity-across-apply — PRESERVED); §5.31 D-3.4b-13 (kManagedMaps[] `rule_counters` entry — the row this slice REMOVES + replaces with 3); §5.34 HG-3.4b-c2-1 + D-3.4b-c2-1 + D-3.4b-c2-8 (rules-axis parallel-promotion shape — DIRECT MIRROR pattern for rule_counters axis); §5.34 PI-29-3.4b-c2 (4-axis active_idx mechanism — extends to 5 axes here per D-3.4d-7); §5.30 HK-9 kManagedMaps[] catalog (4th consecutive cycle's dividend); §4.1 exit-code table (UNCHANGED — no new exit code; reset-counters reuses 1=CliError per HG-3.4d-3); §4.3 LoaderError enum (UNCHANGED — PI-7-3.4d-hpp ZERO-diff continues; 10th consecutive on loader.hpp).
+
+**Scope contract (§5.35 short form)** — assumes Phase A literature-precedent affirms PERCPU-as-inner feasibility; impl Phase 2.5 confirms empirically (see §5.35 Phase A grep §6 + D-3.4d-FEAS):
+
+- NEW (source files, 2): `src/cli/reset_counters.hpp` + `src/cli/reset_counters.cpp` (direct template = `src/cli/bypass.{hpp,cpp}`; helpers DUPLICATED per guard #9). NO new translation unit boundary changes (just two new files registered in `src/cli/CMakeLists.txt`).
+- NEW (BPF maps, 4): `struct rule_counters_inner` template + `rule_counters_a` + `rule_counters_b` PERCPU_ARRAY instances + `rule_counters_outer` ARRAY_OF_MAPS. Parallel-swap symmetry with §5.34 rules-axis (but PERCPU inners; `rule_counters_outer` and `rules_outer` are sibling outers, indexed by the SAME `active_idx`).
+- REMOVED (BPF map): the existing single `rule_counters` PERCPU_ARRAY. PI-3.4d-2-removal: the prior `${PIN_DIR}/<iface>/rule_counters` pin disappears; replaced by `${PIN_DIR}/<iface>/rule_counters_outer` + `rule_counters_a` + `rule_counters_b`.
+- NEW (datapath): `bump_rule` helper signature extends from `bump_rule(__u32 rule_id)` to `bump_rule(__u32 rule_id, __u32 active)`. Both call-sites in `mac_filter_prog` (MAC HASH-hit + CIDR LPM_TRIE-hit branches) pass the existing `active` snapshot. Body changes to `rule_counters_outer[active] → rule_counters_inner[rule_id] → bump`. 5-axis active_idx-snapshot discipline (D-3.4d-7).
+- NEW (apply-step): `copy_rule_counters_forward(int old_active_inner_fd, int new_active_inner_fd)` userspace helper in `loader.cpp` — per-rule_id per-CPU lookup-then-update loop. Called BEFORE active_idx flip in `apply_request`. Preserves PI-3.4b-2 monotonicity across apply (D-3.4d-3).
+- NEW (3 ctests + 1 conditional): `T_CLI_RESET_COUNTERS.sh` (§6.NN), `T_CLI_RESET_COUNTERS_RULE_ID.sh` (§6.NN+1), `T_CLI_RESET_COUNTERS_NO_IFACE.sh` (§6.NN+2). Conditional 4th `T_RULE_COUNTERS_ATOMIC_SWAP.sh` (§6.NN+3) IF HG-3.4d-4 default ships. All 4 take `RESOURCE_LOCK xdp_fixture` (guard #12).
+- EDITED (1 ctest body, version-literal): `T_EXPORTER_METRICS_FORMAT.sh` HK-8/PI-8-3.4d-forced version-literal bump at the `xdpmf-exporter 0.9.0` → `xdpmf-exporter 0.10.0` sites. Body diff = 4 LOC EDIT at the 4 literal sites; NO test-logic change. Precedent: §5.31 EDIT-2 + §5.32 EDIT-2 + §5.34 EDIT (PI-8 carve-out is now stable cross-cycle pattern).
+- EDITED (1 ctest body, fixture cross-reference per guard #13): `T_CLI_HELP_VERSION.sh` — extend the `--help` content assertions to include the new `reset-counters` subcommand line + its flags. Body diff: ~3-5 LOC additive (impl-flexible — adding `grep -q -F -- 'reset-counters'` per the existing pattern at lines 40-53; precision count is operative-semantic SHOULD-hint, not literal-precise per Phase 4.4 discipline).
+- EDITED (BPF source): `src/bpf/mac_filter.bpf.c` — B-1 (`rule_counters` map promotion to parallel ARRAY_OF_MAPS + bump_rule helper signature/body change per D-3.4d-1 + D-3.4d-2).
+- EDITED (loader): `src/lib/loader.cpp` — L-1 (kManagedMaps[] 15 → 17 entries: REMOVE `rule_counters`; ADD `rule_counters_a` + `rule_counters_b` + `rule_counters_outer`) + L-A (NEW `copy_rule_counters_forward` helper at anon-namespace + call-site insertion in `apply_request` BEFORE active_idx flip per D-3.4d-3).
+- EDITED (shared header): `src/common/mac_filter.h` — L-2 (ADD `XDPMF_MAP_RULE_COUNTERS_OUTER_NAME` + `XDPMF_MAP_RULE_COUNTERS_INNER_A_NAME` + `XDPMF_MAP_RULE_COUNTERS_INNER_B_NAME`; DELETE `XDPMF_MAP_RULE_COUNTERS_NAME`). `XDPMF_RULE_COUNTERS_MAX` alias UNCHANGED (operator-observable index space).
+- EDITED (CLI dispatch): `src/cli/cli.cpp` (parse_reset_counters function ~30 LOC + dispatch arm at :329 + `usage_text` extension with new subcommand line + flag descriptions) + `src/cli/cli.hpp` (include reset_counters.hpp + add `ResetCountersConfig` to `ParsedCommand` variant) + `src/cli/main.cpp` (run_reset_counters dispatcher ~5 LOC + `std::visit` arm).
+- EDITED (logger catalog): `src/common/logger.hpp` — kEventNames adds 2 new entries (`reset_counters.refused.no_pin`, `reset_counters.activated`); count 33 → 35.
+- EDITED (CMakeLists.txt): V-1 — VERSION bump `0.9.0 → 0.10.0` (MINOR — operator-observable: NEW CLI subcommand). DESCRIPTION metadata MAY track latest slice (per §5.34 EDIT-2 round-1 OOT-1 inline-merge precedent + /mint-briefer Phase 4.4 operative-semantic discipline).
+- EDITED (CHANGELOG.md): V-2 — NEW `## [0.10.0] - 2026-05-NN` section.
+- EDITED (CLI CMakeLists.txt): `src/cli/CMakeLists.txt` — add `reset_counters.cpp` to the xdpmacfilter binary's source list (mirroring how `bypass.cpp` was added in §5.29).
+- UNCHANGED-BUT-AFFECTED (zero git-diff fence — PI-7-3.4d-hpp / -cpp): `src/lib/loader.hpp` (**10th consecutive ZERO-diff cycle** — strongest PI-7 streak in project history); `src/lib/config.hpp` (**5th consecutive ZERO-diff cycle**); `src/lib/config.cpp` (no schema change); `src/lib/sidecar.{cpp,hpp}` (no per-rule-counter sidecar fields); `src/lib/yaml_subset.{cpp,hpp}` (no schema change); `src/lib/cidr.{cpp,hpp}` (no datapath schema change here); `src/exporter/*` (exporter reads rule_counters via `${PIN_DIR}/<iface>/rule_counters_<active>` — NEW per-rule-counter pin discovery is the operative consequence; see PI-3.4d-EXPORTER below); systemd unit files (UNCHANGED — no new caps, no new env vars); ansible files (UNCHANGED).
+
+#### §5.35 Phase A grep verification report (architect-independent — 2026-05-27)
+
+Per architect spec Phase A code-grep discipline (anti-misdiagnosis guards #5, #7, #9, #10, #11, #12, #13 + cycle-3.4d-specific PERCPU-as-inner feasibility). Independent of brief's Phase 2 verification report:
+
+1. **`rule_counters` declaration in `src/bpf/mac_filter.bpf.c`**: `grep -nE 'rule_counters[[:space:]]+SEC' src/bpf/mac_filter.bpf.c` → line 226 (`} rule_counters SEC(".maps");`). Declaration spans lines 220-226 per brief estimate. CONFIRMED.
+2. **`bump_rule` helper definition**: located at `src/bpf/mac_filter.bpf.c:244-253`. Single signature `bump_rule(__u32 rule_id)`. CONFIRMED. 2 call-sites in `mac_filter_prog` (MAC HASH-hit branch + CIDR LPM_TRIE-hit branch) per §5.31 PI-3.4b-4 — both pass `entry->rule_id` from the inner-allowlist entry, NOT `active`. Post-§5.35: signature extends to `bump_rule(__u32 rule_id, __u32 active)`; call-sites get the existing `active` snapshot variable.
+3. **CLI dispatch + `usage_text` locations**: dispatch at `src/cli/cli.cpp:305-331` (5 subcommands: attach/detach/apply/bypass + --help/--version); `usage_text` at `:77-115`. Bypass dispatch arm at :327-329 is the template (1 dispatch line + 1 parse function call). Post-§5.35: add `else if (sub == "reset-counters") { return parse_reset_counters(rest); }` at :329 — net +3 lines per shape. `usage_text` extension: add 1 subcommand-name line + 2 flag-description lines (`--rule-id`, audit-line note) — ~3-5 LOC additive (operative-semantic per Phase 4.4 — NOT a contract).
+4. **`bypass.{hpp,cpp}` template shape**: `src/cli/bypass.hpp` (30 LOC, struct + entry function declaration), `src/cli/bypass.cpp` (246 LOC, full impl with escape_audit_value + truncate_reason_raw + prompt_confirm_y_n + bypass_main). DIRECT TEMPLATE for reset_counters; impl DUPLICATES `escape_audit_value` (guard #9 — helper-location duplication-over-extraction).
+5. **`kManagedMaps[]` table count**: located at `src/lib/loader.cpp:150-175`. Current entries = **15** (14 non-alias + 1 legacy `allowlist` alias). The §5.34 cycle-2 entries `rules_a/b/outer` are at :166-168; `rule_counters` is at :173. Post-§5.35: REMOVE the :173 row, ADD 3 new rows for `rule_counters_a/b/outer` — net 15 − 1 + 3 = **17 entries** (16 non-alias + 1 alias). Comment update at the surrounding block.
+6. **PERCPU-as-inner-of-ARRAY_OF_MAPS feasibility (CRITICAL Phase A check)**: architect lacks bash exec in this pane; CANNOT physically run the smoke `bpftool prog load build/<obj>.o /sys/fs/bpf/probe type xdp`. **Disposition: PROCEED with parallel-promotion shape AS DEFAULT under literature-precedent assessment, transfer empirical smoke to impl Phase 2.5 per §5.34 EDIT-2 guard #7 precedent.** Reasoning:
+   - **Kernel side**: PERCPU_ARRAY is a supported inner type for ARRAY_OF_MAPS since kernel ≥4.12 (the array-of-maps feature) extended to all inner map types in subsequent kernel cycles. `kernel/bpf/arraymap.c::array_of_map_alloc()` is inner-type-agnostic — any inner with a `map_meta_equal` callback is acceptable; PERCPU_ARRAY has this. The 5.x+ kernel requirement of this project (per `§5.24 kernel-version probe`) is well above the threshold.
+   - **libbpf side**: The `__array(values, struct X)` macro is type-agnostic about `X`. BPF skeleton codegen for ARRAY_OF_MAPS-with-PERCPU-inner is structurally identical to ARRAY_OF_MAPS-with-ARRAY-inner (rulesets) and ARRAY_OF_MAPS-with-LPM_TRIE-inner (cidr_rulesets) and ARRAY_OF_MAPS-with-ARRAY-inner (rules_outer §5.34). The skel generates a `bpf_map *` member per template + per concrete inner — no PERCPU-specific generator path that could fail.
+   - **BTF-asymmetry risk (guard #7)**: the §5.31 EDIT-2 trap was inner-VALUE shape mutation (4-byte allow_entry → 8-byte allow_entry) triggering offset-4 verifier-reject under standalone bpftool. For §5.35, the inner-VALUE is UNCHANGED (`__u64`, same as pre-§5.35 single map); only the outer-shape changes. So the §5.31 EDIT-2 class of trap is NOT expected to recur.
+   - **Impl Phase 2.5 empirical smoke (REQUIRED)**: per §5.34 EDIT-2 D-3.4b-22 precedent, impl SHOULD run `sudo -n bpftool prog load build/src/bpf/mac_filter.bpf.o /sys/fs/bpf/probe type xdp; rc=$?; sudo -n bpftool prog unpin /sys/fs/bpf/probe; echo $rc` after the BPF reshape. Expected rc = 0. **If rc != 0 OR if `make` fails at skel codegen OR if `xdpmacfilter attach` exits non-zero with verifier-reject — peer-DM architect immediately with the exact error**; architect activates HG-3.4d-4 fallback path (defer atomic-swap to future slice; ship reset-counters CLI only against the single existing `rule_counters` pin; document as negotiated-deviation D-3.4d-FALLBACK).
+7. **VERSION 0.9.0 literal propagation** (guard #11): `grep -rln '0\.9\.0' tests/ src/ docs/ CHANGELOG.md CMakeLists.txt` returns:
+   - `CMakeLists.txt:13` (project VERSION) — bumps to `0.10.0` per V-1.
+   - `tests/T_EXPORTER_METRICS_FORMAT.sh` at lines **21, 22, 102, 103** (NOT 21,22,101,102 as the brief stated — brief had an off-by-1; operative-semantic per Phase 4.4 — actual literal location is what impl SHOULD match). 4 literal sites; HK-8-forced bump to `xdpmf-exporter 0.10.0`.
+   - `CHANGELOG.md` — bumped by V-2 NEW `[0.10.0]` entry.
+   - `mint/task-brief.md` + `mint/design.md` — design/brief docs; NOT touched by impl/tester (append-only history under /mint workflow).
+   - **Total operative version-literal touches**: 1 (CMakeLists.txt) + 4 (test body) + N (CHANGELOG entry) = ~6 LOC.
+8. **T_CLI_HELP_VERSION.sh** (guard #13 — fixture cross-reference): asserts `Usage:`, `attach`, `detach`, `--mode`, `xdpmacfilter` substrings + semver shape (`[0-9]+\.[0-9]+\.[0-9]+`). Adding `reset-counters` to `--help` body does NOT silently break the existing test (none of the current assertions exclude new lines). Per Item E-1, the test EXTENDS with a NEW assertion line (impl/tester picks idiom — `grep -q -F -- 'reset-counters'` is the existing pattern at :40-53). Body diff ~3-5 LOC additive — operative-semantic count per Phase 4.4 (impl/tester picks specific assertions for the new flag-descriptions; precise count not contractual).
+9. **`Config::Rule::action` + schema**: NO schema change this slice (PI-7-3.4d-cpp ZERO-diff on `config.hpp` + `config.cpp`). The reset-counters CLI is operator-control-plane, not config-plane.
+10. **RESOURCE_LOCK declarations** (guard #12): `xdp_fixture` lock domain established per §5.33. T-1/T-2/T-3 + T-4 (if shipped) ALL touch veth → ALL MUST declare `RESOURCE_LOCK xdp_fixture` in their `set_tests_properties` block. NO new lock domain needed.
+11. **Catalogue arithmetic** (guard #10): post-§5.35 expected values for reviewer's invariants walk:
+    - `enum xdpmf_stat` count: **UNCHANGED** (STAT_MAX=4 stays — no new STAT bucket).
+    - `XDPMF_MAP_*_NAME` constant count: ADD 3 new (rule_counters_outer/inner_a/inner_b) + REMOVE 1 (rule_counters) = **+2 net**.
+    - `kManagedMaps[]` count: **15 → 17** (14 → 16 non-alias + 1 alias).
+    - `SEC(".maps")` count in bpf source: **15 → 18** (was 15 post-§5.34: includes `struct rules_inner` template per §5.34 EDIT/OOT-4 BTF-naming convention; post-§5.35: −1 removed `rule_counters` decl + 3 added `rule_counters_a` + `rule_counters_b` + `rule_counters_outer`; the inner-map template `struct rule_counters_inner` does NOT carry `SEC(".maps")` per the SAME convention as `rules_inner` per §5.34 OOT-4). Operative-semantic per Phase 4.4 — impl-flexible if the template's `SEC` placement is adjusted to mirror the latest §5.34 shape; reviewer accepts either +3 (template-explicit) or +2 (template-via-struct-only) shapes per OOT-inline-merge precedent.
+    - `kEventNames` count: **33 → 35** (+2 new reset_counters events).
+    - mac_filter_prog body new map-lookups per match: **+2** (rule_counters_outer + rule_counters_inner) per axis vs pre-§5.35; this is +2 PER MATCH but bump_rule was already the per-match per-rule cost so the additional verifier complexity is bounded.
+12. **Discrepancies vs brief**: TWO minor operative-semantic mismatches (NOT contradictions):
+    - Brief said T_EXPORTER_METRICS_FORMAT lines `21, 22, 101, 102`; actual lines are `21, 22, 102, 103` (off-by-1). Operative meaning: the 4 literal sites at the `--version` ERE + the `(f)` PI-33 comment block. Impl matches the actual literals.
+    - Brief said `kManagedMaps[]` "15 → 17 (12 → 14 non-alias + 1 alias preserved)"; actual is 15 → 17 (16 non-alias + 1 alias = 14 non-alias + 1 alias post-§5.34 → 16 non-alias + 1 alias post-§5.35). Phase 4.4 operative-semantic — count direction correct, base values reflected updated §5.34 catalog.
+    - Both are SHOULD-hint operative-semantic per /mint-briefer Phase 4.4 discipline. NOT inline-merge OOT material — just architect aligning the numbers to current code state. Impl uses actual literals.
+
+#### §5.35 Human-gate decisions (pre-loaded defaults from brief — confirmed by architect Phase A)
+
+- **HG-3.4d-1 — PERCPU zero-write mechanism = `bpf_map_update_elem(rule_counters_<inner>_fd, &rule_id, zero_per_cpu, BPF_ANY)` with stack `__u64 zero_per_cpu[libbpf_num_possible_cpus()] = {}`.** Confirmed per brief recommendation. Explicit + idiomatic libbpf pattern; alternative `bpf_map_delete_elem` for PERCPU_ARRAY has subtle "kernel-side zero, not delete" semantic that's less operator-explainable. The buffer is allocated via `libbpf_num_possible_cpus()` (not `_online_`) per existing exporter precedent in `src/exporter/stats_reader.cpp:147` (architect re-verified: `grep -nE 'num_possible_cpus|num_online_cpus' src/`). Buffer is zero-initialised at declaration via C ABI struct-init.
+
+- **HG-3.4d-2 — `--rule-id N` optional argument; without flag = zero ALL 64 slots (loop 0..63); with flag = zero only slot N; validation `0 ≤ N < 64` else exit 1 + stderr `"reset-counters: --rule-id N out of range [0,63]"`.** Confirmed per brief recommendation. Per Q1.A — CLI-parse-time early reject (in `parse_reset_counters`), consistent with existing `--allow` MAC + `--iface` validation timing.
+
+- **HG-3.4d-3 — iface MUST be attached** — pin `${PIN_DIR}/<iface>/rule_counters_a` (or, in HG-3.4d-4 fallback, `${PIN_DIR}/<iface>/rule_counters`) absent → exit 1 + stderr `"reset-counters: no rule_counters pin at <path>; iface '<iface>' not attached?"`. Reuse existing exit code 1 (CliError); no new exit code this slice. Confirmed. **Path checked = inner_a pin** (rule_counters_a) if default ships, OR single `rule_counters` pin if fallback — the architect picks inner_a as the canary because both inners are pinned in lockstep at attach time; if inner_a is absent, the iface is not attached (or partially attached, which is also an error).
+
+- **HG-3.4d-4 — `rule_counter` atomic-swap promotion: DEFAULT SHIP (mirror §5.34 4-axis pattern) — *with architect Phase A literature-precedent affirmation; empirical smoke transferred to impl Phase 2.5*.** Default ship per brief; Phase A architect literature/precedent assessment (§5.35 Phase A grep §6) affirms feasibility. Impl Phase 2.5 runs the empirical bpftool smoke per the §5.34 EDIT-2 D-3.4b-22 precedent. **Fallback path D-3.4d-FALLBACK (peer-DM-activated)**: if impl Phase 2.5 smoke fails OR build fails at skel codegen OR `attach` exits with verifier-reject — peer-DM architect; architect amends the design via Phase B Edit to defer atomic-swap (Items B-1, L-1 reshape, L-2 constant adds, L-A copy-forward helper, T-4 ctest all drop); ships reset-counters CLI ONLY against the single existing `rule_counters` pin (items C-1, C-2, C-3, T-1, T-2, T-3, E-1, E-2, V-1, V-2 only); atomic-swap stays NEW OOS fence for future slice. The fallback is documented IN ADVANCE so impl/tester know the disposition without further architect intervention if smoke fails before the architect can respond.
+
+- **HG-3.4d-5 — semantic post-atomic-swap = PRESERVE-across-apply (PI-3.4b-2 UNCHANGED)** — LOAD-BEARING. Atomic-swap shape change is **structural-only**. Counters survive `apply -f` exactly as in §5.31 PI-3.4b-2; mechanism is the NEW apply-step **copy-forward** D-3.4d-3 (userspace copies per-CPU values from old-active rule_counters inner to inactive inner BEFORE active_idx flip). Reset zeroing is ONLY available via the new `reset-counters` CLI. Operator-explainable: "Prometheus monotonicity holds; explicit reset is an explicit operator action". The structural shape enables a hypothetical future "reset-on-apply" semantic (SKIP the copy step → active_idx flip alone resets the now-active view to the contents of the previously-inactive inner). Future-fence in §7 OOS.
+
+- **HG-3.4d-6 — audit-stderr line for reset-counters = mirror bypass shape verbatim** (operator mental model consistency). Format:
+  ```
+  xdpmacfilter: RESET-COUNTERS on <iface> by uid=<N> euid=<M> sudo_user="<X or <none>>" rule_id=<N or "ALL">
+  ```
+  Single line. Fires AT action time, BEFORE the BPF map writes (consistent with bypass timing per §5.30 HK-4 — operator sees the action announcement; subsequent BPF write failures show up as separate stderr errors as `cli.error`). `<none>` literal sentinel for null/empty `SUDO_USER` (verbatim from §5.30 HK-4). `rule_id` literal value `"ALL"` (quoted-string-style) when no `--rule-id` flag passed; integer value (`rule_id=17`) when `--rule-id 17` passed. The reason field (present in `bypass.activated`) is OMITTED — `reset-counters` has no `--reason` flag (NEW FENCE).
+
+  **Logger event-name**: `reset_counters.activated` (Info level; envelope `iface` slot populated; structured fields = `{uid: i64, euid: i64, sudo_user: str, rule_id: str-or-int}`). Mirrors `bypass.activated`'s structured-field shape per §5.32 PI-3.5-5 (text-mode + JSON-mode envelope).
+
+#### §5.35 Q-decisions (mechanism)
+
+##### Q1: `--rule-id N` range validation timing → **Q1.A (CLI-parse-time)**
+
+Per brief recommendation. Early reject is operator-friendlier; matches existing `--allow` MAC + `--iface` validation timing in `parse_attach` / `parse_bypass`. Validation lives in `parse_reset_counters` BEFORE the `ResetCountersConfig` is constructed. CliError thrown with the stderr text from HG-3.4d-2 (`out of range [0,63]`) propagates through main.cpp's `cli.usage_error` event arm — no NEW logger event needed for this case.
+
+##### Q2: `reset-counters` without `--rule-id` semantics → **Q2.A (zero all 64 slots)**
+
+Per brief recommendation. Operator-friendly batch (common case). Per-rule-id is the special case (audit a specific spurious match without disrupting other counters). Loop 0..63 invokes `bpf_map_update_elem` once per slot with the same `zero_per_cpu` buffer. Per-slot failure (rare; ENOMEM or similar) propagates as `std::system_error` → main.cpp catch arm → `cli.error` → exit 2 (LoadFailed). Idiomatic.
+
+##### Q3: atomic-swap shape if HG-3.4d-4 ships → **Q3.A (mirror §5.34: `rule_counters_outer` ARRAY_OF_MAPS[2] of `rule_counters_a`/`_b` inner PERCPU_ARRAYs)**
+
+Per brief recommendation + §5.34 4-axis precedent extended to 5 axes. Direct mirror of `rules_outer` shape (`rules_outer ARRAY_OF_MAPS[2] of rules_a/_b inner ARRAYs`), only the inner-map type differs (PERCPU_ARRAY vs ARRAY). Same `active_idx` indexes all 5 outers — single u32 store commits MAC + CIDR + defaults + rules + **rule_counters** atomically. D-3.4d-7 (5-axis active_idx mechanism) is the institutional-learning extension of §5.34 D-3.4b-c2-8 (4-axis).
+
+##### Q4: counter survival across `reset-counters --rule-id N` followed by `apply -f` → **Q4.A (counter[N] stays 0)**
+
+Per brief recommendation. The zero-write persists across apply because:
+- reset-counters CLI zeros BOTH inner_a AND inner_b at slot N (per L-3 architect decision D-3.4d-RESET-BOTH below). So regardless of which inner is active post-reset OR post-apply-flip, the slot reads 0.
+- Apply-step copy-forward (D-3.4d-3) copies old-active inner to inactive BEFORE the flip — since old-active inner_<X> has slot[N]=0 (just reset), the copy preserves 0; inactive inner_<Y> ALREADY has slot[N]=0 (reset-counters wrote BOTH); after the flip, new-active inner_<Y> reads slot[N]=0.
+
+So PI-3.4b-2 PRESERVE-across-apply continues to hold; reset persistence across apply is an emergent property of "reset writes BOTH inners + copy-forward copies state into inactive before flip". Operator-explainable: "reset is sticky".
+
+##### Q5 (NEW — architect-surfaced): rule_counters atomic-swap mechanism for PI-3.4b-2 PRESERVE → **Q5.A (apply-step per-CPU copy-forward from old-active to inactive BEFORE active_idx flip)**
+
+Architect-surfaced question NOT explicitly answered by brief. Three candidate mechanisms:
+- **A: apply-step copy-forward (RECOMMENDED + ADOPTED)** — userspace per-rule_id per-CPU loop in `apply_request` BEFORE the single-u32 `active_idx` flip; copies old-active inner's per-CPU values into inactive inner. Mirrors §5.34's "populate inactive inner before flip" discipline. PRESERVE semantic = automatic post-flip. Cost: ~64 syscall pairs per apply (PERCPU_ARRAY's `bpf_map_lookup_elem` returns NCPUS × u64 in one call; `bpf_map_update_elem` takes the same shape). Apply-time cost only; ZERO per-packet overhead beyond §5.34 baseline.
+- B: bump-both — bump_rule writes to BOTH inners on every packet; no apply-step copy needed (inners stay synced). PRESERVE trivially holds. But 2x per-packet PERCPU lookups (verifier-acceptable but performance regression).
+- C: hard-coded inner_a (don't actually flip for this axis) — true "structural-only-and-no-behavior" interpretation; inner_b is dead infrastructure. But this doesn't mirror §5.34 4-axis pattern; future reset-on-apply requires same refactor as A would now.
+
+**ADOPTED: Q5.A** — most faithfully mirrors §5.34 4-axis pattern + cleanest semantic preservation + ZERO per-packet datapath overhead beyond §5.34 baseline. Apply-time copy cost (~64 PERCPU syscall pairs) is operator-imperceptible. The copy is bounded by `XDPMF_RULE_COUNTERS_MAX = 64`, NOT by per-CPU count (each syscall ships NCPUS values).
+
+#### §5.35 LIFTED PI declarations (none — PI-3.4b-2 EXPLICITLY PRESERVED)
+
+No prior PI is LIFTED by this slice. The structural-only atomic-swap promotion is designed specifically to PRESERVE PI-3.4b-2 (counter-monotonicity-across-apply) via the D-3.4d-3 apply-step copy-forward mechanism. Reviewer should NOT see any `[SUPERSEDED]` marker on PI-3.4b-2; if the reviewer sees the counter-clear-on-apply behaviour during T-4 or post-apply counter reads, that's `[INVARIANT-VIOLATED]` per HG-3.4d-5 LOAD-BEARING semantic.
+
+Note: PI-7-3.4d-hpp + PI-7-3.4d-cpp are EXTENSIONS (10th/5th consecutive ZERO-diff cycles on loader.hpp + config.hpp respectively) — not new PIs, just continuation of the streak first established at §5.30 PI-7-3.4.5-hpp.
+
+#### §5.35 DataStructures additions / changes
+
+##### BPF (`src/bpf/mac_filter.bpf.c`) — `rule_counters` axis promotion to parallel ARRAY_OF_MAPS (PERCPU inner)
+
+Replace existing single `rule_counters` PERCPU_ARRAY (lines 220-226) with parallel-outer pattern (DIRECT MIRROR of §5.34 rules-axis shape — only inner-map TYPE differs):
+
+```c
+/* §5.35 (MVP-3.4d) HG-3.4d-4 + D-3.4d-1: rule_counters axis promoted to
+ * parallel ARRAY_OF_MAPS — DIRECT MIRROR of §5.34 rules-axis shape but with
+ * PERCPU_ARRAY inners (vs ARRAY inners for rules). Template + 2 pinned
+ * inner PERCPU_ARRAY instances + outer ARRAY_OF_MAPS. Single active_idx u32
+ * store atomically commits MAC HASH inner + CIDR LPM_TRIE inner + defaults
+ * + rules inner + rule_counters inner — all FIVE axes share the same
+ * active_idx (§5.27 Q1 AS1 mechanism extended to 5 axes per D-3.4d-7).
+ *
+ * STRUCTURAL-ONLY this slice (HG-3.4d-5): PI-3.4b-2 counter-monotonicity-
+ * across-apply PRESERVED via apply-step per-CPU copy-forward from old-active
+ * inner to inactive inner BEFORE active_idx flip (D-3.4d-3 in loader.cpp's
+ * apply_request). NO semantic change to operator-observed counter values.
+ *
+ * The two instances rule_counters_a / rule_counters_b are pinned MANUALLY
+ * via bpf_map__pin() in loader.cpp's kManagedMaps[] per-iface pin loop
+ * (parallel to allowlist_a/_b, cidr_allowlist_a/_b, rules_a/_b per §5.34
+ * inner-as-AOM-target convention — LIBBPF_PIN_BY_NAME forbidden on
+ * AOM-inner template struct definitions). */
+struct rule_counters_inner {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __type(key, __u32);
+    __type(value, __u64);
+    __uint(max_entries, XDPMF_RULE_COUNTERS_MAX);
+};
+
+struct rule_counters_inner rule_counters_a SEC(".maps");
+struct rule_counters_inner rule_counters_b SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
+    __uint(max_entries, XDPMF_RULESET_COUNT);
+    __uint(key_size, sizeof(__u32));
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+    __array(values, struct rule_counters_inner);
+} rule_counters_outer SEC(".maps") = {
+    .values = { &rule_counters_a, &rule_counters_b },
+};
+```
+
+**REMOVED**: the prior single `rule_counters` PERCPU_ARRAY (lines 220-226) — no longer exists. The `XDPMF_MAP_RULE_COUNTERS_NAME` constant (`"rule_counters"`) is also REMOVED from `src/common/mac_filter.h`.
+
+Pinning paths (post-§5.35, per LIBBPF_PIN_BY_NAME on outer + manual pin on inners via kManagedMaps[]):
+- `${PIN_DIR}/<iface>/rule_counters_a` (PERCPU_ARRAY inner slot 0)
+- `${PIN_DIR}/<iface>/rule_counters_b` (PERCPU_ARRAY inner slot 1)
+- `${PIN_DIR}/<iface>/rule_counters_outer` (ARRAY_OF_MAPS outer)
+
+**REMOVED PIN**: `${PIN_DIR}/<iface>/rule_counters` (the prior single PERCPU_ARRAY pin no longer exists).
+
+##### BPF (`src/bpf/mac_filter.bpf.c`) — `bump_rule` helper signature/body change
+
+Current (lines 244-253):
+```c
+static __always_inline void bump_rule(__u32 rule_id)
+{
+    if (rule_id >= XDPMF_RULE_COUNTERS_MAX) {
+        return;
+    }
+    __u64 *v = bpf_map_lookup_elem(&rule_counters, &rule_id);
+    if (v) {
+        *v += 1;
+    }
+}
+```
+
+Post-§5.35:
+```c
+/* §5.35 (MVP-3.4d) D-3.4d-2: signature extends with `active` parameter so
+ * the caller can pass the SAME active_idx snapshot used for MAC / CIDR /
+ * rules lookups (5-axis snapshot discipline per §5.27 Q1 AS1 extended).
+ * Avoids a re-read of active_idx inside the helper, which would be a race-
+ * window split across map families. */
+static __always_inline void bump_rule(__u32 rule_id, __u32 active)
+{
+    if (rule_id >= XDPMF_RULE_COUNTERS_MAX) {
+        return;
+    }
+    if (active >= XDPMF_RULESET_COUNT) {
+        return;
+    }
+    void *inner = bpf_map_lookup_elem(&rule_counters_outer, &active);
+    if (!inner) {
+        return;
+    }
+    __u64 *v = bpf_map_lookup_elem(inner, &rule_id);
+    if (v) {
+        *v += 1;
+    }
+}
+```
+
+Both call-sites in `mac_filter_prog`:
+- MAC HASH-hit branch: `bump_rule(entry->rule_id);` → `bump_rule(entry->rule_id, active);`
+- CIDR LPM_TRIE-hit branch: `bump_rule(cidr_hit->rule_id);` → `bump_rule(cidr_hit->rule_id, active);`
+
+The `active` variable is the existing snapshot already in scope (§5.34 HG-3.4b-c2-4); both call-sites pass it without new local-variable additions.
+
+##### Shared header (`src/common/mac_filter.h`) — map-name constants
+
+**ADDED**:
+```c
+/* §5.35 (MVP-3.4d) HG-3.4d-4: rule_counters axis promoted to parallel
+ * ARRAY_OF_MAPS — DIRECT MIRROR of §5.34 rules-axis shape (only inner-map
+ * type differs: PERCPU_ARRAY vs ARRAY). Single active_idx commits both
+ * axes (and the other three) atomically. */
+#define XDPMF_MAP_RULE_COUNTERS_OUTER_NAME    "rule_counters_outer"  /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] of PERCPU_ARRAY fds */
+#define XDPMF_MAP_RULE_COUNTERS_INNER_A_NAME  "rule_counters_a"      /* inner slot 0, PERCPU_ARRAY of __u64 */
+#define XDPMF_MAP_RULE_COUNTERS_INNER_B_NAME  "rule_counters_b"      /* inner slot 1, PERCPU_ARRAY of __u64 */
+```
+
+**REMOVED**: `#define XDPMF_MAP_RULE_COUNTERS_NAME "rule_counters"` (line 163 of current `src/common/mac_filter.h`). The single PERCPU_ARRAY pin disappears.
+
+**UNCHANGED**: `XDPMF_RULE_COUNTERS_MAX` (alias for XDPMF_ALLOWLIST_MAX = 64; operator-observable rule_id namespace per §5.31 Q5 R1 + D-3.4b-9 + PI-3.4b-7); all other constants/structs/enums byte-equivalent. PI-10-3.4d ADDITIVE-modulo-deletion: 3 added + 1 removed.
+
+##### Loader (`src/lib/loader.cpp`) — `kManagedMaps[]` table 15 → 17 entries
+
+Concrete diff shape (impl reference — exact positioning is impl-flexible per D-3.4b-13 / §5.34 D-3.4b-c2-1 precedent):
+
+```cpp
+constexpr ManagedMapEntry kManagedMaps[] = {
+    { &SkelMapsT::allowlist_a,        XDPMF_MAP_INNER_A_NAME,                  false },
+    { &SkelMapsT::allowlist_b,        XDPMF_MAP_INNER_B_NAME,                  false },
+    { &SkelMapsT::rulesets,           XDPMF_MAP_RULESETS_OUTER_NAME,           false },
+    { &SkelMapsT::cidr_allowlist_a,   XDPMF_MAP_CIDR_INNER_A_NAME,             false },
+    { &SkelMapsT::cidr_allowlist_b,   XDPMF_MAP_CIDR_INNER_B_NAME,             false },
+    { &SkelMapsT::cidr_rulesets,      XDPMF_MAP_CIDR_RULESETS_OUTER_NAME,      false },
+    { &SkelMapsT::active_idx,         XDPMF_MAP_ACTIVE_IDX_NAME,               false },
+    { &SkelMapsT::defaults,           XDPMF_MAP_DEFAULTS_NAME,                 false },
+    { &SkelMapsT::stats,              XDPMF_MAP_STATS_NAME,                    false },
+    { &SkelMapsT::rules_a,            XDPMF_MAP_RULES_INNER_A_NAME,            false },
+    { &SkelMapsT::rules_b,            XDPMF_MAP_RULES_INNER_B_NAME,            false },
+    { &SkelMapsT::rules_outer,        XDPMF_MAP_RULES_OUTER_NAME,              false },
+    { &SkelMapsT::action_table,       XDPMF_MAP_ACTION_TABLE_NAME,             false },
+    /* §5.35 (MVP-3.4d) D-3.4d-1: REMOVE prior single { rule_counters,
+     * RULE_COUNTERS_NAME } entry; ADD 3 new entries for rule_counters_a /
+     * rule_counters_b / rule_counters_outer matching the §5.34 rules-axis
+     * triple. Net 15 → 17 entries (14 → 16 non-alias + 1 alias). All three
+     * call-site loops (clear, pin, reuse) walk this table — HK-9 dividend
+     * collected for the 4th consecutive cycle. */
+    { &SkelMapsT::rule_counters_a,    XDPMF_MAP_RULE_COUNTERS_INNER_A_NAME,    false },
+    { &SkelMapsT::rule_counters_b,    XDPMF_MAP_RULE_COUNTERS_INNER_B_NAME,    false },
+    { &SkelMapsT::rule_counters_outer, XDPMF_MAP_RULE_COUNTERS_OUTER_NAME,     false },
+    { &SkelMapsT::allowlist,          XDPMF_MAP_ALLOWLIST_NAME,                true  },
+};
+```
+
+Position mirrors §5.34's CIDR-axis triple positioning (alphabetical near the existing `rule_counters` row that's being removed). Comment count update from "14 non-alias + 1 alias" → "16 non-alias + 1 alias" — impl rewrites surrounding comment in-place.
+
+The LIBBPF_PIN_BY_NAME `bpf_map__reuse_fd` discipline applies to ALL THREE new entries — same as §5.31 D-3.4b-2 / §5.34 rules-axis — so the inners survive `apply -f`. Combined with the D-3.4d-3 copy-forward apply-step, PI-3.4b-2 PRESERVE is achieved.
+
+##### Loader (`src/lib/loader.cpp`) — NEW `copy_rule_counters_forward` apply-step helper (D-3.4d-3)
+
+```cpp
+/* §5.35 (MVP-3.4d) D-3.4d-3: per-rule-id per-CPU copy-forward from old-
+ * active rule_counters inner to inactive rule_counters inner. Called from
+ * apply_request BEFORE the single-u32 active_idx flip; ensures the new-
+ * active inner (post-flip) carries the same per-CPU counter state as the
+ * old-active inner. PI-3.4b-2 PRESERVE-across-apply held by this copy.
+ *
+ * Implementation contract (impl picks exact shape):
+ *   for rule_id in 0..XDPMF_RULE_COUNTERS_MAX:
+ *       bpf_map_lookup_elem(old_active_inner_fd, &rule_id, buf)
+ *       bpf_map_update_elem(inactive_inner_fd, &rule_id, buf, BPF_ANY)
+ *   where buf is NCPUS * sizeof(u64), allocated once (stack or heap; impl
+ *   picks based on NCPUS upper bound — `libbpf_num_possible_cpus()`).
+ *
+ * Per-CPU PERCPU_ARRAY syscall ABI: lookup returns all CPUs' values in
+ * one call; update takes the same NCPUS-sized buffer. So loop bounded by
+ * 64 (XDPMF_RULE_COUNTERS_MAX), NOT by NCPUS.
+ *
+ * On lookup-fail (rare, e.g. ENOENT for never-bumped slot): treat as zero
+ * (initialize buf to zeros, then update). Defense-in-depth — the kernel
+ * actually returns the slot's per-CPU zero-array for never-bumped slots,
+ * but the explicit zero-init guards against any errno path.
+ *
+ * On update-fail: propagate as std::system_error (LoaderError::AttachFailed
+ * or similar — impl picks per existing apply_request error-translation
+ * pattern). This SHOULD never happen at apply time (writes to a fresh
+ * inactive inner are always succeed-or-OOM); if it does, apply fails and
+ * the caller's existing rollback logic runs (no active_idx flip).
+ *
+ * Called BEFORE active_idx flip in apply_request (parallel to the existing
+ * populate_inner_slot / populate_cidr_inner_slot / populate_rules_inner_slot
+ * calls; insertion-point: same block, after the rules-inner populate, before
+ * the single-u32 write_active_idx call). */
+void copy_rule_counters_forward(int old_active_inner_fd, int inactive_inner_fd);
+```
+
+**Call-site**: insert in `apply_request` body in the inactive-inner-population block, AFTER the §5.34 `populate_rules_inner_slot` call and BEFORE the `write_active_idx(active_idx_fd, inactive)` u32 store. Two `apply_request` call-sites currently (state-b reattach + fresh-attach) — both need the insertion. **On FIRST apply** (initial attach, no prior active): `old_active_inner_fd` is the same fd as `inactive_inner_fd` (both inners are zero-initialised); copy is a self-copy, semantically a no-op. Architect chooses to ALWAYS run the copy (uniform code path; defense-in-depth) rather than special-case first-apply.
+
+##### Loader (`src/lib/loader.cpp`) — reset-counters CLI invokes the loader API path
+
+Reset-counters CLI is implemented in `src/cli/reset_counters.cpp` (NEW file) and invokes the BPF map zero-write via direct `bpf_obj_get` + `bpf_map_update_elem` — NOT via loader.cpp's public API. Why: keeps `loader.hpp` ZERO-diff (PI-7-3.4d-hpp), avoids public-surface bloat for a CLI-only operator action. Same precedent as `bypass.cpp` which calls `xdpmf::detach()` (existing public surface) for its core action.
+
+reset_counters.cpp DOES NOT touch loader.cpp at all (no symbol added to loader.hpp, no symbol consumed). The CLI file is self-contained: opens pins, writes zeros, exits.
+
+#### §5.35 Interfaces additions
+
+##### `src/cli/reset_counters.hpp` — NEW
+
+```cpp
+/*
+ * reset_counters.hpp — `xdpmacfilter reset-counters` subcommand
+ * (§5.35 HG-3.4d-1..6, MVP-3.4d).
+ *
+ * Operator-facing primitive: zero the rule_counters PERCPU map(s) on an
+ * iface — either ALL 64 slots (no --rule-id) or a single slot (--rule-id N).
+ * Audit-stderr line + iface-must-be-attached precondition. Reuses CLI
+ * exit-code 1 for usage / precondition errors; BPF write errors propagate
+ * as std::system_error via main.cpp's catch arm. loader.hpp ABI is
+ * byte-equivalent across this slice (PI-7-3.4d-hpp 10th consecutive
+ * ZERO-diff cycle).
+ */
+#pragma once
+
+#include <cstdint>
+#include <optional>
+#include <string>
+
+namespace xdpmf {
+
+/* Parsed `reset-counters` subcommand inputs. Populated by cli::parse();
+ * dispatched by main.cpp via the existing ParsedCommand variant-visit
+ * pattern. */
+struct ResetCountersConfig {
+    std::string                   iface;                /* REQUIRED */
+    std::optional<std::uint32_t>  rule_id;              /* absent = zero ALL 64 slots; present = zero only slot rule_id */
+};
+
+/* Run the reset-counters action: emit audit-log to stderr (mirroring bypass
+ * shape per HG-3.4d-6), then open the rule_counters_outer pin(s) and apply
+ * zero-writes per rule_id selection (HG-3.4d-1/HG-3.4d-2). Returns exit code
+ * (0 on success; 1 on iface-not-attached precondition fail; loader exit codes
+ * propagate via std::system_error from main.cpp's catch arm for BPF errors).
+ *
+ * If HG-3.4d-4 atomic-swap shape ships: zeros BOTH inner_a AND inner_b pins
+ * (D-3.4d-RESET-BOTH — symmetric reset regardless of subsequent active_idx
+ * flips). If HG-3.4d-4 fallback path active (D-3.4d-FALLBACK): zeros the
+ * single existing `rule_counters` pin only. */
+[[nodiscard]] int reset_counters_main(const ResetCountersConfig& cfg);
+
+}  // namespace xdpmf
+```
+
+##### `src/cli/cli.hpp` — variant + include extension
+
+```cpp
+#include "reset_counters.hpp"   // ResetCountersConfig — §5.35 HG-3.4d-1..6 (MVP-3.4d)
+
+using ParsedCommand = std::variant<AttachConfig, DetachConfig, ApplyConfig,
+                                   BypassConfig, ResetCountersConfig,
+                                   HelpRequest, VersionRequest>;
+```
+
+##### `src/cli/cli.cpp` — `parse_reset_counters` + dispatch arm + usage_text extension
+
+`parse_reset_counters` body (template = `parse_bypass`):
+```cpp
+ParsedCommand parse_reset_counters(std::span<char* const> args)
+{
+    ResetCountersConfig cfg;
+    std::size_t i = 0;
+    while (i < args.size()) {
+        std::string_view tok{args[i]};
+        if (tok == "--iface" || tok.starts_with("--iface=")) {
+            cfg.iface = std::string{consume_flag_value(args, i, "iface")};
+        } else if (tok == "--rule-id" || tok.starts_with("--rule-id=")) {
+            const std::string_view v = consume_flag_value(args, i, "rule-id");
+            /* HG-3.4d-2 + Q1.A: parse-time range validation. */
+            std::uint32_t parsed = 0;
+            const auto* first = v.data();
+            const auto* last  = v.data() + v.size();
+            const auto res = std::from_chars(first, last, parsed);
+            if (res.ec != std::errc{} || res.ptr != last) {
+                throw CliError(std::format(
+                    "reset-counters: --rule-id requires an unsigned integer; got '{}'", v));
+            }
+            if (parsed >= XDPMF_RULE_COUNTERS_MAX) {
+                throw CliError(std::format(
+                    "reset-counters: --rule-id {} out of range [0,{}]",
+                    parsed, XDPMF_RULE_COUNTERS_MAX - 1));
+            }
+            cfg.rule_id = parsed;
+        } else {
+            throw CliError(std::format("unknown reset-counters flag: '{}'", tok));
+        }
+    }
+    if (cfg.iface.empty()) {
+        throw CliError("reset-counters requires --iface <IFNAME>");
+    }
+    return cfg;
+}
+```
+
+Dispatch arm at `cli.cpp:329` (after the `bypass` arm):
+```cpp
+if (sub == "reset-counters") {
+    return parse_reset_counters(rest);
+}
+```
+
+`usage_text` extension (impl-flexible — operative-semantic per Phase 4.4; this is an example NOT a contract):
+```cpp
+"  {0} reset-counters --iface <IFNAME> [--rule-id <N>]\n"   // new subcommand line in Usage block
+"  ...\n"
+"  --rule-id <N>               reset-counters: zero only slot <N> (default: zero all 64 slots).\n"
+"                              Range [0, {1}-1]. Iface must be attached.\n"  // appended to Options block; {1} = XDPMF_ALLOWLIST_MAX
+```
+
+##### `src/cli/main.cpp` — `run_reset_counters` dispatcher
+
+```cpp
+int run_reset_counters(const xdpmf::ResetCountersConfig& cfg)
+{
+    return xdpmf::reset_counters_main(cfg);
+}
+```
+
+And in the `std::visit` lambda body (template = `run_bypass` arm):
+```cpp
+} else if constexpr (std::is_same_v<T, xdpmf::ResetCountersConfig>) {
+    return run_reset_counters(arg);
+}
+```
+
+##### `src/cli/reset_counters.cpp` body (semantic contract — impl picks idiom)
+
+```
+reset_counters_main(cfg):
+  1. cfg.iface.empty() defense-in-depth check → emit reset_counters.usage_error?
+     NO — parser already enforces; defensive check throws CliError → main.cpp catches → cli.usage_error.
+     [Following bypass.cpp:129-138 precedent: defense-in-depth emit + exit 1.
+      For reset-counters, defense-in-depth is OK to ALSO route via cli.usage_error
+      (since parser enforces, this defensive emit is unreachable in practice; we
+      reuse cli.usage_error rather than adding reset_counters.usage_error to
+      keep kEventNames lean per /mint-briefer Phase 4.4 minimal-surface bias).]
+
+  2. Compute pin paths:
+     IF default-ship path (D-3.4d-1):
+         inner_a_path = ${PIN_DIR}/<iface>/rule_counters_a
+         inner_b_path = ${PIN_DIR}/<iface>/rule_counters_b
+     IF fallback path (D-3.4d-FALLBACK):
+         pin_path = ${PIN_DIR}/<iface>/rule_counters
+
+  3. State requirement (HG-3.4d-3): bpf_obj_get(inner_a_path) — if -1 with errno==ENOENT:
+         emit reset_counters.refused.no_pin (Error level; envelope iface; fields
+             {pin_path: str, errno: i64}; msg "reset-counters: no rule_counters pin
+             at <path>; iface '<iface>' not attached?\n")
+         return 1.
+     Any other open errno → throw std::system_error → main.cpp catch arm → cli.error → exit 2.
+
+  4. Audit-log fires AT action time, BEFORE BPF writes (HG-3.4d-6, mirrors bypass.cpp:174):
+         compute uid = getuid(), euid = geteuid(), sudo_user (from SUDO_USER env or "<none>")
+         escape_audit_value() on sudo_user (DUPLICATE helper per guard #9 — copy from bypass.cpp:48-64)
+         rule_id_str = cfg.rule_id.has_value() ? to_string(*cfg.rule_id) : "ALL"
+         (in HG-3.4d-6 format, rule_id is bare token (NOT quoted) for integers, bare token "ALL" for ALL — operator-grep friendly)
+         msg = format("xdpmacfilter: RESET-COUNTERS on {} by uid={} euid={} sudo_user=\"{}\" rule_id={}\n",
+                      iface, uid, euid, sudo_user_audit, rule_id_str)
+         fields = {uid: i64, euid: i64, sudo_user: str_view(raw), rule_id: str_view(rule_id_str)}
+         logger::emit(Info, "reset_counters.activated", iface, msg, fields)
+
+  5. Open inner_b_fd (default path) — bpf_obj_get(inner_b_path); same error handling as inner_a.
+
+  6. Construct zero buffer: __u64 zero_per_cpu[libbpf_num_possible_cpus()] = {0}.
+
+  7. Branch on rule_id:
+     IF cfg.rule_id.has_value():
+         rule_id = *cfg.rule_id
+         bpf_map_update_elem(inner_a_fd, &rule_id, zero_per_cpu, BPF_ANY)
+         IF default path: bpf_map_update_elem(inner_b_fd, &rule_id, zero_per_cpu, BPF_ANY)
+         On error: throw std::system_error → main.cpp catch → cli.error → exit 2
+     ELSE:
+         for rule_id in 0..XDPMF_RULE_COUNTERS_MAX:
+             bpf_map_update_elem(inner_a_fd, &rule_id, zero_per_cpu, BPF_ANY)
+             IF default path: bpf_map_update_elem(inner_b_fd, &rule_id, zero_per_cpu, BPF_ANY)
+         On per-slot error: throw immediately (operator-explainable: any failure aborts the batch)
+
+  8. close(inner_a_fd); IF default path: close(inner_b_fd).
+  9. return 0.
+```
+
+##### `src/common/logger.hpp` — kEventNames additions
+
+Add 2 entries to the `kEventNames` array (33 → 35); update `kEventCount` doc-comment to match. Positioning: alphabetical near `bypass.*` block (impl-flexible; reviewer accepts either alphabetical or chronological-block per existing convention).
+
+```cpp
+    "reset_counters.refused.no_pin",          /* src/cli/reset_counters.cpp — HG-3.4d-3 (iface not attached) */
+    "reset_counters.activated",               /* src/cli/reset_counters.cpp — HG-3.4d-6 audit log */
+```
+
+Reviewer's catalog-count assertion: post-§5.35 kEventCount = **35**. T_LOG_EVENT_CATALOG_STABILITY (§6.58) reference updates 33 → 35.
+
+#### §5.35 FileList (brownfield DIFF)
+
+##### NEW (created this slice)
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `src/cli/reset_counters.hpp` | `ResetCountersConfig` struct + `reset_counters_main()` declaration. Mirror of `src/cli/bypass.hpp`. | C++23 | 35 |
+| `src/cli/reset_counters.cpp` | reset-counters impl: audit-log emit + iface-attached precondition check + zero-write loop (per-rule-id OR batch 0..63). Mirror of `src/cli/bypass.cpp` with helpers DUPLICATED (guard #9). | C++23 | 180 |
+| `tests/T_CLI_RESET_COUNTERS.sh` | §6.NN — attach iface with rules → inject frames → verify rule_counters bumped → `reset-counters --iface X` → verify all 64 slots = 0 (bpftool map dump on the active inner); negation: re-inject → counters bump again from 0. RESOURCE_LOCK xdp_fixture. | bash | 110 |
+| `tests/T_CLI_RESET_COUNTERS_RULE_ID.sh` | §6.NN+1 — attach + bump multiple counters → `reset-counters --iface X --rule-id <b>` → verify counter[b]=0, others unchanged; negation: `--rule-id 64` (out of range) → exit 1 + stderr regex match. RESOURCE_LOCK xdp_fixture. | bash | 110 |
+| `tests/T_CLI_RESET_COUNTERS_NO_IFACE.sh` | §6.NN+2 — don't attach iface; `reset-counters --iface X` → exit 1 + stderr `"no rule_counters pin"` substring; negation: attach + run → exit 0. RESOURCE_LOCK xdp_fixture. | bash | 80 |
+| `tests/T_RULE_COUNTERS_ATOMIC_SWAP.sh` (CONDITIONAL — only IF HG-3.4d-4 default ships) | §6.NN+3 — apply config A → bump rule_counters in active inner → apply config B (active_idx flips) → verify counter values PRESERVED in NEW active inner (D-3.4d-3 copy-forward sanity check + PI-3.4b-2 PRESERVE-across-apply load-bearing canary). Re-bump in new active → verify monotonic increment continues. **Most important new test for HG-3.4d-5 LOAD-BEARING semantic.** RESOURCE_LOCK xdp_fixture. SKIP IF D-3.4d-FALLBACK active (atomic-swap deferred). | bash | 120 |
+
+Total NEW: 2 source files (~215 LOC) + 3-4 test files (~300-420 LOC).
+
+NEW fixture (may be needed): `tests/fixtures/config_reset_counters.yaml` — minimal config with 2-3 pass rules (one for `--rule-id` selectivity, others for unchanged-control). Tester may inline as heredoc per existing precedent (§5.34 fixture-file vs heredoc choice).
+
+##### EDITED (existing files touched this slice)
+
+| Path | What changes |
+|---|---|
+| `src/bpf/mac_filter.bpf.c` | **B-1**: Replace single `rule_counters` PERCPU_ARRAY (lines 220-226) with `rule_counters_inner` template + `rule_counters_a` + `rule_counters_b` PERCPU_ARRAY instances + `rule_counters_outer` ARRAY_OF_MAPS per §5.35 DataStructures. **B-2**: Extend `bump_rule` helper (lines 244-253) — signature `(__u32 rule_id)` → `(__u32 rule_id, __u32 active)`; body lookup chain changes from `&rule_counters` direct to `rule_counters_outer[active] → inner → rule_id`. **B-3**: Both call-sites in `mac_filter_prog` (MAC HASH-hit + CIDR LPM_TRIE-hit branches) pass the existing `active` snapshot to `bump_rule`. ZERO change to: `mac_filter_prog` other body lines, ethhdr/IPv4 bounds checks, `bump_stat` helper, STAT_DROP_MALFORMED branches, default-fallthrough at `defaults[active]`, rules dispatch chain (§5.34), `unlikely()` annotations (§5.30 HK-5), char __license[] line. PI-29-3.4d reviewer regional-diff fence: allowed hunks in `mac_filter_prog` body = {2 call-site signature updates passing `active` to `bump_rule`}; allowed hunks in `.maps` block = {1 removed PERCPU_ARRAY decl (`rule_counters`), 4 added decls (`rule_counters_inner` template + `rule_counters_a` + `rule_counters_b` + `rule_counters_outer`)}; allowed hunks in helper section = {`bump_rule` signature/body change}. |
+| `src/common/mac_filter.h` | **L-2**: ADD `XDPMF_MAP_RULE_COUNTERS_OUTER_NAME` + `XDPMF_MAP_RULE_COUNTERS_INNER_A_NAME` + `XDPMF_MAP_RULE_COUNTERS_INNER_B_NAME` constants per §5.35 DataStructures. REMOVE `XDPMF_MAP_RULE_COUNTERS_NAME` (line 163 of current header). `XDPMF_RULE_COUNTERS_MAX` alias UNCHANGED. PI-10-3.4d ADDITIVE-modulo-deletion: 3 added + 1 removed. |
+| `src/lib/loader.cpp` | **L-1** (kManagedMaps[] 15 → 17 entries): REMOVE `{ &SkelMapsT::rule_counters, XDPMF_MAP_RULE_COUNTERS_NAME, false }` at line 173; ADD 3 new entries `{ &SkelMapsT::rule_counters_a, XDPMF_MAP_RULE_COUNTERS_INNER_A_NAME, false }` + `{ &SkelMapsT::rule_counters_b, XDPMF_MAP_RULE_COUNTERS_INNER_B_NAME, false }` + `{ &SkelMapsT::rule_counters_outer, XDPMF_MAP_RULE_COUNTERS_OUTER_NAME, false }`. Surrounding comment "14 non-alias + 1 alias" → "16 non-alias + 1 alias" (impl-flexible wording). **L-A** (NEW `copy_rule_counters_forward` anon-namespace helper + 2 call-site insertions in `apply_request` body — state-b reattach + fresh-attach, parallel to the existing populate_rules_inner_slot insertion points; AFTER `populate_rules_inner_slot`, BEFORE `write_active_idx`). ZERO diff in: `attach()` / `detach()` public bodies, §5.4 state-machine, §5.19 name-check, §5.22 tag-check + O_PATH, §5.24 kernel-version probe, §5.26 trust_model parse+log, §5.27 CIDR-axis active_idx flip mechanism, §5.34 rules-axis active_idx flip mechanism, link-pin P0a logic, RAII wrappers, error-translation paths, the legacy-alias pin path, `populate_inner_slot` body, `populate_cidr_inner_slot` body, `populate_rules_inner_slot` body, `populate_action_table` body, `extract_pass_*` bodies, `bump_*` helpers (BPF — separate file), sidecar-write call. PI-7-3.4d-cpp scope-fence: allowed function names = {`apply_request` (kManagedMaps table edit area + copy_rule_counters_forward call insertion at 2 sites + adjacent comment updates), `copy_rule_counters_forward` (NEW helper), anon-namespace `kManagedMaps[]` table (1 REMOVE + 3 ADD rows + comment count edit)}. |
+| `src/cli/cli.cpp` | **C-3a**: ADD `parse_reset_counters` function (~30 LOC; template = `parse_bypass` at :280). **C-3b**: Extend subcommand dispatch at :329 with `else if (sub == "reset-counters") { return parse_reset_counters(rest); }`. **C-3c**: Extend `usage_text` at :77-115 with new subcommand line in `Usage:` block + `--rule-id <N>` flag description in `Options:` block (~3-5 LOC additive — operative-semantic per Phase 4.4; impl picks exact wording). ZERO other change. |
+| `src/cli/cli.hpp` | **C-3d**: ADD `#include "reset_counters.hpp"`. **C-3e**: Add `ResetCountersConfig` to the `ParsedCommand` variant alternatives. ~2 LOC delta. |
+| `src/cli/main.cpp` | **C-3f**: ADD `run_reset_counters(const ResetCountersConfig&)` dispatcher (~5 LOC; template = `run_bypass` at :65-68). **C-3g**: Add `ResetCountersConfig` arm to the `std::visit` lambda (~3 LOC). ZERO other change. |
+| `src/common/logger.hpp` | **C-3h**: ADD 2 entries to `kEventNames` array (`reset_counters.refused.no_pin`, `reset_counters.activated`); update size literal 33 → 35; update doc-comment count reference. ZERO other logger module change. |
+| `src/cli/CMakeLists.txt` | Add `reset_counters.cpp` to the xdpmacfilter binary source list (mirroring how `bypass.cpp` was added in §5.29). ~1 LOC delta. |
+| `CMakeLists.txt` | **V-1**: VERSION bump `0.9.0 → 0.10.0`. MINOR — operator-observable: NEW CLI subcommand. DESCRIPTION metadata MAY track latest slice per §5.34 round-1 OOT-1 inline-merge precedent + Phase 4.4 operative-semantic discipline (NOT a contract). No other CMake change. |
+| `CHANGELOG.md` | **V-2**: NEW `## [0.10.0] - 2026-05-NN` section per Keep-a-Changelog. **Added**: `reset-counters` CLI subcommand (audit-log; iface-attached precondition; --rule-id N selective OR batch); `rule_counters` map promoted to parallel ARRAY_OF_MAPS (atomic-swap with MAC + CIDR + defaults + rules — 5-axis active_idx). **Changed**: kManagedMaps[] grows 15 → 17 entries; T_EXPORTER_METRICS_FORMAT version-literal sites bumped; T_CLI_HELP_VERSION extends `--help` assertions for new subcommand line. **Notes**: PI-3.4b-2 counter-monotonicity-across-apply EXPLICITLY PRESERVED (atomic-swap is structural-only; reset zeroing is operator-action-only via the new CLI). **Removed**: single `rule_counters` PERCPU_ARRAY pin (`${PIN_DIR}/<iface>/rule_counters` no longer exists; replaced by `rule_counters_outer` + `rule_counters_a` + `rule_counters_b` pins). Build-pace table gains a row for MVP-3.4d. |
+| `tests/CMakeLists.txt` | ADD 3 new `add_test(...)` entries (T_CLI_RESET_COUNTERS, T_CLI_RESET_COUNTERS_RULE_ID, T_CLI_RESET_COUNTERS_NO_IFACE) all with `RESOURCE_LOCK xdp_fixture` per guard #12; ADD 1 conditional entry `T_RULE_COUNTERS_ATOMIC_SWAP` IF HG-3.4d-4 default ships. Net ctest count: 60 + 3 = **63** (or 60 + 4 = 64 if T-4 ships). |
+| `tests/T_CLI_HELP_VERSION.sh` | **E-1** (~3-5 LOC additive — operative-semantic): extend `--help` content assertions to include the new `reset-counters` subcommand line + flag descriptions. Impl picks exact assertions (e.g. `grep -q -F -- 'reset-counters'` following the pattern at :40-53). Body diff is purely additive. PI-3.4d-fixture-ripple-helpversion carve-out. |
+| `tests/T_EXPORTER_METRICS_FORMAT.sh` | **E-2** (~4 LOC EDIT — version-literal): HK-8/PI-8-3.4d-forced bump at 4 sites (lines 21, 22, 102, 103 per Phase A grep §7) `xdpmf-exporter 0.9.0` → `xdpmf-exporter 0.10.0`. NO test-logic change. PI-3.4d-fixture-ripple-version carve-out. Precedent: §5.31 EDIT-2 + §5.32 EDIT-2 + §5.34 EDIT — PI-8 carve-out is now stable cross-cycle pattern. |
+
+##### DELETED (this slice)
+
+None.
+
+##### UNCHANGED-BUT-AFFECTED (zero git-diff fence; behaviour must hold)
+
+| Path | Why it matters |
+|---|---|
+| `src/lib/loader.hpp` | **PI-7-3.4d-hpp — 10TH consecutive ZERO-diff cycle** (strongest PI-7 streak in project history; MVP-3.2 → MVP-3.4d). `git diff <pre-§5.35> -- src/lib/loader.hpp` MUST show ZERO output. reset-counters CLI is self-contained in `src/cli/reset_counters.{hpp,cpp}` and does NOT consume any new loader.hpp symbol. Apply-step `copy_rule_counters_forward` is an anon-namespace internal helper in loader.cpp, NOT a public symbol. Any diff = `[INVARIANT-VIOLATED]`. |
+| `src/lib/config.hpp` | **PI-7-3.4d-cpp — 5TH consecutive ZERO-diff cycle** (MVP-3.5/3.5.5/3.4b-c2/3.4d). `git diff <pre-§5.35> -- src/lib/config.hpp` MUST show ZERO output. No schema change. |
+| `src/lib/config.cpp` | UNCHANGED. No schema change; no validation change. Expected: ZERO diff. |
+| `src/lib/sidecar.{cpp,hpp}` | UNCHANGED. Sidecar shape preserved; reset-counters does NOT touch sidecar (operator-observable Prometheus action label is unaffected). |
+| `src/lib/cidr.{cpp,hpp}`, `src/lib/yaml_subset.{cpp,hpp}` | UNCHANGED. |
+| `src/exporter/main.cpp`, `src/exporter/http.cpp`, `src/exporter/stats_reader.cpp` | UNCHANGED. PI-31-3.4d (exporter READ-ONLY) PRESERVED. |
+| `src/exporter/rule_counters_reader.cpp` | **PI-3.4d-EXPORTER carve-out**: exporter reads `rule_counters` PERCPU map per-iface. Post-§5.35, the SINGLE `rule_counters` pin no longer exists — it's been replaced by `rule_counters_outer` + `rule_counters_a` + `rule_counters_b`. **Exporter MUST adapt**: open `rule_counters_outer`, read `active_idx`, look up `rule_counters_outer[active]` → inner_fd, then per-rule-id read from inner_fd. This is a NON-TRIVIAL exporter codepath change. **Architect decision**: this exporter adaptation is **REQUIRED for `xdpfilter_rule_match_total` metric to continue working** post-§5.35; if NOT adapted, the exporter's `rule_counters_open_failed` warn fires for every scrape. Architect MOVES `src/exporter/rule_counters_reader.cpp` from UNCHANGED to EDITED below (see additional EDITED row). PI-3.4d-EXPORTER carve-out: exporter scope expansion is INTRINSIC to this slice — NOT design drift. |
+| `src/common/logger.cpp` | UNCHANGED. New kEventNames entries are in logger.hpp; logger.cpp doesn't need touch. |
+| `src/cli/apply.{hpp,cpp}`, `src/cli/bypass.{hpp,cpp}` | UNCHANGED. No CLI surface change for existing subcommands. |
+| All 60 pre-§5.35 ctest BODIES (post-§5.34) | UNCHANGED with explicit 2-EDIT carve-out per PI-3.4d-fixture-ripple. The 2 EDITed bodies are T_CLI_HELP_VERSION (E-1 fixture cross-reference per guard #13) + T_EXPORTER_METRICS_FORMAT (E-2 version-literal per guard #11). All other 58 ctest bodies byte-equivalent. |
+| `tests/lib/*` | UNCHANGED. T-1..T-4 reuse existing helpers (`setup_veth`, `cleanup_veth`, `apply_config`, `inject_eth`, `read_rule_counters.py`, `wait_for_stats_sum`). |
+| `tests/fixtures/*` (existing fixtures) | UNCHANGED. T-1..T-4 reuse existing fixtures (e.g. `config_per_rule_counters.yaml` from §5.31) OR introduce ONE new fixture file `config_reset_counters.yaml` (impl-flexible; SHOULD-hint per Phase 4.4). |
+| systemd unit files + ansible files | UNCHANGED. No new caps; no new env vars; loader's runtime invocation pattern unchanged. Reset-counters CLI runs as operator (existing CAP_BPF requirement same as `bypass`). |
+| `mint/architecture-v2.md` | UNCHANGED. No HLD-level changes. |
+| §5.4 / §5.19 / §5.22 / §5.24 / §5.26 / §5.27 / §5.29 / §5.30 / §5.31 / §5.32 / §5.33 / §5.34 trust+identity gates | UNCHANGED. The new BPF map declarations + extended bump_rule signature are detected and verified by all existing gate codepaths transparently. PI-1..PI-5 all pass. |
+
+##### EDITED (additional — exporter adaptation per PI-3.4d-EXPORTER)
+
+| Path | What changes |
+|---|---|
+| `src/exporter/rule_counters_reader.cpp` | **PI-3.4d-EXPORTER carve-out**: adapt to the new `rule_counters_outer` ARRAY_OF_MAPS shape. Where the current code does `bpf_obj_get("${PIN_DIR}/<iface>/rule_counters")` (single direct open), POST-§5.35 it: (a) opens `rule_counters_outer` pin, (b) reads `active_idx` pin (key=0 returns the active inner slot in {0,1}), (c) `bpf_map_lookup_elem(rule_counters_outer_fd, &active, &inner_id)` retrieves the inner_id, (d) opens the inner directly via `bpf_obj_get("${PIN_DIR}/<iface>/rule_counters_<active>")` (NAME-based open; cheaper than going through outer—`active` is {0,1} → suffix is `_a` or `_b`), (e) reads the inner_fd as before. ALTERNATIVE simpler impl: just `bpf_obj_get("${PIN_DIR}/<iface>/rule_counters_<active>")` directly via active_idx read + string-construct; impl picks. **Existing per-CPU read + per-rule-id loop UNCHANGED** — only the fd-acquisition step changes. PI-3.4d-EXPORTER carve-out: ~15-30 LOC delta in `rule_counters_reader.cpp` (NEW: active_idx fd open + read + suffix-string construct; CHANGED: pin path string from `"rule_counters"` to `"rule_counters_<active>"`). NO change to `exporter/stats_reader.cpp` (stats PERCPU_ARRAY is UNCHANGED this slice — D-3.4d-5 below). NO new exporter event-name (the existing `exporter.scrape.warn.rule_counters_open_failed` covers the failure case). |
+
+Any file NOT listed above is off-limits for impl. If impl needs to edit a file not listed, that's a design gap — SendMessage architect.
+
+#### §5.35 Decisions (with rationale)
+
+##### D-3.4d-1 — `rule_counters` axis promotion shape = parallel `rule_counters_outer` mirror of §5.34 rules-axis — because
+
+Per HG-3.4d-4 + Q3.A confirmation. Byte-for-byte mirror of §5.34 D-3.4b-c2-1 (rules-axis promotion) — only the inner-map TYPE differs (PERCPU_ARRAY vs ARRAY). Template-explicit shape (1 template + 2 pinned inners + 1 outer) per §5.27 + §5.34 precedent — keeps libbpf `__inner_map` linkage idiom + AOM-inner manual-pinning convention aligned with all 4 existing parallel-outer patterns (MAC, CIDR, rules, **now rule_counters**). All 3 call-site loops in kManagedMaps[] walk handle the 3 new pinned entries automatically per the 4th consecutive HK-9 dividend.
+
+##### D-3.4d-2 — `bump_rule` helper takes `active` as explicit parameter — because
+
+5-axis active_idx-snapshot discipline (§5.27 Q1 AS1 mechanism extended; see D-3.4d-7). The caller (mac_filter_prog branches) has the snapshot in scope; passing it through avoids a re-read inside the helper that would split the snapshot atomicity across map families. Cost: 1 extra parameter in helper signature; 2 call-site edits passing existing local. Benefit: load-bearing 5-axis snapshot consistency.
+
+##### D-3.4d-3 — apply-step `copy_rule_counters_forward` for PI-3.4b-2 PRESERVE — because
+
+Per Q5.A confirmation. PI-3.4b-2 (counter-monotonicity-across-apply) is a load-bearing operator contract (Prometheus monotonicity for `xdpfilter_rule_match_total` series). The atomic-swap promotion structural change WOULD break this contract IF bump_rule writes only to active inner AND apply flips active without copy. The copy-forward step (userspace per-CPU loop) preserves per-CPU counter state across the flip. ZERO per-packet overhead (the cost is at apply-time, not packet-time). Cleanest mirror of §5.34 "populate inactive inner before flip" discipline applied to a different purpose (state transfer vs config population). Future "reset-on-apply" semantic = SKIP the copy step (trivial change).
+
+##### D-3.4d-RESET-BOTH — reset-counters zeros BOTH inner_a AND inner_b — because
+
+Per Q4.A enabling argument. Zeroing BOTH inners makes reset-counters SEMANTICALLY-IDEMPOTENT vs subsequent active_idx flips: regardless of which inner is active post-reset OR post-next-apply-flip, the operator's intent (counter[N]=0) is preserved. Cost: 2x BPF writes per reset operation (negligible — reset is rare). Benefit: simpler operator mental model ("reset is sticky regardless of apply-induced flip"); avoids a class of "I reset but my Grafana shows the old value again after the next apply" operator confusion. The alternative ("zero only active") would require operators to understand the active_idx + copy-forward interaction — not operator-friendly.
+
+##### D-3.4d-4 — reset-counters CLI does NOT consume loader.hpp public API — because
+
+PI-7-3.4d-hpp (10th consecutive ZERO-diff on loader.hpp) is preserved by self-containing the reset-counters BPF operations in `reset_counters.cpp` (direct `bpf_obj_get` + `bpf_map_update_elem`). Same precedent as bypass.cpp calling existing `xdpmf::detach()` for its action — but for reset-counters there's no analogous existing loader public API, so we keep the operation as a direct CLI-side BPF call. Adding a public `loader::reset_counters()` symbol would: (a) inflate loader.hpp (breaks ZERO-diff streak), (b) require a new LoaderError variant for the failure modes (breaks the enum), (c) add no value (the operation is a 2-line bpf_map_update_elem loop). Architect explicitly chooses CLI-self-contained.
+
+##### D-3.4d-5 — `stats` PERCPU_ARRAY (STAT_*) is NOT promoted to atomic-swap this slice — because
+
+The `stats` PERCPU_ARRAY (lines 152-158 area of mac_filter.bpf.c, `XDPMF_MAP_STATS_NAME = "stats"`) carries global verdict buckets (STAT_PASS, STAT_DROP_DENY, STAT_DROP_MALFORMED, STAT_PASS_CIDR). It's a small (STAT_MAX=4 entries) global counter, NOT a per-rule-id counter. Promoting `stats` to atomic-swap would add no operator value (global counters don't have apply-reset semantic considerations; Prometheus monotonicity is already preserved via reuse_fd discipline on the SHARED single pin). NEW FENCE in §7 OOS.
+
+##### D-3.4d-6 — helper duplication (escape_audit_value, sudo_user lookup) over extraction — because
+
+Per anti-misdiagnosis guard #9 (brownfield discipline — helper-location duplication-over-extraction). reset_counters.cpp DUPLICATES `escape_audit_value` (bypass.cpp:48-64) + the sudo_user-env-lookup pattern (bypass.cpp:199-207). Extraction into a shared `audit_helpers.hpp` would: (a) add a new header for 2 functions — overhead, (b) churn bypass.cpp imports — unnecessary brownfield disruption, (c) defer the extraction until a 3rd subcommand needs it (rule of three; we're at 2 now). Architect explicitly chooses duplication; future MVP-3.4e+ rule-of-three extraction is a separate concern (NEW FENCE).
+
+##### D-3.4d-7 — 5-axis atomic-swap discipline (NEW institutional learning) — because
+
+§5.27 introduced 2-axis (MAC + CIDR); §5.34 extended to 4-axis (MAC + CIDR + defaults + rules). This slice extends to **5-axis** (adds rule_counters). The pattern continues to scale linearly: single u32 `active_idx` store commits N parallel ARRAY_OF_MAPS axes via shared indexing; per-packet snapshot at datapath head (now passed to bump_rule explicitly per D-3.4d-2) preserves 5-way atomicity. Race-window analysis is BYTE-IDENTICAL to §5.27 Q1 AS1 (per §5.34 D-3.4b-c2-8). Future cycle adding a 6th axis follows same template: declare ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] outer + 2 inners + add to kManagedMaps[] + populate inactive before flip + read same `active` snapshot in BPF program. **Anti-misdiagnosis rule for future cycles**: when adding the Nth axis, do NOT introduce a separate active_idx map — share the existing one. The 5-axis pattern is now established; no future cycle should re-derive it.
+
+##### D-3.4d-FEAS — PERCPU-as-inner-of-ARRAY_OF_MAPS feasibility: Phase A literature/precedent affirmation + Phase 2.5 impl empirical smoke — because
+
+Architect Phase A pane lacks bash exec; cannot physically run the bpftool smoke. Phase A literature/precedent assessment (§5.35 Phase A grep §6) affirms feasibility via:
+- Kernel-side: PERCPU_ARRAY supported as inner of ARRAY_OF_MAPS since 4.12+ (well below project's kernel-version floor).
+- libbpf-side: `__array(values, struct X)` macro is type-agnostic; no PERCPU-specific generator path that could fail.
+- BTF-asymmetry risk (guard #7): inner-VALUE shape UNCHANGED (`__u64` same as pre-§5.35); the §5.31 EDIT-2 class of trap (inner-VALUE mutation triggering offset-4 verifier-reject) does NOT apply.
+- Existing 3 ARRAY_OF_MAPS uses (rulesets/cidr_rulesets/rules_outer) in this project are operationally green; only the inner-map TYPE varies.
+
+Empirical smoke is Phase 2.5 impl task per §5.34 EDIT-2 D-3.4b-22 precedent. If impl Phase 2.5 finds rejection → peer-DM architect → activate HG-3.4d-4 fallback (D-3.4d-FALLBACK below).
+
+##### D-3.4d-FALLBACK — HG-3.4d-4 fallback: defer atomic-swap to future slice — because
+
+Pre-negotiated fallback path. Activated IF impl Phase 2.5 finds PERCPU-as-inner-of-ARRAY_OF_MAPS rejection (build fail, skel codegen fail, or verifier rejection). On activation:
+- Items B-1, B-2, B-3 (BPF reshape + bump_rule signature change + call-site updates) → DROP. `rule_counters` PERCPU_ARRAY stays single + bump_rule signature stays `(rule_id)`.
+- Items L-1 (kManagedMaps[] reshape), L-2 constants additions, L-A copy_rule_counters_forward → DROP. kManagedMaps[] stays at 15 entries; mac_filter.h constants stay as pre-§5.35.
+- Item T-4 (T_RULE_COUNTERS_ATOMIC_SWAP ctest) → DROP. ctest count: 60 + 3 = 63 (not 64).
+- Items C-1, C-2, C-3a..h (reset-counters CLI + dispatch + logger events) → SHIP.
+- Items E-1, E-2, V-1, V-2 → SHIP.
+- Reset-counters CLI opens single `${PIN_DIR}/<iface>/rule_counters` pin (the existing one). Zeros either single slot OR all 64 slots per --rule-id.
+- Architect (during impl Phase B SendMessage exchange) updates §5.35 PRESERVED INVARIANTS to remove PI-3.4d-2 (deferred) and adds PI-3.4d-2-DEFERRED status marker. Atomic-swap stays NEW OOS fence for future slice.
+- PI-7-3.4d-hpp ZERO-diff still holds; PI-3.4b-2 (PRESERVE) still holds (trivially — no shape change to disrupt).
+- §7 OOS gains the atomic-swap fence (back to deferred status).
+
+Documented IN ADVANCE so impl/tester know the disposition without further architect intervention if smoke fails before architect can respond.
+
+#### §5.35 TestStrategy entries
+
+##### §6.NN T_CLI_RESET_COUNTERS — batch reset zeros all 64 slots; subsequent bumps work from zero
+
+**Trigger**:
+1. `setup_veth`.
+2. `apply_config <fixture>` (fixture: 3 pass rules: `id=5/17/42`, MAC-matching).
+3. Inject 5 frames matching rule_id=5 + 3 frames matching rule_id=17 + 2 frames matching rule_id=42.
+4. `read_rule_counters.py` baseline → assert rule_counters[5]=5, [17]=3, [42]=2, all others = 0.
+5. Run `xdpmacfilter reset-counters --iface ${IFACE_A}`.
+6. `read_rule_counters.py` post-reset → assert ALL 64 slots = 0.
+7. Re-inject 1 frame matching rule_id=5.
+8. `read_rule_counters.py` final → assert rule_counters[5]=1; all others (including [17], [42]) = 0.
+
+**Observable outcome (all)**:
+- `reset-counters` exits 0.
+- stderr contains `xdpmacfilter: RESET-COUNTERS on ${IFACE_A} by uid=<N> euid=<M> sudo_user="<X>" rule_id=ALL` (matches HG-3.4d-6 ERE with `rule_id=ALL` for batch case).
+- All 64 PERCPU rule_counters slots read 0 post-reset (verified via `read_rule_counters.py` which sums per-CPU values).
+- Post-reset bump works (re-inject increments from 0 baseline) → atomic-swap NOT broken by reset operation; bump still hits the active inner.
+
+**Assertion mechanism**: `read_rule_counters.py` (existing helper from §5.31) for per-rule sum reads; bash arithmetic on baseline/post-reset/final values; `grep -qE` on captured stderr for audit-log substring.
+
+**Anti-theatricality control**: dual-bump-then-reset-then-rebump pattern verifies that reset ACTUALLY zeros (not just appears zero due to read-error masking) AND that post-reset operations work (not broken by reset clobbering pin state).
+
+**SKIP conditions**: none new (existing veth-fixture skip conditions apply).
+
+**Cleanup**: `cleanup_veth`. **RESOURCE_LOCK**: `xdp_fixture` (touches veth + bpffs pins).
+
+**Maps to**: PI-3.4d-1 (reset-counters CLI behavioral contract), HG-3.4d-1 (zero-write mechanism), HG-3.4d-2 (no-flag = batch), HG-3.4d-6 (audit-stderr format).
+
+##### §6.NN+1 T_CLI_RESET_COUNTERS_RULE_ID — selective reset zeros only the named slot; out-of-range exits 1
+
+**Trigger**:
+1. `setup_veth`.
+2. `apply_config <fixture>` (same 3-rule fixture).
+3. Bump rule_counters[5]=5, [17]=3, [42]=2 (inject as above).
+4. Sub-case a: Run `xdpmacfilter reset-counters --iface ${IFACE_A} --rule-id 17`.
+5. `read_rule_counters.py` → assert [17]=0; [5]=5 UNCHANGED; [42]=2 UNCHANGED.
+6. Sub-case b (negation): Run `xdpmacfilter reset-counters --iface ${IFACE_A} --rule-id 64` → expect exit 1 + stderr matching `out of range \[0,63\]` ERE.
+7. Sub-case c (negation): Run `xdpmacfilter reset-counters --iface ${IFACE_A} --rule-id foo` → expect exit 1 + stderr matching `requires an unsigned integer` ERE.
+
+**Observable outcome (all)**:
+- Sub-case a: `reset-counters` exits 0; stderr contains `rule_id=17` audit-log substring (matches HG-3.4d-6 ERE with `rule_id=17` for single-slot case); only slot 17 zeroed; others byte-equivalent.
+- Sub-case b: exits 1; stderr ERE `out of range \[0,63\]` matches; NO audit-log line emitted (parse-time rejection per Q1.A); rule_counters STATE byte-equivalent (no BPF write happened).
+- Sub-case c: exits 1; stderr ERE `requires an unsigned integer` matches; NO audit-log.
+
+**Assertion mechanism**: same as §6.NN.
+
+**Anti-theatricality control**: 3-rule fixture verifies selectivity (only the named slot zeroes; OTHER slots stay at their bumped values) — directly rules out the "reset --rule-id 17 actually zeros all 64" bug.
+
+**SKIP conditions**: none new.
+
+**Cleanup**: `cleanup_veth`. **RESOURCE_LOCK**: `xdp_fixture`.
+
+**Maps to**: PI-3.4d-1 (CLI behavioral contract), HG-3.4d-2 (--rule-id semantics + range validation), Q1.A (parse-time validation).
+
+##### §6.NN+2 T_CLI_RESET_COUNTERS_NO_IFACE — iface-not-attached precondition fails with exit 1
+
+**Trigger**:
+1. `setup_veth` but DO NOT `apply_config` / `attach` — iface is up but no XDP filter attached.
+2. Sub-case a: Run `xdpmacfilter reset-counters --iface ${IFACE_A}` → expect exit 1 + stderr matching `no rule_counters pin` substring.
+3. Sub-case b (negation control): `apply_config <fixture>` → run `xdpmacfilter reset-counters --iface ${IFACE_A}` → expect exit 0 + audit-log present.
+
+**Observable outcome (all)**:
+- Sub-case a: exits 1; stderr contains `reset-counters: no rule_counters pin at` substring + `iface '${IFACE_A}' not attached?` substring.
+- Sub-case b: exits 0; audit-log emitted; ALL 64 slots zeroed.
+
+**Assertion mechanism**: `grep -q -F` on captured stderr.
+
+**Anti-theatricality control**: negation sub-case proves the precondition check is REACHED ONLY when iface is unattached (not always failing).
+
+**SKIP conditions**: none new.
+
+**Cleanup**: `cleanup_veth`. **RESOURCE_LOCK**: `xdp_fixture`.
+
+**Maps to**: PI-3.4d-1 (CLI behavioral), HG-3.4d-3 (iface-attached precondition).
+
+##### §6.NN+3 T_RULE_COUNTERS_ATOMIC_SWAP — LOAD-BEARING canary for PI-3.4b-2 PRESERVE + D-3.4d-3 copy-forward (CONDITIONAL — only IF HG-3.4d-4 default ships)
+
+**Trigger**:
+1. `setup_veth`.
+2. `apply_config <config_A>` (3 pass rules).
+3. Inject frames bumping rule_counters[5]=5, [17]=3 (active inner say =0, so inner_a has these counts).
+4. Read active_idx → `active_A`. Read rule_counters_outer[active_A] inner → assert per-rule counts match.
+5. `apply_config <config_B>` (could be same rules or different; key is the active_idx flip).
+6. Read active_idx → `active_B`. Assert `active_B != active_A` (flipped).
+7. **LOAD-BEARING ASSERT**: read rule_counters_outer[active_B] inner via `read_rule_counters.py` → assert rule_counters[5] STILL = 5; [17] STILL = 3 (PI-3.4b-2 PRESERVE-across-apply held via D-3.4d-3 copy-forward; the new active inner_b carries the per-CPU state copied from inner_a before the flip).
+8. Inject 2 more frames matching rule_id=5.
+9. Read new active inner → assert rule_counters[5] = 7 (monotonic from preserved 5 + 2 new bumps).
+10. Inject 1 frame matching rule_id=17.
+11. Read → assert rule_counters[17] = 4 (3 + 1).
+
+**Observable outcome (all)**:
+- All apply invocations exit 0.
+- Per-rule counters PRESERVED across apply (PI-3.4b-2 held).
+- Post-apply bumps continue monotonically from preserved values (not from zero).
+- active_idx flip occurred (assertion at step 6).
+
+**Assertion mechanism**: `bpftool map dump pinned ${PIN_DIR}/${IFACE_A}/active_idx` + `read_rule_counters.py` against the correct inner path (`rule_counters_<active>` string-constructed from the active_idx read).
+
+**Anti-theatricality control**: assert ONLY the new-active inner (NOT the inactive one) preserves the values. Reading the inactive inner separately would show the same values (because copy-forward copies INTO inactive before the flip → inactive becomes new-active). The load-bearing observable is that AFTER the flip, the new-active inner has the values.
+
+**SKIP conditions**: SKIP rc 77 IF D-3.4d-FALLBACK active (atomic-swap deferred) — test reads via `${PIN_DIR}/<iface>/rule_counters_<active>` paths which don't exist in fallback mode. Probe `bpf_obj_get("${PIN_DIR}/${IFACE_A}/rule_counters_outer")` at test start; if -1 ENOENT, SKIP-77 + stderr `T_RULE_COUNTERS_ATOMIC_SWAP: D-3.4d-FALLBACK active; atomic-swap deferred — skipping`.
+
+**Cleanup**: `cleanup_veth`. **RESOURCE_LOCK**: `xdp_fixture`.
+
+**Maps to**: PI-3.4b-2 (counter-monotonicity-across-apply — LOAD-BEARING PRESERVATION), HG-3.4d-5 (structural-only semantic), D-3.4d-3 (apply-step copy-forward), D-3.4d-7 (5-axis active_idx mechanism).
+
+##### §6.NN+4 T_CLI_HELP_VERSION — EDITED to assert `reset-counters` in `--help` (E-1)
+
+(Documented in EDITED FileList row above. Body diff ~3-5 LOC additive — extend assertions to match new subcommand. Test name kept. Per Phase 4.4 operative-semantic discipline, impl/tester picks exact assertion idiom following the :40-53 pattern.)
+
+**Maps to**: guard #13 (fixture cross-reference for help-output ripple), PI-3.4d-1 (CLI surface contract).
+
+##### §6.NN+5 T_EXPORTER_METRICS_FORMAT — EDITED to bump version literals (E-2)
+
+(Documented in EDITED FileList row above. Body diff 4 LOC EDIT at literal sites lines 21, 22, 102, 103 per Phase A grep §7. Per PI-8-3.4d carve-out + guard #11.)
+
+**Maps to**: guard #11 (VERSION literal propagation), PI-8-3.4d (version-string parity).
+
+#### §6.5 Preserved invariants (MVP-3.4d brownfield) — PI-1..PI-34 + PI-3.4b-* + PI-3.5-* + PI-3.5.5-* + PI-3.4b-c2-* hold + PI-3.4d-* NEW
+
+All MVP-3.1..3.4b-c2 invariants continue to hold post-§5.35 EXCEPT where this slice explicitly EXTENDS (PI-7-3.4d-hpp/cpp continue the ZERO-diff streaks). NO prior PI is LIFTED.
+
+Reviewer's 5th framework point walks the COMBINED list and reports `[INVARIANT-VIOLATED]` per failed check.
+
+| PI | Statement | §5.35 check mechanism |
+|---|---|---|
+| **PI-7-3.4d-hpp** | `src/lib/loader.hpp` byte-identical (**10TH consecutive ZERO-diff cycle**; strongest streak in project history; MVP-3.2 → MVP-3.4d). `src/lib/config.hpp` byte-identical (**5TH consecutive ZERO-diff cycle**; MVP-3.5 → MVP-3.4d). NO new public symbol, NO LoaderError addition, NO Config field change this slice. Reset-counters CLI is self-contained per D-3.4d-4. | `git diff <pre-§5.35> -- src/lib/loader.hpp src/lib/config.hpp` MUST return zero lines. |
+| **PI-7-3.4d-cpp** | `src/lib/loader.cpp` SCOPED EDIT only — diff lines confined to: (a) `kManagedMaps[]` table 15 → 17 entries (1 REMOVE + 3 ADD lines + comment count update); (b) NEW anon-namespace helper `copy_rule_counters_forward` (~25 LOC); (c) `apply_request` body — 2 call-site insertions for `copy_rule_counters_forward` (state-b reattach + fresh-attach, parallel to existing populate_rules_inner_slot call-sites). ZERO diff in: `attach()` / `detach()` public bodies, §5.4 state-machine, §5.19 name-check, §5.22 tag-check + O_PATH, §5.24 kernel-version probe, §5.26 trust_model parse+log, §5.27 CIDR-axis active_idx flip mechanism, §5.34 rules-axis active_idx flip mechanism, link-pin P0a logic, RAII wrappers, error-translation paths, the legacy-alias pin path, `populate_inner_slot` body, `populate_cidr_inner_slot` body, `populate_rules_inner_slot` body, `populate_action_table` body, `extract_pass_*` bodies, sidecar-write call. | `git diff <pre-§5.35> -- src/lib/loader.cpp` shows changes confined to the regions above. Reviewer applies regional-diff check: produce `git diff <pre-§5.35> -- src/lib/loader.cpp` output; classify each hunk by enclosing function name; allowed function names = {`apply_request` (only in the kManagedMaps section area + 2 copy_rule_counters_forward call insertion sites), `copy_rule_counters_forward` (NEW), anon-namespace `kManagedMaps[]` table}. Any hunk outside this set = `[INVARIANT-VIOLATED]`. Cross-cycle baseline: reviewer compares against MVP-3.4b cycle 2-shipped HEAD. |
+| PI-8-3.4d | `xdpmacfilter --version` reports `xdpmacfilter 0.10.0` AND `xdpmf-exporter --version` reports `xdpmf-exporter 0.10.0` (shared `version.h` per §5.25 P3). | Run both `--version`; both single-line outputs `0.10.0` + newline. MINOR bump from 0.9.0 — operator-observable behavioural change (NEW CLI subcommand). |
+| PI-9 | `--help` / `--version` output FORMAT unchanged modulo new subcommand-line + version-number bump. | §6.NN+4 T_CLI_HELP_VERSION re-run passes (forward-compatible ERE asserting `attach`, `detach`, `--mode`, NOW `reset-counters` too). |
+| **PI-10-3.4d** | `src/common/mac_filter.h` additive-modulo-deletion: ADD 3 new map-name constants (`XDPMF_MAP_RULE_COUNTERS_OUTER_NAME`, `XDPMF_MAP_RULE_COUNTERS_INNER_A_NAME`, `XDPMF_MAP_RULE_COUNTERS_INNER_B_NAME`); REMOVE 1 constant (`XDPMF_MAP_RULE_COUNTERS_NAME`). ALL other constants/structs/enums byte-equivalent (incl. `XDPMF_RULE_COUNTERS_MAX` alias). | `git diff <pre-§5.35> -- src/common/mac_filter.h` shows the 3-line + 1-line edit. Reviewer asserts each existing constant/struct/enum-value byte-identical via grep cross-reference. |
+| PI-1..PI-34 + PI-3.4b-* + PI-3.5-* + PI-3.5.5-* + PI-3.4b-c2-* | All carry-forward unchanged. PI-3.4b-2 EXPLICITLY PRESERVED (counter-monotonicity-across-apply; load-bearing semantic per HG-3.4d-5). | Existing carry-forward check mechanisms apply. T_RULE_COUNTERS_ATOMIC_SWAP §6.NN+3 is the LOAD-BEARING canary for PI-3.4b-2 PRESERVE post-promotion. If T-4 fails on the "counters preserved across apply" assertion → `[INVARIANT-VIOLATED]` on PI-3.4b-2. |
+| **PI-3.4d-1** | reset-counters CLI behavioral contract: `xdpmacfilter reset-counters --iface X` exits 0 on attached iface + emits audit-log `xdpmacfilter: RESET-COUNTERS on X by uid=... euid=... sudo_user="..." rule_id=...` to stderr AT action time + zeros all 64 (or selected) slots of `rule_counters` PERCPU map(s). Exit 1 on parse error / out-of-range / iface-not-attached. | T_CLI_RESET_COUNTERS + T_CLI_RESET_COUNTERS_RULE_ID + T_CLI_RESET_COUNTERS_NO_IFACE all PASS. |
+| **PI-3.4d-2** (IF HG-3.4d-4 default ships) | `rule_counters` axis is in parallel-outer atomic-swap shape (rule_counters_outer ARRAY_OF_MAPS[2] of rule_counters_a/_b inner PERCPU_ARRAYs). `${PIN_DIR}/<iface>/rule_counters_outer` + `rule_counters_a` + `rule_counters_b` all pinned; `${PIN_DIR}/<iface>/rule_counters` does NOT exist post-§5.35. | `bpftool map show pinned ${PIN_DIR}/<iface>/rule_counters_outer` reports `type array_of_maps max_entries 2`. `bpftool map show pinned ${PIN_DIR}/<iface>/rule_counters_a` reports `type percpu_array max_entries 64`. `bpftool map show pinned ${PIN_DIR}/<iface>/rule_counters` FAILS with ENOENT. |
+| **PI-3.4d-2-DEFERRED** (IF D-3.4d-FALLBACK active) | Atomic-swap promotion DEFERRED to future slice; single `rule_counters` PERCPU_ARRAY preserved unchanged. CLI ships against the single pin. Architect EDITs the design via Phase B Edit if fallback activates. | Status marker added by architect during Phase B if fallback is activated. PI-3.4d-2 above becomes inactive; PI-3.4d-2-DEFERRED becomes active. |
+| **PI-3.4d-EXPORTER** (carve-out) | Exporter `rule_counters_reader.cpp` adapts to new `rule_counters_<active>` pin shape: opens `active_idx` pin → constructs `${PIN_DIR}/<iface>/rule_counters_<active>` path → reads. Existing `xdpfilter_rule_match_total` metric continues to emit per-rule values. PI-31-3.4d (exporter READ-ONLY) PRESERVED — exporter only reads, never writes. | T_EXPORTER_VALUES_MATCH_STATS (§6.39, existing test) passes post-§5.35; exporter `--version` reports `0.10.0`. No grep for `bpf_map_update_elem` in `src/exporter/*` (PI-31 preservation). |
+| PI-3.5-4 (kEventNames stability) | Catalog count = **35** post-§5.35 (was 33 per §5.34 D-3.4b-c2-4; +2 NEW reset_counters events). | T_LOG_EVENT_CATALOG_STABILITY (§6.58) updates reference 33 → 35. |
+
+#### §5.35 verifiable invariants for reviewer
+
+(Per architect-spec §6.5 "Verification-hints discipline": items below are GUIDANCE for the reviewer, NOT contracts for impl. Default MAY. Reserve MUST only for true PI-* contracts (PI-1..PI-34 + PI-3.4b-* + PI-3.5-* + PI-3.5.5-* + PI-3.4b-c2-* + PI-3.4d-* above ARE MUSTs by definition; items below MAY be relaxed by impl if a contract elsewhere demands it). **Resolution rule for prose-vs-invariants conflicts within this amendment: invariants block wins, prose loses; if impl deviates on a SHOULD/MAY hint to satisfy a PI-* contract, reviewer's correct disposition is `inline-merge` on the hint text — NOT `[UNRELATED-EDIT]` on impl.**)
+
+- `git diff <pre-§5.35> -- src/lib/loader.hpp src/lib/config.hpp` SHOULD return ZERO output (PI-7-3.4d-hpp — 10th consecutive cycle on loader.hpp + 5th on config.hpp).
+- `git diff <pre-§5.35> -- src/lib/loader.cpp` SHOULD show changes confined to the 3 enumerated scopes (a)-(c) in PI-7-3.4d-cpp.
+- `git diff <pre-§5.35> -- src/common/mac_filter.h` SHOULD show 3 added constants + 1 removed constant; ZERO other changes.
+- `git diff <pre-§5.35> -- src/bpf/mac_filter.bpf.c` SHOULD show: `.maps` block (1 removed `rule_counters` PERCPU_ARRAY decl + 4 added decls: template + 2 inners + outer); `bump_rule` helper signature + body change; 2 call-sites in `mac_filter_prog` (MAC HASH-hit + CIDR LPM_TRIE-hit branches) passing `active` argument. ZERO diff to: `bump_stat`, ethhdr bounds check, IPv4 ethertype gate, IPv4 header bounds check, default-fallthrough, STAT_DROP_MALFORMED branches, `unlikely()` annotations, char __license[] line, §5.34 rules dispatch chain.
+- `git diff <pre-§5.35> -- src/common/logger.hpp` SHOULD show ONLY the kEventNames array literal additions (`reset_counters.refused.no_pin`, `reset_counters.activated`) + the array-size literal bump (33 → 35) + the kEventCount doc-comment update. ZERO other logger module changes.
+- `git diff <pre-§5.35> -- src/cli/cli.cpp` SHOULD show: parse_reset_counters NEW function + 1-line dispatch arm extension at :329 + ~3-5 LOC usage_text extension. ZERO change to other parse_* functions.
+- `git diff <pre-§5.35> -- src/cli/cli.hpp` SHOULD show: 1 NEW include + 1 ResetCountersConfig variant alternative addition. ~2 LOC.
+- `git diff <pre-§5.35> -- src/cli/main.cpp` SHOULD show: NEW run_reset_counters dispatcher (~5 LOC) + ResetCountersConfig std::visit arm (~3 LOC). ZERO other change.
+- `git diff <pre-§5.35> -- src/cli/CMakeLists.txt` SHOULD show: reset_counters.cpp added to source list. ~1 LOC.
+- `git diff <pre-§5.35> -- src/exporter/rule_counters_reader.cpp` SHOULD show: adapted fd-acquisition step for `rule_counters_<active>` pin (NEW: active_idx fd open + read + suffix-string construct; CHANGED: pin path string `"rule_counters"` → `"rule_counters_<active>"`). Existing per-CPU read + per-rule-id loop UNCHANGED. ~15-30 LOC delta.
+- `git diff <pre-§5.35> -- tests/T_*.sh` SHOULD show: 3 NEW files (T_CLI_RESET_COUNTERS/_RULE_ID/_NO_IFACE) + 1 conditional NEW file (T_RULE_COUNTERS_ATOMIC_SWAP) + 2 EDITED files (T_CLI_HELP_VERSION + T_EXPORTER_METRICS_FORMAT). 58 of 60 pre-§5.35 ctest bodies byte-equivalent.
+- `git diff <pre-§5.35> -- tests/CMakeLists.txt` SHOULD show: 3 (or 4 with T-4) new add_test entries; other 60 entries unchanged.
+- `git diff <pre-§5.35> -- tests/fixtures/` SHOULD show: at most 1 new fixture file (`config_reset_counters.yaml`); existing fixtures byte-equivalent. Tester MAY inline as heredoc (impl-flexible per Phase 4.4).
+- `git diff <pre-§5.35> -- CMakeLists.txt` SHOULD show: VERSION bump 0.9.0 → 0.10.0 AND the DESCRIPTION string MAY track the latest shipped slice (description is metadata with NO PI-* contract; per §5.34 round-1 OOT-1 inline-merge precedent). ZERO other top-level CMake changes.
+- `git diff <pre-§5.35> -- CHANGELOG.md` SHOULD show NEW `[0.10.0]` entry + build-pace row.
+- New files SHOULD exist: 2 source files (reset_counters.{hpp,cpp}) + 3 T_*.sh + 1 conditional T-4 + at most 1 new fixture.
+- 3 new ctests SHOULD pass (T_CLI_RESET_COUNTERS_* trio).
+- 1 conditional ctest SHOULD pass if HG-3.4d-4 default ships (T_RULE_COUNTERS_ATOMIC_SWAP — LOAD-BEARING for PI-3.4b-2 PRESERVE).
+- 58 of 60 pre-§5.35 ctests SHOULD still pass byte-equivalent (or legitimately SKIP-77).
+- 2 PI-3.4d-EDITED ctests SHOULD pass with their updated bodies (T_CLI_HELP_VERSION adds new substring assertions; T_EXPORTER_METRICS_FORMAT version-literal bump).
+- `xdpmacfilter --version` SHOULD report `xdpmacfilter 0.10.0` AND `xdpmf-exporter --version` SHOULD report `xdpmf-exporter 0.10.0` (PI-8-3.4d).
+- `XDPMF_SANITIZERS=ON` build SHOULD be clean for BOTH binaries.
+- BPF object SHOULD verifier-load cleanly: `xdpmacfilter attach` on a fixture iface exits 0; the chained-deref pattern `rule_counters_outer[active] → rule_counters_inner[rule_id]` per bump_rule SHOULD pass verifier (precedent: §5.27 + §5.31 + §5.34 chained inner derefs all pass).
+- `bpftool map show pinned ${PIN_DIR}/<iface>/rule_counters_outer` SHOULD report `type array_of_maps max_entries 2 value_size 4 key_size 4` (IF HG-3.4d-4 default ships).
+- `bpftool map show pinned ${PIN_DIR}/<iface>/rule_counters_a` SHOULD report `type percpu_array max_entries 64 value_size 8 key_size 4`; same for `rule_counters_b` (IF default ships).
+- `bpftool map show pinned ${PIN_DIR}/<iface>/rule_counters` SHOULD FAIL with ENOENT (the single PERCPU pin is RETIRED) IF default ships.
+- `grep -c '^\s*{ &SkelMapsT::' src/lib/loader.cpp` SHOULD return **17** (was 15 pre-§5.35; PI-3.4d-kManagedMaps catalog count; impl-flexible if architect later swaps the row count due to Phase B reshape).
+- `grep -cE 'SEC\(".maps"\)' src/bpf/mac_filter.bpf.c` SHOULD return roughly **18** (operative-semantic per Phase 4.4 — actual count depends on template-explicit vs template-via-struct-only convention per §5.34 OOT-4 precedent; reviewer accepts either +3 or +2 depending on template's SEC placement).
+- `grep -cE 'XDPMF_MAP_RULE_COUNTERS' src/common/mac_filter.h` SHOULD return 3 occurrences (3 NEW constants); ZERO occurrence of the standalone `XDPMF_MAP_RULE_COUNTERS_NAME` substring (the removed constant).
+- `grep -c 'reset_counters\.' src/common/logger.hpp` SHOULD return at least 2 (the 2 NEW kEventNames entries).
+- T_LOG_EVENT_CATALOG_STABILITY (§6.58) SHOULD assert count == 35 (was 33 per §5.34 D-3.4b-c2-4; PI-3.5-4 AMENDED per §5.35 NEW-events addition).
+- Optional verifier-canary (impl Phase 2.5 smoke per D-3.4d-FEAS): `sudo -n bpftool prog load build/src/bpf/mac_filter.bpf.o /sys/fs/bpf/probe type xdp; rc=$?; sudo -n bpftool prog unpin /sys/fs/bpf/probe; echo $rc` SHOULD return 0. If rc != 0 OR build fails at skel codegen → impl peer-DMs architect → activate D-3.4d-FALLBACK.
+
+#### §5.35 Anti-misdiagnosis notes (institutional learning, per architect-spec §6.6)
+
+This slice carries forward all 13 anti-misdiagnosis guards from prior cycles + adds two specific to MVP-3.4d:
+
+1. **All guards #1..#13 inherited** unchanged: cap-set declaration on NEW invocation path (D-3.3-6), bpffs ≠ tmpfs (§5.31 EDIT-1), bpftool-vs-libbpf-skeleton BTF asymmetry (§5.31 EDIT-2 + §5.34 Phase A §6 — applied this cycle), catalogue arithmetic (§5.32 EDIT-1 + this cycle's kManagedMaps + kEventNames + SEC count), VERSION-bump literal propagation (§5.32 EDIT-2 + this cycle's CMakeLists + T_EXPORTER_METRICS_FORMAT + CHANGELOG), Phase A code-grep discipline pays off (this cycle Phase A confirmed actual T_EXPORTER_METRICS_FORMAT literal lines are 21/22/102/103 vs brief's 21/22/101/102 — operative-semantic per Phase 4.4 → impl uses actual literals), helper-location duplication-over-extraction (D-3.4d-6 — reset_counters.cpp duplicates bypass.cpp helpers), three-callsite lockstep landmine (RESOLVED MVP-3.4.5 HK-9; **dividend collected here for 4th consecutive cycle**), [[impl-role-discipline]] (silent deviation forbidden; Phase B peer-DM required — D-3.4d-FALLBACK pre-negotiated as the explicit escalation path), [[mint-hld-scope-discipline]] (mechanical-answer check; this slice is mechanical extension of §5.34 precedent — no /mint-hld needed), chronic -j4 parallelism + RESOURCE_LOCK rule (T-1/T-2/T-3/T-4 NEW ctests requiring xdp_fixture lock), fixture cross-reference for retire/rename emit-sites (#13 — T_CLI_HELP_VERSION extends for new subcommand line).
+
+2. **NEW anti-misdiagnosis note #14 — PERCPU-as-inner-of-ARRAY_OF_MAPS feasibility check pattern** (validated by §5.35 Phase A grep §6 + D-3.4d-FEAS + D-3.4d-FALLBACK pre-negotiation). When a brief proposes promoting a PERCPU_* (or any non-trivial map type) to atomic-swap parallel pattern, architect Phase A MUST EITHER: (a) run a minimal BPF object + `bpftool prog load` smoke BEFORE publishing design (preferred; catches feasibility issues at design-time), OR (b) explicitly document the literature/precedent reasoning + transfer empirical smoke to impl Phase 2.5 + PRE-NEGOTIATE the fallback path inline (this slice's D-3.4d-FEAS + D-3.4d-FALLBACK). Both paths are acceptable; (a) is preferred when architect has bash exec. (b) requires the fallback path to be FULLY SPECIFIED in advance so impl/tester have an unambiguous disposition if the smoke fails — NOT a "we'll figure it out later" deferral. Cost: ~10 minutes of careful drafting if (b); ~5 minutes of smoke if (a). Benefit: catches THIS class of design uncertainty before Phase B impl turbulence; pre-negotiated fallback eliminates a class of coordination overhead. **Future-cycle architect anti-misdiagnosis rule**: when a brief proposes ANY parallel-swap promotion of a non-standard inner-map type (PERCPU_*, LPM_TRIE with non-trivial value, etc), default to (a) if bash available; else (b) with full fallback specification. Validated by MVP-3.4d (this slice).
+
+3. **NEW anti-misdiagnosis note #15 — apply-step state-transfer for PRESERVE-across-apply semantic** (validated by §5.35 D-3.4d-3). When a slice promotes a stateful map to atomic-swap shape AND the prior semantic was PRESERVE-across-apply (i.e. operator-observable values must survive apply), the atomic-swap shape alone is INSUFFICIENT — a NEW apply-step userspace "state-transfer" or "copy-forward" helper is REQUIRED to preserve continuity across the active_idx flip. Without it, the new-active inner reads stale (or zero) values post-flip; PRESERVE breaks. The pattern: `copy_<axis>_forward(old_active_inner_fd, inactive_inner_fd)` userspace loop, called BEFORE the active_idx u32 store. Per-rule_id (or per-key) loop; per-CPU lookup-then-update for PERCPU maps. Bounded by the MAX entries count (NOT NCPUS). Future-cycle architect rule: when proposing atomic-swap promotion of a stateful map with PRESERVE semantic, explicitly architect the copy-forward step + document its bounded cost. Validated by MVP-3.4d (this slice).
+
+#### §7 OOS — MVP-3.4d components SHIPPED + new fences + future surfaced
+
+##### Moved from deferred to SHIPPED (per MVP-3.4d)
+
+- ~~**`reset-counters` subcommand** — MVP-3.4d future cycle (per §5.34 §7 OOS).~~ **— SHIPPED in §5.35** as `xdpmacfilter reset-counters --iface X [--rule-id N]` per items C-1, C-2, C-3.
+- ~~**`rule_counter` atomic-swap** — MVP-3.4d future cycle (per §5.34 §7 OOS).~~ **— SHIPPED in §5.35** as parallel `rule_counters_outer` ARRAY_OF_MAPS[2] of `rule_counters_a`/`_b` inner PERCPU_ARRAYs per HG-3.4d-4 + D-3.4d-1. STRUCTURAL-ONLY (PI-3.4b-2 PRESERVE held via D-3.4d-3 copy-forward). **CONDITIONAL on D-3.4d-FEAS**: if impl Phase 2.5 smoke fails → D-3.4d-FALLBACK activates → atomic-swap returns to deferred status.
+
+##### NEW out-of-scope fences (per §5.35)
+
+- **`reset-counters --all-ifaces` / batch reset across multiple ifaces** — NEW FENCE. Per-iface this slice; future cycle if operator demand surfaces.
+- **`reset-counters --dry-run`** — NEW FENCE. Always commits; no dry-run mode.
+- **`reset-counters` without `--iface` (default to attached iface auto-discovery)** — NEW FENCE. `--iface` required.
+- **`reset-counters --reason "<text>"`** — NEW FENCE. reset-counters has no `--reason` flag this slice (operator's audit-log reason flows through git+ansible+commit-message context). Future cycle if explicit per-reset operator-reason is demanded.
+- **`dump-counters` complementary read-side subcommand** — operator can already use `bpftool map dump pinned ${PIN_DIR}/<iface>/rule_counters_<active>` (or pre-§5.35 `rule_counters`) OR query Prometheus `/metrics`. NEW FENCE.
+- **Counter zero-on-detach** — detach currently preserves pin (D-3.1-4 reuse_fd discipline); not changing this. NEW FENCE.
+- **"Reset-on-apply" semantic flip** — atomic-swap shape enables this (skip the copy-forward step → active_idx flip alone resets the now-active view). NOT this slice. Operator demand has not surfaced. NEW FENCE.
+- **`stats` PERCPU_ARRAY atomic-swap promotion (6th axis)** — global counters don't have apply-reset semantic considerations; not motivated. NEW FENCE.
+- **`action_table` promotion to parallel ARRAY_OF_MAPS** — unchanged from §5.34 §7 OOS. NEW FENCE (carry-forward).
+- **Action types beyond `{PASS, DROP}` (MIRROR / RL / TAG)** — unchanged from §5.34 OOS. Carry-forward.
+- **`xdpfilter_packets_total{verdict="rule_drop"}` separate verdict bucket (Q1.A from §5.34)** — unchanged. Carry-forward.
+- **Drop-precedence-over-pass / later-rule-wins dedup semantics** — unchanged from §5.34 OOS. Carry-forward (MVP-3.4e working name).
+- **Rule-of-three helper extraction (`audit_helpers.hpp` for escape_audit_value + sudo_user lookup)** — D-3.4d-6 deferred per brownfield duplication-over-extraction; future cycle when a 3rd subcommand needs the same helpers. NEW FENCE.
+- **Documentation pass** for the `reset-counters` operator workflow + the rule_counters atomic-swap shape change — separate manual doc pass per user direction (Doc bucket carry-forward). NEW FENCE.
+
+##### Carry-forward (unchanged from §5.34 §7 OOS unless noted)
+
+- **MVP-3.5b — `XDPMF_LOG_DEST={stderr,file,syslog,journald}` + `XDPMF_LOG_LEVEL` + SIGHUP re-read** — carry-forward unchanged.
+- **MVP-3.4d** — SHIPPED this cycle; no longer carry-forward.
+- **Doc bucket D1..D13** — user-driven manual pass; carry-forward unchanged.
+- **Security M3 / Perf M1-M4 / TSAN / CO-RE field-probe** — separate cycles; carry-forward.
+- **Library extraction `libxdpmf.so.0` (MVP-3.6+)** — carry-forward.
+- **Daemon `xdpmfd` (MVP-3.6+)** — carry-forward.
+- **Binary rename `xdpmacfilter` → `xdpfilter` (MVP-3.12)** — carry-forward.
+- **L4 ports / VLAN / IPv6 CIDR** — carry-forward.
+- **sFlow (MVP-3.6 conditional)** — carry-forward.
+- **Consolidated anti-misdiagnosis guards file** — workflow-level; outside /mint-dev scope.
+
+Evidence: `mint/task-brief.md` MVP-3.4d brief (HG-3.4d-1..6 + Q1-Q4 + Items C-1/C-2/C-3/B-1/L-1/L-2/L-3/T-1..T-4/E-1/E-2/V-1/V-2); §5.26 Q1 AS1 + Q2 A1 (atomic-swap parent pattern); §5.27 Q1 AS1 (CIDR axis precedent); §5.29 HG-3.4-2 + §5.30 HK-4 (`bypass` subcommand — DIRECT TEMPLATE for `reset-counters`); §5.31 PI-3.4b-2 (counter-monotonicity-across-apply — PRESERVED via D-3.4d-3); §5.34 HG-3.4b-c2-1/2/3/4/5 + D-3.4b-c2-1/8 (rules-axis parallel-promotion shape — DIRECT MIRROR pattern for rule_counters axis); §5.34 OOT-4 (template SEC placement convention — applied to `rule_counters_inner`); §5.30 HK-9 kManagedMaps[] (4th consecutive cycle's dividend); §5.32 EDIT-1 catalogue arithmetic precedent; §5.32 EDIT-2 + §5.31 EDIT-2 + §5.34 PI-6 carve-out language; §5.33 PI-7 ZERO-diff streak (this slice INTENTIONALLY EXTENDS the loader.hpp + config.hpp ZERO-diff streaks for the 10th + 5th consecutive cycle); architect-spec §6.5 Verification-hints discipline + §6.6 Anti-misdiagnosis institutional learning (both applied in this amendment); brief Phase 4.4 operative-semantic SHOULD-hint discipline (applied to T_EXPORTER_METRICS_FORMAT line-numbers + kManagedMaps comment count + SEC count + T_CLI_HELP_VERSION LOC estimates).
