@@ -26,9 +26,9 @@
  *      populate allow-list, attach XDP in SKB mode (Decision §5.6).
  *
  * Rollback on any throw: IfaceDirGuard tears down the per-iface bpffs dir
- * via the same fd-relative walk used by bpffs_remove_iface; XdpAttachment
- * unwinds; BpfSkeleton tears down libbpf state (and the kernel garbage-
- * collects unpinned programs/maps). On success the guards release().
+ * via the same fd-relative walk used by bpffs_remove_iface; BpfSkeleton
+ * tears down libbpf state (and the kernel garbage-collects unpinned
+ * programs/maps). On success the guards release().
  */
 #include "loader.hpp"
 #include "apply_internal.hpp"
@@ -724,11 +724,6 @@ void bpffs_remove_iface(const BpffsRootFd& root, const std::string& iface)
     }
 }
 
-/* §5.22 Item 2 rollback RAII: removes the per-iface dir via the same
- * fd-relative walk used by bpffs_remove_iface(). Replaces the §5.17
- * BpffsDir wrapper for new code paths so rollback inherits the symlink
- * defense (raii.hpp BpffsDir stays as-is per §5.22 impl-surface table —
- * single-callsite-rule, BpffsRootFd is not exported). */
 class IfaceDirGuard {
 public:
     IfaceDirGuard() noexcept = default;

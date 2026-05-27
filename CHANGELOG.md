@@ -5,6 +5,9 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Housekeeping
+- **MVP-3.4g (§5.38)** — `src/lib/raii.hpp`: dead-code cleanup — `BpffsDir` + `XdpAttachment` removed (superseded by `IfaceDirGuard` since §5.22).
+
 ### Security
 - **KC-3 closure (MVP-3.4e / §5.36)** — bilateral restoration of the §5.22 BpffsRootFd / `O_PATH|O_NOFOLLOW` invariant across two paths that opted out of it in earlier slices. (1) `reset-counters --iface X` now routes through a new internal helper (`xdpmf::internal::reset_counters_request`) that composes `validate_iface_name` (shape-check) + `BpffsRootFd` + `iface_entry_is_real_dir` BEFORE constructing pin paths or calling `bpf_obj_get`. Path-traversal-shaped or symlink-shaped `--iface` inputs are refused with exit 8 + stderr `refusing to operate` instead of silently zeroing arbitrary PERCPU pins under `/sys/fs/bpf/`. (2) Sidecar `write_rule_index` (`/run/xdpmacfilter/<iface>/rule_index.json`) upgraded from path-based `lstat`+`open`/`mkdir`/`rename` to fd-relative `mkdirat`/`fstatat`/`openat(O_NOFOLLOW)`/`renameat` rooted in an `O_PATH|O_DIRECTORY|O_NOFOLLOW` SIDECAR_ROOT fd, with per-iface symlink detection via `fstatat(AT_SYMLINK_NOFOLLOW)`. Per-iface symlink at `/run/xdpmacfilter/<iface>` now triggers new `sidecar.warn.iface_dir_symlink` event + skip-and-return (apply continues, exits 0 — PI-32-3.4b sidecar-never-throws PRESERVED; exporter degrades to `action="unknown"` per existing PI-32-3.4b path). No version bump — internal security hardening with no operator-observable feature surface change beyond exit-code/stderr disposition on attack-shaped inputs.
 - **1 new logger event** — `sidecar.warn.iface_dir_symlink`. `kEventNames` catalog 35 → 36; `tests/fixtures/log_events_v1.txt` lockstep 35 → 36 lines.
