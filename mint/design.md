@@ -11299,3 +11299,33 @@ This slice carries forward all 13 anti-misdiagnosis guards from prior cycles + a
 - **Consolidated anti-misdiagnosis guards file** — workflow-level; outside /mint-dev scope.
 
 Evidence: `mint/task-brief.md` MVP-3.4d brief (HG-3.4d-1..6 + Q1-Q4 + Items C-1/C-2/C-3/B-1/L-1/L-2/L-3/T-1..T-4/E-1/E-2/V-1/V-2); §5.26 Q1 AS1 + Q2 A1 (atomic-swap parent pattern); §5.27 Q1 AS1 (CIDR axis precedent); §5.29 HG-3.4-2 + §5.30 HK-4 (`bypass` subcommand — DIRECT TEMPLATE for `reset-counters`); §5.31 PI-3.4b-2 (counter-monotonicity-across-apply — PRESERVED via D-3.4d-3); §5.34 HG-3.4b-c2-1/2/3/4/5 + D-3.4b-c2-1/8 (rules-axis parallel-promotion shape — DIRECT MIRROR pattern for rule_counters axis); §5.34 OOT-4 (template SEC placement convention — applied to `rule_counters_inner`); §5.30 HK-9 kManagedMaps[] (4th consecutive cycle's dividend); §5.32 EDIT-1 catalogue arithmetic precedent; §5.32 EDIT-2 + §5.31 EDIT-2 + §5.34 PI-6 carve-out language; §5.33 PI-7 ZERO-diff streak (this slice INTENTIONALLY EXTENDS the loader.hpp + config.hpp ZERO-diff streaks for the 10th + 5th consecutive cycle); architect-spec §6.5 Verification-hints discipline + §6.6 Anti-misdiagnosis institutional learning (both applied in this amendment); brief Phase 4.4 operative-semantic SHOULD-hint discipline (applied to T_EXPORTER_METRICS_FORMAT line-numbers + kManagedMaps comment count + SEC count + T_CLI_HELP_VERSION LOC estimates).
+
+#### §5.35 EDIT-1 — PI-3.4d-fixture-ripple carve-out (post-review-sweep round 1, 2026-05-27)
+
+**Trigger**: mint-dev-reviewer round-1 surfaced 2 OUT-OF-TRIANGULATION findings (OOT-1: 6 test bodies edited beyond original 2-EDIT carve-out for pin-name swap; OOT-2: `tests/fixtures/log_events_v1.txt` +2 entries for kEventNames lockstep). Both `inline-merge` dispositioned.
+
+**Root cause**: original §5.35 FileList explicitly enumerated PI-3.4d-EXPORTER carve-out (the exporter's `rule_counters_reader.cpp` adaptation to outer→inner indirection) but did NOT enumerate the symmetric **test-body** ripples — 6 ctests that read the now-retired single `${PIN_DIR}/<iface>/rule_counters` pin needed identical pin-name-swap adaptations (`rule_counters_<active>` via active_idx indirection). Symmetric oversight: same class of ripple as exporter; same class of fix; missed at FileList drafting time.
+
+**Disposition**: add NEW carve-out row **PI-3.4d-fixture-ripple** to §5.35 EDITED FileList — mirrors PI-3.4d-EXPORTER row precedent.
+
+##### PI-3.4d-fixture-ripple (NEW PI) — test-body and fixture lockstep with retired `rule_counters` single-pin
+
+**Affected files** (7 total — all MECHANICAL pin-name swap, NO semantic change, guard #9 helper-duplication-over-extraction compliant):
+
+| Path | EDIT shape | LOC |
+|---|---|---|
+| `tests/T_RULE_COUNTER_MAC_HIT_BUMPS.sh` | Add inline `rule_counters_active_pin()` helper; swap direct `${PIN_DIR}/<iface>/rule_counters` reads to call site | ~44 |
+| `tests/T_RULE_COUNTER_CIDR_HIT_BUMPS.sh` | Same pattern | ~30 |
+| `tests/T_RULE_COUNTER_SURVIVES_APPLY.sh` | Same pattern (load-bearing for PI-3.4b-2 PRESERVE; canary still validates via dynamic active-pin) | ~24 |
+| `tests/T_RULES_ATOMIC_SWAP_NO_DROP.sh` | Same pattern (concurrent-traffic test reads via helper) | ~20 |
+| `tests/T_DROP_RULE_BUMPS_COUNTER.sh` | Same pattern | ~30 |
+| `tests/T_DROP_RULE_OPERATIVE.sh` | Smoke-floor pin list update + read_rc_slot helper | ~19 |
+| `tests/fixtures/log_events_v1.txt` | +2 entries (`reset_counters.activated` + `reset_counters.refused.no_pin`) lockstep with C-3h kEventNames 33→35 | +2 lines |
+
+**Verifiable invariants** (added to §5.35 verifiable-invariants block):
+- `git diff <pre-§5.35> -- tests/T_RULE_COUNTER_*.sh tests/T_RULES_ATOMIC_SWAP_NO_DROP.sh tests/T_DROP_RULE_*.sh` SHOULD show 6 MECHANICAL pin-name-swap edits; each test body retains its load-bearing assertion semantics byte-equivalent on the substantive comparison (pre-/post-bump deltas, atomicity bounds, drop-rule-operative dispatch); only the pin-discovery line shape changes.
+- `git diff <pre-§5.35> -- tests/fixtures/log_events_v1.txt` SHOULD show exactly +2 lines (the 2 new reset_counters events) at the sorted-insertion position consistent with the `kEventNames` array order in `src/common/logger.hpp:99-100`.
+- The `rule_counters_active_pin()` helper SHOULD be inline-duplicated in each affected test (guard #9 helper-location duplication-over-extraction discipline; matches the architect-blessed pattern for `escape_audit_value` per D-3.4d-6 in `src/cli/reset_counters.cpp`).
+- All 6 affected tests SHOULD continue to PASS post-fixture-ripple (verified by tester Phase B run + reviewer independent re-run; both 64/64 green).
+
+**Anti-misdiagnosis note #16 (NEW; future-cycle guard)**: when promoting a stateful map to atomic-swap parallel shape, identifying the **exporter** carve-out is necessary but NOT sufficient — every test that DIRECTLY reads the retired single-pin (via `bpftool map dump pinned ${PIN_DIR}/<iface>/<map>`) needs the symmetric pin-name-swap adaptation. Pattern: `grep -rln 'pinned.*/<retired-map-name>' tests/ src/` at FileList drafting time → list all hits as fixture-ripple carve-out EDITED entries. Cost: 30 seconds of grep. Benefit: catches THIS class of ripple at design-time vs surfacing as Phase B test failures requiring tester adaptation + reviewer OOT inline-merge. Validated by MVP-3.4d (this slice). Combined with guards #7 (BTF asymmetry), #13 (test-fixture cross-reference for retire/rename emit-sites), and #15 (apply-step state-transfer for PRESERVE): the Phase A discipline now covers BPF-side BTF + retire-string-fixture + state-transfer-userspace + retire-pin-fixture-ripple — 4 distinct ripple classes around map shape changes.

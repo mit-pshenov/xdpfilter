@@ -1,4 +1,4 @@
-# Review — MVP-3.4b cycle 2: rules atomic-swap + datapath dispatch (mint triangulation, brownfield 5-point)
+# Review — MVP-3.4d `reset-counters` + `rule_counters` atomic-swap (mint triangulation, brownfield 5-point)
 
 ## Verdict
 `pass`
@@ -9,71 +9,80 @@
 |---|---|---|
 | 1. Spec ↔ Code | 0 | — |
 | 2. Spec ↔ Tests | 0 | — |
-| 3. Code ↔ Tests | 0 | — |
+| 3. Code ↔ Tests | 0 (64/64 PASS + 2 SKIP-77 baseline) | — |
 | 4. Out-of-Scope Drift | 0 | — |
-| 5. Behaviour preserved (brownfield §6.5) | 0 | — |
+| 5. Behaviour preserved (brownfield) | 0 | — |
+| OOT (does not affect verdict) | 2 | [OUT-OF-TRIANGULATION × 2, both `inline-merge`] |
 
-## Evidence — point-by-point
+## Verification walk (cited)
 
 ### 1. Spec ↔ Code
 
-- **D-1 BPF map promotion** (`src/bpf/mac_filter.bpf.c:175-202`): SHARED `rules` ARRAY replaced by `struct rules_inner` template + `rules_a` + `rules_b` named instances + `rules_outer` ARRAY_OF_MAPS with inline `.values = { &rules_a, &rules_b }` initializer. Pins land at the 3 expected basenames. Mirrors the §5.27 CIDR axis shape (template + 2 inners + outer). ✓
-- **D-2 datapath dispatch** (`src/bpf/mac_filter.bpf.c:289-322` MAC HASH branch, `:343-373` CIDR LPM_TRIE branch): both branches gain the 3-step chain `rules_outer[active] → rules_inner[rid] → action_table[aid]` with NULL-checks at every step + `STAT_DROP_DENY` bump + `XDP_DROP` on `action_type == ACTION_DROP`. `bump_rule()` runs BEFORE the dispatch chain (HG-3.4b-c2-5). Matches HG-3.4b-c2-4 pseudocode. ✓
-- **L-1 kManagedMaps[]** (`src/lib/loader.cpp:154-175`): 13 → 15 entries; REMOVE `{rules, RULES_NAME}`; ADD `rules_a` / `rules_b` / `rules_outer`. `grep -c '^\s*{ &SkelMapsT::' src/lib/loader.cpp` = **15**. ✓
-- **L-2 populate_rules_inner_slot** (`src/lib/loader.cpp:1230-1276`): function renamed from `populate_rules_skeleton`; body byte-equivalent (clear-all-64 + write-occupied); fd-source shifted to inactive inner-fd. Both call-sites (state-b reattach `loader.cpp:1773-1786`, fresh-attach `:1911-1924`) compute `inactive_rules_inner` via skel ternary BEFORE active_idx flip. ✓
-- **L-3 schema cycle 3 shift** (`src/lib/loader.cpp:1503,1525`): `if (r.action != RuleAction::Pass) continue;` removed from both `extract_pass_macs` and `extract_pass_cidrs`; function names kept per D-3.4b-c2-3. ✓
-- **L-4 mac_filter.h constants** (`src/common/mac_filter.h:124-133`): 3 new `XDPMF_MAP_RULES_OUTER_NAME` / `_INNER_A_NAME` / `_INNER_B_NAME` constants added; `XDPMF_MAP_RULES_NAME` define removed. Rest byte-equivalent. ✓
-- **D-3.4b-c2-4 WARN retirement** (`loader.cpp:1566-1574` replaced the prior emit block with a comment-only retirement note; `logger.hpp:74-86` removes the `loader.warn.rules_skeleton_not_wired` entry and updates `kEventCount` literal 34 → 33). ✓
-- **V-1 VERSION bump** (`CMakeLists.txt:13`): `0.8.0 → 0.9.0`. Both binaries report `0.9.0` via shared `version.h`. ✓
-- **V-2 CHANGELOG** (`CHANGELOG.md:8-60`): new `[0.9.0] - 2026-05-27` section per Keep-a-Changelog with Added/Changed/Removed/Notes/Preserved-invariants/OOS-fences/Build-pace. ✓
-- **PI-28-3.4b + PI-29-3.4b**: both LIFTED with explicit `[SUPERSEDED]` markers in §5.31. Successor `PI-29-3.4b-c2` + `PI-13-3.4b-c2` + `PI-30-3.4b-c2-schema` written. No silent retire. ✓
+- **D-3.4d-1 + B-1** `rule_counters_inner` template + `rule_counters_a`/`_b` PERCPU_ARRAY + `rule_counters_outer` ARRAY_OF_MAPS at `src/bpf/mac_filter.bpf.c:231-249`. ✓
+- **D-3.4d-2 + B-2** `bump_rule(__u32 rule_id, __u32 active)` at `src/bpf/mac_filter.bpf.c:273-289`. ✓
+- **B-3** both call-sites pass `active`: `mac_filter.bpf.c:344` (MAC HASH-hit) + `:395` (CIDR LPM_TRIE-hit). ✓
+- **D-3.4d-3 + L-A** `copy_rule_counters_forward` at `src/lib/loader.cpp:1318-1346` (anon-namespace, per-rule-id × per-CPU bounded loop). Called from BOTH reattach `:1873-1894` + fresh-attach `:2029-2042`, BEFORE `write_active_idx`. ✓
+- **L-1** `kManagedMaps[]` 15 → 17 (`grep -c '^\s*{ &SkelMapsT::' loader.cpp` = 17). ✓
+- **L-2** `mac_filter.h` +3/-1 constants. ✓
+- **C-1/C-2** `reset_counters.{hpp,cpp}` NEW following bypass template. ✓
+- **D-3.4d-RESET-BOTH** both `rid` branches write to inner_a AND inner_b at `reset_counters.cpp:233-244`. ✓
+- **HG-3.4d-1** `libbpf_num_possible_cpus()` per-CPU buffer at `reset_counters.cpp:217-225` + `loader.cpp:1320`. ✓
+- **HG-3.4d-2 + Q1.A** parse-time range validation at `cli.cpp:322-337`. ✓
+- **HG-3.4d-3** precondition check + `reset_counters.refused.no_pin` event at `reset_counters.cpp:137-158`. ✓
+- **HG-3.4d-6** audit-log format + emit BEFORE BPF writes at `reset_counters.cpp:181-199`. ✓
+- **C-3** dispatch chain at `cli.cpp:314-346` + `:375-377` + `cli.hpp:16,26` + `main.cpp:76-78,150-151`. ✓
+- **C-3h** `kEventNames` 33 → 35 at `logger.hpp:85,99-100,126`. ✓
+- **PI-3.4d-EXPORTER** carve-out at `rule_counters_reader.cpp:141-176`. ✓
+- **V-1/V-2** VERSION `0.10.0` at `CMakeLists.txt:13` + CHANGELOG `[0.10.0]` section. ✓
+- **D-3.4d-FEAS smoke** per commit `f161aef`: `bpftool prog load rc=0` — fallback NOT activated. ✓
+- **Anti-misdiagnosis guards #14 + #15** at `design.md:11260-11262`. ✓
 
 ### 2. Spec ↔ Tests
 
-- **§6.NN T_DROP_RULE_OPERATIVE** (`tests/T_DROP_RULE_OPERATIVE.sh:1-339`): all 8 assertion regions (a)..(h) green; pass-rule MAC negation control isolates rc keying. ✓
-- **§6.NN+1 T_RULES_ATOMIC_SWAP_NO_DROP** (`tests/T_RULES_ATOMIC_SWAP_NO_DROP.sh:1-358`): 12-step canary with concurrent alternating injector + ~10% atomicity tolerance + MAC_DENY negation. ✓
-- **§6.NN+2 T_RULES_AXIS_FLIPS_WITH_ACTIVE_IDX** (`tests/T_RULES_AXIS_FLIPS_WITH_ACTIVE_IDX.sh:1-244`): bpftool-only one-deep rollback verification. ✓
-- **§6.52-revised T_DROP_RULE_BUMPS_COUNTER**: assertions INVERTED per Q3.A — drop-MAC NOW in inner-allowlist + `rule_counters[17] += 5`. ✓
-- **PI-3.4b-c2-fixture-ripple**: exactly 2 EDITED test bodies + 1 DELETED + 3 NEW under `tests/T_*.sh`. ✓
+- **§6.NN T_CLI_RESET_COUNTERS** at `tests/T_CLI_RESET_COUNTERS.sh:144-218` — dual-bump-reset-rebump negation. ✓
+- **§6.NN+1 T_CLI_RESET_COUNTERS_RULE_ID** at `:117-216` — selectivity + 2 parse-time negations (`--rule-id 64` out-of-range; `--rule-id foo` non-integer); both negations assert NO audit-log. ✓
+- **§6.NN+2 T_CLI_RESET_COUNTERS_NO_IFACE** at `:51-102` — precondition + negation control. ✓
+- **§6.NN+3 T_RULE_COUNTERS_ATOMIC_SWAP** (LOAD-BEARING) at `:131-232` — explicit active_idx-flip negation `:173-176`; post-flip preserve assertion `:188-199` with copy-forward-broken vs bump-broken diagnostics. ✓
+- **§6.NN+4 T_CLI_HELP_VERSION** EDIT at `:54-60` — `reset-counters` substring assertion. ✓
+- **§6.NN+5 T_EXPORTER_METRICS_FORMAT** EDIT — 4 sites bumped 0.9.0 → 0.10.0. ✓
+- All 4 NEW tests `RESOURCE_LOCK xdp_fixture` at `tests/CMakeLists.txt:906-908` per guard #12. ✓
 
-NO-NEGATION-CONTROL: not triggered. CIRCULAR-TEST: not triggered. SPEC-UNTESTED: not triggered.
+NO-NEGATION-CONTROL/CIRCULAR-TEST/SPEC-UNTESTED: not triggered.
 
 ### 3. Code ↔ Tests
 
-- Reviewer's own `ctest -j4`: `/tmp/mint-review-tests-1779866591.log` → **100% tests passed, 0 tests failed out of 60** (465.29 sec). Same 2 SKIP-77 baseline.
-- PI-13-3.4b-c2 / PI-29-3.4b-c2 / PI-30-3.4b-c2-schema load-bearing canaries: T-1 + T-2 + T-3 each PASS in tester's 60/60 + reviewer's 4th-run 60/60. ✓
+Reviewer's `ctest -j4` → **100% tests passed, 0 failed out of 64** (Total 533.69 sec). 2 SKIP-77 baseline. Matches tester's run. ✓
 
 ### 4. Out-of-Scope Drift
 
-All §7 OOS items NOT touched: reset-counters / rule_counter atomic-swap / action_table promotion / new action types / Q1.A new STAT slot / drop-precedence-dedup / documentation pass. No new CLI flag / env var / exit code / public API symbol. ✓
+`stats` PERCPU_ARRAY NOT promoted (D-3.4d-5 held; STAT_MAX=4 unchanged). No `--all-ifaces`/`--dry-run`/`--reason`/`--no-iface` flags. No "reset-on-apply" semantic (copy_rule_counters_forward ALWAYS runs). No action types beyond `{PASS, DROP}`. No new `loader::` public symbol (D-3.4d-4 held; loader.hpp ZERO-diff). ✓
 
-### 5. Behaviour preserved (brownfield §6.5)
+### 5. Behaviour preserved (brownfield)
 
-- **PI-7-3.4b-c2-hpp** (loader.hpp 9th + config.hpp 4th ZERO diff): `git diff a1b6597 HEAD -- src/lib/loader.hpp src/lib/config.hpp` → **0 lines** ✓
-- **PI-8-3.4b-c2**: both binaries → `0.9.0`. ✓
-- **PI-10-3.4b-c2**: 3 added + 1 removed defines; STAT_MAX stays at 4. ✓
-- **PI-3.4b-c2-fixture-ripple**: 2 EDIT + 1 DELETE + 3 NEW. ✓
-- **PI-3.4b-c2-warn-removed**: no `rules: section parsed` substring. ✓
-- **PI-3.5-4 AMENDED 34→33**: kEventCount=33, kEventNames sized 33, fixture 33 lines. ✓
-- **PI-3.4b-1..PI-3.4b-8** (carry-forward §5.31): UNCHANGED except PI-3.4b-8 kManagedMaps 13→15. ✓
-- **PI-13-3.4b** (struct allow_entry 8-byte): UNCHANGED. ✓
-- **PI-1..PI-12, PI-14..PI-27, PI-30..PI-34**: ZERO-diff on exporter/sidecar/cli/yaml/cidr/config/systemd/ansible. ✓
-- **PI-28-3.4b LIFTED / PI-29-3.4b LIFTED**: `[SUPERSEDED]` markers verified. ✓
+- **PI-7-3.4d-hpp**: `git diff 74ad632 HEAD -- src/lib/loader.hpp src/lib/config.hpp` → **0 lines**. 10th consecutive ZERO-diff on loader.hpp + 5th on config.hpp — strongest streak in project history. ✓
+- **PI-7-3.4d-cpp**: all loader.cpp hunks within allowed-scope set `{apply_request, copy_rule_counters_forward, kManagedMaps[] table + adjacent comment}`. ✓
+- **PI-10-3.4d**: ADD 3 / REMOVE 1 in mac_filter.h; XDPMF_RULE_COUNTERS_MAX alias byte-equivalent. ✓
+- **PI-31-3.4d** (exporter READ-ONLY): no `bpf_map_update_elem` / `bpf_obj_pin` in `src/exporter/`. ✓
+- **PI-3.4b-2 PRESERVE-across-apply**: load-bearing canary T_RULE_COUNTERS_ATOMIC_SWAP + T_RULE_COUNTER_SURVIVES_APPLY both green. ✓
+- **PI-8-3.4d**: both binaries → 0.10.0. ✓
+- **PI-3.5-4 (kEventNames stability)**: count = 35 at `logger.hpp:85,126`; T_LOG_EVENT_CATALOG_STABILITY green. ✓
+- **PI-3.4d-EXPORTER carve-out**: T_EXPORTER_VALUES_MATCH_STATS green. ✓
+- No prior-cycle regression: all 60 pre-§5.35 ctests still green (specifically the 6 fixture-rippled tests at T_RULE_COUNTER_MAC_HIT_BUMPS/_CIDR_HIT_BUMPS/_SURVIVES_APPLY/T_DROP_RULE_BUMPS_COUNTER/_OPERATIVE/T_RULES_ATOMIC_SWAP_NO_DROP). ✓
 
-No REGRESSION. No INVARIANT-VIOLATED. No UNRELATED-EDIT.
+No REGRESSION/INVARIANT-VIOLATED/UNRELATED-EDIT.
 
 ## Test execution
 
 ```
-100% tests passed, 0 tests failed out of 60
-Total Test time (real) = 465.29 sec
+100% tests passed, 0 tests failed out of 64
+Total Test time (real) = 533.69 sec
 
 The following tests did not run:
-	  5 - T_DROP_MALFORMED (Skipped)
-	 35 - T_ANSIBLE_PLAYBOOK_SYNTAX (Skipped)
+  5 - T_DROP_MALFORMED (Skipped)              [legitimate per §6.5]
+  35 - T_ANSIBLE_PLAYBOOK_SYNTAX (Skipped)    [legitimate per §6.35]
 ```
 
-Reviewer log: `/tmp/mint-review-tests-1779866591.log`. NEW canaries: T_DROP_RULE_OPERATIVE 20.17s / T_RULES_ATOMIC_SWAP_NO_DROP 7.95s / T_RULES_AXIS_FLIPS_WITH_ACTIVE_IDX 2.92s.
+Reviewer log: `/tmp/mint-review-tests-*.log`.
 
 ## Findings
 
@@ -85,43 +94,25 @@ N/A (verdict = pass).
 
 ## Out-of-triangulation findings
 
-### OOT-1: CMakeLists.txt project DESCRIPTION updated alongside VERSION
-**Location**: `CMakeLists.txt:14` (+ vs `design.md` V-1 "ZERO other CMake changes" hint)
+### OOT-1: 6 pre-existing ctest bodies edited beyond §5.35 carve-out
+**Location**: `T_RULE_COUNTER_MAC_HIT_BUMPS.sh` (+44), `T_RULE_COUNTER_CIDR_HIT_BUMPS.sh` (+30), `T_RULE_COUNTER_SURVIVES_APPLY.sh` (+24), `T_RULES_ATOMIC_SWAP_NO_DROP.sh` (+20), `T_DROP_RULE_BUMPS_COUNTER.sh` (+30), `T_DROP_RULE_OPERATIVE.sh` (+19). Vs `design.md:11003` ("All 60 pre-§5.35 ctest BODIES UNCHANGED with explicit 2-EDIT carve-out").
 **Disposition**: `inline-merge`
-**Rationale**: DESCRIPTION is metadata with NO user-observable surface tied to any PI-* contract. Reverting leaves stale "MVP-3.5" tag on a 0.9.0 binary. SHOULD-level per verifiable-invariants framing.
+**Rationale**: Mechanical pin-name swap `rule_counters` → `rule_counters_<a|b>` via duplicated `rule_counters_active_pin()` helper (guard #9 compliant). 6 tests would FAIL on the missing-`rule_counters`-pin condition. Symmetric oversight to PI-3.4d-EXPORTER carve-out — design enumerated exporter ripple but not test-body parallel.
 
-### OOT-2: 2 new fixture files vs design's "at most 1 new fixture" SHOULD hint
-**Location**: `tests/fixtures/config_rules_swap_{a,b}.yaml`
+### OOT-2: tests/fixtures/log_events_v1.txt edited (not in §5.35 FileList)
+**Location**: `tests/fixtures/log_events_v1.txt:28-29` — +`reset_counters.activated`, +`reset_counters.refused.no_pin`. Vs `design.md:11005` ("tests/fixtures/* (existing fixtures) UNCHANGED").
 **Disposition**: `inline-merge`
-**Rationale**: Atomic-swap canary structurally requires action-inverted pair. SHOULD-level hint.
-
-### OOT-3: `loader.warn.rules_skeleton_not_wired` retirement-annotation comments remain in 2 files
-**Location**: `src/lib/loader.cpp:1574` + `src/common/logger.hpp:75`
-**Disposition**: `inline-merge`
-**Rationale**: Both are retirement-discipline citation comments per D-3.4b-c2-4. Operative grep (emit-site / kEventNames entry / test stderr assertion) returns ZERO.
-
-### OOT-4: SEC(".maps") post-§5.34 count = 15 not 16 (pseudocode said 16)
-**Location**: `src/bpf/mac_filter.bpf.c` template-without-SEC pattern
-**Disposition**: `inline-merge`
-**Rationale**: Impl mirrored existing `xdpmf_allowlist_inner` / `xdpmf_cidr_inner` precedents. Per design's resolution rule "invariants block wins, prose loses". PI-29-3.4b-c2 + PI-13-3.4b-c2 verified end-to-end via T-1/T-2/T-3.
-
-### OOT-5: Stale comment block in shared fixture `config_per_rule_counters.yaml`
-**Location**: `tests/fixtures/config_per_rule_counters.yaml:11-15`
-**Disposition**: `inline-merge`
-**Rationale**: Comment-only hygiene; YAML data unchanged. Header block still cites §5.26 cycle-2 contract retired by §5.34.
+**Rationale**: Structural consequence of authorized `kEventNames` extension (C-3h: 33→35). Without this fixture update, T_LOG_EVENT_CATALOG_STABILITY would FAIL on set-equality check. Same class as §5.32 EDIT-1 catalog-count correction propagation.
 
 ---
 
-**Triangulation summary**: 4-axis atomic-swap mechanism (MAC + CIDR + defaults + rules) operationally green; PI-28-3.4b + PI-29-3.4b correctly LIFTED with successors PI-13-3.4b-c2 + PI-29-3.4b-c2 + PI-30-3.4b-c2-schema written; schema cycle 3 shift cleanly inverts T_DROP_RULE_BUMPS_COUNTER assertions per Q3.A inline-merge rule. ZERO test failures across 60/60 in 2 independent runs (tester + reviewer). 5 OOT observations all dispose to `inline-merge`. Ready to ship.
+**Triangulation summary**: 5-axis atomic-swap (MAC+CIDR+defaults+rules+rule_counters) operationally green; PI-3.4b-2 PRESERVE-across-apply preserved via D-3.4d-3 copy_rule_counters_forward; D-3.4d-FEAS empirically confirmed (PERCPU-as-inner works; fallback NOT activated); D-3.4d-RESET-BOTH idempotence across active_idx flips. ZERO test failures across 60/60 cycle-2 baseline + 4/4 NEW = 64/64 in 2 independent runs (tester + reviewer). 2 OOT observations both `inline-merge` (test-body ripples + fixture catalog — symmetric to PI-3.4d-EXPORTER carve-out class). PI-7 streak extended to 10th/5th consecutive ZERO-diff on loader.hpp/config.hpp. Ready to ship.
 
 ### Post-review sweep — round 1
 
-All 5 OOT findings disposed as `inline-merge`. Edits ride in the final Phase 6 commit (no separate commit — keeps git log clean per /mint-dev skill spec).
+Both OOT findings disposed as `inline-merge`. Edits ride in Phase 6 final commit (no separate commit per skill spec).
 
-- **OOT-1** → `design.md` verifiable-invariant relaxed: `CMakeLists.txt` `DESCRIPTION` string MAY track the latest shipped slice (metadata, no PI-* tie).
-- **OOT-2** → `design.md` verifiable-invariant relaxed: at most **2** new fixtures under `tests/fixtures/` (paired action-inverted symmetric fixtures accepted for the atomic-swap canary structural requirement).
-- **OOT-3** → `design.md` verifiable-invariant refined: `grep -c 'loader.warn.rules_skeleton_not_wired' src/` operative meaning = ZERO emit-sites + ZERO kEventNames entries + ZERO test stderr assertions; retirement-citation comments MAY remain per D-3.4b-c2-4.
-- **OOT-4** → `design.md` verifiable-invariant amended: `SEC(".maps")` count = **15** not 16 (template-without-SEC mirror of existing `xdpmf_allowlist_inner` / `xdpmf_cidr_inner` precedents; pseudocode lines 9849-9855 yield per "invariants block wins, prose loses").
-- **OOT-5** → `tests/fixtures/config_per_rule_counters.yaml` header comment block refreshed for post-§5.34 schema cycle 3 contract (id=17 drop-rule MAC NOW in inner-allowlist; rule_counters[17] NOW bumps; XDP_DROP via action_table dispatch).
+- **OOT-1** → `design.md` §5.35 EDIT-1: NEW `PI-3.4d-fixture-ripple` carve-out row added to §5.35 EDITED FileList — enumerates 6 test-body pin-name-swap ripples mirroring PI-3.4d-EXPORTER row precedent. Verifiable-invariant added.
+- **OOT-2** → `design.md` §5.35 EDIT-1: fixture ripple `tests/fixtures/log_events_v1.txt` added to same PI-3.4d-fixture-ripple row (lockstep with authorized kEventNames C-3h 33→35 extension).
 
 No `defer` or `promote-to-rework` OOTs. Verdict stays `pass` round-1.
