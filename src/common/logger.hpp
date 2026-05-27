@@ -81,8 +81,13 @@ struct Field {
  * §5.35 (MVP-3.4d): count 33 → 35. Two NEW reset-counters events added
  * (`reset_counters.refused.no_pin` + `reset_counters.activated`) per
  * HG-3.4d-3 (iface-attached precondition fail) + HG-3.4d-6 (audit-log at
- * action time, mirrors bypass.activated shape). */
-inline constexpr std::array<std::string_view, 35> kEventNames = {
+ * action time, mirrors bypass.activated shape).
+ *
+ * §5.36 (MVP-3.4e): count 35 → 36. One NEW event
+ * (`sidecar.warn.iface_dir_symlink`) added per HG-3.4e-4 — per-iface
+ * symlink at `/run/xdpmacfilter/<iface>` triggers WARN + skip (sidecar-
+ * never-throws contract PRESERVED; PI-32-3.4b unchanged). */
+inline constexpr std::array<std::string_view, 36> kEventNames = {
     /* loader (xdpmacfilter) — 18 events (was 19 pre-§5.34) */
     "cli.usage_error",                       /* src/cli/main.cpp:100 */
     "cli.usage_text",                        /* src/cli/main.cpp:101 (multi-line usage dump) */
@@ -98,12 +103,13 @@ inline constexpr std::array<std::string_view, 35> kEventNames = {
     "bypass.activated",                      /* src/cli/bypass.cpp:174 — HK-4 audit log */
     "reset_counters.refused.no_pin",         /* src/cli/reset_counters.cpp — §5.35 HG-3.4d-3 (iface not attached) */
     "reset_counters.activated",              /* src/cli/reset_counters.cpp — §5.35 HG-3.4d-6 audit log */
-    "sidecar.warn.root_symlink",             /* src/lib/sidecar.cpp:259 */
-    "sidecar.warn.root_not_dir",             /* src/lib/sidecar.cpp:266 */
-    "sidecar.warn.lstat_failed",             /* src/lib/sidecar.cpp:273 */
-    "sidecar.warn.mkdir_failed",             /* src/lib/sidecar.cpp:289 */
-    "sidecar.warn.write_failed",             /* src/lib/sidecar.cpp:305 */
-    "sidecar.warn.write_exception",          /* src/lib/sidecar.cpp:312 */
+    "sidecar.warn.root_symlink",             /* src/lib/sidecar.cpp — §5.31 EDIT-1; §5.36 trigger errno=ELOOP on O_PATH|O_NOFOLLOW open */
+    "sidecar.warn.root_not_dir",             /* src/lib/sidecar.cpp — §5.31 EDIT-1; §5.36 trigger errno=ENOTDIR on O_PATH open */
+    "sidecar.warn.lstat_failed",             /* src/lib/sidecar.cpp — §5.31 EDIT-1; §5.36 trigger any other open() errno != ENOENT/ELOOP/ENOTDIR */
+    "sidecar.warn.iface_dir_symlink",        /* src/lib/sidecar.cpp — §5.36 HG-3.4e-4 per-iface symlink (S_ISLNK via fstatat) */
+    "sidecar.warn.mkdir_failed",             /* src/lib/sidecar.cpp — §5.31 EDIT-1; §5.36 fd-relative mkdirat failure */
+    "sidecar.warn.write_failed",             /* src/lib/sidecar.cpp — §5.31 EDIT-1 */
+    "sidecar.warn.write_exception",          /* src/lib/sidecar.cpp — §5.31 EDIT-1 */
 
     /* exporter (xdpmf-exporter) — 15 events */
     "exporter.usage_error",                  /* src/exporter/main.cpp:91, 100, 110, 143, 154 (5 sites share) */
@@ -123,7 +129,7 @@ inline constexpr std::array<std::string_view, 35> kEventNames = {
     "exporter.scrape.warn.rule_counters_open_failed", /* src/exporter/rule_counters_reader.cpp:137 */
 };
 
-inline constexpr std::size_t kEventCount = kEventNames.size();   // = 35 (§5.35: 33 → 35; +2 reset_counters events per HG-3.4d-3 + HG-3.4d-6)
+inline constexpr std::size_t kEventCount = kEventNames.size();   // = 36 (§5.36: 35 → 36; +1 sidecar.warn.iface_dir_symlink per HG-3.4e-4)
 
 /*
  * emit() — write ONE log event to stderr.

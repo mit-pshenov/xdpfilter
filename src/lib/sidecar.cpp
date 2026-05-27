@@ -1,5 +1,6 @@
 /*
- * sidecar.cpp — `rule_index.json` writer impl (§5.31 MVP-3.4b).
+ * sidecar.cpp — `rule_index.json` writer impl (§5.31 MVP-3.4b;
+ * §5.36 MVP-3.4e KC-3 sidecar limb).
  *
  * Roll-your-own JSON emitter per D-3.4b-10 (no nlohmann/json build dep).
  * The schema (Q2 S1 defaults-only + D-3.4b-20 one-rule-per-line shape) has
@@ -9,7 +10,15 @@
  * matches per-rule lines independently).
  *
  * Atomic write: write-to-<path>.tmp → fsync(fd) → close → rename(tmp, path).
- * Failures are NEVER fatal — log a single stderr WARN and return silently.
+ * Failures are NEVER fatal — log a single stderr WARN and return silently
+ * (PI-32-3.4b PRESERVED — sidecar never throws).
+ *
+ * §5.36 (MVP-3.4e) hardening: ALL filesystem ops route through the
+ * `SidecarRootFd` (O_PATH|O_DIRECTORY|O_NOFOLLOW fd to XDPMF_SIDECAR_ROOT)
+ * via fd-relative mkdirat / fstatat / openat / renameat. Mirrors the
+ * §5.22 BpffsRootFd discipline. Per-iface symlink at /run/xdpmacfilter/<iface>
+ * triggers NEW `sidecar.warn.iface_dir_symlink` event + return (HG-3.4e-4 —
+ * WARN + skip; PI-32-3.4b PRESERVED).
  */
 #include "sidecar.hpp"
 
@@ -159,41 +168,119 @@ namespace {
     return body;
 }
 
-/* mkdir-p: ensure `dir` exists (creating each component as needed) with mode
- * 0755. Returns 0 on success (already-exists is OK), errno-positive on real
- * failure. Single-shot helper; no per-component error suppression needed
- * for our usage because /run is universally writable as root on systemd
- * hosts (FHS §3.15) and the per-iface child is the only new component. */
-[[nodiscard]] int mkdir_p(const std::string& dir)
-{
-    /* Walk component-by-component; mkdir each; ignore EEXIST. */
-    std::string acc;
-    acc.reserve(dir.size());
-    for (std::size_t i = 0; i <= dir.size(); ++i) {
-        if (i == dir.size() || dir[i] == '/') {
-            if (!acc.empty() && acc != "/") {
-                if (::mkdir(acc.c_str(), 0755) != 0 && errno != EEXIST) {
-                    return errno;
-                }
+/* §5.36 (MVP-3.4e) D-3.4e-4 / Q4.A2 — RAII for an O_PATH|O_DIRECTORY|
+ * O_NOFOLLOW fd to XDPMF_SIDECAR_ROOT. Mirrors loader.cpp::BpffsRootFd's
+ * shape (§5.22 single-callsite anon-namespace discipline — NOT exported
+ * to a header). DOES NOT throw — sidecar-never-throws contract (PI-32-3.4b);
+ * caller inspects `state()` and emits the appropriate sidecar.warn.*
+ * event. ENOENT triggers an idempotent mkdir + reopen retry (matches
+ * BpffsRootFd ctor).
+ *
+ * State enum maps 1:1 to sidecar.warn.* event names (D-3.4e-5 — event
+ * names PRESERVED from §5.31 EDIT-1 for log-shipping pipeline stability):
+ *   Ok          → caller proceeds
+ *   RootSymlink → emit sidecar.warn.root_symlink (errno ELOOP)
+ *   RootNotDir  → emit sidecar.warn.root_not_dir (errno ENOTDIR after
+ *                 mkdir didn't succeed; fstatat confirms not-symlink)
+ *   OpenFailed  → emit sidecar.warn.lstat_failed (catch-all for permission/
+ *                 other errno — event NAME preserved per D-3.4e-5 even
+ *                 though the trigger is no longer lstat itself)
+ */
+class SidecarRootFd {
+public:
+    enum class State : std::uint8_t {
+        Ok,
+        RootSymlink,
+        RootNotDir,
+        OpenFailed,
+    };
+
+    explicit SidecarRootFd(const char* root_path) noexcept
+    {
+        auto try_open = [&]() -> int {
+            return ::open(root_path,
+                          O_PATH | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        };
+
+        int fd = try_open();
+        if (fd < 0 && errno == ENOENT) {
+            // Idempotent root mkdir then retry — mirrors BpffsRootFd.
+            if (::mkdir(root_path, 0755) != 0 && errno != EEXIST) {
+                error_errno_ = errno;
+                state_       = State::OpenFailed;
+                return;
             }
+            fd = try_open();
         }
-        if (i < dir.size()) acc.push_back(dir[i]);
+        if (fd < 0) {
+            const int e = errno;
+            error_errno_ = e;
+            if (e == ELOOP) {
+                state_ = State::RootSymlink;
+            } else if (e == ENOTDIR) {
+                // Disambiguate symlink-to-non-dir vs regular-file-at-root via
+                // lstat; in either case sidecar's contract is "refuse + WARN".
+                // Symlink targets are treated as root_symlink for operator
+                // clarity (the literal symlink IS what we refuse to follow).
+                struct stat st{};
+                const bool is_link = (::lstat(root_path, &st) == 0)
+                                     && S_ISLNK(st.st_mode);
+                state_ = is_link ? State::RootSymlink : State::RootNotDir;
+            } else {
+                state_ = State::OpenFailed;
+            }
+            return;
+        }
+        fd_    = fd;
+        state_ = State::Ok;
     }
-    return 0;
-}
 
-/* Atomic write: write→fsync→rename. Returns 0 on success, errno-positive
- * on any failure (caller logs single WARN, never throws). The tmp file is
- * unlinked on failure so a future apply doesn't trip on a stale .tmp. */
-[[nodiscard]] int atomic_write_file(const std::string& final_path,
-                                     std::string_view  body)
+    ~SidecarRootFd() noexcept
+    {
+        if (fd_ >= 0) {
+            (void)::close(fd_);
+        }
+    }
+
+    SidecarRootFd(const SidecarRootFd&)            = delete;
+    SidecarRootFd& operator=(const SidecarRootFd&) = delete;
+
+    [[nodiscard]] int   fd()           const noexcept { return fd_; }
+    [[nodiscard]] State state()        const noexcept { return state_; }
+    [[nodiscard]] int   error_errno()  const noexcept { return error_errno_; }
+
+private:
+    int   fd_           = -1;
+    State state_        = State::OpenFailed;
+    int   error_errno_  = 0;
+};
+
+/* §5.36 (MVP-3.4e) fd-relative atomic write: openat(root, "<iface>/...",
+ * O_WRONLY|O_CREAT|O_TRUNC|O_NOFOLLOW|O_CLOEXEC) → write → fsync → close →
+ * renameat(root, ".tmp", root, ".json"). The path components passed to
+ * openat / renameat are bound to root.fd() — symlinks at any depth along
+ * the path are NOT followed (O_NOFOLLOW is per-component? No — it applies
+ * to the trailing component only, but root_fd is already O_PATH on the
+ * real-dir root, so the only attacker-controlled component left is the
+ * iface name itself, which the caller has already verified via fstatat).
+ *
+ * Returns 0 on success; positive errno on failure (caller emits
+ * sidecar.warn.write_failed). The tmp path is unlinkat'd on any failure
+ * after the open so a future apply doesn't trip on a stale .tmp. */
+[[nodiscard]] int atomic_write_file_at(int                root_fd,
+                                        const std::string& iface_str,
+                                        std::string_view   body)
 {
-    const std::string tmp_path = final_path + ".tmp";
+    const std::string tmp_rel   = iface_str + "/rule_index.json.tmp";
+    const std::string final_rel = iface_str + "/rule_index.json";
 
-    /* mode 0644: world-readable (CAP_BPF-only exporter reads it). */
-    const int fd = ::open(tmp_path.c_str(),
-                           O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
-                           0644);
+    /* O_NOFOLLOW: if rule_index.json.tmp happens to exist as a symlink at
+     * the per-iface dir, the open refuses (ELOOP). 0644: world-readable
+     * (CAP_BPF-only exporter reads it). */
+    const int fd = ::openat(root_fd, tmp_rel.c_str(),
+                             O_WRONLY | O_CREAT | O_TRUNC
+                             | O_NOFOLLOW | O_CLOEXEC,
+                             0644);
     if (fd < 0) {
         return errno;
     }
@@ -209,7 +296,7 @@ namespace {
             if (errno == EINTR) continue;
             const int e = errno;
             (void)::close(fd);
-            (void)::unlink(tmp_path.c_str());
+            (void)::unlinkat(root_fd, tmp_rel.c_str(), 0);
             return e;
         }
         p   += n;
@@ -219,17 +306,17 @@ namespace {
     if (::fsync(fd) != 0) {
         const int e = errno;
         (void)::close(fd);
-        (void)::unlink(tmp_path.c_str());
+        (void)::unlinkat(root_fd, tmp_rel.c_str(), 0);
         return e;
     }
     if (::close(fd) != 0) {
         const int e = errno;
-        (void)::unlink(tmp_path.c_str());
+        (void)::unlinkat(root_fd, tmp_rel.c_str(), 0);
         return e;
     }
-    if (::rename(tmp_path.c_str(), final_path.c_str()) != 0) {
+    if (::renameat(root_fd, tmp_rel.c_str(), root_fd, final_rel.c_str()) != 0) {
         const int e = errno;
-        (void)::unlink(tmp_path.c_str());
+        (void)::unlinkat(root_fd, tmp_rel.c_str(), 0);
         return e;
     }
     return 0;
@@ -247,20 +334,17 @@ void write_rule_index(std::string_view iface,
             root.pop_back();
         }
 
-        /* §5.31 EDIT-1 architect Phase B addendum (symlink-refuse): if
-         * XDPMF_SIDECAR_ROOT itself is a symlink (or absent + the parent
-         * has one in its way), refuse-and-warn. Mirrors §5.22 O_PATH
-         * discipline used for the bpffs root. lstat() returns the
-         * symlink's own type — NOT what it points to — so S_ISLNK directly
-         * catches the attack. Missing-root is OK (mkdir_p creates it);
-         * existing-non-dir-non-symlink (e.g. regular file at /run/xdpmacfilter)
-         * also gets refused. */
-        struct stat st_root{};
-        if (::lstat(root.c_str(), &st_root) == 0) {
-            if (S_ISLNK(st_root.st_mode)) {
-                /* §5.32 (MVP-3.5): byte-equivalent text-mode (PI-3.5-1) + JSON
-                 * field `path`. Iface-scoped — sidecar root errors are
-                 * indirectly per-iface (the apply that triggered them is). */
+        /* §5.36 D-3.4e-4: open SIDECAR_ROOT with O_PATH|O_DIRECTORY|
+         * O_NOFOLLOW. Upgrades §5.31 EDIT-1's path-based lstat to the
+         * §5.22-symmetric fd-relative discipline. Event names PRESERVED
+         * per D-3.4e-5 (operator log-shipping pipeline stability). */
+        SidecarRootFd root_fd{root.c_str()};
+        switch (root_fd.state()) {
+            case SidecarRootFd::State::Ok:
+                break;
+            case SidecarRootFd::State::RootSymlink: {
+                /* §5.32 (MVP-3.5): byte-equivalent text-mode (PI-3.5-1) +
+                 * JSON field `path`. Wording from §5.31 EDIT-1 PRESERVED. */
                 const std::string msg = std::format(
                     "xdpmacfilter: WARN: rule_index.json refusing "
                     "to write — sidecar root '{}' is a symlink\n",
@@ -273,7 +357,7 @@ void write_rule_index(std::string_view iface,
                                     std::string_view{iface}, msg, fs);
                 return;
             }
-            if (!S_ISDIR(st_root.st_mode)) {
+            case SidecarRootFd::State::RootNotDir: {
                 const std::string msg = std::format(
                     "xdpmacfilter: WARN: rule_index.json refusing "
                     "to write — sidecar root '{}' is not a directory\n",
@@ -286,42 +370,46 @@ void write_rule_index(std::string_view iface,
                                     std::string_view{iface}, msg, fs);
                 return;
             }
-        } else if (errno != ENOENT) {
-            const std::string errno_str = std::strerror(errno);
-            const std::string msg = std::format(
-                "xdpmacfilter: WARN: rule_index.json lstat('{}') "
-                "failed: {}\n",
-                root, errno_str);
-            const xdpmf::logger::Field fs[] = {
-                xdpmf::logger::Field{"path",      std::string_view{root}},
-                xdpmf::logger::Field{"errno_str", std::string_view{errno_str}},
-                xdpmf::logger::Field{"errno",     static_cast<std::int64_t>(errno)},
-            };
-            xdpmf::logger::emit(xdpmf::logger::Level::Warn,
-                                "sidecar.warn.lstat_failed",
-                                std::string_view{iface}, msg, fs);
-            return;
+            case SidecarRootFd::State::OpenFailed: {
+                const int         e         = root_fd.error_errno();
+                const std::string errno_str = std::strerror(e);
+                const std::string msg       = std::format(
+                    "xdpmacfilter: WARN: rule_index.json open of "
+                    "sidecar root '{}' failed: {}\n",
+                    root, errno_str);
+                const xdpmf::logger::Field fs[] = {
+                    xdpmf::logger::Field{"path",      std::string_view{root}},
+                    xdpmf::logger::Field{"errno_str", std::string_view{errno_str}},
+                    xdpmf::logger::Field{"errno",     static_cast<std::int64_t>(e)},
+                };
+                xdpmf::logger::emit(xdpmf::logger::Level::Warn,
+                                    "sidecar.warn.lstat_failed",
+                                    std::string_view{iface}, msg, fs);
+                return;
+            }
         }
 
-        std::string dir = root;
-        dir.push_back('/');
-        dir.append(iface);
+        const std::string iface_str{iface};
 
-        /* §5.31 EDIT-1 + D-3.4b-21: mkdir-p the per-iface sidecar dir under
-         * /run/xdpmacfilter/ (universally writable as root on systemd hosts).
-         * Failure is non-fatal — degrades to exporter's action="unknown"
-         * labels per D-3.4b-17. */
-        if (const int mrc = mkdir_p(dir); mrc != 0) {
-            /* §5.32 (MVP-3.5): byte-equivalent text-mode emission. */
-            const std::string errno_str = std::strerror(mrc);
-            const std::string msg = std::format(
-                "xdpmacfilter: WARN: rule_index.json mkdir-p "
-                "of '{}' failed: {}\n",
-                dir, errno_str);
+        /* §5.36 HG-3.4e-2 + D-3.4e-4: fd-relative mkdirat of the per-iface
+         * sidecar dir under XDPMF_SIDECAR_ROOT/<iface>. On EEXIST verify
+         * the existing entry is a real directory (NOT a symlink — KC-3
+         * sidecar limb) via fstatat(AT_SYMLINK_NOFOLLOW). On S_ISLNK:
+         * emit NEW sidecar.warn.iface_dir_symlink + return (HG-3.4e-4 —
+         * WARN + skip; PI-32-3.4b PRESERVED). */
+        if (::mkdirat(root_fd.fd(), iface_str.c_str(), 0755) != 0
+            && errno != EEXIST)
+        {
+            const int         e         = errno;
+            const std::string errno_str = std::strerror(e);
+            const std::string msg       = std::format(
+                "xdpmacfilter: WARN: rule_index.json mkdirat "
+                "of '{}/{}' failed: {}\n",
+                root, iface_str, errno_str);
             const xdpmf::logger::Field fs[] = {
-                xdpmf::logger::Field{"path",      std::string_view{dir}},
+                xdpmf::logger::Field{"path",      std::string_view{iface_str}},
                 xdpmf::logger::Field{"errno_str", std::string_view{errno_str}},
-                xdpmf::logger::Field{"errno",     static_cast<std::int64_t>(mrc)},
+                xdpmf::logger::Field{"errno",     static_cast<std::int64_t>(e)},
             };
             xdpmf::logger::emit(xdpmf::logger::Level::Warn,
                                 "sidecar.warn.mkdir_failed",
@@ -329,11 +417,72 @@ void write_rule_index(std::string_view iface,
             return;
         }
 
-        std::string final_path = dir;
-        final_path.append("/rule_index.json");
+        /* §5.36 HG-3.4e-4: per-iface symlink defense. fstatat with
+         * AT_SYMLINK_NOFOLLOW reports the link itself (NOT its target);
+         * S_ISLNK then catches the attack regardless of whether the
+         * mkdirat above returned 0 (race-free creation) or EEXIST
+         * (pre-planted entry). On S_ISDIR proceed; on S_ISLNK or other
+         * non-dir → WARN + skip. */
+        struct stat st_iface{};
+        if (::fstatat(root_fd.fd(), iface_str.c_str(), &st_iface,
+                       AT_SYMLINK_NOFOLLOW) != 0)
+        {
+            const int         e         = errno;
+            const std::string errno_str = std::strerror(e);
+            const std::string msg       = std::format(
+                "xdpmacfilter: WARN: rule_index.json fstatat "
+                "'{}/{}' failed: {}\n",
+                root, iface_str, errno_str);
+            const xdpmf::logger::Field fs[] = {
+                xdpmf::logger::Field{"path",      std::string_view{iface_str}},
+                xdpmf::logger::Field{"errno_str", std::string_view{errno_str}},
+                xdpmf::logger::Field{"errno",     static_cast<std::int64_t>(e)},
+            };
+            xdpmf::logger::emit(xdpmf::logger::Level::Warn,
+                                "sidecar.warn.lstat_failed",
+                                std::string_view{iface}, msg, fs);
+            return;
+        }
+        if (S_ISLNK(st_iface.st_mode)) {
+            /* §5.36 NEW event — HG-3.4e-4. Per-iface symlink under
+             * XDPMF_SIDECAR_ROOT/<iface>. KC-3 sidecar limb closed.
+             * WARN + skip; apply continues; PI-32-3.4b PRESERVED. */
+            const std::string msg = std::format(
+                "xdpmacfilter: WARN: rule_index.json refusing "
+                "to write — sidecar per-iface entry '{}/{}' is a symlink\n",
+                root, iface_str);
+            const xdpmf::logger::Field fs[] = {
+                xdpmf::logger::Field{"path", std::string_view{iface_str}},
+            };
+            xdpmf::logger::emit(xdpmf::logger::Level::Warn,
+                                "sidecar.warn.iface_dir_symlink",
+                                std::string_view{iface}, msg, fs);
+            return;
+        }
+        if (!S_ISDIR(st_iface.st_mode)) {
+            /* Other non-dir (e.g. a regular file pre-planted) — treat
+             * uniformly via mkdir_failed (closest existing event) so
+             * downstream pipelines don't need a brand-new entry for an
+             * edge case that is effectively the same operator action
+             * "something blocked the iface dir creation". */
+            const std::string errno_str = "not a directory";
+            const std::string msg       = std::format(
+                "xdpmacfilter: WARN: rule_index.json refusing "
+                "to write — sidecar per-iface entry '{}/{}' is not a directory\n",
+                root, iface_str);
+            const xdpmf::logger::Field fs[] = {
+                xdpmf::logger::Field{"path",      std::string_view{iface_str}},
+                xdpmf::logger::Field{"errno_str", std::string_view{errno_str}},
+                xdpmf::logger::Field{"errno",     static_cast<std::int64_t>(ENOTDIR)},
+            };
+            xdpmf::logger::emit(xdpmf::logger::Level::Warn,
+                                "sidecar.warn.mkdir_failed",
+                                std::string_view{iface}, msg, fs);
+            return;
+        }
 
         const std::string body = build_body(iface, cfg);
-        const int         rc   = atomic_write_file(final_path, body);
+        const int rc = atomic_write_file_at(root_fd.fd(), iface_str, body);
         if (rc != 0) {
             /* D-3.4b-17: non-fatal degrade — single WARN line, no throw,
              * no exit. Exporter will degrade to action="unknown" labels
@@ -342,6 +491,8 @@ void write_rule_index(std::string_view iface,
              * §5.32 (MVP-3.5): byte-equivalent text-mode (PI-3.5-1) + JSON
              * surfaces errno + path. */
             const std::string errno_str = std::strerror(rc);
+            const std::string final_path = root + "/" + iface_str
+                                         + "/rule_index.json";
             const std::string msg = std::format(
                 "xdpmacfilter: WARN: rule_index.json write failed: {}\n",
                 errno_str);
@@ -355,8 +506,9 @@ void write_rule_index(std::string_view iface,
                                 std::string_view{iface}, msg, fs);
         }
     } catch (...) {
-        /* Never-throw contract: any exception (std::bad_alloc, std::format
-         * argument-formatting issue, etc.) degrades to silent WARN. */
+        /* PI-32-3.4b never-throw contract: any exception (std::bad_alloc,
+         * std::format argument-formatting issue, etc.) degrades to silent
+         * WARN. */
         xdpmf::logger::emit(
             xdpmf::logger::Level::Warn,
             "sidecar.warn.write_exception",

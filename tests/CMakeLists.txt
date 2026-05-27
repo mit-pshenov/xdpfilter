@@ -910,3 +910,37 @@ foreach(T IN ITEMS
         SKIP_RETURN_CODE 77
     )
 endforeach()
+
+# ─────────────────────────────────────────────────────────────────────────
+# MVP-3.4e additions (§5.36 / T-1 + T-2 — KC-3 closure: reset-counters
+# path-hardening + sidecar iface-subdir symlink defense).
+#
+# T_RESET_COUNTERS_PATH_TRAVERSAL (§5.36 T-1): `reset-counters --iface
+#   <bad-shape>` rejected at the §5.22 invariant layer with exit 8
+#   (PathRefused) + stderr substring 'refusing to operate'. Sub-cases
+#   (a) `../foo` (path traversal), (b) 'invalid name with spaces' (shape
+#   reject), (c) NEGATION real iface → exit 0 + audit-log. PI-3.4e-1.
+# T_SIDECAR_IFACE_SYMLINK_REFUSAL (§5.36 T-2): per-iface symlink at
+#   `/run/xdpmacfilter/<iface>` detected by SidecarRootFd discipline;
+#   apply exit 0 (PI-32-3.4b PRESERVED) + `sidecar.warn.iface_dir_symlink`
+#   event in stderr + NO write to attacker target dir. PI-3.4e-2.
+#
+# Both share RESOURCE_LOCK xdp_fixture per D-3.4e-T2-LOCK (no separate
+# `sidecar_root` lock domain — IFACE_A is PID-unique so per-iface state
+# under /run/xdpmacfilter cannot clash with concurrent tests).
+foreach(T IN ITEMS
+    T_RESET_COUNTERS_PATH_TRAVERSAL
+    T_SIDECAR_IFACE_SYMLINK_REFUSAL
+)
+    add_test(
+        NAME ${T}
+        COMMAND bash ${TEST_DIR}/${T}.sh
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    set_tests_properties(${T} PROPERTIES
+        ENVIRONMENT "${TEST_ENV}"
+        RESOURCE_LOCK xdp_fixture
+        TIMEOUT 60
+        SKIP_RETURN_CODE 77
+    )
+endforeach()

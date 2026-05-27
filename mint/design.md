@@ -11866,3 +11866,167 @@ Cite §5.36 (MVP-3.4e KC-3 closure) as the audit-trail source for this guard.
 **Anti-misdiagnosis sub-note (institutional learning specific to brief Q-decision precision)**: brief Q2 recommended Q2.A1 ("call `resolve_ifindex(iface, LoaderError::LoadFailed)` — does ifindex lookup + dev_valid_name in one") on a factual basis that did not survive architect's Phase A grep (resolve_ifindex calls only `if_nametoindex`, NOT `dev_valid_name`). Architect overrode to Q2.A2 (explicit `validate_iface_name` helper). **Lesson**: brief Q-decision recommendations are not contracts; they are starting hypotheses to be validated by Phase A grep. The /mint-briefer + brief-author workflow already includes Phase 2 grep discipline, but the BODY-SEMANTIC of grep'd functions (what they actually do internally) is harder to enforce automatically. Future-cycle architect: when Q recommendation hinges on "function X does Y", verify Y by reading the body, not just locating the declaration. **Validated by §5.36 Q2.A2 override**: Phase A grep located resolve_ifindex's body; the body's `if_nametoindex`-only behaviour invalidated brief's "does it in one" claim; architect picked A2 instead. Documented to help future cycles save the round-trip.
 
 Evidence: `mint/task-brief.md` MVP-3.4e brief (HG-3.4e-1..4 + Q1-Q4); /mint-review report at `agent-teams-review/runs/mint-review-mint-l2-mac-filter-202605271147/report.md` (security-reviewer H1 + M3 anchors for KC-3); §5.22 (BpffsRootFd + IfaceDirGuard + iface_entry_is_real_dir + throw_iface_symlink — DIRECT LOAD-BEARING PRECEDENT); §5.22 Q3 (LoaderError::PathRefused exit 8 — REUSED); §5.26 EDIT-1 (apply_internal.hpp internal-helper pattern); §5.31 EDIT-1 + D-3.4b-21 (SIDECAR_ROOT lstat — UPGRADED to O_PATH discipline per D-3.4e-4); §5.31 D-3.4b-17 + PI-32-3.4b (sidecar never throws — PRESERVED via HG-3.4e-4); §5.32 logger event catalog (kEventNames +1 entry per HG-3.4e-4 — guard #13 lockstep); §5.35 (most recent amendment — `reset_counters.cpp` significant rewrite this slice; `reset_counters.refused.no_pin` + `reset_counters.activated` events preserved in catalog); architect-spec §6.5 Verification-hints discipline + §6.6 Anti-misdiagnosis institutional learning (both applied in this amendment); brief Phase 4.4 operative-semantic SHOULD-hint discipline (applied to: SidecarRootFd helper naming + LOC-count estimates + alphabetical fixture sort position + helper-class member naming + comment wording updates).
+
+#### §5.36 EDIT-1 — Phase B design-vs-reality correction: drop `resolve_ifindex` from helper + bool return convention (2026-05-27, dialog with mint-dev-impl)
+
+**Trigger**: mint-dev-impl Phase B peer-DM with concrete platform-constraint evidence that the published `reset_counters_request` body shape (step 2 `resolve_ifindex`) breaks §5.35 ctest baseline.
+
+**Evidence (impl-supplied, paraphrased)**:
+- Pre-§5.36 `reset_counters.cpp` NEVER called `resolve_ifindex` — it went directly to `bpf_obj_get` against host-global pins under `/sys/fs/bpf/xdpmacfilter/<iface>/` per §5.25 P1 (pin-path host-globalness invariant).
+- §5.35 existing ctests (`T_CLI_RESET_COUNTERS` / `_RULE_ID` / `_NO_IFACE`) run reset-counters from HOST context, NOT via `${NSEXEC}`. `IFACE_A=xdpmf_a_$$` is created INSIDE the per-PID `${NETNS}` (`tests/lib/common.sh:106-`); the netns owns the veth pair while pins live host-global.
+- Step 2 (`resolve_ifindex(req.iface, LoaderError::LoadFailed)`) calls `if_nametoindex(iface)` against the HOST's netdev table → ENODEV → throws LoadFailed → exit 2. §5.35 tests expect exit 0 (negation control) OR exit 1 with `reset_counters.refused.no_pin` event for the not-attached case.
+- Phase 2.5 ctest result: 60/66 pass, 4 fail (the 3 §5.35 tests + T-2 per EDIT-2 below), 2 skip. T-1 passed first try.
+
+**Root cause** (architect Phase A insufficient grep):
+The Q2.A2 override correctly identified that `resolve_ifindex` doesn't do `dev_valid_name`-style shape validation, but failed to identify the OTHER misfit: `resolve_ifindex` is unnecessary for reset-counters semantics. reset-counters is a HOST-SIDE BPF MAP OPERATION on host-global pins (§5.25 P1). The iface name is a FOLDER KEY in the pin namespace, NOT a kernel netdev attach target. `apply_request` legitimately needs ifindex (XDP attach requires real ifindex); reset-counters does not. The `validate_iface_name` shape gate + `BpffsRootFd` root fence + `iface_entry_is_real_dir` per-iface fence provide the security contract WITHOUT touching the netdev table; the pin folder is the authoritative "is this attached?" signal.
+
+This is symmetric in shape to §5.31 EDIT-1 (bpffs ≠ tmpfs misdiagnosis): a design-time over-confidence about kernel/userspace semantics that survived Phase A grep but failed Phase 2.5 empirical smoke. Impl peer-DM caught it cleanly via [[impl-role-discipline]].
+
+**Disposition**: D-3.4e-EDIT-1-DROP-RESOLVE (NEW) — supersedes §5.36 Interfaces / D-3.4e-PROBE-PLACEMENT step-list step 2 + supersedes the `void` return type.
+
+##### D-3.4e-EDIT-1-DROP-RESOLVE — `reset_counters_request` helper body drops step 2 (`resolve_ifindex`) + adopts `[[nodiscard]] bool` return convention — because
+
+reset-counters does not need ifindex; the pin folder existence (via `iface_entry_is_real_dir`) is the operative "iface attached?" signal and is the host-side-correct check (netns-agnostic). The shape gate (validate_iface_name) + bpffs root fence (BpffsRootFd) + per-iface symlink fence (iface_entry_is_real_dir) preserve the security contract intact (all KC-3 attack vectors closed at layers 1-4 of the original 5-step shape).
+
+Adopting `bool` return type preserves the §5.35 exit-1 semantic for "iface not attached" without test-body edits:
+- `true` = success (zeroed-OK)
+- `false` = iface-not-attached (helper emitted `reset_counters.refused.no_pin` event before return)
+- throws on PathRefused (shape-bad iface, root symlink, per-iface symlink) + on hard errors (bpf_obj_get on real pins, libbpf_num_possible_cpus, etc.)
+
+The throw-on-hard-error vs return-false-on-not-attached split is the right semantic distinction: not-attached is a usage-flow signal ("you forgot to attach"); hard errors are kernel/libbpf failures that operator can't address without further info.
+
+##### §5.36 Interfaces — UPDATED helper body shape (supersedes §5.36 Interfaces as originally published)
+
+`xdpmf::internal::reset_counters_request` final body shape (post-EDIT-1):
+
+```cpp
+namespace xdpmf::internal {
+[[nodiscard]] bool reset_counters_request(const ResetCountersRequest& req)
+{
+    // 1. shape-check iface (Q2.A2 — throws PathRefused on bad shape)
+    validate_iface_name(req.iface, LoaderError::PathRefused);
+
+    // 2. bpffs root hardening (§5.22 BpffsRootFd; throws PathRefused on root symlink)
+    BpffsRootFd root{};
+
+    // 3. per-iface depth hardening (§5.22 iface_entry_is_real_dir;
+    //    throws PathRefused on iface symlink/non-dir; returns false on ENOENT)
+    if (!iface_entry_is_real_dir(root, req.iface)) {
+        // §5.36 EDIT-1 D-3.4e-EDIT-1-DROP-RESOLVE + D-3.4e-PROBE-PLACEMENT-EDIT-1:
+        // emit reset_counters.refused.no_pin from helper-side (single emission site;
+        // CLI-side probe is GONE per D-3.4e-PROBE-PLACEMENT). Then RETURN FALSE
+        // (not throw) so CLI translation unit's exit-code mapping preserves
+        // §5.35 T_CLI_RESET_COUNTERS_NO_IFACE exit-1 expectation byte-equivalent.
+        emit reset_counters.refused.no_pin event (iface + canary-pin-path field);
+        return false;
+    }
+
+    // 4. construct pin paths via bpffs_dir_for(req.iface) + "/" + XDPMF_MAP_*_NAME;
+    //    open inner_a + inner_b via bpf_obj_get (hard-error throws std::system_error)
+    // 5. libbpf_num_possible_cpus + zero-buffer; loop or single-slot bpf_map_update_elem
+    //    (mirrors §5.35 zero_one_slot semantics; impl-flexible whether to introduce a
+    //    local helper or inline)
+    // 6. close fds; return true.
+    return true;
+}
+}  // namespace xdpmf::internal
+```
+
+`src/lib/apply_internal.hpp` declaration UPDATED:
+```cpp
+// SUPERSEDES original §5.36 declaration:
+[[nodiscard]] bool reset_counters_request(const ResetCountersRequest& req);
+```
+
+CLI translation unit (`src/cli/reset_counters.cpp::reset_counters_main`) UPDATED:
+```cpp
+int reset_counters_main(const ResetCountersConfig& cfg) {
+    // 1. defense-in-depth empty-iface check (UNCHANGED from §5.35 lines 124-130)
+    // 2. emit reset_counters.activated audit log (UNCHANGED shape from §5.35)
+    // 3. invoke helper, map bool to exit code:
+    try {
+        const bool ok = internal::reset_counters_request(
+            internal::ResetCountersRequest{cfg.iface, cfg.rule_id});
+        return ok ? 0 : 1;   // §5.36 EDIT-1: false → exit 1 preserves §5.35
+                              // T_CLI_RESET_COUNTERS_NO_IFACE expectation
+    } catch (...) {
+        throw;  // main.cpp catch arm handles PathRefused (exit 8) / hard errors
+    }
+}
+```
+
+##### Updates to other §5.36 sub-sections
+
+- **§5.36 Phase A grep verification report item #4 (resolve_ifindex)**: superseded — the discrepancy with Q2.A1 stands (resolve_ifindex does NOT do `dev_valid_name`), but the **conclusion** ("therefore validate_iface_name MUST be called BEFORE resolve_ifindex") is incomplete; corrected conclusion: "therefore validate_iface_name MUST be called; resolve_ifindex is redundant for reset-counters per D-3.4e-EDIT-1-DROP-RESOLVE and is DROPPED from the helper body".
+- **§5.36 Decisions / Q2.A2 OVERRIDE**: STANDS — `validate_iface_name` helper is still needed; only step 2 (`resolve_ifindex`) is dropped.
+- **§5.36 D-3.4e-PROBE-PLACEMENT FINAL**: AMENDED per D-3.4e-PROBE-PLACEMENT-EDIT-1 — the "LoadFailed throw at iface_entry_is_real_dir returns-false branch" becomes "false-return after emit" — exit code 1 instead of 2; mechanism is helper return value, not exception class.
+- **§5.36 FileList EDITED row `src/lib/loader.cpp`**: body shrinks by ~5-8 LOC vs original §5.36 (no step-2 resolve_ifindex call); validate_iface_name + bool-return-bookkeeping count unchanged.
+- **§5.36 verifiable invariants** item #6 (`grep -nE 'validate_iface_name' src/lib/loader.cpp` returns at least 2 hits) — STANDS. New item #12 (MAY): `grep -nE 'resolve_ifindex' src/lib/loader.cpp` count UNCHANGED vs pre-§5.36 (no new call-sites — reset_counters_request does NOT call resolve_ifindex per D-3.4e-EDIT-1-DROP-RESOLVE).
+
+##### PI-3.4e-1 (NEW) — clarification (post-EDIT-1)
+
+Property restated: "`reset-counters --iface <path-traversal-shape>` returns exit 8 with stderr `refusing to operate`; `reset-counters --iface <unattached-but-shape-valid-name>` returns exit 1 with stderr containing `reset_counters.refused.no_pin` event (JSON-mode) or its prose equivalent (text-mode); NO BPF map mutation on sibling pinned subsystems."
+
+T-1 sub-case (c) negation-control assertion CLARIFIED: `xdpmacfilter attach --iface ${IFACE_A}` runs via `${NSEXEC}` (per existing fixture); `xdpmacfilter reset-counters --iface ${IFACE_A}` runs from HOST context (matches existing §5.35 ctest pattern; pins are host-global). Both succeed (exit 0). Architect Phase A had insufficient awareness of this asymmetry — captured in anti-misdiagnosis note below.
+
+#### §5.36 EDIT-2 — Phase B logger-convention correction: drop event-name-token assertion from T-2 text-mode (2026-05-27, dialog with mint-dev-impl)
+
+**Trigger**: mint-dev-impl Phase B peer-DM with concrete platform-constraint evidence that the T-2 sub-case (a) assertion "stderr contains literal `sidecar.warn.iface_dir_symlink`" cannot be satisfied in text mode.
+
+**Evidence (impl-supplied)**: `src/common/logger.cpp:231-242 emit_text()` literally `write_stderr(msg)` — event-name tokens appear in JSON-mode envelope (as `"event": "..."`) but NEVER in text-mode prose. All 6 existing `sidecar.warn.*` emissions in §5.31 EDIT-1 + §5.36 follow this convention (`msg` contains semantic phrasing like `"refusing to write — sidecar root '...' is a symlink"`, NOT the event-name literal).
+
+**Root cause** (architect spec rule violation):
+§5.36 T-2 sub-case (a) text says "(event name token — emitted in both text-mode + JSON-mode per §5.32 logger convention)". This **misstates the §5.32 logger convention**. Per §5.32 PI-3.5-1, text-mode is byte-equivalent to pre-§5.32 emissions (which carried only `msg` prose, no event-name tokens). JSON-mode emits the structured envelope including `event` field.
+
+Symmetric to EDIT-1 in shape: architect over-confidence about a kernel/userspace contract that survived Phase A grep but failed Phase 2.5 ctest. Impl peer-DM caught it cleanly.
+
+**Disposition**: D-3.4e-EDIT-2-T2-ASSERTION (NEW) — supersedes §5.36 T-2 sub-case (a) first assertion.
+
+##### D-3.4e-EDIT-2-T2-ASSERTION — T-2 sub-case (a) drops event-name token assertion; relies on prose `symlink` token + attacker-file-absent + exit-0 — because
+
+The remaining T-2 sub-case (a) assertions (exit code 0 + stderr contains literal `symlink` token (semantic phrasing) + `/tmp/xdpmf-fake-iface-attacker/rule_index.json` absent) provide complete PI-3.4e-2 coverage:
+- exit 0 → PI-32-3.4b preserved (sidecar never throws);
+- `symlink` token in stderr → semantic refusal observable;
+- attacker-target file absent → fd-relative discipline holds (no symlink follow);
+- + (existing per §5.31 EDIT-1 + §5.36 fixture lockstep) `sidecar.warn.iface_dir_symlink` appears in kEventNames catalog + log_events_v1.txt fixture — verified by build + guard #13 invariant, not by per-test stderr grep.
+
+The event-name token assertion was an architect over-specification that doesn't survive the §5.32 logger convention. Tester relaxation = correct disposition (per architect spec §6.5 "Verification-hints discipline" — items are MAY by default, prose loses to invariants block, impl/tester inline-merge if a contract conflict surfaces).
+
+##### §5.36 T-2 — UPDATED sub-case (a) assertions (supersedes §5.36 TestStrategy T-2 sub-case (a))
+
+T-2 sub-case (a) — symlink refused; apply continues — UPDATED assertion list:
+- Observable: exit code 0 (PI-32-3.4b — apply does NOT escalate to fatal).
+- Assertion: stderr contains literal `symlink` token (semantic phrasing — already in impl's msg per `src/lib/sidecar.cpp` per-iface-symlink branch).
+- Assertion (NEW): stderr contains the iface name token (the iface being refused appears in the msg per impl's `std::format` shape — load-bearing for grep specificity).
+- Assertion: `/tmp/xdpmf-fake-iface-attacker/rule_index.json` does NOT exist (no write into attacker-controlled target).
+- Assertion: `/tmp/xdpmf-fake-iface-attacker/rule_index.json.tmp` does NOT exist either.
+- **DROPPED**: stderr contains literal `sidecar.warn.iface_dir_symlink` (text-mode unobservable per §5.32 logger convention; covered by fixture-lockstep guard #13 instead).
+
+If tester WANTS belt-and-suspenders coverage of the JSON-mode emission, an OPTIONAL sub-case (a.json) MAY assert: setting `XDPMF_LOG_FORMAT=json` before invoking apply; stderr line is a single NDJSON object; the object's `event` field equals `"sidecar.warn.iface_dir_symlink"`. This is NOT contractual for PI-3.4e-2 (the text-mode prose + filesystem checks above are sufficient); MAY be added at tester's discretion if Phase 2.5 turns out to want extra coverage.
+
+##### §5.36 verifiable invariants item #4 — UPDATED (post-EDIT-2)
+
+> 4. (MAY) `grep -F 'sidecar.warn.iface_dir_symlink' src/common/logger.hpp` returns 1 hit; same grep on `tests/fixtures/log_events_v1.txt` returns 1 hit. kEventNames array length 35 → 36; fixture line count 35 → 36. **Event-name observable via fixture-lockstep + catalog inclusion** — NOT via text-mode per-test stderr grep (which is unobservable per §5.32 PI-3.5-1 byte-equivalence convention).
+
+##### Anti-misdiagnosis institutional learning from §5.36 EDIT-1 + EDIT-2 (NEW guard #18)
+
+**Add to §7 OOS anti-misdiagnosis notes after item 17 (bilateral invariant restoration):**
+
+18. **Helper-body design must respect host-vs-netns + path-vs-netdev semantic asymmetry**. When introducing a new internal-helper that consolidates an existing operator action (e.g., `reset_counters_request` consolidates §5.35 `reset_counters_main`'s direct map ops), architect MUST audit each step against the EXISTING operator-action's runtime invocation pattern (HOST vs NSEXEC vs SUDO vs systemd-managed) BEFORE picking the step-list. Mirroring a SIBLING helper's body (`apply_request` → uses ifindex for XDP attach) is necessary but NOT sufficient: the new helper's semantic axis may differ (`reset_counters_request` operates on host-global pins; netdev existence is orthogonal). Phase A grep should specifically check: "does the EXISTING action call this primitive?" If not, the new helper SHOULD NOT introduce it via mirror-shape mimicry. Validated by §5.36 EDIT-1 (this slice). Pattern: `grep -nE '<primitive>' <existing-cli-translation-unit>.cpp` BEFORE adding `<primitive>` to the new helper's step list. Cost: 30 seconds. Benefit: avoids the design-vs-reality mismatch that surfaces as a Phase 2.5 ctest regression requiring Phase B EDIT.
+
+19. **Logger-emission text-mode is byte-equivalent prose; event-name tokens live in JSON-mode envelope only**. When writing TestStrategy assertions that pin a stderr substring to an event-name literal (`grep -F '<event.name.token>'`), architect MUST verify text-mode emit_text() body in `src/common/logger.cpp` — if it's `write_stderr(msg)` with no event-name prepend, the assertion is text-mode unobservable. JSON-mode CAN observe event-name via `"event":"..."` field. Either (a) write the test sub-case explicitly for JSON-mode (`XDPMF_LOG_FORMAT=json`) OR (b) rely on prose semantic-phrasing tokens that DO appear in msg + fixture lockstep + catalog inclusion for event-name observability. Validated by §5.36 EDIT-2 (this slice). Pattern: `grep -nE 'write_stderr\(msg\)' src/common/logger.cpp` BEFORE pinning any per-test stderr grep to an event-name literal. Cost: 30 seconds. Benefit: avoids the text-mode-grep contract that's unobservable per PI-3.5-1 byte-equivalence.
+
+##### §5.36 EDIT-1 + EDIT-2 — PI accounting (no PI changes; clarifications only)
+
+- PI-3.4e-1: property restated to clarify exit-1-vs-exit-8 split (shape-bad → 8; not-attached → 1). No semantic change; preserved.
+- PI-3.4e-2: property unchanged; T-2 sub-case (a) assertions tightened to text-mode-observable items only. No semantic change.
+- PI-32-3.4b PRESERVED: unchanged; T-2 sub-case (a) exit 0 confirms.
+- PI-7-3.4e-hpp/cpp: unchanged (loader.hpp + config.hpp still ZERO-diff; `apply_internal.hpp` adds `[[nodiscard]] bool` return type — internal header, NOT public surface).
+- PI-6 (existing ctest count regression-baseline): UNCHANGED — 60 + 2 + 2 EDIT-fixture = 64 → 66, ZERO existing ctest body EDITs. EDIT-1 preserves exit-1 byte-equivalence for the §5.35 not-attached test; EDIT-2 is a test-author guidance shift (T-2 was a NEW test this slice, so no existing-test body edit).
+
+##### Notifications dispatched (§5.36 EDIT-1 + EDIT-2 closure)
+
+Per architect spec "design flaw" + "tester ambiguity" scenarios:
+1. team-lead notified via SendMessage at correction-flag time with the diff summary (this EDIT block) + the two rulings.
+2. mint-dev-impl notified with the EDIT-1 ruling (drop resolve_ifindex; helper returns bool; CLI maps to exit 0/1) + the EDIT-2 ruling (T-2 drops event-name-token assertion).
+3. mint-dev-tester notified with the T-2 sub-case (a) assertion list change (via SendMessage; T-2 file authoring will reflect the relaxed assertions).

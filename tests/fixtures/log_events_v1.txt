@@ -27,6 +27,7 @@ loader.trust_model
 logger.warn.unknown_log_format
 reset_counters.activated
 reset_counters.refused.no_pin
+sidecar.warn.iface_dir_symlink
 sidecar.warn.lstat_failed
 sidecar.warn.mkdir_failed
 sidecar.warn.root_not_dir

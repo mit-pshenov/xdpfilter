@@ -438,6 +438,52 @@ void kernel_version_probe()
                              iface));
 }
 
+/* §5.36 (MVP-3.4e) D-3.4e-3 Q2.A2: dev_valid_name-style shape check for
+ * the operator-controlled `iface` token BEFORE it is composed into any
+ * filesystem path. Rejects:
+ *   - empty (defense-in-depth — cli.cpp parser also rejects)
+ *   - length > IFNAMSIZ - 1 (= 15) per kernel `dev_valid_name`
+ *   - any char outside [A-Za-z0-9._-] (rejects '/', whitespace, NUL,
+ *     control chars; mirrors POSIX portable filename character set)
+ *   - exact "." or ".." (kernel reserves; canonical path-traversal tokens)
+ * Throws std::system_error{on_fail, ...} with stderr containing the
+ * literal `refusing to operate` token (load-bearing for §6 T-1 grep).
+ *
+ * Single-callsite per §5.22 anon-namespace fence (D-3.4e-2). Future slices
+ * MAY promote to retrofit apply_request/detach() if /mint-review surfaces
+ * a shape-rejection regression there. Not retrofitted this slice per
+ * Q2.A2 scope discipline. */
+void validate_iface_name(const std::string& iface, LoaderError on_fail)
+{
+    auto reject = [&](std::string_view why) {
+        throw_loader(on_fail,
+                     std::format("iface name '{}' is invalid or unsafe — "
+                                 "refusing to operate ({})",
+                                 iface, why));
+    };
+
+    if (iface.empty()) {
+        reject("empty");
+    }
+    // IFNAMSIZ - 1 = 15 — leave room for the NUL terminator the kernel
+    // expects on ifname-shaped strings.
+    if (iface.size() > 15) {
+        reject("length > 15");
+    }
+    if (iface == "." || iface == "..") {
+        reject("reserved name");
+    }
+    for (const char c : iface) {
+        const bool ok = (c >= 'A' && c <= 'Z')
+                     || (c >= 'a' && c <= 'z')
+                     || (c >= '0' && c <= '9')
+                     || c == '.' || c == '_' || c == '-';
+        if (!ok) {
+            reject("disallowed character");
+        }
+    }
+}
+
 /* §5.22 Item 2: O_PATH | O_DIRECTORY | O_NOFOLLOW fd on the bpffs root.
  * Single-callsite RAII per the §5.19 anon-namespace rule (not exported
  * to raii.hpp). All per-iface `*at()` syscalls in this TU resolve relative
@@ -2068,6 +2114,172 @@ std::uint32_t apply_request(const ApplyRequest& req)
     const XdpProbe after = probe_attached_xdp(ifindex, self_tag);
     dir_guard.release();
     return after.prog_id;
+}
+
+/* §5.36 (MVP-3.4e) HG-3.4e-1 + EDIT-1: `reset-counters` routed through
+ * this helper instead of the CLI translation unit, so the §5.22
+ * BpffsRootFd / iface_entry_is_real_dir primitives are composed BEFORE
+ * any pin path is constructed. KC-3 reset-counters limb closure (closes
+ * the regression noted by the 2026-05-27 /mint-review security-reviewer
+ * H1).
+ *
+ * Flow (post §5.36 EDIT-1 — resolve_ifindex DROPPED per netns-vs-host
+ * asymmetry + pin-as-authority semantic):
+ *   1. validate_iface_name(req.iface, PathRefused)         — shape gate (exit 8)
+ *   2. BpffsRootFd root{}                                  — root symlink gate (exit 8)
+ *   3. iface_entry_is_real_dir(root, req.iface)
+ *        → true               → proceed
+ *        → false              → emit reset_counters.refused.no_pin + return false
+ *                              (CLI maps false → exit 1, matches §5.35
+ *                               T_CLI_RESET_COUNTERS_NO_IFACE expectation)
+ *        → symlink / non-dir  → throws PathRefused (exit 8)
+ *   4. bpf_obj_get(<iface>/rule_counters_a) + (..._b)
+ *   5. per-CPU zero buffer (libbpf_num_possible_cpus())
+ *   6. bpf_map_update_elem zero-write loop or single-slot (D-3.4d-RESET-BOTH)
+ *   7. close fds; return true
+ *
+ * Return: true on success; false on iface-not-attached (event already
+ * emitted). Throws std::system_error on PathRefused class + hard BPF
+ * errors. CLI translation unit (src/cli/reset_counters.cpp) post-§5.36
+ * EDIT-1: argv → audit-log `reset_counters.activated` → invoke this
+ * helper → `return ok ? 0 : 1;`. NO path-construction, NO bpf_obj_get,
+ * NO direct map writes survive in the CLI TU. */
+[[nodiscard]] bool reset_counters_request(const ResetCountersRequest& req)
+{
+    // 1. Shape gate (Q2.A2): rejects path-traversal / whitespace / control
+    // chars BEFORE the path is composed. Throws PathRefused (exit 8).
+    validate_iface_name(req.iface, LoaderError::PathRefused);
+
+    // 2. Bpffs root hardening (§5.22): O_PATH|O_DIRECTORY|O_NOFOLLOW on
+    // XDPMF_BPFFS_ROOT — root symlink → PathRefused (exit 8); non-dir →
+    // PathRefused; permission errors → Permission.
+    //
+    // §5.36 EDIT-1: resolve_ifindex step is INTENTIONALLY OMITTED. Reset-
+    // counters is a host-global BPF MAP operation per §5.25 P1; the iface
+    // is a pin-folder key, not a netdev attach target. Pin presence is the
+    // authoritative attached?-signal (step 3 below). Apply/detach still
+    // call resolve_ifindex because XDP attach genuinely needs ifindex.
+    BpffsRootFd root{};
+
+    // 3. Per-iface depth hardening (§5.22): faccessat + fstatat
+    // (AT_SYMLINK_NOFOLLOW). Returns false on ENOENT; throws PathRefused
+    // on symlink/non-dir. §5.36 EDIT-1: on ENOENT (iface not attached),
+    // emit reset_counters.refused.no_pin event and return false — caller
+    // maps to exit 1 (operator-observable "not attached" — preserves
+    // §5.35 HG-3.4d-3 behavioural contract verbatim).
+    if (!iface_entry_is_real_dir(root, req.iface)) {
+        const std::string inner_a_path =
+            std::string{XDPMF_BPFFS_ROOT} + "/" + req.iface + "/"
+            + XDPMF_MAP_RULE_COUNTERS_INNER_A_NAME;
+        const std::string msg = std::format(
+            "reset-counters: no rule_counters pin at {}; iface '{}' not attached?\n",
+            inner_a_path, req.iface);
+        const xdpmf::logger::Field fs[] = {
+            xdpmf::logger::Field{"pin_path", std::string_view{inner_a_path}},
+            xdpmf::logger::Field{"errno",    static_cast<std::int64_t>(ENOENT)},
+        };
+        xdpmf::logger::emit(xdpmf::logger::Level::Error,
+                            "reset_counters.refused.no_pin",
+                            std::string_view{req.iface}, msg, fs);
+        return false;
+    }
+
+    // 5. Construct pin paths post-validation. iface has passed validate_iface_name
+    // and iface_entry_is_real_dir — the name is fence-clean; the path string
+    // cannot escape XDPMF_BPFFS_ROOT.
+    const std::string iface_dir   = bpffs_dir_for(req.iface);
+    const std::string inner_a_pin = iface_dir + "/" + XDPMF_MAP_RULE_COUNTERS_INNER_A_NAME;
+    const std::string inner_b_pin = iface_dir + "/" + XDPMF_MAP_RULE_COUNTERS_INNER_B_NAME;
+
+    // §5.36 note: libbpf has no fd-relative bpf_obj_get_at (§5.22 Q2
+    // Maximum carries forward as OOS). The path-based bpf_obj_get is
+    // safe HERE because iface has been fence-validated above — no
+    // attacker-controlled component remains.
+    auto open_pin = [](const std::string& path) -> int {
+        const int fd = ::bpf_obj_get(path.c_str());
+        if (fd < 0) {
+            const int e = errno;
+            // ENOENT here is a partial-attach inconsistency: the iface dir
+            // exists but the inner pin is missing. Emit the same no_pin
+            // event so operator log-shipping pipelines treat it uniformly.
+            if (e == ENOENT) {
+                const std::string msg = std::format(
+                    "reset-counters: no rule_counters pin at {}\n", path);
+                const xdpmf::logger::Field fs[] = {
+                    xdpmf::logger::Field{"pin_path", std::string_view{path}},
+                    xdpmf::logger::Field{"errno",    static_cast<std::int64_t>(e)},
+                };
+                xdpmf::logger::emit(xdpmf::logger::Level::Error,
+                                    "reset_counters.refused.no_pin",
+                                    std::nullopt, msg, fs);
+                throw_loader(LoaderError::LoadFailed,
+                             std::format("rule_counters pin '{}' absent — partial attach?",
+                                         path));
+            }
+            throw std::system_error(
+                e, std::generic_category(),
+                std::format("bpf_obj_get('{}')", path));
+        }
+        return fd;
+    };
+
+    const int inner_a_fd = open_pin(inner_a_pin);
+    int inner_b_fd = -1;
+    try {
+        inner_b_fd = open_pin(inner_b_pin);
+    } catch (...) {
+        (void)::close(inner_a_fd);
+        throw;
+    }
+
+    // 6. Per-CPU zero buffer sized by libbpf_num_possible_cpus(). std::vector
+    // default-initializes to zero so the buffer is N×u64 zeros.
+    const int num_cpus = ::libbpf_num_possible_cpus();
+    if (num_cpus <= 0) {
+        (void)::close(inner_a_fd);
+        (void)::close(inner_b_fd);
+        throw std::system_error(
+            EINVAL, std::generic_category(),
+            std::format("libbpf_num_possible_cpus returned {}", num_cpus));
+    }
+    std::vector<std::uint64_t> zero_per_cpu(static_cast<std::size_t>(num_cpus), 0u);
+
+    // 7. D-3.4d-RESET-BOTH: zero the chosen slot(s) on BOTH inner_a AND
+    // inner_b so subsequent active_idx flips are idempotent. Single-slot
+    // when req.rule_id has a value; full sweep 0..XDPMF_RULE_COUNTERS_MAX-1
+    // otherwise (HG-3.4d-1).
+    auto zero_slot = [&](int fd, std::uint32_t rid, std::string_view inner_name) {
+        const int rc = ::bpf_map_update_elem(fd, &rid, zero_per_cpu.data(), BPF_ANY);
+        if (rc < 0) {
+            const int e = -rc;
+            throw std::system_error(
+                e, std::generic_category(),
+                std::format("bpf_map_update_elem({}[{}])", inner_name, rid));
+        }
+    };
+
+    try {
+        if (req.rule_id.has_value()) {
+            const std::uint32_t rid = *req.rule_id;
+            zero_slot(inner_a_fd, rid, XDPMF_MAP_RULE_COUNTERS_INNER_A_NAME);
+            zero_slot(inner_b_fd, rid, XDPMF_MAP_RULE_COUNTERS_INNER_B_NAME);
+        } else {
+            for (std::uint32_t rid = 0;
+                 rid < static_cast<std::uint32_t>(XDPMF_RULE_COUNTERS_MAX);
+                 ++rid) {
+                zero_slot(inner_a_fd, rid, XDPMF_MAP_RULE_COUNTERS_INNER_A_NAME);
+                zero_slot(inner_b_fd, rid, XDPMF_MAP_RULE_COUNTERS_INNER_B_NAME);
+            }
+        }
+    } catch (...) {
+        (void)::close(inner_a_fd);
+        (void)::close(inner_b_fd);
+        throw;
+    }
+
+    (void)::close(inner_a_fd);
+    (void)::close(inner_b_fd);
+    return true;
 }
 
 }  // namespace internal
