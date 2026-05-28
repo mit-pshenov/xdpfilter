@@ -1,148 +1,124 @@
-# Task brief — MVP-3.4h: exporter `--bind` non-loopback startup WARN (brownfield, security-observability)
+# Task brief — MVP-3.4i: compound exporter scrape-path perf (4 byte/set-equivalent patches) (brownfield, performance)
 
 ## Goal
 
-Emit a startup WARN line via `xdpmf::logger::emit(Level::Warn, "exporter.warn.bind_non_loopback", ...)` when `xdpmf-exporter` is invoked with `--bind <addr>` resolving to a non-loopback IPv4 address (i.e., NOT in `127.0.0.0/8`). No refusal — operator may have legitimate reason (k8s sidecar mesh, monitoring proxy, fleet-wide remote-scrape pattern); the WARN makes the choice visible in audit logs.
+Apply 4 micro-optimizations to the `xdpmf-exporter` `/metrics` scrape path, each preserving the emitted output's line-SET (and for 3 of 4, the exact byte-STREAM). Pure CPU/allocation reduction: ~1.3 ms/scrape on a 50-iface fleet (~40% of the compound win identified by /mint-review's performance dimension). This is a **behavior-preservation slice** — the contract is "output line-set unchanged", the perf is the motivation.
 
-Closes /mint-review 2026-05-27 sec M2 (exporter `--bind` non-loopback no WARN) and the **observability half** of KC-2 kill chain. KC-2 mitigation half (auth/TLS for the exposed `/metrics` endpoint) remains OOS — separate slice.
+Closes 4 of 5 /mint-review performance findings (Major-1 + Med-1/2/3). The 5th (Med-4 fd-cache) is EXPLICITLY DEFERRED to a separate slice — it introduces cross-scrape state + an apply/detach race window whose invalidation strategy is a genuine multi-axis design question (out of scope here).
 
-Mirrors §5.30 HK-16 W1 startup-warn pattern (PI-32 trust-model-flip / bpffs-root-missing logged at startup so fleet-wide divergence is detectable).
-
-**Source of truth**: `/home/user/agent-teams-review/runs/mint-review-mint-l2-mac-filter-202605271147/report.md` (sec M2; KC-2 lines 127-129 + line 144 top-actionable item #10).
+**Source of truth**: `/home/user/agent-teams-review/runs/mint-review-mint-l2-mac-filter-202605271147/raw/performance-reviewer.md` (Major findings §1 + Medium findings §1/2/3) + `report.md` compound chain (line 131-133).
 
 ## Context: prior work
 
-- All prior briefs: archived in `mint/task-brief-*.md` (28 prior cycles)
-- Existing design: `mint/design.md` §5.38 (MVP-3.4g dead-code delete, commit `315a6e7`)
-- Architecture doc: `mint/architecture-v2.md` — no row for this slice (security-observability hardening from /mint-review; treat as §5.39 brownfield amendment, mirroring §5.30 / §5.36 / §5.37 / §5.38 hardening precedents)
-- Phase A code-grep verification: brief-author ran exhaustive Phase 2 greps (see "Notes for architect Phase A code-grep discipline" footer)
-- PI continuity: PI-7-3.4g-hpp 13th + cpp 8th + loader-hpp + mac-filter-h ZERO-diff streaks active post-MVP-3.4g.
-
-**Critical: PI-7-3.4h-hpp streak BREAKS this cycle**. kEventNames catalog at `src/common/logger.hpp:90` (`std::array<std::string_view, 36>`) MUST extend to 37 entries to register the new event-name token — `logger.hpp` cannot stay byte-identical. This carve-out is well-precedented: §5.36 MVP-3.4e also extended kEventNames (35→36) with explicit PI-3.4e-K scoped carve-out. Brief proposes the same shape for §5.39: scoped catalog-extension carve-out at PI-3.4h-K; baseline re-starts post-§5.39 EDIT-point. **PI-7-3.4h-cpp = 9th** + loader-hpp + mac-filter-h streaks continue cleanly.
+- All prior briefs: archived in `mint/task-brief-*.md` (29 prior cycles)
+- Existing design: `mint/design.md` §5.39 (MVP-3.4h exporter bind WARN, commit `db7e00e`)
+- Architecture doc: `mint/architecture-v2.md` — no row for this slice (perf hardening from /mint-review; treat as §5.40 brownfield amendment)
+- Phase A code-grep verification: brief-author ran exhaustive Phase 2 greps (see footer); confirmed patch-coupling for patches 1 + 3, and a byte-equivalence nuance for patch 4 (see below)
+- PI continuity: PI-7-3.4h-cpp 9th + loader-hpp + mac-filter-h ZERO-diff streaks active. logger.hpp was carve-out-EDITed in §5.39 (PI-3.4h-K); this slice does NOT touch logger.hpp. All 4 edited files are exporter `.cpp` — none are PI-7 fence-path headers.
 
 ## Workflow rules (brownfield)
 
-- **Architect**: read §5.30 HK-16 W1 startup-warn precedent (the W1-vs-W2 placement decision; `validate_bpffs_root_or_warn()` helper pattern in stats_reader.cpp:130) + §5.36 PI-3.4e-K kEventNames carve-out precedent + §5.32 (MVP-3.5 logger spec; emit() signature; PI-3.5-1 byte-equivalence for text mode) + §6.5 invariants summary. EDIT design.md in place; append §5.39. Phase A code-grep MUST re-verify parse_bind_addr IPv4-only constraint + sibling exporter.bind.* events placement.
-- **Impl**: FileList interpretation per brownfield mode — strict in-scope EDIT on `src/exporter/http.cpp` (WARN emission) + `src/common/logger.hpp` (kEventNames +1 entry + 2 sub-comment counts) + `tests/fixtures/log_events_v1.txt` (+1 alphabetical line); NEW `tests/T_EXPORTER_BIND_NON_LOOPBACK_WARN.sh` + EDIT `tests/CMakeLists.txt` (+15 LOC add_test block). NO touch to UNCHANGED-BUT-AFFECTED files (3 PI-7 fence paths minus logger.hpp).
-- **Tester**: 1 NEW ctest target. Existing ctests stay green by construction (PI-3.4h-1 byte-equivalence on default --bind=127.0.0.1 paths; existing T_LOG_JSON_EXPORTER_EVENTS may need fixture-cross-reference EDIT if it pins kEventCount or sub-counts — Phase 2 grep flags this for architect re-check).
-- **Reviewer**: 5-point brownfield framework. Special attention items: (a) PI-3.4h-K scoped carve-out rationale citation in §5.39; (b) PI-7-3.4h-cpp + loader-hpp + mac-filter-h ZERO-diff fences (3 paths, NOT 4 this cycle); (c) NEW ctest exercises BOTH loopback (negation control) AND non-loopback (positive) cases; (d) text-mode WARN line shape matches `xdpmf-exporter: WARN ...\n` convention per guard #19; (e) kEventNames alphabetical placement of `exporter.warn.bind_non_loopback` (slots before `exporter.warn.bpffs_root_missing` since `bi` < `bp`).
+- **Architect**: read §5.29 (exporter origin; stats_reader/http/prom_format module roles) + §5.32 (PI-3.5-1 text-mode byte-equivalence; the /metrics format contract) + §5.31/§5.34 (rule_counters_reader + rule_match label emission) + §6.5 invariants summary. EDIT design.md in place; append §5.40. Phase A code-grep MUST independently re-verify the patch-coupling findings (patch 1 signature change; patch 3 multi-callsite; patch 4 ordering nuance).
+- **Impl**: FileList interpretation per brownfield mode — strict in-scope EDIT on 4 exporter `.cpp` files; NO touch to UNCHANGED-BUT-AFFECTED (PI-7 fence paths, logger.hpp, headers unless a signature change forces a `.hpp` edit — see Q1).
+- **Tester**: likely NO new ctest. Existing T_EXPORTER_METRICS_FORMAT + T_EXPORTER_VALUES_MATCH_STATS + T_EXPORTER_RULE_LABELS are the byte/set-equivalence oracle (all grep-per-line → order-insensitive). Tester's role is largely "confirm the 3 oracle tests + full suite stay green". Architect MAY spec a small determinism-assert for Patch 4 if desired.
+- **Reviewer**: 5-point brownfield framework. Special attention items: (a) PI-3.4i-A byte-STREAM-identical for patches 1/2/3 (curl /metrics pre/post → identical bytes modulo counter values); (b) PI-3.4i-B line-SET-identical for patch 4 (sorted order acceptable; grep oracle green); (c) patch 1 signature change correctness (buffer reuse across keys+ifaces — no aliasing/stale-data bug); (d) patch 3 Content-Length correctness on the two-step path + 6 small error paths byte-identical; (e) no PI-7 fence-path edits.
 
 ## Human-gate decisions (defaults applied — architect overrides at Phase A)
 
-### HG-3.4h-1: PI-7-3.4h-hpp scoped carve-out for kEventNames extension → **YES, mirror §5.36 PI-3.4e-K precedent**
+### HG-3.4i-1: scope = patches 1-4; Med-4 fd-cache DEFERRED → **CONFIRMED**
 
-13-cycle PI-7-hpp ZERO-diff streak ends here by necessity — kEventNames catalog is the canonical event-name registry, and adding a NEW emit-site REQUIRES a catalog extension per guard #10. Architect documents new `PI-3.4h-K` (kEventNames-extension-only carve-out: ONE +1 entry + size literal 36→37 + 2 sub-comment counts) in §6.5; reviewer's framework point 5 walks the carve-out instead of asserting full byte-identical. Baseline re-starts post-§5.39 EDIT-point so future cycles (§5.40+) extend a new PI-7-3.4i-hpp streak from 1.
+In-scope: Major-1 (PERCPU buf hoist) + Med-1 (format_to in-place) + Med-2 (build_response two-step) + Med-3 (sorted-vector). Med-4 (per-scrape bpf_obj_get fd cache) is DEFERRED — it introduces cross-scrape state + an apply/detach race window; the invalidation strategy (TTL vs mtime-stat vs inotify vs per-scrape revalidate) is multi-axis and likely warrants /mint-hld. NEW OOS fence; mvp-3.4j candidate.
 
-### HG-3.4h-2: loopback detection scope → **127.0.0.0/8 entire range, numerical post-parse check**
+### HG-3.4i-2: byte-equivalence PI split → **PI-3.4i-A (stream) + PI-3.4i-B (set)**
 
-Detection logic: after `parse_bind_addr(cfg.bind_addr, bind_inaddr)` succeeds in `http.cpp::run()`, check `(bind_inaddr.s_addr & htonl(0xff000000)) == htonl(0x7f000000)`. Anything in 127.0.0.0/8 (kernel loopback range) is NOT WARN-worthy; everything else (including 0.0.0.0 wildcard, RFC1918 private, public IPv4) is. NOT just exact 127.0.0.1 — operators legitimately use 127.0.0.2 / 127.1.0.1 / etc. for sidecar separation. IPv6 `::1` and string-literal "localhost" are OOS (parse_bind_addr is IPv4-only via `inet_pton(AF_INET, ...)`; "localhost" gets rejected with existing `exporter.bind.invalid_addr`).
+Phase 2 grep found patch 4 (sorted-vector) is NOT byte-stream-identical: `prom_format.cpp` currently iterates `unordered_map` in unspecified order, so the /metrics rule_match line order is ALREADY non-deterministic. Sorted-vector makes it deterministic but changes the byte stream vs hash-order.
+- **PI-3.4i-A** (patches 1, 2, 3): byte-STREAM-identical /metrics output (modulo live counter values). format_to writes identical bytes; two-step write produces identical wire bytes (TCP concatenation); buf hoist is invisible to output.
+- **PI-3.4i-B** (patch 4): line-SET-identical (every rule_match line still emitted; order may change to deterministic-sorted). Prometheus is order-insensitive; the 3 oracle tests grep per-line so they stay green. Deterministic output is a minor bonus.
 
-### HG-3.4h-3: new kEventNames entry token → **`exporter.warn.bind_non_loopback`**
+### HG-3.4i-3: NO new ctest → **CONFIRMED (existing oracle suffices)**
 
-Slots alphabetically in log_events_v1.txt BEFORE `exporter.warn.bpffs_root_missing` (since `bi` < `bp`). In logger.hpp:90-130 array, slots within the "exporter (xdpmf-exporter)" sub-comment group between `exporter.bind.listen_failed` and `exporter.listening` (alphabetical within group) OR at end of `exporter.warn.*` cluster — architect's tactical D-decision.
+T_EXPORTER_METRICS_FORMAT (per-line `grep -qE`/`grep -cE`) + T_EXPORTER_VALUES_MATCH_STATS (per-line `grep -E`) + T_EXPORTER_RULE_LABELS are the byte/set-equivalence oracle. They pass under both stream-identical (1/2/3) and set-identical (4) changes. Architect MAY add a sorted-determinism assert for patch 4 but it's not required (the grep oracle is sufficient; perf numbers are NOT independently benchmarkable per report's residual_uncertainty note — do NOT add a flaky timing-based ctest).
 
-### HG-3.4h-4: NO refusal — WARN-only posture → **CONFIRMED**
+### HG-3.4i-4: NO VERSION bump → **CONFIRMED**
 
-Emit warn + continue normal startup. KC-2 mitigation half (auth/TLS for `/metrics`) explicit OOS — separate slice. Refusal would break legitimate fleet-ops use cases (k8s sidecar mesh) without operator opt-in.
+Pure internal perf; no operator-observable surface change (output line-set unchanged; same metrics, same labels, same values).
 
-### HG-3.4h-5: NO VERSION bump → **CONFIRMED**
+### HG-3.4i-5: PI-7 fences → **logger.hpp NOT touched; cpp/loader-hpp/mac-filter-h extensions continue**
 
-Pure observability addition; no operator-observable API change (default --bind=127.0.0.1 keeps current silent behavior; only non-loopback bind triggers new line). Architect overrides only if KC-2 mitigation also lands same cycle (it won't — explicit OOS).
+All 4 edited files are exporter `.cpp`. No PI-7 fence-path header is touched (UNLESS Q1's signature change forces a `.hpp` edit — see Q1; `percpu_sum_u64` is a static function in each reader's `.cpp`, NOT exposed via a header, so the signature change stays `.cpp`-local). config.hpp + loader.hpp + mac_filter.h ZERO-diff streaks extend. logger.hpp untouched (its §5.39 PI-3.4h-K carve-out re-baseline restarts cleanly; architect adjudicates whether PI-7-3.4i-hpp counts as restart-at-1 or continuation).
 
-## Open mechanism questions (architect decides; document in §5.39)
+## Open mechanism questions (architect decides; document in §5.40)
 
-### Q1: WARN emission placement — main.cpp helper (Option A) vs http.cpp::run() post-parse (Option B)?
+### Q1: Patch 1 — `percpu_sum_u64` signature change to accept caller-provided buffer
 
-- **A**: helper called from `main()` after cmdline parse, BEFORE `http::run()`. Matches §5.30 HK-16 W1 precedent (`validate_bpffs_root_or_warn` shape). Uses `cfg.bind_addr` STRING; loopback check string-based (case-insensitive prefix match for `127.`). Fail-fast: warns before socket() syscall.
-- **B**: inside `http.cpp::run()` AFTER `parse_bind_addr(cfg.bind_addr, bind_inaddr)` succeeds, BEFORE `::socket()`. Sibling to existing `exporter.bind.*` events at http.cpp:288-330. Uses parsed `struct in_addr`; loopback check numerical `(s_addr & htonl(0xff000000)) == htonl(0x7f000000)`. Cleaner per architect spec sub-rule "where is X executed per-runtime".
-- **Recommendation**: **B**. Per-runtime correctness; numerical loopback check is robust (string-prefix `"127."` misses edge-cases like trailing whitespace OR matches non-loopback "127a.b.c.d"); same TU as siblings simplifies code review + future maintenance. If architect flips to A, the brief accepts — both options satisfy HG-3.4h-2 contract; only the helper-location + check-mechanism differ.
+- **A1**: `percpu_sum_u64(fd, key, num_cpus, std::span<std::uint8_t> buf)` — caller allocates ONE buffer above the per-iface loop, resize(num_cpus*8) once, passes span. C++23 idiomatic.
+- **A2**: raw `std::uint8_t* buf` + size param (C-style; matches libbpf call shape).
+- **Recommendation**: **A1** (`std::span` — bounds-carrying, idiomatic, zero-overhead). Both readers' `percpu_sum_u64` is a static anon-namespace function in the `.cpp` (Phase 2 confirmed: NOT declared in any `.hpp`), so the signature change stays `.cpp`-local → no header edit, no PI-7 ripple. Architect picks span-vs-pointer.
 
-### Q2: text-mode WARN message shape — D-decision territory
+### Q2: Patch 3 — `build_response` two-step refactor shape
 
-Architect picks at Phase A per guard #19. Reference shape (NOT contractual): `"xdpmf-exporter: WARN: --bind <addr> is not loopback (127.0.0.0/8); /metrics will be exposed on a routable interface\n"`. JSON-mode envelope is automatic per logger.hpp Q1=A1 structured field shape (`bind_addr` field).
+- **A1**: add `build_headers(status, status_text, content_type, body_size)` helper; the /metrics 200 path (http.cpp:237) does `write_all(headers) + write_all(body)` directly; the 6 small error paths (400/405/404/ok at :180,188,200,250,254) keep single `build_response`. Minimal blast radius.
+- **A2**: change `build_response` to always-two-step internally (all 7 paths).
+- **Recommendation**: **A1** — only the hot /metrics path (large body) needs the optimization; the 6 error responses have tiny bodies where the copy is negligible AND keeping them on the existing single-write path guarantees their wire bytes are byte-identical (no regression risk). Content-Length computed from body.size() BEFORE writing headers (load-bearing — the header must be correct or the HTTP response breaks).
 
-## Scope (cycle MVP-3.4h — concrete items)
+### Q3: Patch 4 — sorted-vector shape
 
-### Item E-1 — EDIT `src/exporter/http.cpp` (Option B default per Q1) — WARN emission
+- Sorted `std::vector<std::pair<std::uint32_t, std::string_view>>` populated from the per-iface RuleMeta list, then linear scan (≤64 entries; report says fits cache-line ~30 ns vs ~50 ns) OR binary search. Architect picks linear-vs-binary (linear is simpler + report-recommended at this cardinality). Output line order becomes sorted-by-rule_id (deterministic) — acceptable per PI-3.4i-B.
 
-**Where**: `src/exporter/http.cpp` (current 17501 bytes; `run()` entry @:288; `parse_bind_addr` @:261)
-Diff (if Q1.B):
-- ADD `is_loopback_ipv4()` static helper (~5 LOC) — takes `struct in_addr`, returns `bool`; bitmask check 127.0.0.0/8 per HG-3.4h-2.
-- ADD WARN emission block after `parse_bind_addr()` success at run() entry, BEFORE `::socket()` call. ~20 LOC: `if (!is_loopback_ipv4(bind_inaddr)) { ... logger::emit(...Warn, "exporter.warn.bind_non_loopback", msg, fs); }`. Includes structured field `bind_addr` (matches sibling `exporter.bind.*` field shape).
-- Net LOC: ~+25 in http.cpp.
+## Scope (cycle MVP-3.4i — concrete items)
 
-If Q1.A picked, swap to main.cpp + helper file/path; mechanism otherwise unchanged.
+### Item P-1 — Patch 1: PERCPU buf alloc hoist (Major-1)
 
-### Item E-2 — EDIT `src/common/logger.hpp` (PI-3.4h-K scoped carve-out)
+**Where**: `src/exporter/stats_reader.cpp` (`percpu_sum_u64` @:84-91 + per-key call loop @:230) + `src/exporter/rule_counters_reader.cpp` (parallel `percpu_sum_u64` @:89-94 + its call loop)
+Diff: move the `std::vector<std::uint8_t>` alloc OUT of `percpu_sum_u64` to ABOVE the per-iface read loop in each reader's `read_all*` function; resize(num_cpus*8) once; pass buffer (span per Q1) into `percpu_sum_u64`. Drop the per-call zero-init `std::uint8_t{0}` (unnecessary — `bpf_map_lookup_elem` overwrites fully; this is a documented micro-win in the finding). ~500 µs/scrape on 50-iface host. Net LOC: roughly neutral (~+5 signature/hoist, ~-3 alloc).
 
-**Where**: `src/common/logger.hpp:90-132`
-Diff:
-- Update array size literal: `std::array<std::string_view, 36>` → `std::array<std::string_view, 37>` at :90.
-- ADD ONE new entry `"exporter.warn.bind_non_loopback",` alphabetically placed within the "exporter (xdpmf-exporter)" sub-comment cluster — architect picks exact position (between `exporter.bind.listen_failed` + `exporter.listening` OR among `exporter.warn.*` group).
-- Update exporter sub-comment at :114 `15 events` → `16 events`.
-- Update kEventCount comment at :132 from `// = 36 (§5.36: 35 → 36; +1 sidecar.warn.iface_dir_symlink per HG-3.4e-4)` to mirror new shape: `// = 37 (§5.39: 36 → 37; +1 exporter.warn.bind_non_loopback per HG-3.4h-3)`.
-- Net LOC: ~+3 (1 new entry + 2 count adjustments).
+### Item P-2 — Patch 2: `std::format_to` in-place (Med-1)
 
-### Item E-3 — EDIT `tests/fixtures/log_events_v1.txt` (guard #13 fixture lockstep)
+**Where**: `src/exporter/prom_format.cpp` (`out.append(std::format(...))` @:71-76, :110-112, :117-119)
+Diff: replace each `out.append(std::format(FMT, ...))` with `std::format_to(std::back_inserter(out), FMT, ...)` (C++23). Eliminates the temp-string heap alloc + copy + free per emitted line. Byte-identical output (PI-3.4i-A). ~700 µs/scrape + ~3400 fewer allocs. Net LOC: ~neutral.
 
-**Where**: `tests/fixtures/log_events_v1.txt` (current 36 lines, alphabetical)
-Diff: ADD one line `exporter.warn.bind_non_loopback` slotted alphabetically BEFORE `exporter.warn.bpffs_root_missing` (since `bi` < `bp`). Net +1 LOC.
+### Item P-3 — Patch 3: `build_response` two-step write for /metrics path (Med-2)
 
-### Item T-1 — NEW `tests/T_EXPORTER_BIND_NON_LOOPBACK_WARN.sh`
+**Where**: `src/exporter/http.cpp` (`build_response` @:159-172 + /metrics 200 call-site @:237)
+Diff per Q2.A1: add `build_headers(...)` helper; /metrics path writes headers + body via 2 `write_all` calls (no full-body copy into a format result); Content-Length computed from body.size() pre-write. 6 small error paths unchanged. ~45 µs + 250 KiB peak heap saved on max-fleet. Costs +1 write(2) syscall (~3 µs — net win). Net LOC: ~+5-8.
 
-**Where**: `tests/T_EXPORTER_BIND_NON_LOOPBACK_WARN.sh` (NEW)
-Body (high-level — impl/tester picks exact shape):
-- **PRIMARY** (positive): launch `xdpmf-exporter --bind 0.0.0.0 --port <ephemeral>` (background); poll for "listening" emit; assert stderr contains `WARN.*bind.*not.*loopback` regex OR `exporter.warn.bind_non_loopback` event-name in JSON mode; kill exporter.
-- **NEGATION** (default loopback): launch `xdpmf-exporter --port <ephemeral>` (default --bind=127.0.0.1); poll for listening; assert stderr does NOT contain bind_non_loopback WARN regex; kill.
-- **Sub-case** (127.0.0.0/8 non-default loopback): launch `xdpmf-exporter --bind 127.0.0.2 --port <ephemeral>`; assert NO WARN (127.0.0.0/8 covers entire range per HG-3.4h-2).
-- RESOURCE_LOCK: `exporter_port_9417` (port-clash serialization with sibling exporter tests; mirror `T_EXPORTER_NO_ATTACHED_IFACE` shape at tests/CMakeLists.txt:657). xdp_fixture lock NOT required (no veth/loader interaction).
-- SKIP: passwordless sudo (exporter doesn't need sudo for self-test; but mirror project convention for consistency — architect picks).
+### Item P-4 — Patch 4: sorted-vector vs unordered_map (Med-3)
 
-### Item E-4 — EDIT `tests/CMakeLists.txt` — add_test block
+**Where**: `src/exporter/prom_format.cpp` (`std::unordered_map<std::uint32_t, std::string_view> action_for_rule` @:94 + its populate loop + the 2 iteration loops @:107 + the `.contains()` check @ orphan loop)
+Diff per Q3: replace `unordered_map` with sorted `std::vector<std::pair<std::uint32_t, std::string_view>>`; populate + sort once per iface; replace `.find()`/`.contains()`/range-for with vector scan. Drop `#include <unordered_map>` (verify no other user in prom_format.cpp). Output line order becomes deterministic-sorted (PI-3.4i-B — line-set-identical, grep oracle green). ~60 µs/scrape + ~500 fewer small allocs. Net LOC: ~neutral.
 
-**Where**: `tests/CMakeLists.txt`
-Diff: ~+15 LOC `add_test(...) + set_tests_properties(... RESOURCE_LOCK exporter_port_9417 TIMEOUT 60 SKIP_RETURN_CODE 77)` block, mirroring `T_EXPORTER_NO_ATTACHED_IFACE` shape.
+### NO new ctest, NO new files
 
-### Item T-EXISTING — UNCHANGED-BUT-AFFECTED ctest carve-out
-
-**Where**: §6.5 invariants block in design.md §5.39
-List existing tests that touch kEventNames or exporter startup as UNCHANGED-BUT-AFFECTED zero-diff fence:
-- `T_LOG_JSON_EXPORTER_EVENTS.sh` — consumes kEventNames indirectly via JSON envelope assertions; verify Phase A grep — does it pin kEventCount (36) or full count? If yes, +1 EDIT needed; if no, byte-equivalent.
-- Existing exporter ctests (`T_EXPORTER_*`) — default --bind=127.0.0.1 path stays silent per HG-3.4h-2; ZERO regressions.
-
-Reviewer point 5 confirms zero diff via `git diff` against prior cycle baseline.
+Existing 3 oracle tests are the byte/set-equivalence verification. Tester confirms full suite (68 ctests) stays green.
 
 ## Out of scope (explicit)
 
-- **KC-2 mitigation half (auth/TLS for `/metrics`)** — separate slice; explicit OOS. This slice closes observability gap ONLY.
-- **IPv6 `::1` loopback detection** — parse_bind_addr is IPv4-only via inet_pton(AF_INET); IPv6 binding explicitly OOS per existing http.cpp:260 comment. NEW FENCE.
-- **String-literal "localhost" detection** — parse_bind_addr rejects "localhost" with existing `exporter.bind.invalid_addr`; no WARN needed (different error class). NEW FENCE.
-- **Rate-limiting the WARN** — one-shot startup emission; no per-scrape repetition needed (mirrors W1 HK-16 design). NEW FENCE.
-- **REFUSAL on non-loopback** — operator legitimate reasons exist; WARN-only per HG-3.4h-4. NEW FENCE.
-- **VERSION bump** — pure observability addition; no operator-observable API change. NEW FENCE.
-- **README / fleet-ops docs update** — minimal CHANGELOG entry (1 line under Security section in [Unreleased]) is the only doc touch; README updates are part of B1 doc-backlog slice. NEW FENCE.
-- **Other /mint-review backlog items** (KC-1 escape-action-label-defensive, Theme D dispatch_match helper, perf compound, TUN/TAP injector, CI/CD) — all separate slices.
+- **Med-4 fd cache across scrapes** (`stats_reader.cpp:193,232` + `rule_counters_reader.cpp:155-178,210`) — ~1.4 ms/scrape, BUT introduces cross-scrape state + apply/detach race window; invalidation strategy is multi-axis (TTL vs mtime-stat vs inotify vs per-scrape revalidate). DEFERRED to mvp-3.4j; likely /mint-hld first. NEW FENCE.
+- **Low findings** (BPF batch API for apply ops; action_table identity-map elision; O(N²) dedup in extract_pass_macs) — separate slices; the first two touch the datapath/loader hot paths (higher blast radius). NEW FENCES.
+- **Benchmark/timing ctest** — perf numbers are algorithmic estimates, NOT independently benchmarked (report residual_uncertainty). A timing-based ctest would be flaky under -j4 contention (see guard #12 history). NO perf-assertion test. NEW FENCE.
+- **VERSION bump** — pure internal perf. NEW FENCE.
+- **Changing /metrics output semantics** (new labels, new metrics, value changes) — strictly forbidden; this is preservation-only. NEW FENCE.
+- **KC-1 / KC-2 mitigation halves, Theme C/D remnants, CI/CD** — separate slices.
 
 ## Definition of done
 
-- §5.39 amendment in `mint/design.md` (estimated ~120-180 LOC: scope + HG/Q resolutions + D-decisions + FileList table + PI block including PI-3.4h-K carve-out + OOS block + Phase A grep notes)
+- §5.40 amendment in `mint/design.md` (estimated ~150-250 LOC: scope + HG/Q resolutions + D-decisions + FileList table + PI-3.4i-A/B split + OOS block + Phase A grep notes)
 - PI continuity:
-  - PI-3.4h-K NEW (scoped kEventNames-extension carve-out for logger.hpp; mirrors §5.36 PI-3.4e-K)
-  - PI-7-3.4h-cpp = **9th** consecutive ZERO-diff on `src/lib/config.hpp`
-  - PI-7-3.4h-loader-hpp + PI-7-3.4h-mac-filter-h extensions
-  - PI-3.5-1 byte-equivalence text-mode emissions preserved (new WARN follows existing emit() shape)
+  - PI-3.4i-A NEW (byte-STREAM-identical /metrics for patches 1/2/3)
+  - PI-3.4i-B NEW (line-SET-identical for patch 4; sorted order acceptable)
+  - PI-7-3.4i-cpp (config.hpp) + loader-hpp + mac-filter-h ZERO-diff continue; logger.hpp untouched
+  - PI-3.5-1 text-mode byte-equivalence preserved (the /metrics format contract)
   - PI-32-3.4b sidecar-never-throws preserved (no sidecar changes)
-- ctest baseline: 67 → 68 (+T_EXPORTER_BIND_NON_LOOPBACK_WARN)
-- CHANGELOG.md `[Unreleased]` Security subsection: +1 line entry for §5.39 / sec M2 closure
+- ctest baseline: 68 → 68 (NO new ctests; reviewer confirms zero regressions on 3 oracle tests + full suite)
 - mint/review.md round-1 verdict = pass
 - One git commit per phase boundary
 
 ## Dependencies
 
-- C++23 stdlib (`<arpa/inet.h>` already included via `<netinet/in.h>` in http.cpp; `htonl` for bitmask)
-- No CMake changes (escape_util already wired; logger.hpp is header-only)
+- C++23 stdlib (`<span>` for Q1.A1; `std::format_to` + `std::back_inserter` for P-2; already on C++23)
+- No CMake changes
 - No kernel/platform deps
-- No external BPF/libbpf changes
+- No external BPF/libbpf changes (same bpf_map_lookup_elem calls; just buffer lifetime moves)
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 
@@ -159,53 +135,33 @@ packs:
 
 ## Pre-brief sanity check (per [[mint-hld-scope-discipline]])
 
-- **Multi-axis design space?** No. One mechanism axis (Q1 placement A vs B); answer falls out of per-runtime-correctness rule.
-- **Brief-author uncertain across ≥2 axes?** No. /mint-review prescribes resolution + §5.30 HK-16 + §5.36 kEventNames-extension precedents both apply directly.
-- **Expensive to undo?** No. Pure observability addition + 1 NEW ctest; rollback = revert single commit.
-- **≥3 distinct viable options?** No. WARN emission is the one viable mechanism per /mint-review signal.
-- **Mechanical-answer check**: ✓ yes — extension of established precedent.
-- **Has /mint-hld been run?** No — not needed.
-- **Brief-author overconfidence flag**: ⚠ initial brief invocation had 2 wrong claims (LOC estimate 3x too low; PI-7-hpp 14th streak target impossible). Phase 2 grep corrected both. Architect repeats Phase 2 greps per guard #5.
+- **Multi-axis design space?** No (for the 4 in-scope patches). Each is a mechanical optimization with a clear answer from the report. The ONE multi-axis item (Med-4 fd-cache invalidation) is explicitly DEFERRED out.
+- **Brief-author uncertain across ≥2 axes?** No. Patch 4's ordering nuance resolved via grep-oracle verification (tests are order-insensitive).
+- **Expensive to undo?** No. Pure refactor; rollback = revert single commit. Byte/set-equivalence makes correctness verifiable.
+- **≥3 distinct viable options?** No (per patch). Each patch's mechanism is report-prescribed; the Q-decisions are minor shape choices (span vs ptr, helper-split vs inline, linear vs binary).
+- **Mechanical-answer check**: ✓ yes — 4 report-prescribed optimizations + byte/set-equivalence oracle.
+- **Has /mint-hld been run?** No — not needed for 1-4. Med-4 may want it when scoped.
+- **Brief-author overconfidence flag**: ⚠ brief invocation claimed "all 4 byte-identical" — Phase 2 corrected (Patch 4 is line-set-identical, order may change). Also flagged patch-1 signature-change + patch-3 multi-callsite coupling. Architect repeats Phase 2 greps per guard #5.
 
-**Verdict**: mechanical extension; `/mint-hld` overkill. Proceed with `/mint-dev`.
+**Verdict**: mechanical perf slice; `/mint-hld` overkill for 1-4 (Med-4 correctly split out). Proceed with `/mint-dev`.
 
 ## Notes for architect Phase A code-grep discipline (per architect spec rules)
 
 Brief-author already ran these greps per Phase 2 — architect re-verifies + extends:
 
-1. **Confirm Q1 placement**:
-   - `grep -nE 'parse_bind_addr|run\(const HttpConfig' src/exporter/http.cpp` — should match :261 parse_bind_addr + :288 run() entry.
-   - `grep -nE 'cfg\.bind_addr|consume_flag_value.*bind' src/exporter/main.cpp` — :140 default + :177-178 parse loop.
-   - Verify Option B is the per-runtime-correct placement vs Option A per spec sub-rule.
-
-2. **Confirm sibling exporter.bind.* event shape + Field schema**:
-   - `grep -nE 'exporter\.bind\.|exporter\.warn\.' src/exporter/ src/common/logger.hpp | head -20` — observe field-name conventions; new emit must match (`bind_addr` field name, std::string_view type, etc.).
-
-3. **Confirm kEventNames catalog position**:
-   - `grep -nE 'exporter\.warn\.bpffs_root_missing|exporter\.warn\.cpu_count_invalid' src/common/logger.hpp` — slot new entry alphabetically in the cluster.
-
-4. **PI-3.4h-K carve-out fence smoke (pre-commit)**:
-   - `git diff 315a6e7..HEAD -- src/common/logger.hpp` MUST show EXACTLY: +1 entry, size literal 36→37, 2 sub-comment count updates. No other changes (no struct edits, no Field type changes, no emit() signature changes). Architect documents fence in §5.39 PI block.
-
-5. **Test fixture cross-reference (guard #13)**:
-   - `grep -nE 'kEventCount|kEventNames' tests/` — find tests that pin the catalog count. If `T_LOG_JSON_EXPORTER_EVENTS.sh` or `T_LOG_JSON_ENVELOPE_INVARIANTS.sh` asserts exact kEventCount=36, +1 EDIT body adjustment needed.
-   - `grep -c '^' tests/fixtures/log_events_v1.txt` — currently 36; will become 37 post-impl. Alphabetical placement verified by reviewer.
-
-6. **RESOURCE_LOCK for NEW ctest (guard #12)**:
-   - `grep -nE 'RESOURCE_LOCK.*exporter_port|T_EXPORTER_NO_ATTACHED_IFACE' tests/CMakeLists.txt` — confirm precedent shape at :657; mirror for NEW ctest.
-
-7. **Text-mode prose vs event-name convention (guard #19)**:
-   - `grep -nE '"xdpmf-exporter: WARN' src/exporter/` — observe existing prose convention; new WARN follows verbatim shape.
+1. **Patch 1 signature scope** — confirm `percpu_sum_u64` is static/anon-namespace in BOTH readers' `.cpp` (NOT declared in any `.hpp`):
+   - `grep -rn 'percpu_sum_u64' src/exporter/` — expect defs + call-sites ONLY in stats_reader.cpp + rule_counters_reader.cpp; ZERO hits in any `.hpp`. Confirms signature change stays `.cpp`-local (no PI-7 header ripple).
+2. **Patch 3 callsite enumeration** — `grep -n 'build_response' src/exporter/http.cpp` — expect 1 def + 7 call-sites (:180,188,200,237,250,254 + the def @:159). Confirm only the :237 /metrics path has a large body; the other 6 are small error responses that stay single-write.
+3. **Patch 4 ordering + include** — `grep -n 'unordered_map\|action_for_rule\|\.contains(\|\.find(' src/exporter/prom_format.cpp` — enumerate all uses; confirm dropping `#include <unordered_map>` is safe (no other user). Verify the iteration order is observable in output (it is — feeds rule_match line emission) so sorted-vector is line-set-equivalent NOT byte-stream (PI-3.4i-B).
+4. **Byte/set-equivalence oracle confirm** — `grep -nE 'grep -qE|grep -cE|grep -E' tests/T_EXPORTER_METRICS_FORMAT.sh tests/T_EXPORTER_VALUES_MATCH_STATS.sh tests/T_EXPORTER_RULE_LABELS.sh` — confirm all assertions are per-line grep (order-insensitive). This is what lets patch 4 (order change) stay green.
+5. **PI-7 fence smoke (pre-commit)** — `git diff db7e00e..HEAD -- src/common/logger.hpp src/lib/config.hpp src/lib/loader.hpp src/common/mac_filter.h` MUST be empty (these 4 exporter .cpp edits touch none of them).
+6. **No /metrics semantic change** — diff the format strings: the FMT literals in prom_format.cpp + build_response must be byte-identical pre/post (only the EMISSION MECHANISM changes — append→format_to, map→vector — NOT the format strings themselves).
 
 ### Anti-misdiagnosis guards applicable to this slice (per Phase 3)
 
-- **Guard #5 (Phase A code-grep)**: ✓ applies; architect repeats brief-author's Phase 2 greps independently. Phase 2 caught 2 brief-invocation errors (LOC undercount + PI-7-hpp 14th streak impossibility) — guard discipline pays off again.
-- **Guard #8 (interactive-vs-log distinction)**: ✓ trivially — exporter daemon; no UI primitive surface. NEW emit is unambiguously log-class.
-- **Guard #10 (catalog arithmetic)**: ✓ **LOAD-BEARING** — kEventNames 36→37 with size literal + sub-comment + fixture lockstep. Architect MUST cite §5.36 PI-3.4e-K precedent in §5.39 D-decision for PI-3.4h-K scoped carve-out.
-- **Guard #11 (VERSION-bump test-literal propagation)**: N/A — no VERSION bump (per HG-3.4h-5 + §7 OOS).
-- **Guard #12 (RESOURCE_LOCK for shared host state)**: ✓ NEW ctest needs `exporter_port_9417` lock (mirror tests/CMakeLists.txt:657 precedent). NO xdp_fixture lock needed (no veth interaction).
-- **Guard #13 (fixture cross-reference)**: ✓ `tests/fixtures/log_events_v1.txt` +1 alphabetical line. Reviewer point 5 grep-checks alphabetical placement.
-- **Guard #19 (logger text-mode prose vs event-name token convention)**: ✓ text-mode WARN prose follows `xdpmf-exporter: WARN: ...\n` precedent; event-name token follows `exporter.warn.*` cluster convention.
-- **Guards #17 / #18 / #20 / #21**: N/A — no bilateral invariants, no host-vs-netns, no rule-of-three trigger, no NEW test IO-model.
+- **Guard #5 (Phase A code-grep)**: ✓ applies; architect independently re-verifies the 3 patch-coupling findings (patch-1 signature, patch-3 multi-callsite, patch-4 ordering) + the order-insensitive oracle. Phase 2 caught the "byte-identical" imprecision on patch 4 — guard discipline pays off.
+- **Guards #8 / #10 / #11 / #13 / #19**: N/A — no logger emit changes, no kEventNames catalog, no VERSION bump, no fixture, no logger text-mode prose.
+- **Guard #12 (RESOURCE_LOCK)**: N/A — no new ctest (existing grep oracle is the verification; no timing-based perf test per OOS).
+- **Guards #14-21**: N/A — no map-shape/atomic-swap/bilateral/host-vs-netns/rule-of-three/IO-model concerns.
 
-**Operative-semantic discipline reminder (Phase 4.4)**: counts in this brief (~25 LOC E-1; +3 LOC E-2; +1 LOC E-3; ~80-120 LOC T-1; +15 LOC E-4; net ~+120-160 LOC) are SHOULD-level orientation, not contracts. Impl deviations on those (different LOC delta, different position in catalog cluster, different ctest sub-case count, different text-mode prose shape per guard #19) are `inline-merge` per design's resolution rule. Architect SHOULD explicitly include the prose-vs-invariants conflict resolution rule in §5.39 per [[mint-human-gate-self-approve]] + §5.37/§5.38 precedent.
+**Operative-semantic discipline reminder (Phase 4.4)**: counts in this brief (~1.3 ms/scrape; ~500/700/45/60 µs per patch; net LOC ~neutral-to-+15) are SHOULD-level orientation, not contracts — AND the perf numbers are algorithmic estimates, NOT benchmarked. The HARD contract is PI-3.4i-A (byte-stream-identical 1/2/3) + PI-3.4i-B (line-set-identical 4) verified by the 3 grep oracle tests. Impl deviations on patch shape (span vs ptr, linear vs binary scan, helper-split granularity) are `inline-merge` per design's resolution rule. Architect SHOULD include the prose-vs-invariants conflict resolution rule in §5.40 per §5.37/§5.38/§5.39 precedent.
