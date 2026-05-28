@@ -30,6 +30,7 @@
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -85,15 +86,21 @@ namespace {
 
 /* PERCPU sum of `rule_counters` map's value at `key`. Returns 0 on lookup
  * error (caller logs once per iface, not once per key, to avoid flooding
- * stderr on a transient bpffs unmount). */
+ * stderr on a transient bpffs unmount).
+ *
+ * §5.40 (MVP-3.4i) P-1 + D-3.4i-1: the caller hoists `buf` above the per-iface
+ * loop and reuses it for every (iface, key) read, so the scratch allocation is
+ * O(1) per scrape instead of O(ifaces × XDPMF_RULE_COUNTERS_MAX). No per-call
+ * zero-init is needed: on rc==0 the kernel overwrites the FULL span, so every
+ * byte summed is freshly written by THIS lookup; on rc<0 the buffer is never
+ * read. PI-3.4i-A holds (output value-identical). Kept independently per-TU
+ * (the two readers stay duplicated per §5.31 guidance — NO factor-out). */
 [[nodiscard]] std::uint64_t percpu_sum_u64(int map_fd,
                                             std::uint32_t key,
-                                            int num_cpus)
+                                            int num_cpus,
+                                            std::span<std::uint8_t> buf)
 {
     const std::size_t per_slot_bytes = round_up_8(sizeof(std::uint64_t));
-    std::vector<std::uint8_t> buf(per_slot_bytes
-                                     * static_cast<std::size_t>(num_cpus),
-                                  std::uint8_t{0});
     const int rc = ::bpf_map_lookup_elem(map_fd, &key, buf.data());
     if (rc < 0) {
         return 0;
@@ -135,6 +142,14 @@ read_rule_counters(std::string_view bpffs_root) noexcept
                             "exporter.warn.cpu_count_invalid", msg, fs);
         return out;
     }
+
+    /* §5.40 (MVP-3.4i) P-1 + D-3.4i-1: hoist the PERCPU read scratch buffer
+     * above the per-iface loop and reuse it for every (iface, key) lookup.
+     * Sized once for the PERCPU map ABI (round_up_8(8) * num_cpus bytes); the
+     * kernel overwrites the full span on each successful lookup. */
+    std::vector<std::uint8_t> percpu_buf;
+    percpu_buf.resize(round_up_8(sizeof(std::uint64_t))
+                      * static_cast<std::size_t>(num_cpus));
 
     out.reserve(ifaces.size());
     for (const std::string& iface : ifaces) {
@@ -205,7 +220,8 @@ read_rule_counters(std::string_view bpffs_root) noexcept
         RuleCountersSample sample;
         sample.iface = iface;
         for (std::uint32_t k = 0; k < XDPMF_RULE_COUNTERS_MAX; ++k) {
-            sample.counters[k] = percpu_sum_u64(fd, k, num_cpus);
+            sample.counters[k] = percpu_sum_u64(fd, k, num_cpus,
+                                                std::span{percpu_buf});
         }
         (void)::close(fd);
         out.push_back(std::move(sample));

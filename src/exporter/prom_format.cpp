@@ -4,12 +4,14 @@
  */
 #include "prom_format.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <format>
+#include <iterator>
 #include <map>
 #include <string>
 #include <string_view>
-#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "common/mac_filter.h"  // STAT_PASS / STAT_DROP_DENY / STAT_DROP_MALFORMED / STAT_PASS_CIDR / STAT_MAX / XDPMF_RULE_COUNTERS_MAX
@@ -68,11 +70,14 @@ std::string emit_metrics(
     for (const StatsSample& s : samples) {
         const std::string iface_escaped = escape_label_value(s.iface);
         for (std::uint32_t k = 0; k < STAT_MAX; ++k) {
-            out.append(std::format(
+            /* §5.40 (MVP-3.4i) P-2 + D-3.4i-2: format directly into `out`'s
+             * (already-reserved) storage instead of materializing a temporary
+             * std::string per line. FMT literal byte-identical → PI-3.4i-A. */
+            std::format_to(std::back_inserter(out),
                 "xdpfilter_packets_total{{iface=\"{}\",verdict=\"{}\"}} {}\n",
                 iface_escaped,
                 verdict_label(k),
-                s.stats[k]));
+                s.stats[k]);
         }
     }
 
@@ -90,14 +95,31 @@ std::string emit_metrics(
         /* Per-iface rule_id → action lookup table from sidecar. Missing
          * iface or missing rule_id => "unknown" action. Built per-iface
          * rather than globally so a sidecar-orphan in iface A doesn't
-         * contaminate iface B's labels. */
-        std::unordered_map<std::uint32_t, std::string_view> action_for_rule;
+         * contaminate iface B's labels.
+         *
+         * §5.40 (MVP-3.4i) P-4 + D-3.4i-4: a `rule_id`-sorted vector replaces
+         * the prior hash map (cache-friendly linear scan at ≤64 entries;
+         * ~500 fewer small allocs/scrape). FIRST-WINS dedup on duplicate
+         * rule_id is LOAD-BEARING — the prior hash-map emplace kept the first
+         * insert, so we skip a rule_id already present (NOT overwrite) to keep
+         * the emitted line-SET identical (PI-3.4i-B). The sort makes the
+         * known-rule emission order deterministic ascending-rule_id (was
+         * hash-order); Prometheus is order-insensitive so the oracle greps
+         * stay green. */
+        std::vector<std::pair<std::uint32_t, std::string_view>> action_for_rule;
         const auto it = rule_meta_by_iface.find(s.iface);
         if (it != rule_meta_by_iface.end()) {
             for (const RuleMeta& rm : it->second) {
-                action_for_rule.emplace(rm.rule_id, std::string_view{rm.action});
+                const bool already_present = std::any_of(
+                    action_for_rule.begin(), action_for_rule.end(),
+                    [&](const auto& e) { return e.first == rm.rule_id; });
+                if (already_present) continue;  // first-wins dedup (D-3.4i-4)
+                action_for_rule.emplace_back(rm.rule_id,
+                                             std::string_view{rm.action});
             }
         }
+        std::sort(action_for_rule.begin(), action_for_rule.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
 
         /* Emit ALL sidecar-known rules even at count 0 (Prometheus
          * convention: emit zeroes for known series). Then emit any
@@ -107,16 +129,21 @@ std::string emit_metrics(
             const std::uint64_t v = (rule_id < XDPMF_RULE_COUNTERS_MAX)
                                         ? s.counters[rule_id]
                                         : 0u;
-            out.append(std::format(
+            std::format_to(std::back_inserter(out),
                 "xdpfilter_rule_match_total{{iface=\"{}\",rule_id=\"{}\",action=\"{}\"}} {}\n",
-                iface_escaped, rule_id, action, v));
+                iface_escaped, rule_id, action, v);
         }
         for (std::uint32_t k = 0; k < XDPMF_RULE_COUNTERS_MAX; ++k) {
             if (s.counters[k] == 0) continue;
-            if (action_for_rule.contains(k)) continue;
-            out.append(std::format(
+            /* Linear scan over the ≤64-entry sorted vector (D-3.4i-4 / Q3):
+             * replaces the prior hash-map `.contains` membership test. */
+            const bool known = std::any_of(
+                action_for_rule.begin(), action_for_rule.end(),
+                [&](const auto& e) { return e.first == k; });
+            if (known) continue;
+            std::format_to(std::back_inserter(out),
                 "xdpfilter_rule_match_total{{iface=\"{}\",rule_id=\"{}\",action=\"unknown\"}} {}\n",
-                iface_escaped, k, s.counters[k]));
+                iface_escaped, k, s.counters[k]);
         }
     }
 

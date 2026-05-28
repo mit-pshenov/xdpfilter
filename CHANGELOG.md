@@ -5,6 +5,9 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Performance
+- **MVP-3.4i (§5.40)** — `xdpmf-exporter`: reduce `/metrics` scrape CPU + allocations (PERCPU read-buffer hoist out of the per-key loop in both readers, `std::format_to` in-place emission, two-step HTTP header/body write on the hot `/metrics` path, sorted-vector rule_id→action lookup replacing `unordered_map`); output is byte-stream-identical for the first three and line-set-identical for the fourth (deterministic ascending-`rule_id` order). No semantic/label/value change; no VERSION bump. Closes /mint-review performance Major-1 + Med-1/2/3 (Med-4 fd-cache DEFERRED).
+
 ### Housekeeping
 - **MVP-3.4g (§5.38)** — `src/lib/raii.hpp`: dead-code cleanup — `BpffsDir` + `XdpAttachment` removed (superseded by `IfaceDirGuard` since §5.22).
 

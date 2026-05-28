@@ -443,3 +443,55 @@ holds. Architect MAY choose in a future revision to suppress the WARN on
 synthesised configs by adding an `is_synthetic` flag to `ApplyRequest`;
 this is impl-flexible but design-literal currently fires the WARN
 universally.
+
+## MVP-3.4i (§5.40) — compound exporter scrape-path perf — impl-flex choices
+
+Brownfield perf slice; 4 exporter `.cpp` EDITs. HARD contract = output
+preservation (PI-3.4i-A byte-STREAM-identical for patches 1/2/3; PI-3.4i-B
+line-SET-identical for patch 4). All 68 ctests green (66 PASS + 2 SKIP); the
+3 oracle tests (T_EXPORTER_METRICS_FORMAT / VALUES_MATCH_STATS / RULE_LABELS)
+GREEN. The choices below are all design-authorized impl-flex (per §5.40
+D-3.4i-PROSE-VS-INVARIANTS the verifiable-invariants list is MAY/operative-
+semantic; reviewer disposition = inline-merge, not [UNRELATED-EDIT]).
+
+1. **build_response DRY refactor (P-3, Q2.A1 explicit MAY-grant)** — chose the
+   design-blessed "delegate" option: `build_response` now calls `build_headers`
+   then `.append(body)` instead of duplicating the full header format literal.
+   Produced bytes are byte-identical by construction (build_headers holds the
+   header literal MINUS the trailing `{}` body placeholder; the body append
+   replaces it). Consequence for MAY-invariant #10: the http.cpp HTTP header
+   format literal is now in `build_headers` (header portion only) rather than
+   verbatim in `build_response` — i.e. the SOURCE literal moved, but the WIRE
+   bytes are unchanged (verified by T_EXPORTER_METRICS_FORMAT). Rationale:
+   single source of truth for the header bytes (no drift between two copies).
+   The /metrics path uses two `write_all` calls; the 5 error/healthz paths keep
+   the single-write `build_response`.
+
+2. **`<iterator>` + `<utility>` includes added to prom_format.cpp** — beyond the
+   design's enumerated "+<algorithm> / -<unordered_map>" include hint. Both are
+   required by the design-mandated mechanisms: `std::format_to(std::back_inserter
+   (out), ...)` needs `<iterator>` (back_inserter); the sorted `std::vector<
+   std::pair<...>>` uses `std::pair` (`<utility>`, otherwise only transitively
+   guaranteed via the retained `<map>`). Necessity-includes, not a scope
+   extension; MAY-invariant #6 still holds (unordered_map removed, algorithm
+   present, map retained).
+
+3. **Patch-4 dedup + membership via `std::any_of` linear scan (Q3)** — first-wins
+   dedup at populate (skip a rule_id already present, matching the prior
+   hash-map emplace which does NOT overwrite — D-3.4i-4 LOAD-BEARING), then
+   `std::sort` by rule_id; orphan-loop membership is a linear `std::any_of`
+   scan (Q3 linear-vs-binary → linear at ≤64 entries). The known-rule emission
+   order is now deterministic ascending-rule_id (was hash-order) — byte-STREAM
+   change but line-SET preserved (PI-3.4i-B).
+
+4. **MAY-invariant #9 baseline off-by-one (factual, non-blocking)** — design's
+   §5.40 invariant #9 says `grep -cE 'write_all\(conn_fd' http.cpp` was 7 → 8.
+   Actual baseline (db7e00e) is **6**; post-patch is **7**. The DELTA (+1, from
+   splitting the /metrics write into headers+body) is exactly per contract; only
+   the absolute count in the MAY hint is off by one. Flagged for reviewer
+   awareness; no code impact.
+
+5. **CHANGELOG** — added a new `### Performance` subsection under `[Unreleased]`
+   (category-correct) with one bullet, rather than folding the entry into the
+   existing `### Housekeeping`/`### Security`. Wording is impl-flex per the
+   FileList row ("reviewer inline-merge").

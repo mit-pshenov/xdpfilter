@@ -25,6 +25,7 @@
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -80,17 +81,22 @@ namespace {
 
 /* PERCPU sum of the `stats` map's value at `key`. Returns 0 on lookup error
  * (caller logs once per iface, not once per key, to avoid flooding stderr
- * on a transient bpffs unmount). */
+ * on a transient bpffs unmount).
+ *
+ * §5.40 (MVP-3.4i) P-1 + D-3.4i-1: the caller hoists `buf` above the per-iface
+ * loop and reuses it for every (iface, key) read, so the scratch allocation is
+ * O(1) per scrape instead of O(ifaces × STAT_MAX). No per-call zero-init is
+ * needed: on rc==0 the kernel overwrites the FULL span (num_cpus * round_up_8(8)
+ * bytes), so every byte summed is freshly written by THIS lookup; on rc<0 the
+ * buffer is never read. PI-3.4i-A holds (output value-identical). */
 [[nodiscard]] std::uint64_t percpu_sum_u64(int stats_fd,
                                             std::uint32_t key,
-                                            int num_cpus)
+                                            int num_cpus,
+                                            std::span<std::uint8_t> buf)
 {
     /* Each per-CPU slot is u64 (rounded up to 8 — same as natural alignment).
-     * We allocate sized buffer; libbpf writes num_cpus * 8 bytes. */
+     * The kernel writes num_cpus * 8 bytes into the caller-provided span. */
     const std::size_t per_slot_bytes = round_up_8(sizeof(std::uint64_t));
-    std::vector<std::uint8_t> buf(per_slot_bytes
-                                     * static_cast<std::size_t>(num_cpus),
-                                  std::uint8_t{0});
     const int rc = ::bpf_map_lookup_elem(stats_fd, &key, buf.data());
     if (rc < 0) {
         return 0;
@@ -180,6 +186,14 @@ std::vector<StatsSample> read_all_attached_with_acc(std::string_view     bpffs_r
         return out;
     }
 
+    /* §5.40 (MVP-3.4i) P-1 + D-3.4i-1: hoist the PERCPU read scratch buffer
+     * above the per-iface loop and reuse it for every (iface, key) lookup.
+     * Sized once for the PERCPU map ABI (round_up_8(8) * num_cpus bytes); the
+     * kernel overwrites the full span on each successful lookup. */
+    std::vector<std::uint8_t> percpu_buf;
+    percpu_buf.resize(round_up_8(sizeof(std::uint64_t))
+                      * static_cast<std::size_t>(num_cpus));
+
     out.reserve(ifaces.size());
     for (const std::string& iface : ifaces) {
         std::string pin = std::string{bpffs_root};
@@ -227,7 +241,8 @@ std::vector<StatsSample> read_all_attached_with_acc(std::string_view     bpffs_r
         StatsSample sample;
         sample.iface = iface;
         for (std::uint32_t k = 0; k < STAT_MAX; ++k) {
-            sample.stats[k] = percpu_sum_u64(fd, k, num_cpus);
+            sample.stats[k] = percpu_sum_u64(fd, k, num_cpus,
+                                             std::span{percpu_buf});
         }
         (void)::close(fd);
         out.push_back(std::move(sample));

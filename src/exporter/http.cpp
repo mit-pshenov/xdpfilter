@@ -156,19 +156,40 @@ bool write_all(int fd, std::string_view data) noexcept
     return true;
 }
 
-[[nodiscard]] std::string build_response(int                status,
-                                          std::string_view   status_text,
-                                          std::string_view   content_type,
-                                          std::string_view   body)
+/* §5.40 (MVP-3.4i) P-3 + D-3.4i-3: HTTP response header block for the two-step
+ * `/metrics` write path. The format string below is build_response's literal
+ * MINUS the trailing "{}" body placeholder, so build_headers(...) followed by
+ * the body bytes is byte-identical to the old single-format build_response(...).
+ * Content-Length MUST be body_size (load-bearing — a wrong length corrupts the
+ * HTTP response). */
+[[nodiscard]] std::string build_headers(int                status,
+                                         std::string_view   status_text,
+                                         std::string_view   content_type,
+                                         std::size_t        body_size)
 {
     return std::format(
         "HTTP/1.0 {} {}\r\n"
         "Content-Type: {}\r\n"
         "Content-Length: {}\r\n"
         "Connection: close\r\n"
-        "\r\n"
-        "{}",
-        status, status_text, content_type, body.size(), body);
+        "\r\n",
+        status, status_text, content_type, body_size);
+}
+
+[[nodiscard]] std::string build_response(int                status,
+                                          std::string_view   status_text,
+                                          std::string_view   content_type,
+                                          std::string_view   body)
+{
+    /* DRY: delegate the header block to build_headers (byte-identical to the
+     * prior single-format result) then append the body. The 5 small
+     * error/healthz call-sites keep this single-write path — their tiny
+     * literal bodies make the copy negligible and the unchanged path
+     * guarantees byte-stable error responses. */
+    std::string resp = build_headers(status, status_text, content_type,
+                                     body.size());
+    resp.append(body);
+    return resp;
 }
 
 void handle_connection(int conn_fd, std::string_view bpffs_root)
@@ -234,9 +255,16 @@ void handle_connection(int conn_fd, std::string_view bpffs_root)
         }
 
         const std::string body = emit_metrics(samples, rule_samples, meta_by_iface);
-        const std::string resp = build_response(
-            200, "OK", "text/plain; version=0.0.4", body);
-        (void)write_all(conn_fd, resp);
+        /* §5.40 (MVP-3.4i) P-3 + D-3.4i-3: two-step write — headers then body —
+         * avoids copying the (potentially large) body into a build_response
+         * result. TCP is a byte stream, so two write_all calls on this
+         * `Connection: close` socket deliver the identical concatenated bytes
+         * a single write would (PI-3.4i-A). Content-Length is computed from
+         * body.size() BEFORE the headers are written. */
+        (void)write_all(conn_fd,
+                        build_headers(200, "OK", "text/plain; version=0.0.4",
+                                      body.size()));
+        (void)write_all(conn_fd, body);
         if (acc.total_discovered > 0
             && acc.eacces_failures == acc.total_discovered
             && acc.successes       == 0)
