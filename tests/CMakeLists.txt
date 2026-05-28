@@ -417,10 +417,17 @@ set_tests_properties(T_EXIT_CODE_9_ON_CONFIG_ERROR PROPERTIES
 # T_PASS_MAC_OR_CIDR (§6.30): LOAD-BEARING OR-compose verification —
 #   single rule with both mac+src_cidr; 3 sub-cases assert counter
 #   SPLIT (STAT_PASS vs STAT_PASS_CIDR vs STAT_DROP_DENY).
+#   §6.43 T_PASS_CIDR_VLAN: single 802.1Q-tagged IPv4 reaches the CIDR axis
+#     (THE regression closed by §5.41 MVP-4.1); in-range → STAT_PASS_CIDR,
+#     out-of-range → STAT_DROP_DENY.
+#   §6.44 T_PASS_CIDR_QINQ: depth-2 QinQ-tagged IPv4 in-range → STAT_PASS_CIDR,
+#     plus the load-bearing depth-3-overflow anti-vacuity sub-case (guard #22).
 foreach(T IN ITEMS
     T_PASS_CIDR
     T_DROP_CIDR_NOT_IN_RANGE
     T_PASS_MAC_OR_CIDR
+    T_PASS_CIDR_VLAN
+    T_PASS_CIDR_QINQ
 )
     add_test(
         NAME ${T}

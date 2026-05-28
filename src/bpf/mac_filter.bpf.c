@@ -47,6 +47,20 @@
 #define ETH_P_IP 0x0800
 #endif
 
+/* §5.41 (MVP-4.1) D-mvp-4.1-MACROS: VLAN TPIDs + tag-walk depth cap. Same
+ * rationale as ETH_P_IP above — vmlinux.h is BTF-derived (types only, no CPP
+ * macros) and linux/if_ether.h is unavailable in the BPF-target build. Values
+ * are byte-equivalent to the IEEE 802.1Q (C-TAG) / 802.1AD (S-TAG) TPIDs.
+ * XDPMF_VLAN_MAX_DEPTH is the single source of truth for the #pragma unroll
+ * count (HG-mvp-4.1-1: 802.1Q + one stacked QinQ tag = depth 2). */
+#ifndef ETH_P_8021Q
+#define ETH_P_8021Q 0x8100
+#endif
+#ifndef ETH_P_8021AD
+#define ETH_P_8021AD 0x88A8
+#endif
+#define XDPMF_VLAN_MAX_DEPTH 2
+
 /* Named inner-map type. Used by both concrete inner instances and the
  * outer MAP_OF_MAPS template (so &instance pointer types match exactly). */
 struct xdpmf_allowlist_inner {
@@ -288,6 +302,42 @@ static __always_inline void bump_rule(__u32 rule_id, __u32 active)
     }
 }
 
+/* §5.41 (MVP-4.1) Q1.A2 single-consumer helper: walk up to
+ * XDPMF_VLAN_MAX_DEPTH stacked VLAN tags (802.1Q C-TAG or 802.1AD S-TAG) and
+ * return the inner EtherType + the first byte past the L2/VLAN headers (the
+ * candidate L3 start). The bounded #pragma unroll has no back-edge, so the
+ * verifier sees a straight-line path with explicit per-tag bounds checks
+ * (kernel floor 5.15 — no bpf_loop). On a frame with no VLAN tag the loop body
+ * never runs: *l3hdr = eth + sizeof(ethhdr) and we return eth->h_proto —
+ * byte-equivalent to the pre-§5.41 `(struct iphdr *)(eth + 1)` path. On a
+ * truncated tag (no room for a full vlan_hdr) the walk STOPS with `proto`
+ * still a VLAN TPID (non-IPv4), so the caller's ETH_P_IP test fails and the
+ * frame falls through to defaults — NEVER reclassified MALFORMED
+ * (HG-mvp-4.1-2; D-mvp-4.1-MALFORMED). The caller MUST still bounds-check
+ * sizeof(struct iphdr) at *l3hdr before dereferencing (this helper validates
+ * only the VLAN tags it consumed, not the L3 header). */
+static __always_inline __u16 l3_after_vlan(void *eth, void *data_end, void **l3hdr)
+{
+    void *cursor = eth + sizeof(struct ethhdr);
+    __u16 proto  = ((struct ethhdr *)eth)->h_proto;
+
+#pragma unroll
+    for (int i = 0; i < XDPMF_VLAN_MAX_DEPTH; i++) {
+        if (proto != bpf_htons(ETH_P_8021Q) && proto != bpf_htons(ETH_P_8021AD)) {
+            break;
+        }
+        if (cursor + sizeof(struct vlan_hdr) > data_end) {
+            break;
+        }
+        struct vlan_hdr *vlan = cursor;
+        proto  = vlan->h_vlan_encapsulated_proto;
+        cursor += sizeof(struct vlan_hdr);
+    }
+
+    *l3hdr = cursor;
+    return proto;
+}
+
 SEC("xdp")
 int mac_filter_prog(struct xdp_md *ctx)
 {
@@ -359,18 +409,26 @@ int mac_filter_prog(struct xdp_md *ctx)
         return XDP_PASS;
     }
 
-    /* §5.27 Q2 OR1: MAC miss → CIDR axis (only on IPv4 ethertype). Non-IPv4
-     * frames (ARP, IPv6, VLAN-tagged, ...) skip the CIDR branch entirely
-     * and fall through to defaults — preserves MVP-3.1 semantic for
-     * non-IP traffic per brief §1. Read the same `active` snapshot so a
+    /* §5.27 Q2 OR1: MAC miss → CIDR axis (only on IPv4 ethertype). §5.41
+     * (MVP-4.1): the IPv4 ethertype is now the INNER proto after walking ≤2
+     * VLAN tags, so a VLAN/QinQ-tagged IPv4 frame reaches the CIDR branch.
+     * Non-IPv4-after-VLAN frames (ARP, IPv6, other, truncated-tag) still skip
+     * the CIDR branch and fall through to defaults — preserves the MVP-3.1
+     * non-IP semantic per brief §1. Read the same `active` snapshot so a
      * concurrent userspace flip cannot split the MAC/CIDR axes mid-packet. */
-    if (eth->h_proto == bpf_htons(ETH_P_IP)) {
-        /* Verifier-required IPv4 header bounds check before saddr deref. */
-        if (unlikely((void *)(eth + 1) + sizeof(struct iphdr) > data_end)) {
+    /* §5.41 (MVP-4.1): walk up to 2 VLAN tags so a tagged Gi frame reaches the
+     * CIDR axis. inner_proto / l3hdr come from the post-VLAN cursor; on an
+     * untagged frame this is byte-equivalent to the prior `eth + 1` path. */
+    void *l3hdr;
+    __u16 inner_proto = l3_after_vlan(eth, data_end, &l3hdr);
+    if (inner_proto == bpf_htons(ETH_P_IP)) {
+        /* Verifier-required IPv4 header bounds check before saddr deref —
+         * applied at the post-VLAN L3 offset (the only MALFORMED path). */
+        if (unlikely(l3hdr + sizeof(struct iphdr) > data_end)) {
             bump_stat(STAT_DROP_MALFORMED);
             return XDP_DROP;
         }
-        struct iphdr *ip = (struct iphdr *)(eth + 1);
+        struct iphdr *ip = (struct iphdr *)l3hdr;
 
         void *cidr_inner = bpf_map_lookup_elem(&cidr_rulesets, &active);
         if (unlikely(!cidr_inner)) {

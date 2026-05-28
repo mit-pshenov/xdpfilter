@@ -5,6 +5,9 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **MVP-4.1 (§5.41)** — datapath: VLAN/QinQ-tagged (802.1Q/802.1AD, depth ≤2) IPv4 frames now reach the src-CIDR match branch (were silently falling to `default_action` on a tagged Gi link). The XDP program walks up to two stacked VLAN tags before the L3 gate; non-IPv4-after-VLAN frames keep their prior verdict and a 3rd tag falls to defaults (depth cap). No new match field, schema, or operator surface; no VERSION bump.
+
 ### Performance
 - **MVP-3.4i (§5.40)** — `xdpmf-exporter`: reduce `/metrics` scrape CPU + allocations (PERCPU read-buffer hoist out of the per-key loop in both readers, `std::format_to` in-place emission, two-step HTTP header/body write on the hot `/metrics` path, sorted-vector rule_id→action lookup replacing `unordered_map`); output is byte-stream-identical for the first three and line-set-identical for the fourth (deterministic ascending-`rule_id` order). No semantic/label/value change; no VERSION bump. Closes /mint-review performance Major-1 + Med-1/2/3 (Med-4 fd-cache DEFERRED).
 
