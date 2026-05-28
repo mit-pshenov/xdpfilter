@@ -13560,4 +13560,300 @@ Guards applied this slice:
 - **Guard #22 (NEW)** — the data-plane-survival forward-defense above; the depth-3-overflow anti-vacuity sub-case is its concrete mechanism this slice.
 - **Guards #7/#8/#10/#11/#13/#14-21** — N/A (no map-shape/BTF-asymmetry mutation, no kEventNames catalog, no VERSION bump, no fixture lockstep, no bilateral/host-vs-netns/IO-model concern). The inner-VALUE of every map is UNCHANGED, so the §5.31 EDIT-2 BTF-asymmetry class (guard #7) does not recur.
 
+---
+
+### §5.42 MVP-4.2: bit-vector AND-classification SPIKE (rule-model S2) (brownfield, isolated prototype, 2026-05-28)
+
+#### §5.42 Problem statement
+
+This slice PROVES-OR-DISPROVES the **bit-vector packet-classification structure** (`mint/architecture-rule-model.md` Option 1 / Wave-B `§6.2(b)`) on the eBPF datapath as an **isolated prototype** over a **hardcoded canonical Gi rule-set**. The deliverable is **evidence, not production**: does the per-axis-`u64`-bitmask → `acc &= (matched | wildcard)` across axes → `ffsll`-for-first-match lowering (i) **verify** on the 5.15 floor (the `__builtin_ffsll`/AND datapath has NO src precedent — load-bearing feasibility check), (ii) **classify** a mixed-primitive rule-set correctly (incl. the LPM **prefix-closure** for overlapping dst-IP prefixes + dst-port **range encoding** + **wildcard** baseline — the classic bit-vector traps the contrarian flagged), and (iii) stay **tractable on the control-plane side**? The output resolves the PO decision gate: *take bit-vector (max-perf endpoint) unless the spike shows it is "very hard," else fall back to sequential (the documented S3 fallback, NOT built here).*
+
+Scope is **narrow on purpose** (PO scope A, 2026-05-28): bit-vector ONLY; hardcoded/test-populated rules ONLY (no v2 config parser, no Rule IR, no `schema_version:2`, no exporter wiring, no production atomic-swap apply — all S3). **Isolation is an invariant**: the prototype is ADDITIVE new files under `tests/bitvec/`; production `src/bpf/mac_filter.bpf.c` + its 70 ctests stay **byte-untouched & green**; PI-7 `loader.hpp`/`config.hpp` ZERO-diff continues; the prototype maps are NOT in `kManagedMaps[]` and pin under a SEPARATE bpffs subdir. The **complexity verdict** (§5.42 below) is a FIRST-CLASS deliverable — if the prefix-closure / range / aux-mask machinery proves intractable or alarmingly bug-prone, that IS the "very hard" signal (escalate via peer-DM); it is NOT a failure.
+
+This is **slice S2** of the rule-model build (`mint/architecture-rule-model.md` "Recommended slice sequence" S2). S1 (§5.41 VLAN parse-fix) shipped the tagged-frame L3-reach prerequisite. S3 (production landing: wire config → the chosen structure, `schema_version:2`, atomic-swap) is gated on this spike's verdict.
+
+#### §5.42 Phase A grep verification report (architect-independent — 2026-05-28, per guard #5)
+
+Architect re-ran the brief's greps independently and read each codepath in full. Brief claims CONFIRMED; literals re-anchored by pattern.
+
+1. **`rule_entry` / `allow_entry` / `action_entry` — CONFIRMED (`src/common/mac_filter.h`).** `struct rule_entry { unsigned char present; unsigned char action_id; unsigned char _pad[2]; }` (`:107-111`, 4B); `struct allow_entry { unsigned char present; unsigned char _pad[3]; unsigned int rule_id; }` (`:150-154`, 8B — the inner VALUE the bit-vector REPLACES with a `u64` bitmask in the prototype); `struct action_entry { unsigned char action_type; unsigned char _pad[3]; }` (`:113-116`, 4B); `enum xdpmf_action_type { ACTION_PASS=0, ACTION_DROP=1, ACTION_MAX=2 }` (`:118-122`). **These live in PRODUCTION `mac_filter.h` and STAY byte-untouched** — the prototype defines its OWN parallel types in `tests/bitvec/bitvec_proto.h` (isolation; do NOT extend `mac_filter.h`).
+2. **`defaults` ARRAY[2] + `active_idx` swap precedent — CONFIRMED (`mac_filter.h:78-83`, `mac_filter.bpf.c:139-158`).** `XDPMF_RULESET_COUNT=2`; `active_idx` = `ARRAY[1]` of `__u32`; `defaults` = `ARRAY[XDPMF_RULESET_COUNT]` of `__u32` indexed by the active idx; the atomic-swap commit is the single `write_active_idx` u32 store (`loader.cpp:1272-1283`). This is the precedent A1 for a per-axis `wildcard_mask` ARRAY[2]+`active_idx` — **but the spike SIMPLIFIES to a single non-swapped slot** (no live re-apply in an isolated prototype): see D-mvp-4.2-WILDCARD / Q1.
+3. **`populate_inner_slot` / `populate_cidr_inner_slot` — CONFIRMED (`loader.cpp:1176-1258`).** Both = bulk-clear (`bpf_map_get_next_key`+`bpf_map_delete_elem` loop) then per-entry `bpf_map_update_elem(inner_fd, &key, &allow_entry, BPF_ANY)`. The test-only populate harness MIRRORS this shape (clear-then-insert via `bpf_map_update_elem`) for the prototype's bitmask maps — but writes a `u64` value (not `struct allow_entry`) per key, and computes prefix-closure + wildcard masks first. **NO config parser** (the canonical set is a hardcoded C table).
+4. **`ffsll` / `__builtin_ffs` — CONFIRMED ABSENT from `src/` (zero hits).** No `bpf_loop` either (floor 5.15). The prototype's `__builtin_ffsll` on the AND-accumulated `u64` is NEW and UNPROVEN on the BPF target — this is the load-bearing feasibility check (BPF ISA has no native CTZ/CLZ; clang may inline OR emit a `__ffsdi2`/`__ctzdi2` libcall the BPF loader cannot resolve). See the D-mvp-4.2-FFS-FEAS / D-mvp-4.2-FFS-FALLBACK pair (bash-less Phase-A fallback discipline — architect pane lacks bpftool/clang exec; smoke transferred to impl Phase 2.5).
+5. **All rule population is via `apply -f <yaml>` — CONFIRMED (no direct-map-write harness exists).** `internal::apply_request` (`loader.cpp:1651+`) is the only populate path and it parses a Config. The spike adds a NEW **test-only** direct-map-write harness (`tests/bitvec/bitvec_harness.cpp`) — it does NOT touch the production loader/apply path.
+6. **`#pragma unroll` bounded-loop precedent — CONFIRMED (`mac_filter.bpf.c:324-335`, `l3_after_vlan`).** The §5.41 VLAN walk is a depth-2 `#pragma unroll` with no back-edge, verifier-accepted on 5.15. This is the precedent for BOTH the prototype's bounded port-range scan AND the `ffsll` fallback bit-scan (D-mvp-4.2-FFS-FALLBACK).
+7. **Isolation surface — CONFIRMED.** Production pins live under `XDPMF_BPFFS_ROOT="/sys/fs/bpf/xdpmacfilter"` (`mac_filter.h:64`); `kManagedMaps[]` (`loader.cpp:~161`) is the production managed-maps table. The prototype pins under a SEPARATE root `/sys/fs/bpf/xdpmf-bitvec-proto` and its maps are NOT added to `kManagedMaps[]` (guard #10 — keep the count arithmetic of the production table untouched).
+8. **Test registration / injection — CONFIRMED (`tests/CMakeLists.txt`, `tests/inject/`, `tests/lib/common.sh`).** `RESOURCE_LOCK xdp_fixture` + `SKIP_RETURN_CODE 77` is the established pattern; `add_bpf_object(...)` (used for `xdp_pass`/`mac_filter_alt` fixtures) builds a BPF object + skeleton; `setup_veth`/`cleanup_veth`/`NSEXEC` in `common.sh`. `inject_ipv4.py` builds Eth+IPv4 but its positional CLI is `<iface> <src_mac> <dst_mac> <src_ip> [dst_ip]` — **no proto/dst-port control**, so the spike needs a richer NEW injector (`inject_l4.py`) for the proto/port axes (do NOT edit `inject_ipv4.py` — isolation).
+
+**Baseline commit for all `git diff` invariant checks:** the pre-§5.42 commit = HEAD at slice start (`a638433` — "mint-dev: prep — task-brief for mvp-4.2"). Reviewer substitutes the actual merge-base if different.
+
+#### §5.42 Human-gate decisions (defaults from brief — confirmed by architect Phase A)
+
+- **HG-mvp-4.2-1 — bit-vector ONLY; sequential is the documented fallback, NOT built → CONFIRMED.** The absolute control-plane complexity of bit-vector is the measure; no sequential comparator is built.
+- **HG-mvp-4.2-2 — test-only direct-map-write harness; NO v2 config parser → CONFIRMED.** Canonical set is a hardcoded C table consumed by the harness; v2 schema/IR/`schema_version:2`/exporter/atomic-swap-apply are S3.
+- **HG-mvp-4.2-3 — prototype is ADDITIVE; production `mac_filter.bpf.c` + 70 ctests byte-untouched & green → CONFIRMED.** Separate prototype object + test-loader + spike ctests under `tests/bitvec/`; separate bpffs root; not in `kManagedMaps[]`; PI-7 streak continues.
+- **HG-mvp-4.2-4 — N≤64, single `u64` bitmask (no multi-word loop) → CONFIRMED.** `XDPMF_ALLOWLIST_MAX=64` ⇒ the whole rule-match-set is one `u64`. `id` = bit position ∈ [0,63].
+- **HG-mvp-4.2-5 — no VERSION bump → CONFIRMED.** Internal spike; no operator surface. `CMakeLists.txt` VERSION untouched (PI-mvp-4.2-VERSION).
+- **HG-mvp-4.2-6 — mixed-primitive ~10-20 rule canonical set → CONFIRMED.** Architect specifies the exact **12-rule** set below (§5.42 Canonical rule-set), exercising LPM (dst-IP + src-IP), exact (proto), range (dst-port), wildcard (absent axis), overlapping dst-IP prefixes (prefix-closure), and a first-match-tie (more-specific rule loses to lower-`id` rule).
+
+#### §5.42 Q-decisions (mechanism — Q1/Q2/Q3 resolved)
+
+##### Q1: per-axis `wildcard_mask` placement + atomic-swap → **single non-swapped slot (spike simplification of A1)** — D-mvp-4.2-WILDCARD
+
+Production S3 would use A1 (parallel `ARRAY[2]` per axis swapped by the shared `active_idx`, the `defaults` precedent). **The spike OMITS the [2]+active_idx doubling** and uses a single `ARRAY[NUM_AXES]` of `u64` (one wildcard mask per axis, 4 entries: dst/src/proto/port) plus single-slot match maps — because an isolated prototype has NO live re-apply (it test-populates once, then injects), so the atomic-swap machinery (already PROVEN in §5.26/§5.27/§5.34/§5.35) adds zero spike-relevant evidence and only noise. **This deliberate reduction ISOLATES the bit-vector classification logic (the actual unknown) from the atomic-swap logic (a solved problem).** S3 re-adds the swap by mirroring the `defaults` ARRAY[2] pattern per axis — a known, low-risk transform. Recorded as an explicit complexity-measurement caveat: *the spike's loader LOC EXCLUDES the per-axis ×2 swap bookkeeping S3 will add.*
+
+##### Q2: dst-port range encoding → **A2 (bounded aux range-table scanned in the datapath)** — D-mvp-4.2-RANGE
+
+Two options: A1 prefix-expand each range into a port-LPM (range → set of prefixes) then prefix-closure over ports; A2 an aux range-table `ARRAY[N]` of `{u32 lo, u32 hi, u64 bit}` scanned by a bounded `#pragma unroll` in the datapath, OR-ing `bit` where `lo ≤ dport ≤ hi`. **Chosen A2** because (i) the spike's goal is to MINIMIZE control-plane bug surface, and A2's loader side is trivial (`lo`/`hi`/`bit` per constrained rule — no expansion, no port-prefix-closure), with range-edge correctness reducing to a literal `lo ≤ p ≤ hi` inclusivity check; (ii) the datapath cost (one bounded ≤64-iteration scan, no back-edge — mirrors the §5.41 `l3_after_vlan` unroll precedent) lands in the explicitly-deferred perf dimension; (iii) A2 still composes cleanly into the bit-vector framework — the port "lookup" returns a `u64` mask exactly like the LPM/HASH axes, so `acc &= (port_mask | port_wildcard)` is uniform. **The complexity FINDING this records:** ranges are *awkward* for a pure bit-vector — you either accept range→prefix expansion + a second closure (A1) or accept a datapath scan that is "not really a single-lookup bit-vector" (A2). This awkwardness is itself a data point for the verdict (a Tier-1 field — dst-port — does not lower to a clean single map lookup under bit-vector).
+
+##### Q3: `ffsll` mechanism → **`__builtin_ffsll` default, bounded-bit-scan fallback** — D-mvp-4.2-FFS-FEAS + D-mvp-4.2-FFS-FALLBACK
+
+`rid = __builtin_ffsll(acc) - 1` on the AND-accumulated `u64` (`acc == 0` ⇒ NOMATCH/default). Since there is NO src precedent and the architect pane lacks `bpftool`/`clang` exec, this resolves as a **FEAS/FALLBACK decision pair** with the empirical smoke transferred to impl Phase 2.5 (bash-less fallback discipline). See the Decisions section.
+
+#### §5.42 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+##### NEW (this slice — all under `tests/bitvec/` + `tests/inject/`, ISOLATED)
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `tests/bitvec/bitvec_proto.h` | Prototype-only shared types/constants: map names (separate namespace), key structs (reuse `xdpmf_cidr_v4` shape via its own decl OR include `mac_filter.h` read-only for the key type — see DataStructures), `BITVEC_NUM_AXES`, axis indices, NOMATCH sentinel. **Separate from production `mac_filter.h`** (isolation). | C (BPF+C++ compatible) | ~50 |
+| `tests/bitvec/bitvec_proto.bpf.c` | Prototype XDP datapath: parse Eth/VLAN/IPv4/L4 → build 4 axis keys → per-axis `u64` lookup (`dst_lpm`/`src_lpm` LPM_TRIE, `proto_hash` HASH, `port_ranges` bounded scan) → `acc &= (mask \| wildcard[axis])` → `rid = ffsll(acc)-1` → bump `result[rid]` (or `result[NOMATCH]`); return XDP_PASS/XDP_DROP per `action[rid]`. Reuses the §5.41 `l3_after_vlan` *pattern* (re-implemented locally, single-consumer — guard #9, do NOT share production code). | BPF C | ~160 |
+| `tests/bitvec/canonical_ruleset.inc` | The exact 12-rule canonical set as a C array (the SOURCE OF TRUTH, transcribed from §5.42 Canonical rule-set table). Consumed by the harness to build maps. | C (header-fragment) | ~40 |
+| `tests/bitvec/bitvec_harness.cpp` | Test-only loader+populate+attach+dump harness. Subcommands: `populate <iface>` (load skeleton, compute prefix-closure + wildcard masks + range table from `canonical_ruleset.inc`, `bpf_map_update_elem` into the prototype maps mirroring `populate_inner_slot`, attach XDP to `<iface>`, pin result map under `/sys/fs/bpf/xdpmf-bitvec-proto`); `dump` (print the per-rule-id result counters as text for the ctest to parse); `detach`. NO config parser. | C++23 | ~200 |
+| `tests/inject/inject_l4.py` | Raw AF_PACKET injector building Eth+[VLAN]*+IPv4+{TCP\|UDP\|ICMP} with configurable `--dst-ip --src-ip --proto --dport [--vlan]`; one frame, `count=1`. Mirrors `inject_ipv4.py` socket setup; does NOT edit `inject_ipv4.py`. | Python | ~90 |
+| `tests/bitvec/bitvec_oracle.py` | **Tester-owned** independent reference classifier: naive O(N) first-match scan over the canonical set (for each rule in `id` order, packet matches iff every CONSTRAINED axis is satisfied; return lowest matching `id`, else NOMATCH). Reads the canonical set transcribed from the §5.42 table. Independence = ALGORITHM (dumb scan, no bitmask/closure), not data. | Python | ~80 |
+| `tests/T_BITVEC_ORACLE_AGREEMENT.sh` | §6.45 ctest — table-driven: for each test vector, `inject_l4.py` the frame, read the prototype's matched-rule-id via `bitvec_harness dump`, assert `== bitvec_oracle.py` prediction. Covers hit/miss/overlap/range-edge/wildcard/first-match-tie + mandatory negation control. | bash | ~180 |
+| `tests/T_BITVEC_VERIFIER_LOAD.sh` | §6.46 ctest — load `bitvec_proto.bpf.o` standalone (`bpftool prog load` OR harness `populate` on the veth) and assert the verifier accepts the `ffsll`/AND/bounded-scan datapath (rc=0). The empirical feasibility gate (D-mvp-4.2-FFS-FEAS). | bash | ~60 |
+
+##### EDITED (this slice)
+
+| Path | Change shape | LOC est |
+|---|---|---|
+| `tests/CMakeLists.txt` | (a) `add_bpf_object(bitvec_proto …)` to build the prototype object+skeleton (mirrors the `xdp_pass`/`mac_filter_alt` fixture wiring). (b) An executable target for `bitvec_harness` linked against the skeleton + libbpf (mirrors the main loader's link recipe). (c) `add_test` for `T_BITVEC_ORACLE_AGREEMENT` + `T_BITVEC_VERIFIER_LOAD` with `RESOURCE_LOCK xdp_fixture` + `SKIP_RETURN_CODE 77` + appropriate TIMEOUT. Net ctest 70 → 72. **Reconfigure (`cmake -B build -S .`) before `ctest`.** May factor the bitvec wiring into a NEW `tests/bitvec/CMakeLists.txt` `add_subdirectory`'d from here — impl's call (operative-semantic). | ~+40 |
+| `mint/design.md` | APPEND §5.42 (this block). NO rewrites to prior §-sections. | ~+450 |
+| `CHANGELOG.md` | OPTIONAL ~1 line under `[Unreleased]`: e.g. `- spike: isolated bit-vector AND-classification prototype (rule-model S2) — evidence for the bit-vector-vs-sequential decision gate; no production datapath change.` Operative-semantic — impl-flex wording; reviewer inline-merge. | +1 |
+
+##### UNCHANGED-BUT-AFFECTED (zero git-diff fence; behaviour must hold)
+
+| Path | Why it ripples but stays identical | Check |
+|---|---|---|
+| `src/bpf/mac_filter.bpf.c` | **PI-mvp-4.2-PROD-DATAPATH** — the production datapath is the thing the spike is an alternative TO; it is NOT touched. | `git diff a638433 -- src/bpf/mac_filter.bpf.c` empty |
+| `src/common/mac_filter.h` | Prototype defines its OWN types in `bitvec_proto.h`; no production type/constant/STAT-enum change (it MAY be included read-only for the `xdpmf_cidr_v4` key shape — read-only include is not an edit). | `git diff a638433 -- src/common/mac_filter.h` empty |
+| `src/lib/loader.hpp` | **PI-7-mvp-4.2-loader-hpp** ZERO-diff streak continues — the prototype harness is a SEPARATE program, not an edit to the production loader. | `git diff a638433 -- src/lib/loader.hpp` empty |
+| `src/lib/config.hpp` | **PI-7-mvp-4.2-config-hpp** ZERO-diff streak continues — no schema/config change (no v2 parser this slice). | `git diff a638433 -- src/lib/config.hpp` empty |
+| `src/lib/loader.cpp`, `src/lib/config.cpp`, `src/lib/apply_internal.*`, `src/lib/cidr.*`, `src/lib/sidecar.*`, `src/lib/raii.hpp` | No production loader/config/apply change; `kManagedMaps[]` (`loader.cpp`) is NOT extended (prototype maps live outside it — guard #10). | `git diff a638433 -- src/lib/` empty |
+| `src/cli/**`, `src/exporter/**`, `src/common/logger.*`, `src/common/escape_util.*` | Orthogonal — no CLI flag, metric, log event, or exporter axis added (exporter wiring is S3). | `git diff a638433 -- src/cli/ src/exporter/ src/common/logger.* src/common/escape_util.*` empty |
+| `tests/inject/inject_ipv4.py`, `tests/inject/inject_eth.py`, `tests/inject/inject_runt.py` | The new injector is a SEPARATE file (`inject_l4.py`); existing injectors untouched. | `git diff a638433 -- tests/inject/inject_ipv4.py tests/inject/inject_eth.py tests/inject/inject_runt.py` empty |
+| All 70 pre-§5.42 ctest BODIES + `tests/fixtures/**` + `tests/lib/**` | **PI-mvp-4.2-CTEST-BASELINE** — existing tests stay GREEN with ZERO body edits; only NEW files + new `add_test`/`add_bpf_object`/target lines in CMakeLists. No fixture/lib change. | `git diff a638433 -- tests/lib tests/fixtures $(existing test bodies)` empty; `ctest -j4` 70/70 → 72/72 |
+| `cmake/BpfBuild.cmake` | The `add_bpf_object` helper is REUSED, not edited. | `git diff a638433 -- cmake/BpfBuild.cmake` empty |
+| `CMakeLists.txt` (top-level) | **PI-mvp-4.2-VERSION** — no VERSION bump (HG-mvp-4.2-5); no new production source/target. | `git diff a638433 -- CMakeLists.txt` empty |
+| `include/vmlinux.h` | Prototype reads `struct iphdr`/`tcphdr`/`udphdr`/`vlan_hdr` read-only from the generated header. | `git diff a638433 -- include/vmlinux.h` empty |
+| systemd/ansible, `docs/*.md`, `README.md`, `HANDOFF.md` | No env/caps/path/schema/semantic change; doc work separate. Only optional `CHANGELOG.md` +1 line. | `git diff a638433 -- systemd/ ansible/ docs/ README.md HANDOFF.md` empty |
+
+Anything not in NEW/EDITED/UNCHANGED-BUT-AFFECTED is off-limits for impl. If impl needs to edit a file not listed → peer-DM architect (design gap).
+
+#### §5.42 DataStructures
+
+All bit-vector structures are **prototype-only** (declared in `tests/bitvec/bitvec_proto.h` + the BPF TU); NONE cross into production `mac_filter.h`. `id` = bit position ∈ [0,63]; the whole rule-match-set is a single `u64` (`XDPMF_ALLOWLIST_MAX=64`).
+
+**Axes** (`BITVEC_NUM_AXES = 4`): index 0 = dst-IP (LPM), 1 = src-IP (LPM), 2 = proto (exact), 3 = dst-port (range).
+
+**Prototype BPF maps** (all single-slot — Q1 spike simplification, NO active_idx, NO [2] doubling; pin under `/sys/fs/bpf/xdpmf-bitvec-proto`):
+
+| Map | Type | Key | Value | max_entries | Note |
+|---|---|---|---|---|---|
+| `bv_dst_lpm` | `LPM_TRIE` | `struct xdpmf_cidr_v4` (prefixlen-first, addr network-order) | `__u64` (rule-bitmask, prefix-closed) | `XDPMF_ALLOWLIST_MAX` | `BPF_F_NO_PREALLOC` |
+| `bv_src_lpm` | `LPM_TRIE` | `struct xdpmf_cidr_v4` | `__u64` | `XDPMF_ALLOWLIST_MAX` | `BPF_F_NO_PREALLOC` |
+| `bv_proto_hash` | `HASH` | `__u32` (IP proto number) | `__u64` (rules with that exact proto) | 8 | exact axis |
+| `bv_port_ranges` | `ARRAY` | `__u32` (index) | `struct bv_port_range { __u32 lo; __u32 hi; __u64 bit; }` | `XDPMF_ALLOWLIST_MAX` | bounded datapath scan (D-mvp-4.2-RANGE); `lo>hi` ⇒ unused slot |
+| `bv_wildcard` | `ARRAY` | `__u32` (axis index 0..3) | `__u64` (rules that DON'T constrain this axis) | `BITVEC_NUM_AXES` | the per-axis baseline |
+| `bv_action` | `ARRAY` | `__u32` (rule id) | `__u8 action_type` (PASS=0/DROP=1) | `XDPMF_ALLOWLIST_MAX` | verdict dispatch |
+| `bv_result` | `PERCPU_ARRAY` | `__u32` (rule id, or `BITVEC_NOMATCH = XDPMF_ALLOWLIST_MAX`) | `__u64` (hit count) | `XDPMF_ALLOWLIST_MAX + 1` | per-packet observable; userspace sums CPUs |
+
+`struct bv_port_range` and the count/inclusivity semantics are the contract; impl may rename fields if the layout + behaviour hold.
+
+**Wildcard semantics (load-bearing):** a rule that does NOT constrain axis A has its bit set in `bv_wildcard[A]` and is ABSENT from axis A's match map. The datapath does `axis_survivors = (lookup_mask_or_0 | bv_wildcard[A])`, so a wildcard rule survives axis A regardless of the packet. A rule MUST be in EXACTLY ONE of {axis-A match map, `bv_wildcard[A]`} per axis (mutual exclusion — fiddly invariant FI-2 below). Normalize "`/0` or absent" → wildcard (no `/0` trie entry).
+
+**Prefix-closure (the classic bit-vector trap, LPM axes only):** LPM_TRIE returns the SINGLE longest-matching prefix's value, but a packet also matches every LESS-specific (covering) rule. So each inserted prefix `P_i`'s stored mask MUST = OR of `bit_j` over ALL rules `j` whose prefix `P_j` COVERS `P_i` (i.e. `P_j.len ≤ P_i.len` AND `P_j == P_i` truncated to `P_j.len`), INCLUDING `P_i` itself. Loader algorithm (O(N²) per LPM axis): for each constrained prefix `P_i`, scan all constrained prefixes `P_j`, OR in `bit_j` when `P_j` covers `P_i`; insert `bv_<axis>_lpm[P_i] = mask`. **Getting the cover-direction backwards (storing more-specific into less-specific) is the #1 bit-vector bug** (FI-1).
+
+#### §5.42 Canonical rule-set (the exact 12 rules — SOURCE OF TRUTH)
+
+`id` = bit position = first-match priority (lower `id` wins). `*` = wildcard (axis unconstrained). proto: TCP=6, UDP=17, ICMP=1. dst-port `[lo,hi]` inclusive (exact = `[p,p]`).
+
+| id | dst-IP | src-IP | proto | dst-port | action |
+|---|---|---|---|---|---|
+| 0 | `10.1.2.0/24` | `*` | TCP | 1000–2000 | DROP |
+| 1 | `10.1.0.0/16` | `*` | TCP | `*` | PASS |
+| 2 | `10.0.0.0/8` | `*` | `*` | `*` | PASS |
+| 3 | `192.168.1.0/24` | `*` | UDP | 53 | DROP |
+| 4 | `192.168.0.0/16` | `172.16.0.0/12` | UDP | 53 | PASS |
+| 5 | `*` | `10.5.0.0/16` | TCP | 443 | DROP |
+| 6 | `203.0.113.0/24` | `*` | `*` | 8080–8090 | PASS |
+| 7 | `*` | `*` | ICMP | `*` | PASS |
+| 8 | `10.1.2.128/25` | `*` | TCP | 1000–2000 | PASS |
+| 9 | `198.51.100.0/24` | `198.51.100.0/24` | TCP | 22 | PASS |
+| 10 | `10.2.0.0/16` | `*` | UDP | 5000–6000 | DROP |
+| 11 | `*` | `*` | `*` | 9999 | PASS |
+
+**Scenario coverage:** overlapping dst prefixes `10.0.0.0/8 ⊃ 10.1.0.0/16 ⊃ 10.1.2.0/24 ⊃ 10.1.2.128/25` (prefix-closure) + `192.168.0.0/16 ⊃ 192.168.1.0/24`; **first-match-tie**: a packet to `10.1.2.130 TCP:1500` matches r0(/24,DROP), r1(/16), r2(/8), AND r8(/25,PASS — *more specific*) → lowest `id` **r0 DROP** wins (proves first-match-by-`id`, NOT most-specific); exact proto (r3/r4/r7/r9…); dst-port range incl. edge (r6 `8080–8090`); wildcard on each axis (dst: r5/r7/r11; proto: r2/r6/r11; port: r1/r2/r7; src: all but r4/r5/r9); full-AND all-axes-constrained (r9); src-LPM-decides (r5 fires only when src ∈ `10.5/16`).
+
+**Derived structures (impl computes; given here so the spec is self-checking):**
+- `bv_wildcard[dst]={5,7,11}`, `bv_wildcard[src]={0,1,2,3,6,7,8,10,11}`, `bv_wildcard[proto]={2,6,11}`, `bv_wildcard[port]={1,2,7}` (bit-sets).
+- `bv_dst_lpm`: `10.0.0.0/8→{2}`, `10.1.0.0/16→{1,2}`, `10.1.2.0/24→{0,1,2}`, `10.1.2.128/25→{0,1,2,8}`, `10.2.0.0/16→{2,10}`, `192.168.0.0/16→{4}`, `192.168.1.0/24→{3,4}`, `203.0.113.0/24→{6}`, `198.51.100.0/24→{9}`.
+- `bv_src_lpm`: `172.16.0.0/12→{4}`, `10.5.0.0/16→{5}`, `198.51.100.0/24→{9}` (no src-prefix overlaps — closure trivial here).
+- `bv_proto_hash`: `6→{0,1,5,8,9}`, `17→{3,4,10}`, `1→{7}`.
+- `bv_port_ranges` (`{lo,hi,bit}`): `{1000,2000,0}`,`{53,53,3}`,`{53,53,4}`,`{443,443,5}`,`{8080,8090,6}`,`{1000,2000,8}`,`{22,22,9}`,`{5000,6000,10}`,`{9999,9999,11}`.
+- `bv_action`: DROP at id ∈ {0,3,5,10}; PASS at {1,2,4,6,7,8,9,11}.
+
+#### §5.42 Interfaces
+
+**No production/external interface change** — no new flag on `xdpmacfilter`, no env var, exit code, metric, log event, config field, or exported C++ symbol. Three internal surfaces, all under `tests/`:
+
+1. **Prototype datapath contract (`bitvec_proto.bpf.c`, `SEC("xdp")`):** parse Eth → `l3_after_vlan`-style VLAN skip (depth ≤2, re-implemented locally) → require inner `ETH_P_IP`, bounds-check `iphdr`; extract `dst = ip->daddr`, `src = ip->saddr`, `proto = ip->protocol`; bounds-check + extract `dport` from `tcphdr`/`udphdr` (ICMP ⇒ no port, `dport` axis contributes via wildcard only — a packet with proto ICMP has no L4 port, so the port-range scan finds nothing and only `bv_wildcard[port]` rules survive). Compose: `acc = (lpm(bv_dst_lpm,dst) | wc[0]) & (lpm(bv_src_lpm,src) | wc[1]) & (hash(bv_proto_hash,proto) | wc[2]) & (scan(bv_port_ranges,dport) | wc[3])` (a map miss contributes `0` before the `| wc`). `rid = ffsll(acc) - 1`; if `acc == 0` → `bump bv_result[BITVEC_NOMATCH]`, return `XDP_PASS` (NOMATCH = default-pass in the spike — the verdict observable is the matched-`id`, not pass/drop). Else `bump bv_result[rid]`, look up `bv_action[rid]`, return `XDP_DROP` if `action_type==DROP` else `XDP_PASS`. All map-lookup NULL checks verifier-required. The port scan is a bounded `#pragma unroll` over `XDPMF_ALLOWLIST_MAX` (no back-edge, 5.15-safe).
+2. **Harness CLI (`bitvec_harness`):** `bitvec_harness populate <iface>` (rc 0 on success; loads skeleton, computes derived structures from `canonical_ruleset.inc`, writes all prototype maps, attaches XDP SKB-mode to `<iface>`, pins `bv_result` under `/sys/fs/bpf/xdpmf-bitvec-proto`); `bitvec_harness dump` (prints `bv_result` summed across CPUs as `id count` lines, incl. the NOMATCH slot, for the ctest to parse); `bitvec_harness detach <iface>` (cleanup). Exact subcommand spelling/output format is impl's call PROVIDED the ctest can read "which rule-id slot bumped" deterministically.
+3. **Injector CLI (`inject_l4.py`):** `inject_l4.py <iface> --dst-ip A --src-ip B --proto {tcp,udp,icmp} --dport N [--src-mac M] [--dst-mac M] [--vlan VID ...]` — builds one Eth+[VLAN]*+IPv4+L4 frame via raw AF_PACKET (`count=1`). `--vlan` repeatable (outermost first), mirrors §5.41 `inject_ipv4.py` tag insertion. MACs default to non-allowlisted constants (the prototype has no MAC axis — MAC is irrelevant here, document it).
+
+**Oracle semantics (the reference `bitvec_oracle.py` implements — tester writes, architect specifies):** input = `(dst_ip, src_ip, proto, dport)`; for each rule in ascending `id`: rule matches iff for EVERY axis the rule constrains, the packet field satisfies it (dst/src: IP ∈ CIDR; proto: equal; dport: `lo ≤ dport ≤ hi`; ICMP packet has no port ⇒ only port-wildcard rules can match on the port axis). Return the FIRST (lowest `id`) matching rule, else `NOMATCH`. This is a dumb O(N) scan with NO bitmask/closure machinery — its disagreement with the datapath localizes a closure/wildcard/range bug.
+
+#### §5.42 Decisions (with rationale)
+
+##### D-mvp-4.2-ISOLATION — prototype is a fully separate object/harness/bpffs-root, NOT in `kManagedMaps[]` — because
+The spike's value depends on the production datapath + its 70 ctests staying provably untouched (HG-mvp-4.2-3). Separate BPF object (`bitvec_proto.bpf.c`), separate types header (`bitvec_proto.h`, NOT extending `mac_filter.h`), separate bpffs root (`/sys/fs/bpf/xdpmf-bitvec-proto`), and KEEPING the prototype maps OUT of `kManagedMaps[]` (guard #10 — the production table's count arithmetic stays exact) guarantee zero production ripple. Reviewer asserts the production `git diff` fences (PI-mvp-4.2-PROD-DATAPATH + the PI-7 streak).
+
+##### D-mvp-4.2-WILDCARD — single non-swapped wildcard/match slot (Q1 spike simplification) — because
+See Q1. Isolating the bit-vector classification logic from the (already-solved) atomic-swap logic keeps the spike measuring the actual unknown. The complexity verdict explicitly notes the EXCLUDED S3 swap cost.
+
+##### D-mvp-4.2-RANGE — dst-port via a bounded aux range-table scan (Q2 A2), not port-prefix expansion — because
+See Q2. Minimizes control-plane bug surface (no range→prefix expansion + second closure); range-edge correctness = a literal inclusive compare; composes uniformly into the bit-vector. Records the FINDING that a Tier-1 range field does not lower to a clean single map lookup under bit-vector.
+
+##### D-mvp-4.2-FFS-FEAS — DEFAULT ship path is `__builtin_ffsll(acc)-1`, supported by precedent — because
+`__builtin_ffsll` is the idiomatic first-set-bit lowering; clang frequently inlines it. The default ship path is `__builtin_ffsll`. **Empirical smoke transferred to impl Phase 2.5** (architect pane lacks `bpftool`/`clang` exec — bash-less Phase-A fallback discipline): after build, `bpftool prog load tests/bitvec/bitvec_proto.bpf.o /sys/fs/bpf/probe type xdp` (or the `T_BITVEC_VERIFIER_LOAD` ctest) MUST return `rc=0` AND the object MUST NOT reference an unresolved `__ffsdi2`/`__ctzdi2` libcall (`bpftool`/`llvm-objdump` symbol check). **Pass condition: rc=0 + no unresolved libcall.** If it passes, default ship stands.
+
+##### D-mvp-4.2-FFS-FALLBACK — if the Phase-2.5 smoke FAILS, fall back to a bounded `#pragma unroll` bit-scan — because
+If `__builtin_ffsll` emits an unresolvable libcall OR the verifier rejects it, impl activates (via peer-DM, NO further architect intervention required) a local `static __always_inline int bitvec_first_set(__u64 acc)` = `#pragma unroll for (i=0;i<64;i++) if (acc & (1ULL<<i)) return i; return BITVEC_NOMATCH;` — a fixed 64-iteration scan with NO back-edge, mirroring the PROVEN §5.41 `l3_after_vlan` unroll pattern (5.15-safe). This fallback is PURELY a datapath-internal lowering of "lowest set bit" — it changes NO map layout, NO scope item, NO PI disposition, NO OOS fence. **The fallback being needed is itself a (minor) complexity data point** (the `ffsll` shortcut isn't free on BPF), NOT a "very hard" signal — the bounded scan is trivial. Record the smoke outcome (FEAS held vs FALLBACK activated) in the complexity verdict.
+
+##### D-mvp-4.2-CANONICAL — the exact 12-rule set is the SOURCE OF TRUTH; harness + oracle both derive from it — because
+A single canonical table (`canonical_ruleset.inc` for the harness; transcribed into `bitvec_oracle.py` for the tester) prevents data drift between the structure-under-test and the reference. Independence is in the ALGORITHM (closure-based bit-vector vs naive O(N) scan), not the data — the right kind of independence for a correctness oracle. If impl and tester transcriptions of the table diverge, the agreement test fails loudly (good).
+
+##### D-mvp-4.2-OBSERVABLE — the per-packet observable is the matched rule-`id` (via `bv_result[]`), not just PASS/DROP — because
+Asserting WHICH rule matched is strictly stronger than asserting the verdict (the action falls out of the matched id via `bv_action`). A `bv_result` PERCPU_ARRAY indexed by `id` (+NOMATCH sentinel), bumped once per packet, lets the ctest inject one frame and read exactly which slot incremented — directly testing the classification core (prefix-closure, wildcard, range, first-match-tie) rather than just its action projection.
+
+##### D-mvp-4.2-PROSE-VS-INVARIANTS — resolution rule (architect-stated for this amendment) — because
+If a prose statement in §5.42 conflicts with a §6.5 PI-mvp-4.2-* item or the §5.42 verifiable-invariants list, **the §6.5 invariants-block item WINS (prose loses).** If impl deviates from a verifiable-invariants hint to satisfy a PI contract or a load-bearing test assertion, reviewer disposition is `inline-merge` on the hint, NOT `[UNRELATED-EDIT]` on impl. Counts/sizes/LOC in verifiable-invariants prose are operative-semantic, not literal-match. Per architect-spec §6.5 discipline; mirrors §5.37/§5.39/§5.40/§5.41 precedent.
+
+#### §5.42 Complexity verdict (FIRST-CLASS DELIVERABLE — feeds the PO bit-vector-vs-sequential gate)
+
+**Early read: TRACTABLE (borderline) — leaning ADOPT, pending the spike's empirical confirmation (ffsll smoke + prefix-closure ctests green).**
+
+- **Datapath: trivial & verifier-friendly.** Four map lookups + ORs + ANDs + one bounded port scan + `ffsll`. Loop-free at N≤64 (single `u64`). The ONLY datapath unknown is `ffsll` lowering, and it has a clean, proven bounded-scan fallback (D-mvp-4.2-FFS-FALLBACK). This is NOT where the difficulty lives.
+- **Control-plane: the real bug surface — but bounded and teachable at N≤64.** The difficulty is concentrated in the loader/harness, exactly as the contrarian predicted. Enumerated **fiddly invariants (the "is it very hard" count):**
+  - **FI-1 (sharpest): prefix-closure cover-direction.** Each LPM entry stores OR of all COVERING (less-or-equally-specific) rules. Getting the direction backwards silently mis-matches overlapping prefixes. O(N²) per LPM axis. **This is the make-or-break correctness item** — heavily tested by the overlap + first-match-tie vectors.
+  - **FI-2: wildcard ↔ match-map mutual exclusion per axis.** A rule is in EXACTLY one of {axis match map, `bv_wildcard[axis]`}. Double-counting or omission breaks the AND.
+  - **FI-3: `id` = bit = priority alignment.** The bit position must equal the operator `id` and the `ffsll`-derived first-match order.
+  - **FI-4: range inclusivity + ICMP-has-no-port.** `lo ≤ p ≤ hi`; an ICMP packet contributes to the port axis via wildcard only.
+  - **FI-5: `ffsll`-1 off-by-one + `acc==0` NOMATCH sentinel.**
+  - **FI-6: LPM key network-byte-order + prefixlen-first.**
+  - **FI-7 (S3-only, EXCLUDED here): per-axis ×2 wildcard/match swap with `active_idx`** — deferred by Q1; a known low-risk transform, but it MULTIPLIES the above bookkeeping by the swap dimension in production.
+- **Loader-side LOC (the measured cost):** prefix-closure (~30) + wildcard derivation (~15) + range table (~10) + map writes mirroring `populate_inner_slot` (~40) + load/attach/pin boilerplate (~80) ≈ **~175 LOC** for the SPIKE (single-slot). S3 adds the FI-7 swap layer.
+- **Verdict statement:** for the ≤64-rule, single-`u64` vehicle stage, bit-vector is **manageable and teachable — NOT "very hard."** The prefix-closure (FI-1) is the one genuinely sharp edge and MUST be the most heavily tested item (the overlap + first-match-tie vectors are designed for it). The range awkwardness (D-mvp-4.2-RANGE) and the FI-7 swap-multiplication are honest cost caveats, not blockers. **If the spike's prefix-closure ctests go green and the `ffsll` smoke passes (or the trivial fallback activates), the recommendation is ADOPT bit-vector for S3.** The "very hard" escape (→ sequential) is reserved for: prefix-closure proving bug-prone in practice (multiple closure-direction reworks), OR the verifier rejecting the composed datapath even with the bounded-scan fallback. **Impl MUST peer-DM the architect if FI-1 closure turns into a repeated-rework spiral — that escalation IS the "very hard" evidence the PO gate needs.**
+
+#### §5.42 TestStrategy entries
+
+Two NEW ctests (§6.45, §6.46), both `RESOURCE_LOCK xdp_fixture` + `SKIP_RETURN_CODE 77` + `setup_veth`/`cleanup_veth` + aggressive `trap … EXIT` cleanup (incl. unpinning the prototype bpffs root). Tester writes against THIS spec, not impl's code.
+
+##### §6.45 T_BITVEC_ORACLE_AGREEMENT — prototype verdict == independent oracle (THE correctness test)
+- **Setup:** `require_passwordless_sudo`; `setup_veth`; best-effort `ethtool -K ${IFACE} rxvlan off txvlan off || true` (guard #22, in case any vector uses `--vlan`); `bitvec_harness populate ${IFACE_A}`; assert the prototype's `bv_result` pin exists.
+- **Trigger + assertion (table-driven):** for each test vector `(dst_ip, src_ip, proto, dport[, vlan])`: reset/snapshot `bv_result`; `inject_l4.py ${IFACE_B} …`; `bitvec_harness dump`; parse which `id` slot bumped by exactly 1; assert it `== bitvec_oracle.py` prediction for the same tuple. Mechanism: integer compare of harness-dumped matched-id vs oracle-predicted id.
+- **Mandatory vectors (the scenario battery — tester MAY add more; oracle computes all expecteds):**
+
+  | # | dst-ip | src-ip | proto | dport | expected id | scenario |
+  |---|---|---|---|---|---|---|
+  | V1 | 10.1.2.130 | 8.8.8.8 | tcp | 1500 | **0** (DROP) | overlap + first-match-tie (r8 more-specific PASS LOSES to r0) |
+  | V2 | 10.9.9.9 | 8.8.8.8 | tcp | 1234 | **2** (PASS) | overlap, less-specific-only (/8) |
+  | V3 | 203.0.113.5 | 8.8.8.8 | tcp | 8079 | **NOMATCH** | range-edge low miss (8080−1) |
+  | V4 | 203.0.113.5 | 8.8.8.8 | tcp | 8080 | **6** (PASS) | range-edge low hit |
+  | V5 | 203.0.113.5 | 8.8.8.8 | tcp | 8090 | **6** (PASS) | range-edge high hit |
+  | V6 | 203.0.113.5 | 8.8.8.8 | tcp | 8091 | **NOMATCH** | range-edge high miss (8090+1) |
+  | V7 | 8.8.8.8 | 8.8.8.8 | icmp | 0 | **7** (PASS) | wildcard dst+src+port, exact proto (ICMP, no L4 port) |
+  | V8 | 198.51.100.10 | 198.51.100.20 | tcp | 22 | **9** (PASS) | full AND, all 4 axes constrained |
+  | V9 | 8.8.8.8 | 8.8.8.8 | tcp | 7 | **NOMATCH** | **mandatory negation control** (matches nothing) |
+  | V10a | 8.8.8.8 | 10.5.1.1 | tcp | 443 | **5** (DROP) | src-LPM decides (src ∈ 10.5/16) |
+  | V10b | 8.8.8.8 | 8.8.8.8 | tcp | 443 | **NOMATCH** | src-LPM flips V10a to no-match (src ∉ 10.5/16) |
+  | V11 | 192.168.1.50 | 172.16.5.5 | udp | 53 | **3** (DROP) | overlap (/16⊃/24) + first-match (r3 < r4) |
+
+  (Architect hand-verified each expected id against the AND-intersection of the derived structures; the oracle reproduces them independently.)
+- **TIMEOUT:** generous (multiple inject+dump cycles); `SKIP_RETURN_CODE 77` for absent-tool/rate-floor.
+
+##### §6.46 T_BITVEC_VERIFIER_LOAD — the prototype verifies on the 5.15 floor (feasibility gate)
+- **Trigger:** `bitvec_harness populate ${IFACE_A}` (or `bpftool prog load tests/bitvec/bitvec_proto.bpf.o …`) — exercises the full `ffsll`/AND/bounded-scan datapath through the verifier.
+- **Assertion:** rc=0 (verifier accepted). This is the D-mvp-4.2-FFS-FEAS empirical gate: if it FAILS on `__builtin_ffsll`, impl activates D-mvp-4.2-FFS-FALLBACK and this test passes with the bounded-scan lowering. Either way the SHIPPED prototype must make this green. Reviewer special-attention item (a).
+- **TIMEOUT/SKIP:** standard load test shape.
+
+##### T-SUITE — full ctest baseline 70 → 72
+All 70 pre-§5.42 ctests stay GREEN (or legitimately SKIP) with ZERO body edits; +2 NEW bitvec tests. `cmake -B build -S .` reconfigure (CMakeLists changed) then `ctest --output-on-failure -j4` → 72/72 (modulo SKIPs). No production/fixture/lib/VERSION change.
+
+##### (impl Phase 2.5 ffsll feasibility smoke — D-mvp-4.2-FFS-FEAS)
+After build, run the `bpftool prog load` + symbol check from D-mvp-4.2-FFS-FEAS. Pass = rc=0 + no unresolved `__ffsdi2`/`__ctzdi2`. On fail → activate D-mvp-4.2-FFS-FALLBACK (peer-DM architect with the smoke output, then proceed — no design change needed). Record the outcome for the complexity verdict.
+
+#### §6.5 Preserved invariants (§5.42 MVP-4.2 brownfield)
+
+Reviewer's framework point 5 walks this list. Items here are **MUST contracts**; reviewer reports `[INVARIANT-VIOLATED]` per failed check. (`a638433` = pre-§5.42 baseline; reviewer substitutes the actual merge-base.)
+
+| PI | Property | Check mechanism |
+|---|---|---|
+| **PI-mvp-4.2-PROD-DATAPATH (NEW)** | Production `src/bpf/mac_filter.bpf.c` is byte-untouched; the spike is entirely additive under `tests/bitvec/`. | `git diff a638433 -- src/bpf/mac_filter.bpf.c` empty |
+| **PI-mvp-4.2-PROD-70-GREEN (NEW)** | All 70 pre-§5.42 ctests stay GREEN (or legitimately SKIP) with ZERO body edits; baseline 70 → 72 (+2 NEW bitvec tests). | `git diff a638433 -- tests/lib tests/fixtures $(existing test bodies)` empty; `ctest -j4` 72/72 (or pass + legit SKIPs) |
+| **PI-mvp-4.2-CORRECTNESS (NEW)** | The prototype's matched rule-`id` equals the independent oracle for EVERY vector incl. overlap/range-edge/wildcard/first-match-tie/negation. | `T_BITVEC_ORACLE_AGREEMENT` GREEN across the full V1–V11 battery |
+| **PI-mvp-4.2-VERIFIER (NEW)** | The prototype `ffsll`/AND/bounded-scan datapath verifies on the 5.15 floor (via `__builtin_ffsll` OR the bounded-scan fallback). | `T_BITVEC_VERIFIER_LOAD` GREEN; impl-Phase-2.5 `bpftool prog load` rc=0 |
+| **PI-mvp-4.2-CLOSURE (NEW)** | Overlapping dst-IP prefixes classify correctly (prefix-closure: each LPM entry = OR of covering rules). | `T_BITVEC_ORACLE_AGREEMENT` V1/V2/V11 GREEN (the overlap vectors) |
+| **PI-mvp-4.2-ISOLATION (NEW)** | Prototype maps are NOT in `kManagedMaps[]`; prototype pins under a SEPARATE bpffs root; production bpffs layout untouched. | `git diff a638433 -- src/lib/loader.cpp` empty (no `kManagedMaps[]` row added); harness pin path = `/sys/fs/bpf/xdpmf-bitvec-proto*` |
+| **PI-7-mvp-4.2-loader-hpp** | `src/lib/loader.hpp` byte-identical (ZERO-diff streak continues). | `git diff a638433 -- src/lib/loader.hpp` empty |
+| **PI-7-mvp-4.2-config-hpp** | `src/lib/config.hpp` byte-identical (no v2 schema/config change). | `git diff a638433 -- src/lib/config.hpp` empty |
+| **PI-mvp-4.2-MAC-FILTER-H** | `src/common/mac_filter.h` byte-identical (prototype types live in `bitvec_proto.h`; read-only include is not an edit). | `git diff a638433 -- src/common/mac_filter.h` empty |
+| **PI-mvp-4.2-VERSION** | `CMakeLists.txt` VERSION unchanged (HG-mvp-4.2-5); no operator surface. | `git diff a638433 -- CMakeLists.txt` empty |
+| **PI-mvp-4.2-NO-PROD-RIPPLE** | No production `src/lib`, `src/cli`, `src/exporter`, `src/common` change; injectors/fixtures/lib untouched. | `git diff a638433 -- src/lib src/cli src/exporter src/common tests/lib tests/fixtures tests/inject/inject_ipv4.py` empty |
+
+#### §5.42 verifiable invariants for reviewer (MAY-default per architect-spec §6.5 discipline)
+
+Guidance for reviewer, NOT contracts for impl. **Resolution rule (per D-mvp-4.2-PROSE-VS-INVARIANTS): if any item below conflicts with a §6.5 PI-mvp-4.2-* item, the §6.5 item wins; if impl deviates from an item to satisfy a PI or a load-bearing test assertion, reviewer disposition is `inline-merge`, NOT `[UNRELATED-EDIT]`.**
+
+1. (MAY) `git diff a638433 --stat` shows changes ONLY under `tests/bitvec/`, `tests/inject/inject_l4.py`, `tests/CMakeLists.txt` (+ optional `tests/bitvec/CMakeLists.txt`), `mint/design.md`, and optional `CHANGELOG.md`. NO `src/**` change.
+2. (MAY) `grep -rnE 'ffsll|first_set' tests/bitvec/bitvec_proto.bpf.c` shows the first-match lowering (either `__builtin_ffsll` or the bounded-scan fallback); NO `bpf_loop`; the port scan + any bit-scan are `#pragma unroll` with no back-edge.
+3. (MAY) `grep -nE 'kManagedMaps' src/lib/loader.cpp` count is UNCHANGED from baseline (prototype maps NOT added — guard #10).
+4. (MAY) The harness pins under `/sys/fs/bpf/xdpmf-bitvec-proto` (NOT `/sys/fs/bpf/xdpmacfilter`) — `grep -n 'xdpmf-bitvec-proto' tests/bitvec/bitvec_harness.cpp` ≥1 hit; no production pin path touched.
+5. (MAY) `tests/CMakeLists.txt` adds `T_BITVEC_ORACLE_AGREEMENT` + `T_BITVEC_VERIFIER_LOAD` with `RESOURCE_LOCK xdp_fixture` (guard #12) and `add_bpf_object(bitvec_proto …)`.
+6. (MAY) The prefix-closure code stores, per LPM entry, the OR of COVERING (less-or-equally-specific) rules — reviewer special-attention item (b); spot-check `10.1.2.128/25 → {0,1,2,8}` against the §5.42 derived structures.
+7. (MAY) The oracle (`bitvec_oracle.py`) is a naive O(N) scan with NO bitmask/closure logic (algorithmic independence from the datapath).
+8. (MAY) Net ctest 70 → 72; production 70 stay green with zero body edits. Operative-semantic per Phase 4.4.
+9. (MAY) The §5.42 complexity verdict is present and gives a tractable/borderline/very-hard read + the FI-1..FI-7 fiddly-invariant enumeration + loader LOC measure (reviewer special-attention item (e) — the "is it very hard" evidence is a first-class deliverable).
+
+#### §7 OOS additions (§5.42 — new fences)
+
+- **Sequential lowering** — the documented fallback; built ONLY if the spike's verdict + PO gate reject bit-vector. NOT built this slice. NEW FENCE.
+- **v2 config schema/parser (`dst_ip`/`protocol`/`dst_port` keys), Rule IR emission, `schema_version:2` hard-cutover** — S3. `config.cpp`/`config.hpp` stay byte-identical. NEW FENCE.
+- **Exporter/metrics/labels for the new axes; production atomic-swap apply wiring; per-axis wildcard ×2 swap with `active_idx`** — S3 (the FI-7 swap layer Q1 deferred). NEW FENCE.
+- **Editing production `mac_filter.bpf.c` / loader / config / `kManagedMaps[]`** — isolation invariant (PI-mvp-4.2-ISOLATION + PI-mvp-4.2-PROD-DATAPATH). NEW FENCE.
+- **IPv6 axis, VLAN-as-match-field, MAC axis in the prototype, feed-objects, N>64 multi-word bitmask** — later slices. The prototype has 4 axes (dst/src-IP, proto, dst-port) — the minimum to span LPM+exact+range+wildcard. NEW FENCE.
+- **VERSION bump** — D-mvp-4.2 internal spike. NEW FENCE.
+- **Most-specific-wins ordering (S.3)** — the spike uses first-match-by-`id` (S.1); the first-match-tie vector V1 PROVES more-specific does NOT win. S.3 is a future loader sort-key change. NEW FENCE.
+
+Carry-forward from §5.41 §7 OOS items NOT listed above — UNCHANGED.
+
+#### §5.42 Anti-misdiagnosis institutional learning (per architect-spec §6.6)
+
+**Guard catalog grows 22 → 23.** NEW guard #23 (forward-defense for classification-structure spikes):
+
+> **Guard #23 (bit-vector prefix-closure correctness / overlap-vector mandate)** — when a slice implements an LPM-based bit-vector (or any longest-prefix-match structure where one trie entry must carry MULTIPLE rules' bits), the test suite MUST include at least one **overlapping-prefix vector where a less-specific covering rule has a LOWER `id` (higher priority) than the more-specific entry** — because the single most common bit-vector bug is prefix-closure cover-direction (storing only the most-specific rule's bit, dropping covering rules), and that bug is INVISIBLE to any test where the longest-matching prefix happens to be the intended winner. Here: vector V1 (`10.1.2.130 TCP:1500` → r0 DROP, where the more-specific r8/25 PASS is present but loses) is the concrete mechanism — a closure-direction bug would return r8 (PASS) and FAIL V1. Pair with an independent O(N)-scan oracle (no closure machinery) so disagreement localizes the bug. Cite §5.42 (MVP-4.2 bit-vector spike) as the audit-trail source.
+
+Guards applied this slice:
+- **Guard #5 (Phase A code-grep)** — applied; documented in the §5.42 Phase A report. Re-anchored `rule_entry`/`allow_entry`/`action_entry` shapes, the `defaults`+`active_idx` swap precedent, `populate_inner_slot`, the confirmed-absent `ffsll`, and the apply-only population path by pattern.
+- **Guard #9 (helper duplication-over-extraction)** — applied: the prototype re-implements VLAN-skip / first-set-bit locally (single-consumer); it does NOT refactor production code to "share" with the prototype.
+- **Guard #10 (catalog arithmetic)** — applied: prototype maps are kept OUT of `kManagedMaps[]` (PI-mvp-4.2-ISOLATION), preserving the production table's exact count.
+- **Guard #12 (RESOURCE_LOCK)** — applied: both NEW ctests take `RESOURCE_LOCK xdp_fixture` + cleanup trap (they touch the veth fixture + a bpffs pin).
+- **Guard #6 (bpffs ≠ tmpfs)** — applied: prototype pins live on bpffs under a separate root; the harness reuses the established fixture teardown.
+- **Guard #22 (L2-mutation test vacuity)** — applied IF any vector uses `--vlan` (offload-disable in setup); the spike's primary axes are L3/L4 so most vectors are untagged.
+- **Guard #23 (NEW)** — the prefix-closure / overlap-vector mandate above; V1 (more-specific-loses) is its concrete mechanism this slice.
+- **Bash-less Phase-A fallback discipline (architect-spec)** — applied: architect pane lacks `bpftool`/`clang` exec, so the `ffsll` feasibility check is pre-negotiated as the D-mvp-4.2-FFS-FEAS/FALLBACK pair and the empirical smoke transferred to impl Phase 2.5 with an unambiguous pass/fail + peer-DM trigger.
+- **Guards #7/#8/#11/#13/#14-21** — N/A (no production map-shape/BTF mutation, no kEventNames catalog, no fixture lockstep, no VERSION bump, no bilateral/host-vs-netns/IO-model concern).
+
 Evidence: `mint/task-brief.md` MVP-4.1 brief (HG-mvp-4.1-1..4 + Q1/Q2 + Phase A grep footer + anti-misdiagnosis guards #5/#6/#9/#12); `mint/architecture-rule-model.md` §6.4 (Wave B; this fix = S1) + "Recommended slice sequence"; `mint/selection-scenarios.md` §3.A (VLAN = APN carrier) + §6.4 (this latent bug); independent Phase A reads of `src/bpf/mac_filter.bpf.c:299-426`, `include/vmlinux.h:57635`, `src/common/mac_filter.h:54-59`, `src/lib/config.cpp:152-161`, `tests/inject/inject_ipv4.py`, `tests/CMakeLists.txt:420-436`, `tests/T_PASS_CIDR.sh`, `tests/fixtures/config_valid_cidr.yaml`, `tests/lib/common.sh`; §5.27 (CIDR-axis origin: STAT_PASS_CIDR, cidr_rulesets, the L3 gate this slice widens) + PI-7-3.2 loader.hpp ZERO-diff precedent.
