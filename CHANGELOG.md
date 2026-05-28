@@ -5,6 +5,9 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Spike
+- **MVP-4.2 (§5.42)** — isolated bit-vector AND-classification prototype (rule-model S2): a separate `tests/bitvec/` prototype BPF datapath + test-only populate/dump harness + L4 injector over a hardcoded 12-rule canonical Gi set, exercising per-axis `u64`-bitmask composition (`acc &= matched|wildcard`), LPM prefix-closure, dst-port range encoding, and first-set-bit lowering. Evidence for the bit-vector-vs-sequential decision gate; NO production datapath/schema/operator-surface change, no VERSION bump.
+
 ### Fixed
 - **MVP-4.1 (§5.41)** — datapath: VLAN/QinQ-tagged (802.1Q/802.1AD, depth ≤2) IPv4 frames now reach the src-CIDR match branch (were silently falling to `default_action` on a tagged Gi link). The XDP program walks up to two stacked VLAN tags before the L3 gate; non-IPv4-after-VLAN frames keep their prior verdict and a 3rd tag falls to defaults (depth cap). No new match field, schema, or operator surface; no VERSION bump.
 

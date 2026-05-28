@@ -1006,3 +1006,73 @@ set_tests_properties(T_EXPORTER_BIND_NON_LOOPBACK_WARN PROPERTIES
     TIMEOUT 60
     SKIP_RETURN_CODE 77
 )
+
+# ─────────────────────────────────────────────────────────────────────────
+# MVP-4.2 additions (§5.42 — ISOLATED bit-vector AND-classification SPIKE).
+#
+# This block is ADDITIVE and fully isolated (D-mvp-4.2-ISOLATION): a separate
+# prototype BPF object + skeleton + a test-only populate/dump harness, plus the
+# two §6.45/§6.46 ctests. The prototype maps are NOT in the production
+# kManagedMaps[] and pin under the SEPARATE bpffs root /sys/fs/bpf/
+# xdpmf-bitvec-proto; the production datapath + its 70 ctests are untouched.
+#
+# (a) Prototype BPF object + skeleton (mirrors the mac_filter wiring). The
+#     add_bpf_object/add_bpf_skeleton helpers (cmake/BpfBuild.cmake) are reused
+#     verbatim — the sanitizer-isolation invariant holds (no flag splicing).
+add_bpf_object(bitvec_proto ${CMAKE_SOURCE_DIR}/tests/bitvec/bitvec_proto.bpf.c)
+add_bpf_skeleton(bitvec_proto)
+
+# (b) Test-only harness executable. Links libbpf (skeleton consumer) the same
+#     way xdpmf_internal does; depends on the generated skeleton header.
+add_executable(bitvec_harness ${CMAKE_SOURCE_DIR}/tests/bitvec/bitvec_harness.cpp)
+# Land the harness in the build root (not build/tests/) so its path matches the
+# BITVEC_HARNESS env var below and mirrors the top-level binary layout the
+# other tests assume via ${BUILD_DIR}.
+set_target_properties(bitvec_harness PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+target_include_directories(bitvec_harness PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/bitvec
+)
+# bpftool-generated skel.h uses C-style casts; treat the build dir as SYSTEM
+# include so its diagnostics do not trip the -Werror floor (same convention as
+# the top-level xdpmf_internal target).
+target_include_directories(bitvec_harness SYSTEM PRIVATE
+    ${CMAKE_BINARY_DIR}
+)
+target_link_libraries(bitvec_harness PRIVATE PkgConfig::LIBBPF)
+add_dependencies(bitvec_harness bitvec_proto_skel)
+
+# (c) The two spike ctests. The bitvec env extends the shared TEST_ENV with
+#     explicit paths to the harness binary, the prototype BPF object, and the
+#     L4 injector so the test bodies need not hard-code build-layout knowledge.
+set(TEST_ENV_BITVEC
+    ${TEST_ENV}
+    "BITVEC_HARNESS=${CMAKE_BINARY_DIR}/bitvec_harness"
+    "BITVEC_BPF_OBJ=${CMAKE_BINARY_DIR}/bitvec_proto.bpf.o"
+    "INJECT_L4=${CMAKE_SOURCE_DIR}/tests/inject/inject_l4.py"
+    "BITVEC_ORACLE=${CMAKE_SOURCE_DIR}/tests/bitvec/bitvec_oracle.py"
+)
+
+# T_BITVEC_ORACLE_AGREEMENT (§6.45): table-driven datapath-vs-oracle agreement
+#   across hit/miss/overlap/range-edge/wildcard/first-match-tie + a negation
+#   control. Touches the veth pair → RESOURCE_LOCK xdp_fixture.
+# T_BITVEC_VERIFIER_LOAD (§6.46): the D-mvp-4.2-FFS-FEAS empirical gate —
+#   load the prototype object through the verifier (rc=0). Touches the veth
+#   pair (harness populate attaches) → RESOURCE_LOCK xdp_fixture.
+foreach(T IN ITEMS
+    T_BITVEC_ORACLE_AGREEMENT
+    T_BITVEC_VERIFIER_LOAD
+)
+    add_test(
+        NAME ${T}
+        COMMAND bash ${TEST_DIR}/${T}.sh
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    set_tests_properties(${T} PROPERTIES
+        ENVIRONMENT "${TEST_ENV_BITVEC}"
+        RESOURCE_LOCK xdp_fixture
+        TIMEOUT 90
+        SKIP_RETURN_CODE 77
+    )
+endforeach()

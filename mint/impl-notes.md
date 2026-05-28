@@ -495,3 +495,54 @@ semantic; reviewer disposition = inline-merge, not [UNRELATED-EDIT]).
    (category-correct) with one bullet, rather than folding the entry into the
    existing `### Housekeeping`/`### Security`. Wording is impl-flex per the
    FileList row ("reviewer inline-merge").
+
+---
+
+# MVP-4.2 (§5.42) — bit-vector AND-classification SPIKE
+
+Brownfield, additive prototype under `tests/bitvec/` + `tests/inject/inject_l4.py`.
+Production datapath + 70 ctests byte-untouched (git diff fences clean).
+
+## Phase 2.5 smoke outcomes (the spike's decision-gate evidence)
+
+- **Q3 `ffsll` feasibility — FEAS HELD, default ship path stands (no fallback).**
+  `bpftool prog load build/bitvec_proto.bpf.o … type xdp` → `rc=0` (verifier
+  accepts the composed bitmask/AND/`__builtin_ffsll` datapath). `llvm-nm` on the
+  object → NO `__ffsdi2`/`__ctzdi2` (clang inlined `__builtin_ffsll`).
+  **D-mvp-4.2-FFS-FALLBACK NOT activated** — the `-DBITVEC_FFS_FALLBACK`
+  bounded-scan path is compiled-in but unused (one-flag switch if needed later).
+
+- **FI-1 prefix-closure — CLEAN, ZERO rework iterations (no spiral).**
+  `close_prefixes()` cover-direction correct on first implementation; the live
+  veth battery confirmed every overlap case matches the §5.42 derived-structures
+  table. NOT a "very hard" signal.
+
+- **Live populate→inject→classify battery (veth, SKB mode), all == oracle:**
+  first-match-tie r0-over-r8(/25)=0; /16 closure=1; /8 proto-wc=2; r3<r4 (UDP:53)=3;
+  src-LPM-decides=5; range=6; ICMP port-wc-only=7; port-only-wc=11; clean miss=64;
+  range hi-edge 8090 inclusive=6; 8091 just-past=64; VLAN-tagged walk=1. All ✓.
+
+- **ctest:** `T_BITVEC_ORACLE_AGREEMENT` + `T_BITVEC_VERIFIER_LOAD` PASS (2/2)
+  against the tester's bodies + `bitvec_oracle.py`.
+
+## Operative-semantic / impl-discretion choices
+
+1. CMake wiring inline in `tests/CMakeLists.txt` (NOT a separate subdir — design
+   permitted both); harness `RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}` so it
+   lands in the build root like the top-level binaries.
+2. `TEST_ENV_BITVEC` extends `TEST_ENV` with explicit `BITVEC_HARNESS` /
+   `BITVEC_BPF_OBJ` / `INJECT_L4` / `BITVEC_ORACLE` paths (tester bodies need no
+   build-layout knowledge). Both tests: TIMEOUT 90, RESOURCE_LOCK xdp_fixture,
+   SKIP_RETURN_CODE 77.
+3. `bv_rule` in `canonical_ruleset.inc` = dotted-CIDR strings + int
+   port/proto/action (NULL/-1 = wildcard); harness derives network-order LPM keys
+   via `inet_pton`. 1:1 human-readable with the §5.42 table.
+4. Port-range ARRAY unused slots written `lo=1,hi=0` (lo>hi sentinel) so a
+   zero-init slot can't spuriously match dport 0 on bit 0.
+5. Datapath uses fixed `ip+1` L4 start (IHL=5, no IPv4 options); `inject_l4.py`
+   emits IHL=5 only — documented in both files; keeps the verifier path
+   straight-line.
+
+## Deviations from design
+
+None. Implemented per §5.42 FileList / DataStructures / Interfaces / Decisions.
