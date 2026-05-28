@@ -1,4 +1,4 @@
-# Review — MVP-3.4h exporter `--bind` non-loopback startup WARN (mint triangulation, brownfield 5-point)
+# Review — MVP-3.4i compound exporter scrape-path perf (mint triangulation, brownfield 5-point)
 
 ## Verdict
 `pass`
@@ -8,103 +8,80 @@
 | Framework point | Findings | Tags |
 |---|---|---|
 | 1. Spec ↔ Code | 0 | — |
-| 2. Spec ↔ Tests | 0 | — (negation controls b/c/d present; no CIRCULAR-TEST; no SPEC-UNTESTED) |
-| 3. Code ↔ Tests | 0 | 68/68 green, 2 SKIP-77 baseline matching MVP-3.4g |
-| 4. Out-of-Scope Drift | 0 | — (KC-2 mitigation half + IPv6 + "localhost" + refusal + VERSION + README all UNTOUCHED) |
-| 5. Behaviour preserved (brownfield) | 0 | PI-7-3.4h fences ZERO-diff; PI-3.4h-K scope confirmed; PI-3.4h-CTEST-BASELINE 67→68 with ZERO existing-body EDITs |
-| OOT (does not affect verdict) | 0 | — |
-
-## Special-attention checklist (all green)
-
-- **(a) D-3.4h-7 LOAD-BEARING prose** — `grep -F 'xdpmf-exporter: WARN --bind' src/exporter/http.cpp` → 1 hit at `:314`. No colon after `WARN` per HK-16/guard #19 convention ✓
-- **(b) D-3.4h-2 bitmask exact form** — `(addr.s_addr & ::htonl(0xff000000)) == ::htonl(0x7f000000)` at `src/exporter/http.cpp:272` ✓
-- **(c) D-3.4h-6 alphabetical slot** — `logger.hpp:125-127`: `exporter.shutdown` → `exporter.warn.bind_non_loopback` (NEW) → `exporter.warn.bpffs_root_missing` ✓
-- **(d) D-3.4h-T1-LOCK** — `tests/CMakeLists.txt:998` `RESOURCE_LOCK exporter_port_9417` ONLY; no `xdp_fixture` ✓
-- **(e) Fixture alphabetical insert** — `log_events_v1.txt:22` slotted between `:21 exporter.usage_error` and `:23 exporter.warn.bpffs_root_missing`; total 37 ✓
-- **(f) PI-3.4h-K scope** — `git diff 315a6e7..HEAD -- src/common/logger.hpp` shows EXACTLY 4 hunks (size 36→37 at :90 + 1 entry at :126 + sub-comment 15→16 at :114 + kEventCount comment at :133). No struct/Field/emit-signature changes ✓
-- **(g) PI-7-3.4h fences** — `git diff 315a6e7..HEAD -- src/lib/loader.hpp src/lib/config.hpp src/common/mac_filter.h` empty; full UNCHANGED-BUT-AFFECTED sweep across 12 paths all empty ✓
-- **(h) Test-machinery fixes legitimacy** — Phase A→B helper-shape fixes (poll_host arg + readiness-timeout port cleanup) at T_EXPORTER_BIND_NON_LOOPBACK_WARN.sh:150-192; assertions at :230-373 target spec contract (D-3.4h-7 prose + event token + level=warn + fields.bind_addr), NOT impl internal state. Not [CIRCULAR-TEST]; not [SPEC-DRIFT] ✓
-- **(i) Impl deviation independent grep** — `is_loopback_ipv4` 2 hits (:270 def + :312 call); event-name emit 1 hit at :321; both `[[nodiscard]]` in anon namespace; no header leakage. Matches "Deviations: None" ✓
+| 2. Spec ↔ Tests | 0 | NO-NEGATION-CONTROL N/A (preservation slice; contract = output-preservation, verified by 3 grep oracles + T_NEGATION_CONTROL #7) |
+| 3. Code ↔ Tests | 0 | 68/68 green; no UNEXERCISED-EXPORT |
+| 4. Out-of-Scope Drift | 0 | Med-4 fd-cache untouched; no /metrics semantic change; no VERSION |
+| 5. Behaviour preserved (brownfield) | 0 | PI-3.4i-A/B verified; PI-7-3.4i-cpp 10th |
+| OOT (does not affect verdict) | 1 | inline-merge × 1 |
 
 ## Detailed triangulation
 
-### Point 1 — Spec ↔ Code
+### Point 1 — Spec ↔ Code (D-3.4i-1..4 + Q1/Q2/Q3)
 
-| Design item | Code citation | Status |
-|---|---|---|
-| D-3.4h-1 — placement Q1.B (post-parse, pre-socket) | http.cpp:308-323 between parse-fail return @:306 and `::socket()` @:325 | ✓ |
-| D-3.4h-2 — bitmask numerical loopback | http.cpp:272 exact match | ✓ |
-| D-3.4h-3 — event-name token | http.cpp:321 + logger.hpp:126 + fixture:22 | ✓ |
-| D-3.4h-4 — WARN-only (no refusal) | http.cpp:312-323 `if (!loopback) { emit(); }` then falls through; no `return` in WARN block | ✓ |
-| D-3.4h-5 — NO VERSION bump | `git diff -- CMakeLists.txt` empty | ✓ |
-| D-3.4h-6 — alphabetical slot in `exporter.warn.*` cluster | logger.hpp:125-127 ordering | ✓ |
-| D-3.4h-7 — text-mode prose verbatim | http.cpp:314-316 exact match | ✓ |
-| D-3.4h-T1-LOCK — `exporter_port_9417` only | tests/CMakeLists.txt:998 | ✓ |
-| Caller idiom contracts | Level=Warn @:320; Field `bind_addr` @:318; before `::socket()` @:325 + before `exporter.listening` (PI-3.4h-1) | ✓ |
+- **D-3.4i-1** (buffer hoist + `std::span` + drop zero-init): `stats_reader.cpp:193-195` + `:244-245` hoist `percpu_buf` once above per-iface loop, sized `round_up_8(8)*num_cpus`, pass `std::span{percpu_buf}`. `percpu_sum_u64` (:92-113) overwrites FULL span on `rc==0` (bpf_map_lookup_elem @:100) + returns 0 WITHOUT reading on `rc<0` (:101-103) → no stale-data leak across reuse. Identical in `rule_counters_reader.cpp:98-117` + :150-152 + :223-224. **T_EXPORTER_VALUES_MATCH_STATS #38 GREEN** = runtime correctness oracle ✓
+- **D-3.4i-2** (format_to in-place): `prom_format.cpp:76,132,144` — 3 `std::format_to(std::back_inserter(out),…)` sites; FMT literals byte-identical; HELP/TYPE append-literal lines UNCHANGED ✓
+- **D-3.4i-3** (two-step write + build_headers): `http.cpp:165-177` new `build_headers`; /metrics path :264-267 `write_all(build_headers(...,body.size()))` then `write_all(body)`; Content-Length pre-write @:266. `build_response` :179-193 DRY-delegates to build_headers + .append(body) — header literal minus trailing `{}` body placeholder → wire bytes byte-identical (verified vs db7e00e:http.cpp). 5 small error/healthz paths keep single-write (:201,209,221,278,282). 6 build_response call-sites total (not 7) ✓
+- **D-3.4i-4** (sorted-vector FIRST-WINS dedup, linear scan): `prom_format.cpp:109` vector replaces unordered_map; populate :112-119 skips already-present rule_id via `std::any_of` :113-116 = first-wins (matches `unordered_map::emplace`, NOT overwrite); `std::sort` by `.first` :121-122; first emission loop iterates sorted vector :128; orphan membership :140-142 linear any_of. `rule_meta_by_iface.find` (std::map parameter) NOT touched. **T_EXPORTER_RULE_LABELS #51 GREEN** = line-SET oracle ✓
+- **D-3.4i-PI7-LOGGER**: logger.hpp untouched ✓
+- **Interfaces**: `percpu_sum_u64(int,uint32_t,int,std::span<uint8_t>)` identical both readers; `build_headers(int,sv,sv,size_t)->string` NEW anon-ns; build_response sig retained; emit_metrics/read_*/run/write_all UNCHANGED ✓
 
 ### Point 2 — Spec ↔ Tests
 
-| T-1 sub-case | Test citation | Status |
-|---|---|---|
-| (a) positive `--bind 0.0.0.0` text-mode 3 substrings + guard #19 prefix | T_EXPORTER_BIND_NON_LOOPBACK_WARN.sh:219-248 | ✓ |
-| (b) upper-edge negation `--bind 127.255.255.255` | :259-275 | ✓ negation control |
-| (c) default negation no `--bind` | :280-301 | ✓ negation control |
-| (d) in-range non-default negation `--bind 127.0.0.2` | :306-328 | ✓ negation control (proves /8 coverage not exact-match) |
-| (e) JSON-mode positive (jq probe) | :333-374 | ✓ |
-
-3 negation controls (b/c/d) make suite falsifiable; degenerate impl that always emits WARN would fail all three. NO-NEGATION-CONTROL not triggered. Assertions target externalized contract — NO CIRCULAR-TEST.
+No new ctest per HG-3.4i-3. T-ORACLE-1/2/3 (T_EXPORTER_VALUES_MATCH_STATS / T_EXPORTER_METRICS_FORMAT #37 / T_EXPORTER_RULE_LABELS) all GREEN, assert on /metrics OUTPUT (stated outcome) not code-shape → no SPEC-UNTESTED, no CIRCULAR-TEST. NO-NEGATION-CONTROL N/A (preservation slice); suite carries T_NEGATION_CONTROL #7 + oracle-internal negations (post-sidecar-delete action="unknown"; empty-scrape T_EXPORTER_NO_ATTACHED_IFACE #39) all GREEN ✓
 
 ### Point 3 — Code ↔ Tests
 
-Reviewer's independent rerun: `ctest -j4` → **68/68 PASS, 0 FAIL, 2 SKIP** (T_DROP_MALFORMED #5 + T_ANSIBLE_PLAYBOOK_SYNTAX #35 — same baseline). Log: `/tmp/mint-review-tests-1779909194.log`. T_EXPORTER_BIND_NON_LOOPBACK_WARN (#68) ran in 4.55s on tester's run + green on reviewer's independent run.
-
-T_BPFFS_ROOT_SYMLINK passed cleanly (no host-pollution intervention needed; impl's manual cleanup carried over).
-
-UNEXERCISED-EXPORT: N/A (`is_loopback_ipv4` is anon-namespace internal helper; not exported via http.hpp).
+Reviewer rebuild (clean, zero warnings) + `sudo ctest -j4` → **100% passed, 0 failed out of 68** (66 PASS + 2 legitimate SKIP: T_DROP_MALFORMED + T_ANSIBLE_PLAYBOOK_SYNTAX) — identical to tester's mint/test-run.log. No UNEXERCISED-EXPORT (build_headers is .cpp-local anon-ns, exercised via /metrics oracle path). Log: `/tmp/mint-review-tests-1779953478.log` (551.59s). ✓
 
 ### Point 4 — Out-of-Scope Drift
 
-§7 OOS fences walked: KC-2 auth/TLS untouched · IPv6 `::1` untouched (parse_bind_addr still AF_INET at :265) · "localhost" string detection none · rate-limiting none (single-shot in run() startup) · refusal none (falls through to ::socket()) · `--strict-loopback` flag none (main.cpp UNCHANGED) · VERSION bump none · README/HANDOFF empty diff · richer fields none (only `bind_addr`). ✓
+Med-4 fd-cache NOT touched (bpf_obj_get still per-scrape; grep `static.*fd|fd_cache|cached` → none). No /metrics semantic change (FMT/header literals byte-identical). No VERSION bump (CMakeLists.txt zero-diff). No new ctest. build_response NOT made always-two-step (Q2.A2 fence respected). percpu_sum_u64/list_iface_dirs kept duplicated per-TU. ✓
 
 ### Point 5 — Behaviour preserved (brownfield §6.5)
 
-| PI | Check | Result |
-|---|---|---|
-| PI-3.4h-K NEW (scoped carve-out) | logger.hpp diff CONFINED to 4 enumerated items; no other changes | ✓ |
-| PI-7-3.4h-cpp (9th ZERO-diff on config.hpp) | empty diff | ✓ |
-| PI-7-3.4h-loader-hpp | empty diff | ✓ |
-| PI-7-3.4h-mac-filter-h | empty diff | ✓ |
-| PI-3.4h-1 NEW (1 WARN before listening on non-loopback) | T-1(a)+(e) positive; T-1(c)+(d) negation; all green | ✓ |
-| PI-3.4h-CTEST-BASELINE (67→68 + ZERO existing-body EDITs) | 1 NEW test file; 0 existing test edits | ✓ |
-| PI-32-3.4b PRESERVED | T_SIDECAR_JSON_SHAPE + T_SIDECAR_IFACE_SYMLINK_REFUSAL green | ✓ |
-| PI-3.5-1 PRESERVED | T_LOG_TEXT_BYTE_EQUIVALENT + 5 exporter tests green | ✓ |
-| PI-3.5-4 PRESERVED (catalog lockstep +1) | T_LOG_EVENT_CATALOG_STABILITY green (set-equality fixture↔logger.hpp) | ✓ |
-| PI-3.5-7 PRESERVED (no new deps) | CMakeLists.txt empty diff | ✓ |
-| PI-8 (VERSION stability) | CMakeLists.txt empty diff | ✓ |
-| PI-6 (67→68) | ctest output | ✓ |
-| §5.36 PI-3.4e-* + KC-3 closure PRESERVED | T_RESET_COUNTERS_PATH_TRAVERSAL + T_SIDECAR_IFACE_SYMLINK_REFUSAL green | ✓ |
-| §5.37 PI-3.4f-* + §5.38 PI-3.4g-* PRESERVED | baseline holds | ✓ |
+| PI | Result |
+|---|---|
+| PI-7-3.4i-cpp (10th ZERO-diff) | `git diff db7e00e..HEAD -- src/lib/config.hpp` empty ✓ |
+| PI-7-3.4i-loader-hpp | empty ✓ |
+| PI-7-3.4i-mac-filter-h | empty ✓ |
+| logger.hpp (restart-at-1 post-§5.39) | empty ✓ |
+| PI-3.4i-A byte-STREAM (patches 1/2/3) | oracles #37 + #38 green ✓ |
+| PI-3.4i-B line-SET (patch 4) | oracle #51 green ✓ |
+| PI-31 read-only | no update/delete/pin/attach in src/exporter/; reads bpf_obj_get + bpf_map_lookup_elem only ✓ |
+| PI-32 | T_EXPORTER_NO_ATTACHED_IFACE #39 + T_EXPORTER_EXITS_6 #45 green ✓ |
+| PI-3.5-1 | T_LOG_TEXT_BYTE_EQUIVALENT #55 green ✓ |
+| PI-8/PI-33 (--version 0.10.0) | #37 pins `xdpmf-exporter 0.10.0` ✓ |
+| PI-3.5-7 (no new build dep) | <span>/<algorithm>/<iterator>/<utility> all stdlib ✓ |
 
-No REGRESSION / INVARIANT-VIOLATED / UNRELATED-EDIT.
+No REGRESSION (0 fail). No UNRELATED-EDIT (only 4 FileList .cpp + CHANGELOG + design.md + impl-notes.md in impl commit 1c3ef31; task-brief*.md belong to prep commit 0d609e9). ✓
 
-Anti-misdiagnosis catalog stays at 21.
+UNCHANGED-BUT-AFFECTED sweep: `git diff db7e00e -- src/exporter/*.hpp main.cpp sidecar_reader.* logger.cpp tests/ CMakeLists.txt` → all empty.
+
+Anti-misdiagnosis catalog stays at 21 (+1 forward-defense note: future prom_format container swaps must re-check observable-iteration-order + insert-dedup-semantics).
+
+## 5 impl-flex notes (impl-notes.md) — all MAY-level inline-merge per D-3.4i-PROSE-VS-INVARIANTS, NOT [SPEC-DRIFT]
+
+1. build_response DRY-delegate — Q2.A1 explicit grant; wire byte-identical ✓
+2. `<iterator>`+`<utility>` includes — necessity for design-mandated mechanisms (see OOT-1 below) ✓
+3. std::any_of linear dedup+membership — Q3 linear choice ✓
+4. MAY-invariant #9 off-by-one — architect inline-fixed design.md (write_all count 7→8 corrected to 6→7; +1 delta always correct; baseline=6, post=7) ✓
+5. CHANGELOG ### Performance subsection — impl-flex wording ✓
 
 ## Test execution
 
 ```
 100% tests passed, 0 tests failed out of 68
-Total Test time = ~540 sec wall-clock under -j4
-
+Total Test time (real) = 551.59 sec
 The following tests did not run:
     5 - T_DROP_MALFORMED (Skipped)
    35 - T_ANSIBLE_PLAYBOOK_SYNTAX (Skipped)
 ```
 
-Reviewer log: `/tmp/mint-review-tests-1779909194.log`.
+Reviewer log: `/tmp/mint-review-tests-1779953478.log`. Oracle tests #37 + #38 + #51 all GREEN.
 
 ## Findings
 
-NONE.
+NONE (blocking).
 
 ## Rework assignments
 
@@ -112,8 +89,19 @@ N/A (verdict = pass).
 
 ## Out-of-triangulation findings
 
-NONE. Second consecutive ZERO-OOT round-1 pass in the OOT-tracking trajectory: 5 → 2 → 2 → 2 → 1 → 0 → **0**.
+### OOT-1: verifiable-invariant #6 include-list under-enumerates the necessity includes
+**Location**: `design.md` MAY-invariant #6 vs `prom_format.cpp:10,14` (`#include <iterator>`, `#include <utility>`)
+**Disposition**: `inline-merge`
+**Rationale**: MAY-invariant #6 enumerated only `+<algorithm> / -<unordered_map> / <map> kept`. Impl additionally adds `<iterator>` (required by design-mandated `std::format_to(std::back_inserter(out),…)` D-3.4i-2) + `<utility>` (required by design-mandated `std::vector<std::pair<…>>` D-3.4i-4). Both stdlib, no new build dep (PI-3.5-7 holds). Exactly the D-3.4i-PROSE-VS-INVARIANTS scenario architect pre-authorized — MAY-hint, reviewer disposition = inline-merge, NOT [UNRELATED-EDIT]. No code/rework needed.
 
 ---
 
-**Triangulation summary**: §5.39 closes KC-2 observability half (sec M2) cleanly. PI-3.4h-K scoped carve-out for logger.hpp catalog extension executed precisely per §5.36 35→36 precedent. D-3.4h-7 LOAD-BEARING text-mode prose verbatim at http.cpp:314. PI-7-3.4h-cpp = **9th** consecutive ZERO-diff on config.hpp + loader-hpp + mac-filter-h fence extensions intact. logger.hpp ZERO-diff streak intentionally narrowed for 1 cycle (PI-3.4h-K); re-baselines from §5.39 EDIT-point for future cycles. 2 test-machinery bugs caught + fixed Phase A→B (poll_host arg + readiness-timeout port cleanup) — impl peer-DM diagnosis discipline working as designed (tester did NOT need to read impl src/).
+**Triangulation summary**: clean round-1 pass. design ↔ code ↔ tests all agree. PI-3.4i-A byte-stream-identical (patches 1/2/3) + PI-3.4i-B line-set-identical (patch 4 sorted-vector + FIRST-WINS dedup) both verified by the 3 grep oracles. D-3.4i-1 buffer-reuse correctness (dropped zero-init safe) + D-3.4i-4 first-wins dedup (load-bearing) both verified at code-level + runtime-oracle level. PI-7-3.4i-cpp = **10th** consecutive config.hpp ZERO-diff. Med-4 fd-cache correctly deferred. 1 OOT inline-merge (include-list completeness).
+
+### Post-review sweep — round 1
+
+OOT-1 disposed as `inline-merge`. Edit rides in Phase 6 final commit.
+
+- **OOT-1** → `mint/design.md` MAY-invariant #6 — appended `[§5.40 EDIT]` note enumerating the 2 necessity includes (`<iterator>` for format_to/back_inserter per D-3.4i-2 + `<utility>` for vector<pair> per D-3.4i-4); both stdlib, PI-3.5-7 unaffected. Prose-completeness only; zero code/behavior impact; 68/68 unchanged.
+
+No `defer` or `promote-to-rework`. Verdict stays `pass` round-1.
