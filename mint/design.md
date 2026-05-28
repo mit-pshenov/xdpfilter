@@ -13326,3 +13326,238 @@ No NEW guard from this slice. **Guard catalog stays at 21.** Rationale: this is 
 - **Guards #8/#10/#11/#13/#19** — N/A (no logger emit, no kEventNames catalog, no VERSION bump, no fixture, no logger text-mode prose). **Guards #14-21** — N/A (no map-shape/atomic-swap/bilateral/host-vs-netns/IO-model concerns).
 
 Evidence: `mint/task-brief.md` MVP-3.4i brief (HG-3.4i-1..5 + Q1-Q3 + Phase 2 grep footer); /mint-review performance dimension (`agent-teams-review/runs/mint-review-mint-l2-mac-filter-202605271147/raw/performance-reviewer.md` Major §1 + Medium §1/2/3; `report.md` compound chain lines 131-133); §5.29 exporter origin (stats_reader/http/prom_format module roles); §5.31/§5.34 `xdpfilter_rule_match_total` label emission + `RuleMeta` sidecar shape; §5.32 PI-3.5-1 text-mode byte-equivalence + `/metrics` format contract; §5.35 PI-3.4d-EXPORTER active_idx indirection in `rule_counters_reader.cpp`; §5.39 PI-3.4h-K logger.hpp carve-out (precedent for the PI-7-3.4i-logger-hpp restart-at-1).
+
+---
+
+### §5.41 MVP-4.1: VLAN-tagged-frame L3 parse-path fix (rule-model S1) (brownfield, bugfix-foundation, 2026-05-28)
+
+#### §5.41 Problem statement
+
+The XDP datapath reaches the L3 src-CIDR match branch ONLY when the outer Ethernet EtherType is IPv4 (`eth->h_proto == bpf_htons(ETH_P_IP)`, `src/bpf/mac_filter.bpf.c:367`). On an 802.1Q-tagged frame the outer EtherType is `0x8100` (or `0x88A8` for an S-TAG), so a VLAN-tagged IPv4 packet NEVER reaches the CIDR lookup — it falls through to `defaults[active]`. On a GGSN-Gi link APN context is carried as a VLAN tag (Wave A `mint/selection-scenarios.md` §3.A / §6.4), so real Gi traffic is tagged and the `src_cidr` axis is **silently broken there today**. This slice walks up to two stacked VLAN tags, derives the inner EtherType + the L3 start offset, and applies the EXISTING CIDR branch when the inner EtherType is IPv4. The MAC axis (read from the outer Ethernet header before the L3 gate) is unaffected. Verdict semantics are PRESERVED — a tagged in-range IPv4 frame now hits `STAT_PASS_CIDR` exactly as an untagged one does, and every non-IPv4-after-VLAN frame behaves exactly as a non-IPv4 untagged frame does today.
+
+This is **slice S1 of the rule-model build** (`mint/architecture-rule-model.md` §6.4, "Recommended slice sequence" S1), deliberately scoped to the parse-path fix ONLY. The Rule IR, first-match-by-`id` ordering, and `schema_version:2` hard-cutover are **deferred to S2** (the AND-architecture landing) per the brief's rationale: `config.cpp:153-161` supports `schema_version {1}` only and bumping to 2 is meaningless before v2 AND-features exist; a Rule IR with no consumer is premature; first-match ordering is moot in the single-axis OR model. The parse fix is the one independently-valuable piece and is a prerequisite for every future dst-IP/port/VLAN axis (they all need tagged frames to reach L3). No new match field (incl. `vlan`-as-match-key) is added — this slice makes tagged frames REACH L3; it does NOT make VLAN a match axis.
+
+#### §5.41 Phase A grep verification report (architect-independent — 2026-05-28, per guard #5)
+
+Architect re-ran the brief's Phase 2 greps independently and read each touched codepath in full. Results below; the brief's claims are CONFIRMED, with the exact literals re-anchored by pattern (not trusting line numbers).
+
+1. **L3 gate — CONFIRMED at `mac_filter.bpf.c:367`.** `if (eth->h_proto == bpf_htons(ETH_P_IP)) {` opens the CIDR branch. Inside: IPv4-header bounds check `(void *)(eth + 1) + sizeof(struct iphdr) > data_end` (`:369`, else `STAT_DROP_MALFORMED`); `struct iphdr *ip = (struct iphdr *)(eth + 1);` (`:373`); `cidr_key = { .prefixlen = 32u, .addr = ip->saddr }` (`:380-383`); `STAT_PASS_CIDR` on PASS (`:409`); branch closes `:412`. The post-branch fall-through to `defaults[active]` is `:414-426`.
+2. **MAC key read PRECEDES the L3 gate — CONFIRMED (`:304-306`).** `struct ethhdr *eth = data;` (`:304`); `__builtin_memcpy(key.octets, eth->h_source, sizeof(key.octets));` (`:306`). The MAC HASH lookup + dispatch chain runs `:342-360`, all BEFORE `:367`. The source MAC lives in the OUTER Ethernet header at a fixed offset that a VLAN tag (which is inserted AFTER both MAC addresses, before the EtherType) does not move. **Q2 = NO MAC-axis change** (confirmed below).
+3. **`struct vlan_hdr` — CONFIRMED in `include/vmlinux.h:57635-57638`:** `struct vlan_hdr { __be16 h_vlan_TCI; __be16 h_vlan_encapsulated_proto; };` — 4 bytes; `h_vlan_encapsulated_proto` carries the next EtherType. (`struct vlan_ethhdr` also present at `:57640` but NOT used — the cursor design walks bare `vlan_hdr`s past `eth`.)
+4. **`ETH_P_8021Q` / `ETH_P_8021AD` macros — ABSENT from the BPF TU (and vmlinux.h).** `grep -nE 'ETH_P_8021Q|ETH_P_8021AD|0x8100|0x88[aA]8' src/bpf/mac_filter.bpf.c` → ZERO hits. They must be `#define`d inline next to the existing `#ifndef ETH_P_IP / #define ETH_P_IP 0x0800 / #endif` block (`:46-48`) — same precedent (vmlinux.h is BTF-derived: types only, no CPP macros). See D-mvp-4.1-MACROS.
+5. **STAT enum — no new slot needed (`src/common/mac_filter.h:54-59`):** `STAT_PASS=0, STAT_DROP_DENY=1, STAT_DROP_MALFORMED=2, STAT_PASS_CIDR=3, STAT_MAX=4`. This slice reuses `STAT_PASS_CIDR` / `STAT_DROP_DENY` / `STAT_DROP_MALFORMED` verbatim. `mac_filter.h` stays byte-identical → PI-7 streak continues.
+6. **schema_version — stays `{1}` (`src/lib/config.cpp:153-161`):** default 1, supported set `{1}`, error string `"unsupported schema_version: {} (supported: 1)"`. NOT bumped this slice (S2 work). `config.cpp` / `config.hpp` UNCHANGED.
+7. **Injector raw-frame layout — CONFIRMED (`tests/inject/inject_ipv4.py`):** builds bytes manually (`mac_to_bytes` / `ipv4_to_bytes` / `ip_checksum`); frame = `dst_mac + src_mac + ethertype(0x0800) + iphdr(20B) + payload(26B)` = 60 bytes (`build_ipv4_frame:45-74`); sent via `socket(AF_PACKET, SOCK_RAW, htons(0x0800))` + `bind((iface,0))` + `send(frame)` — NO scapy, NO kernel IP-stack rewrite. The positional CLI is `<iface> <src_mac> <dst_mac> <src_ip> [dst_ip]` (`main:77-98`). VLAN tag(s) insert between `src_mac` and the `0x0800` EtherType.
+8. **RESOURCE_LOCK / CIDR ctest registration — CONFIRMED (`tests/CMakeLists.txt:420-436`):** a `foreach(T IN ITEMS T_PASS_CIDR T_DROP_CIDR_NOT_IN_RANGE T_PASS_MAC_OR_CIDR)` block calls `add_test(NAME ${T} COMMAND bash ${TEST_DIR}/${T}.sh ...)` then `set_tests_properties(${T} PROPERTIES ENVIRONMENT "${TEST_ENV}" RESOURCE_LOCK xdp_fixture TIMEOUT 60 SKIP_RETURN_CODE 77)`. The two NEW VLAN tests slot into this EXISTING foreach ITEMS list (one-line-each extension; they inherit the lock + 60s timeout + SKIP-77) — guard #12 satisfied automatically.
+9. **CIDR fixture default action — CONFIRMED (`tests/fixtures/config_valid_cidr.yaml`):** `default_action: drop` + one rule `{id:0, action:pass, match:{src_cidr:"10.0.0.0/8"}}`. So a tagged in-range frame is `PASS_CIDR` post-fix but `DROP_DENY` (defaults) pre-fix → the regression differential is crisp (D-mvp-4.1-TEST-DIFF).
+10. **lib helpers — CONFIRMED reusable (`tests/lib/common.sh`):** `read_stats_with_cidr` (`:190`), `wait_for_stats_sum_with_cidr` (`:225`), `setup_veth` (`:106`), `cleanup_veth` (`:169`), `MAC_DST="ff:ff:ff:ff:ff:ff"` (`:32`), `NSEXEC="sudo -n nsenter --net=/var/run/netns/${NETNS}"` (`:51`). The two NEW tests are clones of `T_PASS_CIDR.sh` with the `--vlan` flag added to the injection step. The non-allowlisted `SRC_MAC=99:99:99:99:99:99` discipline (proves PASS is CIDR-driven not MAC) carries over.
+
+**Baseline commit for all `git diff` invariant checks below:** the pre-§5.41 commit = HEAD at slice start (`84be9d3` — "mint-dev: prep — task-brief for mvp-4.1"). Reviewer substitutes the actual merge-base if different.
+
+#### §5.41 Human-gate decisions (defaults from brief — confirmed by architect Phase A)
+
+- **HG-mvp-4.1-1 — VLAN parse depth = 802.1Q + QinQ stacked, depth ≤ 2, then inner EtherType → CONFIRMED.** Bounded `#pragma unroll` walk over ≤2 tags, accepting BOTH `0x8100` and `0x88A8` as VLAN TPIDs at each level; then the existing `ETH_P_IP` check on the inner EtherType. No loop back-edge (verifier-cheap; kernel floor 5.15, no `bpf_loop`). Architect does NOT reduce to single-tag: QinQ presence on Gi is not confirmed-absent, and depth-2 is verifier-trivial.
+- **HG-mvp-4.1-2 — non-IPv4-after-VLAN (ARP / IPv6 / other / truncated-tag) → preserve current semantic → CONFIRMED.** After the tag-walk, a non-IPv4 inner EtherType skips the CIDR branch and falls through to the MAC-axis result + `defaults[active]`, exactly as a non-IPv4 untagged frame does today. A frame whose VLAN tag is truncated (cannot complete a 4-byte `vlan_hdr` within bounds) ALSO falls through to `defaults` (its current proto stays the non-IPv4 TPID) — it is NOT reclassified as `STAT_DROP_MALFORMED`. The ONLY `STAT_DROP_MALFORMED` path remains the IPv4-header bounds check INSIDE the IPv4 branch (now at the post-VLAN L3 offset), preserving the untagged-IPv4-truncation semantic. See D-mvp-4.1-MALFORMED.
+- **HG-mvp-4.1-3 — "no residual tunneling on Gi" → documented invariant; inner-IP-under-encap is OUT OF SCOPE → CONFIRMED.** The parser extracts the FIRST IP header after the L2/VLAN headers, on the assumption that Gi frames are plain (optionally VLAN/QinQ-tagged, depth ≤2) IP with GTP-U terminated upstream at the GGSN (Wave A §1, HA#5). If a future deployment shows residual tunneling (a "dst-IP" that is an inner IP under encap), that is a SEPARATE slice. This assumption is recorded as a falsifiable invariant **PI-mvp-4.1-NO-ENCAP** (§6.5) and fenced in §7 OOS. (PO flagged this needs NOC detail; S1 proceeds on the safe assumption and does not block on it.)
+- **HG-mvp-4.1-4 — VERSION bump = none → CONFIRMED.** Internal datapath bugfix; no operator-facing CLI/schema/metric surface change. Consistent with prior internal-hardening slices. `CMakeLists.txt` VERSION untouched (PI-mvp-4.1-VERSION). Architect judged the change NOT operator-visible enough to warrant a bump (it fixes a latent bug to MATCH the documented `src_cidr` contract; it does not add a surface).
+
+#### §5.41 Q-decisions (mechanism)
+
+##### Q1: VLAN tag-walk placement → **Q1.A2 (single-consumer `static __always_inline` helper)**
+
+A small `static __always_inline` helper `l3_after_vlan(...)` (named per Interfaces §5.41 below), kept **single-consumer** (guard #9 duplication-over-extraction — exactly ONE call-site, immediately before the widened L3 gate; do NOT build a shared/general parser for hypothetical future axes). Chosen over A1 (fully inline) because the bounded-unroll cursor walk is ~10 lines that read cleaner factored out, and `__always_inline` makes it instruction-path-identical to inlining (the verifier sees the unrolled body at the call-site — zero function-call overhead, zero extra instructions vs A1). The no-VLAN fast path through the helper is byte-equivalent to today's `(struct iphdr *)(eth + 1)` (the cursor starts at `eth + 1` and the `is_vlan` test fails immediately → returns `eth->h_proto` + `l3hdr = eth + 1`).
+
+##### Q2: does the MAC-axis branch need any change? → **NO (confirmed)**
+
+The MAC key is read from the outer Ethernet header (`:304-306`) BEFORE the L3 gate; a VLAN tag is inserted after both MAC addresses, so the source-MAC offset is unchanged on tagged frames and MAC matching already works. S1 touches ONLY the L3-reach path (`:362-412`). The MAC HASH branch (`:342-360`) and the active-snapshot/map-of-maps preamble (`:308-341`) are byte-UNCHANGED. Recorded as intra-file invariant **PI-mvp-4.1-MAC** (§6.5). Architect does NOT gratuitously modify the MAC branch.
+
+#### §5.41 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+##### NEW (this slice)
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `tests/T_PASS_CIDR_VLAN.sh` | §6.43 ctest — single 802.1Q-tagged IPv4: in-range src → `STAT_PASS_CIDR` (THE regression closed); out-of-range src → `STAT_DROP_DENY`. Clone of `T_PASS_CIDR.sh` + `--vlan` on inject + VLAN-offload-disable setup. | bash | ~150 |
+| `tests/T_PASS_CIDR_QINQ.sh` | §6.44 ctest — depth-2 QinQ-tagged IPv4 in-range → `STAT_PASS_CIDR`; PLUS the load-bearing depth-3-overflow anti-vacuity sub-case (3 tags, in-range inner IPv4 → `STAT_DROP_DENY`, because the ≤2 walk stops at the 3rd tag's TPID — proves XDP saw the raw tags AND the depth cap holds). | bash | ~170 |
+
+##### EDITED (this slice)
+
+| Path | Change shape | LOC est |
+|---|---|---|
+| `src/bpf/mac_filter.bpf.c` | (a) ADD inline macros `#define ETH_P_8021Q 0x8100`, `#define ETH_P_8021AD 0x88A8`, `#define XDPMF_VLAN_MAX_DEPTH 2` near the `#ifndef ETH_P_IP` block (`:46-48`) — D-mvp-4.1-MACROS. (b) ADD `static __always_inline` helper `l3_after_vlan(...)` (Q1.A2; near the other anon-scope helpers, above `mac_filter_prog`). (c) REWRITE the L3 gate region (`:362-373`): replace `if (eth->h_proto == bpf_htons(ETH_P_IP)) { ... struct iphdr *ip = (struct iphdr *)(eth + 1); }` with a call to `l3_after_vlan` to obtain `inner_proto` + `l3hdr`, then `if (inner_proto == bpf_htons(ETH_P_IP))`, bounds-check `(void*)l3hdr + sizeof(struct iphdr) > data_end` (`STAT_DROP_MALFORMED`), and `struct iphdr *ip = (struct iphdr *)l3hdr;`. The CIDR lookup + dispatch chain + `STAT_PASS_CIDR` (`:375-411`) are UNCHANGED in body (only `ip` now comes from `l3hdr` not `eth+1`). **MAC branch `:342-360` + preamble `:308-341` + defaults `:414-426` byte-UNCHANGED.** | ~+30 / −4 |
+| `tests/inject/inject_ipv4.py` | Add an optional, repeatable `--vlan <vid>` flag (argparse; `action="append"`). Each `--vlan` inserts a 4-byte tag `struct.pack("!HH", 0x8100, vid)` (TPID 0x8100, TCI = vid, PCP/DEI = 0) between `src_mac` and the `0x0800` EtherType; first `--vlan` = OUTERMOST. Switch the positional parse to argparse (positional `iface src_mac dst_mac src_ip`, optional positional `dst_ip` `nargs="?"`, default `192.0.2.1`). **Default (no `--vlan`) frame bytes are byte-IDENTICAL to today** (PI-mvp-4.1-INJECT). Socket setup unchanged. | ~+20 |
+| `tests/CMakeLists.txt` | Add `T_PASS_CIDR_VLAN` and `T_PASS_CIDR_QINQ` to the EXISTING CIDR `foreach(T IN ITEMS ...)` ITEMS list (`:420-423`) — they inherit `RESOURCE_LOCK xdp_fixture` + `TIMEOUT 60` + `SKIP_RETURN_CODE 77` (guard #12). Net ctest 68 → 70. **If EDITED, run `cmake -B build -S .` reconfigure before `ctest` (else new tests don't enumerate).** | ~+2 |
+| `mint/design.md` | APPEND §5.41 (this block). NO rewrites to prior §-sections. | ~+340 |
+| `CHANGELOG.md` | OPTIONAL ~1 line under `[Unreleased]` (Fixed): e.g. `- datapath: VLAN/QinQ-tagged (802.1Q/802.1AD, depth ≤2) IPv4 frames now reach the src-CIDR match branch (were silently falling to default_action on a tagged Gi link).` Operative-semantic — impl-flex on wording; reviewer inline-merge. | +1 |
+
+##### UNCHANGED-BUT-AFFECTED (zero git-diff fence; behaviour must hold)
+
+| Path | Why it ripples but stays identical | Check |
+|---|---|---|
+| `src/common/mac_filter.h` | **PI-mvp-4.1-MAC-FILTER-H** — STAT enum reused (no new slot); `xdpmf_mac` / `xdpmf_cidr_v4` / `allow_entry` / `rule_entry` / `action_entry` UNCHANGED; no new constant. | `git diff 84be9d3 -- src/common/mac_filter.h` empty |
+| `src/lib/config.hpp` | **PI-7-mvp-4.1-config-hpp** ZERO-diff streak continues — no schema/config-field change (S2 work). | `git diff 84be9d3 -- src/lib/config.hpp` empty |
+| `src/lib/config.cpp` | schema_version stays `{1}`; no new match type; no parser change. | `git diff 84be9d3 -- src/lib/config.cpp` empty |
+| `src/lib/loader.hpp` | **PI-7-mvp-4.1-loader-hpp** ZERO-diff streak continues — loader/map/pin layout untouched (datapath-only fix). | `git diff 84be9d3 -- src/lib/loader.hpp` empty |
+| `src/lib/loader.cpp`, `src/lib/apply_internal.*`, `src/lib/cidr.*`, `src/lib/yaml_subset.*`, `src/lib/sidecar.cpp`, `src/lib/raii.hpp` | No loader/userspace change — the fix is entirely in the BPF datapath. Map shapes, pin names, atomic-swap flow all identical. | `git diff 84be9d3 -- src/lib/` shows only `mac_filter.bpf.c` is NOT here (it lives in `src/bpf/`) |
+| `src/cli/**`, `src/exporter/**`, `src/common/logger.{hpp,cpp}`, `src/common/escape_util.{hpp,cpp}` | Orthogonal — no CLI flag, no metric, no log event added. | `git diff 84be9d3 -- src/cli/ src/exporter/ src/common/logger.* src/common/escape_util.*` empty |
+| All 68 pre-§5.41 ctest BODIES + `tests/fixtures/**` + `tests/lib/common.sh` | **PI-mvp-4.1-CTEST-BASELINE** — existing tests stay GREEN with ZERO body edits; only 2 NEW files + 2 ITEMS lines in CMakeLists. No fixture/lib/common change (the default `inject_ipv4.py` invocation is byte-identical). | `git diff 84be9d3 -- tests/lib tests/fixtures $(existing test bodies)` empty; `ctest -j4` 68/68 → 70/70 |
+| `CMakeLists.txt` (top-level) | **PI-mvp-4.1-VERSION** — no VERSION bump (HG-mvp-4.1-4); no new source/target. | `git diff 84be9d3 -- CMakeLists.txt` empty |
+| `include/vmlinux.h` | `struct vlan_hdr` is CONSUMED (read-only) — vmlinux.h is generated, never hand-edited. | `git diff 84be9d3 -- include/vmlinux.h` empty |
+| systemd/ansible, `docs/*.md`, `README.md`, `HANDOFF.md`, `docs/BACKLOG.md`, `docs/REQUIREMENTS.md` | No env/caps/path/schema/semantic change; doc work is a separate slice. Only optional `CHANGELOG.md` +1 line. | `git diff 84be9d3 -- systemd/ ansible/ docs/ README.md HANDOFF.md` empty |
+
+Anything not in NEW/EDITED/UNCHANGED-BUT-AFFECTED is off-limits for impl. If impl needs to edit a file not listed → peer-DM architect (design gap).
+
+#### §5.41 DataStructures
+
+No cross-module data structure changes. No new BPF map, no map-layout change, no wire/disk/config-schema change. The STAT enum (`mac_filter.h`) and all map value/key structs are reused verbatim.
+
+One **BPF-TU-local, read-only** structure is newly consumed: `struct vlan_hdr { __be16 h_vlan_TCI; __be16 h_vlan_encapsulated_proto; }` (4 bytes, from `vmlinux.h:57635`). The tag-walk reads `h_vlan_encapsulated_proto` to obtain the next EtherType and advances a `void *` cursor by `sizeof(struct vlan_hdr)` per consumed tag. No instance is stored; the cursor is a local pointer in `mac_filter_prog`.
+
+New compile-time constants (BPF TU only, D-mvp-4.1-MACROS): `ETH_P_8021Q = 0x8100`, `ETH_P_8021AD = 0x88A8`, `XDPMF_VLAN_MAX_DEPTH = 2`.
+
+#### §5.41 Interfaces
+
+**No external/public interface change** — no new CLI flag on the `xdpmacfilter` binary, no env var, no exit code, no metric, no log event, no config field, no exported C++ symbol. Two surfaces are added, both internal:
+
+1. **BPF-TU-local helper (`src/bpf/mac_filter.bpf.c`, `static __always_inline`):**
+
+   `static __always_inline __u16 l3_after_vlan(void *eth, void *data_end, void **l3hdr);`
+
+   - **Inputs:** `eth` = pointer to the outer Ethernet header (already bounds-validated by the caller at `:299`); `data_end` = `ctx->data_end`.
+   - **Behaviour:** start the cursor at `eth + sizeof(struct ethhdr)` with `proto = ((struct ethhdr *)eth)->h_proto` (network byte order). `#pragma unroll` over `XDPMF_VLAN_MAX_DEPTH` (=2) iterations: if `proto` is a VLAN TPID (`== bpf_htons(ETH_P_8021Q) || == bpf_htons(ETH_P_8021AD)`), bounds-check that a full `struct vlan_hdr` fits (`cursor + sizeof(struct vlan_hdr) > data_end` → STOP the walk, leaving `proto` at the current non-IPv4 TPID), else read `proto = vlan->h_vlan_encapsulated_proto` and advance `cursor += sizeof(struct vlan_hdr)`. After the unrolled walk, write `*l3hdr = cursor` and `return proto`.
+   - **Returns:** the inner EtherType in **network byte order** (caller compares `== bpf_htons(ETH_P_IP)`). `*l3hdr` = pointer to the first byte past the consumed L2/VLAN headers (the candidate L3 header). **The caller MUST still bounds-check `sizeof(struct iphdr)` at `*l3hdr` before dereferencing** (the helper validates only the VLAN tags it consumed, not the L3 header).
+   - **No-VLAN fast path:** if `eth->h_proto` is not a VLAN TPID, the loop body never executes; `*l3hdr = eth + sizeof(struct ethhdr)` and `return eth->h_proto` — byte-equivalent to today's `(struct iphdr *)(eth + 1)` + `eth->h_proto` compare.
+   - **Truncated-tag path:** on a mid-walk bounds failure, the walk STOPS with `proto` = the current (non-IPv4) VLAN TPID and `*l3hdr` = the cursor as-is; the caller's `== ETH_P_IP` fails → falls through to `defaults` (HG-mvp-4.1-2; D-mvp-4.1-MALFORMED). NEVER bumps `STAT_DROP_MALFORMED` for a truncated tag.
+   - Exact signature shape (param names, by-pointer vs by-return for `l3hdr`/`proto`) is impl-flexible PROVIDED the contract above holds; the helper stays single-consumer (guard #9).
+
+2. **Test injector CLI (`tests/inject/inject_ipv4.py`):**
+
+   New optional flag `--vlan <vid>` (repeatable, `argparse action="append"`, integer VID 0..4095). Each occurrence inserts one tag `TPID=0x8100, TCI=vid` between the source MAC and the `0x0800` EtherType; the FIRST `--vlan` is the outermost tag (closest to the MAC headers). Positional args unchanged: `<iface> <src_mac> <dst_mac> <src_ip> [dst_ip]`. **Zero `--vlan` ⇒ byte-identical to the current frame builder** (PI-mvp-4.1-INJECT). All tags use TPID `0x8100` (the common C-TAG); the datapath's `0x88A8` (S-TAG) branch is a sibling literal in the same `||` and is verified by code-review (D-mvp-4.1-TPID — exercising 0x8100 fully covers the unrolled loop's iteration count + bounds checks; injector S-TAG support is OOS to keep the tool minimal per guard #9).
+
+#### §5.41 Decisions (with rationale)
+
+##### D-mvp-4.1-MACROS — `ETH_P_8021Q`/`ETH_P_8021AD`/`XDPMF_VLAN_MAX_DEPTH` `#define`d inline in the BPF TU — because
+
+`vmlinux.h` is BTF-derived (types only, no CPP macros), and `<linux/if_ether.h>` is not available in the BPF-CO-RE target build — exactly the situation that forced the existing `#ifndef ETH_P_IP / #define ETH_P_IP 0x0800 / #endif` at `:46-48`. The two VLAN EtherTypes and the depth cap follow the same pattern (guarded `#ifndef`, IANA/IEEE values byte-equivalent). Keeping them adjacent to `ETH_P_IP` keeps the EtherType vocabulary in one place. `XDPMF_VLAN_MAX_DEPTH = 2` is the single source of truth for the unroll count (HG-mvp-4.1-1).
+
+##### D-mvp-4.1-WALK — bounded `#pragma unroll` cursor walk, depth 2, no `bpf_loop` — because
+
+Kernel floor is 5.15; `bpf_loop` is 5.17+. A fixed-depth `#pragma unroll` over 2 iterations has no back-edge, so the verifier sees a straight-line instruction path with two explicit `cursor + sizeof(vlan_hdr) > data_end` bounds checks — trivially accepted, no unbounded-loop risk (reviewer special-attention item (a)). Depth 2 covers 802.1Q + one stacked QinQ tag, which is the realistic Gi maximum (HG-mvp-4.1-1); deeper stacks fall through to `defaults` (the depth cap is itself a tested fence — see T_PASS_CIDR_QINQ depth-3 sub-case). A pointer cursor (advance + bounds-check against `data_end`) is the idiomatic, verifier-proven XDP VLAN-parse shape and is friendlier to the verifier's pointer-range tracking than integer-offset arithmetic.
+
+##### D-mvp-4.1-MALFORMED — truncated VLAN tag falls through to `defaults`, NOT `STAT_DROP_MALFORMED` — because
+
+Today a frame with `h_proto == 0x8100` is non-IPv4 → falls to `defaults[active]` (no MALFORMED). To preserve that verdict exactly (HG-mvp-4.1-2), a frame whose VLAN tag is truncated (no room for a full `vlan_hdr`) must ALSO fall to `defaults` — the walk stops with `proto` still a VLAN TPID (non-IPv4), so the caller's `== ETH_P_IP` is false. The ONLY `STAT_DROP_MALFORMED` path stays the IPv4-header bounds check INSIDE the IPv4 branch (now applied at the post-VLAN L3 offset), which mirrors the untagged-IPv4-truncation semantic byte-for-byte. Net: no frame changes verdict class except the targeted one (tagged in-range IPv4: `defaults` → `STAT_PASS_CIDR`).
+
+##### D-mvp-4.1-MAC — MAC axis + active-snapshot preamble + defaults fall-through are byte-UNCHANGED — because
+
+The source MAC is read from the outer Ethernet header before the L3 gate (Phase A grep #2); a VLAN tag is inserted after both MAC addresses, so its offset is invariant under tagging. Changing the MAC branch would be gratuitous and risk the PI-7-style invariants. Only the L3-reach region (`:362-373`) is rewritten. Recorded as PI-mvp-4.1-MAC.
+
+##### D-mvp-4.1-TPID — injector emits `0x8100` tags only; `0x88A8` datapath branch verified by code-review — because
+
+The datapath treats `0x8100` and `0x88A8` identically (both satisfy `is_vlan`), so injecting `0x8100` at depth 1 and depth 2 fully exercises the unrolled loop's iteration count, advance, and bounds checks. `0x88A8` is a trivially-correct sibling literal in the `||`; adding per-tag TPID support to the injector would expand the test tool for near-zero coverage gain (guard #9 — keep the tool minimal). If a reviewer/tester wants empirical S-TAG coverage, peer-DM architect and the injector gains an optional `--svlan` in a follow-up; default ship is `0x8100`. (Recorded as a §7 OOS fence.)
+
+##### D-mvp-4.1-TEST-DIFF — the regression differential is `defaults`-drop (pre-fix) vs `STAT_PASS_CIDR` (post-fix) — because
+
+`config_valid_cidr.yaml` is `default_action: drop` + pass `10.0.0.0/8`. A single-tag in-range IPv4 frame with a NON-allowlisted source MAC (`99:99:99:99:99:99`): pre-fix → tag skips the CIDR branch → `defaults` → `STAT_DROP_DENY`; post-fix → reaches CIDR → matches → `STAT_PASS_CIDR`. So `T_PASS_CIDR_VLAN` step-4's assertion (`PASS_CIDR +1`, `DROP_DENY +0`, `PASS +0`) IS the regression differential — it FAILS on a pre-fix binary. The out-of-range step is the negation control (proves the fix did not break to always-PASS).
+
+##### D-mvp-4.1-TEST-VACUITY — the depth-3-overflow sub-case is the load-bearing anti-vacuity / OPS-equivalent assertion — because
+
+The single-tag `PASS_CIDR` assertion is vacuous w.r.t. "did XDP actually walk a tag" IF the kernel stripped the tag before XDP ran (a stripped tag makes the frame look untagged → `PASS_CIDR` even on a pre-fix binary). The cleanest proof that the raw tags reached the XDP program is the **depth-3-overflow** case in `T_PASS_CIDR_QINQ`: inject 3 stacked tags with in-range inner IPv4; the ≤2 walk stops at the 3rd tag's TPID (non-IPv4) → `STAT_DROP_DENY` (via `defaults`). This verdict can ONLY be produced if XDP saw all 3 tags in the frame data AND the depth cap holds — if any tag were stripped before XDP, the frame would present ≤2 tags and emit `STAT_PASS_CIDR`, FAILING the assertion. To make this deterministic, both VLAN tests disable NIC VLAN offload in setup (`ethtool -K ${IFACE} rxvlan off txvlan off`, best-effort `|| true`) so the kernel rewrites nothing between AF_PACKET TX and XDP RX. This is the slice's "catches behaviour the existing (untagged-only) test infrastructure can't" assertion — the new datapath-reach path is genuinely uncovered by every existing test. See guard #22.
+
+##### D-mvp-4.1-NO-VERSION — no VERSION bump — because
+
+Pure internal datapath bugfix; no operator-observable surface added (no new CLI flag, metric, log event, config field, or exit code). It fixes a latent bug so the EXISTING documented `src_cidr` contract holds on tagged links — a correctness restoration, not a feature. Consistent with prior internal-hardening slices (HG-mvp-4.1-4). PI-mvp-4.1-VERSION enforces zero `CMakeLists.txt` VERSION diff.
+
+##### D-mvp-4.1-PROSE-VS-INVARIANTS — resolution rule (architect-stated for this amendment) — because
+
+If a prose statement in §5.41 conflicts with a §6.5 PI-mvp-4.1-* item or the §5.41 verifiable-invariants list below, **the §6.5 invariants-block item WINS (prose loses).** If impl deviates from a verifiable-invariants hint to satisfy a PI contract in §6.5 (or a load-bearing test assertion), reviewer's correct disposition is `inline-merge` on the hint text — NOT `[UNRELATED-EDIT]` on impl. Per architect-spec §6.5 verification-hints discipline; mirrors §5.37/§5.39/§5.40 precedent. Counts/depths/LOC in the verifiable-invariants prose are operative-semantic (e.g. "depth ≤2", "~30 LOC"), NOT literal-match contracts; impl deviations mirroring existing precedent are `inline-merge`.
+
+#### §5.41 TestStrategy entries
+
+Two NEW ctests (§6.43, §6.44), both cloning the `T_PASS_CIDR` template (§6.28) + `setup_veth` + `tests/inject` + `RESOURCE_LOCK xdp_fixture` (guard #12). Both add a best-effort `ethtool -K` VLAN-offload-disable in setup (D-mvp-4.1-TEST-VACUITY) and an aggressive `trap 'cleanup_veth; rm -f ...' EXIT`. Tester writes against THIS spec, not impl's code.
+
+##### §6.43 T_PASS_CIDR_VLAN — single 802.1Q tag reaches the CIDR axis (THE regression)
+
+- **Setup:** `require_passwordless_sudo`; `setup_veth`; best-effort `ethtool -K ${IFACE_A} rxvlan off txvlan off || true` and same on `${IFACE_B}`; apply `config_valid_cidr.yaml` on `${IFACE_A}`; assert pin `${PIN_DIR}/cidr_rulesets` exists + active CIDR inner non-empty (steps 1-3 verbatim from `T_PASS_CIDR.sh`).
+- **Trigger (step 4):** `inject_ipv4.py ${IFACE_B} 99:99:99:99:99:99 ${MAC_DST} 10.5.6.7 --vlan 100` (tagged, in-range, non-allowlisted MAC).
+- **Observable / assertion:** `STAT_PASS_CIDR` delta `== 1`; `STAT_PASS` delta `== 0`; `STAT_DROP_DENY` delta `== 0`. Mechanism: `read_stats_with_cidr` + `wait_for_stats_sum_with_cidr` + integer-delta compares (same as `T_PASS_CIDR.sh:106-130`). **This is the regression differential** (D-mvp-4.1-TEST-DIFF) — FAILS on a pre-fix binary (would show `DROP_DENY +1`).
+- **Trigger (step 5):** same flag, src `192.168.1.1` (tagged, out-of-range). **Observable:** `STAT_DROP_DENY` delta `== 1`; `STAT_PASS_CIDR` delta `== 0`; `STAT_PASS` delta `== 0` (negation control — proves the fix didn't break to always-PASS).
+- **SKIP_RETURN_CODE 77**: inherited (timing/rate floor + absent-tool guard, matching the CIDR foreach).
+
+##### §6.44 T_PASS_CIDR_QINQ — depth-2 walk + depth-3-overflow anti-vacuity fence
+
+- **Setup:** identical to §6.43 (offload-disable + apply CIDR fixture + pin checks).
+- **Trigger (step 4, depth-2 PASS):** `inject_ipv4.py ${IFACE_B} 99:99:99:99:99:99 ${MAC_DST} 10.5.6.7 --vlan 100 --vlan 200` (two stacked tags, in-range). **Observable:** `STAT_PASS_CIDR` delta `== 1`; `STAT_PASS`/`STAT_DROP_DENY` delta `== 0`. Verifies the depth-2 walk reaches L3.
+- **Trigger (step 5, depth-3 overflow — LOAD-BEARING anti-vacuity, D-mvp-4.1-TEST-VACUITY):** `inject_ipv4.py ${IFACE_B} 99:99:99:99:99:99 ${MAC_DST} 10.5.6.7 --vlan 100 --vlan 200 --vlan 300` (three stacked tags, in-range inner IPv4). **Observable:** `STAT_DROP_DENY` delta `== 1`; `STAT_PASS_CIDR` delta `== 0`. **Assertion contract:** this verdict is producible ONLY if XDP saw all 3 raw tags AND stopped at the depth-2 cap (the inner-after-2-tags proto is the 3rd tag's TPID, non-IPv4 → `defaults` drop). A stripped-tag environment would emit `STAT_PASS_CIDR` here and FAIL — with a failure message pointing at VLAN offload / depth cap. This is the test that the existing untagged-only suite cannot provide.
+- **SKIP_RETURN_CODE 77**: inherited.
+
+##### T-SUITE — full ctest baseline 68 → 70
+
+All 68 pre-§5.41 ctests stay GREEN (or legitimately SKIP) with ZERO body edits; +2 NEW VLAN tests. `cmake -B build -S .` reconfigure (CMakeLists ITEMS changed) then `ctest --output-on-failure -j4` → 70/70 (modulo SKIPs). No fixture/lib/CMake-VERSION change.
+
+##### (verifier-feasibility smoke — impl Phase 2.5, optional but recommended)
+
+After build, `sudo -n bpftool prog load build/src/bpf/mac_filter.bpf.o /sys/fs/bpf/probe type xdp; rc=$?; sudo -n bpftool prog unpin /sys/fs/bpf/probe 2>/dev/null; echo $rc` SHOULD return `0` — confirms the bounded VLAN walk passes the verifier standalone (reviewer special-attention item (a)). Not a ctest (the existing `T_LOAD_ATTACH`/`T_VERIFIER_REJECT` + the new VLAN tests exercise load+attach end-to-end), just a fast pre-flight.
+
+#### §6.5 Preserved invariants (§5.41 MVP-4.1 brownfield)
+
+Reviewer's framework point 5 walks this list. Items here are **MUST contracts**; reviewer reports `[INVARIANT-VIOLATED]` per failed check. (`84be9d3` = pre-§5.41 baseline; reviewer substitutes the actual merge-base.)
+
+| PI | Property | Check mechanism |
+|---|---|---|
+| **PI-mvp-4.1-REGRESSION (NEW)** | A VLAN/QinQ-tagged (depth ≤2) IPv4 frame with `src_ip ∈` an applied CIDR rule reaches the CIDR branch and emits `STAT_PASS_CIDR` (was `defaults`/`STAT_DROP_DENY`). | `T_PASS_CIDR_VLAN` step-4 + `T_PASS_CIDR_QINQ` step-4 GREEN. |
+| **PI-mvp-4.1-NONIP-PRESERVED (NEW)** | Every non-IPv4-after-VLAN frame (ARP/IPv6/other/truncated-tag) keeps its pre-fix verdict (MAC-axis result + `defaults`); no frame is reclassified as `STAT_DROP_MALFORMED` by the tag-walk. The only MALFORMED path is the IPv4-header bounds check inside the IPv4 branch. | Code-review of the rewritten `:362-373` region against D-mvp-4.1-MALFORMED; `T_PASS_CIDR_QINQ` depth-3 step (3-tag in-range → `DROP_DENY`, NOT MALFORMED). |
+| **PI-mvp-4.1-DEPTHCAP (NEW)** | The tag-walk is bounded at `XDPMF_VLAN_MAX_DEPTH = 2`; a 3rd tag is NOT parsed → such a frame falls to `defaults`. Verifier accepts the program (no unbounded loop). | `T_PASS_CIDR_QINQ` step-5 GREEN (`DROP_DENY +1`); impl-Phase-2.5 `bpftool prog load` rc=0; `T_LOAD_ATTACH` GREEN. |
+| **PI-mvp-4.1-MAC (NEW)** | The MAC-axis branch + active-snapshot preamble + `defaults` fall-through in `mac_filter.bpf.c` are behaviorally UNCHANGED; MAC matching works identically on tagged + untagged frames. | `git diff 84be9d3 -- src/bpf/mac_filter.bpf.c` shows changes ONLY in the macro block, the new `l3_after_vlan` helper, and the `:362-373` L3-gate region; `:308-360` + `:414-426` unchanged. Existing `T_PASS_ALLOWED`/`T_DROP_DENY`/`T_PASS_MAC_OR_CIDR` GREEN. |
+| **PI-mvp-4.1-NO-ENCAP (NEW, documented assumption — falsifiable)** | The parser extracts the FIRST IP header after L2/VLAN; it assumes NO residual tunneling on Gi (GTP-U terminated upstream at the GGSN; Wave A §1 HA#5). Inner-IP-under-encap is OUT OF SCOPE. | Documented invariant (no automated check this slice). Falsified by NOC evidence of residual encap on Gi → triggers a separate slice. Recorded so the assumption is explicit. |
+| **PI-mvp-4.1-INJECT (NEW)** | `inject_ipv4.py` with NO `--vlan` produces byte-identical frame bytes to pre-§5.41; existing tests that call it positionally are unaffected. | `git diff 84be9d3 -- tests/inject/inject_ipv4.py` shows only additive `--vlan`/argparse changes; all existing `inject_ipv4.py`-using ctests GREEN. |
+| **PI-7-mvp-4.1-config-hpp** | `src/lib/config.hpp` byte-identical (ZERO-diff streak continues; no schema/config change). | `git diff 84be9d3 -- src/lib/config.hpp` empty |
+| **PI-7-mvp-4.1-loader-hpp** | `src/lib/loader.hpp` byte-identical (datapath-only fix; no loader API change). | `git diff 84be9d3 -- src/lib/loader.hpp` empty |
+| **PI-mvp-4.1-MAC-FILTER-H** | `src/common/mac_filter.h` byte-identical — STAT enum reused, no new slot/constant. | `git diff 84be9d3 -- src/common/mac_filter.h` empty |
+| **PI-mvp-4.1-CTEST-BASELINE (NEW)** | 68 pre-§5.41 ctests stay GREEN with ZERO body edits; baseline 68 → 70 (+2 NEW VLAN tests; +2 ITEMS lines in CMakeLists). | `git diff 84be9d3 -- tests/lib tests/fixtures` empty; `ctest -j4` 70/70 (or all pass + legitimate SKIPs). |
+| **PI-mvp-4.1-VERSION** | `CMakeLists.txt` VERSION unchanged (HG-mvp-4.1-4); no operator-facing surface change. | `git diff 84be9d3 -- CMakeLists.txt` empty (no VERSION line edit). |
+| **PI-mvp-4.1-NO-BUILD-DEP** | No new build dependency (`struct vlan_hdr` is from the existing `vmlinux.h`; macros are inline). | `grep -E 'find_package\|pkg_check_modules\|FetchContent' CMakeLists.txt src/bpf/CMakeLists.txt` — no new entries. |
+
+#### §5.41 verifiable invariants for reviewer (MAY-default per architect-spec §6.5 discipline)
+
+Guidance for reviewer, NOT contracts for impl. **Resolution rule (per D-mvp-4.1-PROSE-VS-INVARIANTS): if any item below conflicts with a §6.5 PI-mvp-4.1-* item, the §6.5 item wins; if impl deviates from an item to satisfy a PI or a load-bearing test assertion, reviewer disposition is `inline-merge`, NOT `[UNRELATED-EDIT]`.**
+
+1. (MAY) `grep -nE '#define[[:space:]]+ETH_P_8021Q|#define[[:space:]]+ETH_P_8021AD' src/bpf/mac_filter.bpf.c` returns 2 hits (`0x8100` + `0x88A8`); `grep -nE 'XDPMF_VLAN_MAX_DEPTH' src/bpf/mac_filter.bpf.c` returns ≥1 hit (value 2).
+2. (MAY) `grep -nE 'pragma unroll|__always_inline' src/bpf/mac_filter.bpf.c` shows the bounded-unroll VLAN walk; there is NO `bpf_loop` / `while` / unbounded back-edge in the walk.
+3. (MAY) `grep -nE 'vlan_hdr|h_vlan_encapsulated_proto' src/bpf/mac_filter.bpf.c` returns ≥1 hit (the tag-walk reads `h_vlan_encapsulated_proto`).
+4. (MAY) The rewritten L3 gate compares the INNER proto (`== bpf_htons(ETH_P_IP)`) returned by the walk, and derives `ip` from the post-VLAN L3 pointer/offset — NOT from `eth + 1` directly. Operative-semantic — impl may inline (Q1.A1) instead of the helper as long as the contract holds.
+5. (MAY) `git diff 84be9d3 -- src/bpf/mac_filter.bpf.c` touches ONLY: the macro block (~`:46-48` vicinity), the new `l3_after_vlan` helper, and the `:362-373` L3-gate region. The MAC branch (`:342-360`), preamble (`:308-341`), and defaults (`:414-426`) show ZERO diff.
+6. (MAY) `grep -nE 'STAT_DROP_MALFORMED' src/bpf/mac_filter.bpf.c` count is UNCHANGED from baseline (no new MALFORMED bump from the tag-walk; D-mvp-4.1-MALFORMED).
+7. (MAY) `grep -nE '\-\-vlan|argparse|action=.append.' tests/inject/inject_ipv4.py` shows the new repeatable `--vlan` flag; the default (no-flag) frame builder is byte-identical (PI-mvp-4.1-INJECT).
+8. (MAY) `tests/CMakeLists.txt` adds exactly `T_PASS_CIDR_VLAN` + `T_PASS_CIDR_QINQ` to the existing CIDR `foreach` ITEMS list (they inherit `RESOURCE_LOCK xdp_fixture`); no new standalone `add_test` block needed.
+9. (MAY) `git diff 84be9d3 -- src/lib/ src/cli/ src/exporter/ src/common/ include/vmlinux.h CMakeLists.txt` is EMPTY except (nothing in `src/bpf` is under these paths). All UNCHANGED-BUT-AFFECTED git-diff fences hold.
+10. (MAY) Net LOC across `mac_filter.bpf.c` ≈ +26 (helper + macros + gate rewrite, minus the 4 replaced lines). Operative-semantic per Phase 4.4.
+
+#### §7 OOS additions (§5.41 — new fences)
+
+- **Rule IR, first-match-by-`id` ordering, `schema_version:2` hard-cutover** — all deferred to S2 (AND-architecture landing). `config.cpp` schema stays `{1}`. NEW FENCE (re-affirmed from brief).
+- **Any new match field — `dst_ip` / port / `vlan`-as-match-axis / EtherType** — later slices. This slice makes tagged frames REACH L3; it does NOT add `vlan` as a match key. NEW FENCE.
+- **Classification-structure choice (sequential vs bit-vector)** — S2 spike. NEW FENCE.
+- **Inner-IP-under-residual-tunneling parsing** — PI-mvp-4.1-NO-ENCAP invariant; a future slice IF NOC confirms residual encap on Gi. NEW FENCE.
+- **VLAN parse depth > 2** — `XDPMF_VLAN_MAX_DEPTH = 2`; deeper stacks fall to `defaults`. NEW FENCE (depth cap is a tested invariant, not a TODO).
+- **Injector S-TAG (`0x88A8`) / per-tag TPID support** — injector emits `0x8100` tags only; the datapath's `0x88A8` branch is verified by code-review (D-mvp-4.1-TPID). A `--svlan`/per-tag-TPID flag is a follow-up IF empirical S-TAG coverage is requested. NEW FENCE.
+- **VERSION bump** — D-mvp-4.1-NO-VERSION (HG-mvp-4.1-4). NEW FENCE.
+- **Datapath actions beyond allow/drop (mirror/rate-limit/tag/redirect)** + DPDK/AF_XDP perf datapath — out of the rule-model S1 scope entirely (REQUIREMENTS.md forward targets). NEW FENCE.
+
+Carry-forward from §5.40 §7 OOS items NOT listed above — UNCHANGED.
+
+#### §5.41 Anti-misdiagnosis institutional learning (per architect-spec §6.6)
+
+**Guard catalog grows 21 → 22.** NEW guard #22 (forward-defense for datapath tests that inject L2-mutated frames):
+
+> **Guard #22 (L2-mutation test vacuity / data-plane survival)** — when a ctest verifies datapath behaviour by injecting a frame whose L2 has been MUTATED relative to the existing test corpus (VLAN/QinQ tags, modified EtherType, MPLS, etc.) via raw AF_PACKET, the test MUST (a) defensively disable any NIC offload that could STRIP or REWRITE the mutation before the XDP program runs (`ethtool -K <iface> rxvlan off txvlan off`, best-effort), AND (b) include at least ONE assertion whose verdict is producible ONLY if XDP saw the raw mutated bytes (here: the depth-3-overflow → `DROP` sub-case, which a stripped-tag environment would turn into `PASS_CIDR` and fail). Without (b), a "tagged in-range → PASS" assertion passes VACUOUSLY on a binary that never saw a tag (kernel stripped it), giving false green on the exact bug the slice fixes. The existing untagged-only suite is structurally blind to this class. Cite §5.41 (MVP-4.1 VLAN parse fix) as the audit-trail source.
+
+Guards applied this slice:
+- **Guard #5 (Phase A code-grep)** — applied; documented in the §5.41 Phase A report. Re-anchored every literal by pattern (L3 gate, MAC read, `vlan_hdr` struct, absent VLAN macros, STAT enum, schema_version set, injector layout, CIDR foreach registration, fixture default action, lib helpers) without trusting brief line numbers.
+- **Guard #9 (helper-location duplication-over-extraction)** — applied: `l3_after_vlan` is single-consumer (one call-site); NOT a generalized shared parser. Injector stays minimal (`0x8100` only; D-mvp-4.1-TPID).
+- **Guard #12 (RESOURCE_LOCK for shared host state)** — applied: both NEW ctests slot into the existing CIDR `foreach` and inherit `RESOURCE_LOCK xdp_fixture` + cleanup trap.
+- **Guard #6 (bpffs ≠ tmpfs)** — applied: NEW ctests load via the real loader and touch bpffs pins; reuse `setup_veth`/`cleanup_veth` fixture teardown.
+- **Guard #22 (NEW)** — the data-plane-survival forward-defense above; the depth-3-overflow anti-vacuity sub-case is its concrete mechanism this slice.
+- **Guards #7/#8/#10/#11/#13/#14-21** — N/A (no map-shape/BTF-asymmetry mutation, no kEventNames catalog, no VERSION bump, no fixture lockstep, no bilateral/host-vs-netns/IO-model concern). The inner-VALUE of every map is UNCHANGED, so the §5.31 EDIT-2 BTF-asymmetry class (guard #7) does not recur.
+
+Evidence: `mint/task-brief.md` MVP-4.1 brief (HG-mvp-4.1-1..4 + Q1/Q2 + Phase A grep footer + anti-misdiagnosis guards #5/#6/#9/#12); `mint/architecture-rule-model.md` §6.4 (Wave B; this fix = S1) + "Recommended slice sequence"; `mint/selection-scenarios.md` §3.A (VLAN = APN carrier) + §6.4 (this latent bug); independent Phase A reads of `src/bpf/mac_filter.bpf.c:299-426`, `include/vmlinux.h:57635`, `src/common/mac_filter.h:54-59`, `src/lib/config.cpp:152-161`, `tests/inject/inject_ipv4.py`, `tests/CMakeLists.txt:420-436`, `tests/T_PASS_CIDR.sh`, `tests/fixtures/config_valid_cidr.yaml`, `tests/lib/common.sh`; §5.27 (CIDR-axis origin: STAT_PASS_CIDR, cidr_rulesets, the L3 gate this slice widens) + PI-7-3.2 loader.hpp ZERO-diff precedent.
