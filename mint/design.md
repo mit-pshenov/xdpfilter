@@ -13107,3 +13107,222 @@ None of these surfaced a NEW anti-misdiagnosis class — they are all well-rehea
 Cite §5.39 as a precedent for "small observability slices that extend the §5.36 kEventNames-carve-out shape and the §5.30 W1 startup-warn shape in one move".
 
 Evidence: `mint/task-brief.md` MVP-3.4h brief (HG-3.4h-1..5 + Q1-Q2); /mint-review report at `agent-teams-review/runs/mint-review-mint-l2-mac-filter-202605271147/report.md` (sec M2 + KC-2 anchors); §5.30 HK-16 W1 startup-warn precedent (`validate_bpffs_root_or_warn` shape at `stats_reader.cpp:131`); §5.32 logger module (`logger::emit` signature; PI-3.5-1 byte-equivalence); §5.36 kEventNames-extension precedent (35→36 carve-out shape; PI-3.4h-K mirrors); §5.38 minimal-brownfield-slice precedent (PI-7-loader-hpp + PI-7-mac-filter-h streak extension via UNCHANGED-BUT-AFFECTED zero-diff fence).
+
+---
+
+### §5.40 MVP-3.4i: compound exporter scrape-path perf (4 byte/set-equivalent patches) (brownfield, performance)
+
+#### §5.40 Problem statement
+
+Apply four micro-optimizations to the `xdpmf-exporter` `/metrics` scrape path, each preserving the emitted output. This is a **behaviour-preservation slice**: the HARD contract is output preservation (PI-3.4i-A byte-STREAM-identical for patches 1/2/3; PI-3.4i-B line-SET-identical for patch 4); the perf wins (~1.3 ms/scrape on a 50-iface fleet) are the *motivation* but are algorithmic estimates, NOT benchmarked — there is **no timing-based test** (it would be flaky under `-j4`; guard #12). The four patches are: (P-1) hoist the PERCPU read buffer out of the per-key inner loop in both readers (Major-1); (P-2) `std::format_to` in-place into the output string in `prom_format.cpp` (Med-1); (P-3) two-step header/body write for the hot `/metrics` 200 path in `http.cpp` (Med-2); (P-4) replace the per-iface `unordered_map` with a sorted vector in `prom_format.cpp` (Med-3).
+
+Closes 4 of 5 /mint-review performance findings (Major-1 + Med-1/2/3). The 5th (Med-4 per-scrape `bpf_obj_get` fd cache) is EXPLICITLY DEFERRED — it introduces cross-scrape state + an apply/detach race window whose invalidation strategy (TTL vs mtime-stat vs inotify vs per-scrape revalidate) is a genuine multi-axis design question; OOS this slice (NEW FENCE; mvp-3.4j candidate, likely `/mint-hld` first). Source of truth: `agent-teams-review/runs/mint-review-mint-l2-mac-filter-202605271147/raw/performance-reviewer.md` (Major §1 + Medium §1/2/3) + `report.md` compound chain (lines 131-133). All four edits land in exporter `.cpp` files only — no PI-7 fence-path header, no `logger.hpp`, no `/metrics` semantic change (same metrics, same labels, same values).
+
+#### §5.40 Phase A grep verification report (architect-independent — 2026-05-28, per guard #5)
+
+Architect re-ran the brief's Phase 2 greps independently and read each touched file in full. Results below; **one factual correction** to the brief's call-site arithmetic, plus the patch-4 dedup subtlety the brief did not surface.
+
+1. **Patch-1 signature scope — CONFIRMED `.cpp`-local in BOTH readers.** `percpu_sum_u64` is a `[[nodiscard]]` static anon-namespace function in `src/exporter/stats_reader.cpp` (def `:84-107`, single call `:230` inside the per-key loop `:229-231`, itself inside the per-iface loop `:184-235`) AND in `src/exporter/rule_counters_reader.cpp` (def `:89-110`, single call `:208`, per-iface loop `:140-212`). `grep -rn 'percpu_sum_u64' src/exporter/*.hpp` → **ZERO hits in any header**. The Q1 signature change is therefore `.cpp`-local in each TU → **no PI-7 header ripple**. In both readers `num_cpus` is computed/validated (stats `:163-181`; rule_counters `:124-137`) BEFORE the per-iface loop, so the hoisted buffer can be sized once between the num_cpus check and the per-iface loop.
+2. **Patch-3 call-site enumeration — CORRECTED.** `build_response` (anon-namespace static, def `:159-172`) has **6 call-sites**, NOT 7: `:180` (400), `:188` (400), `:200` (405), `:237` (200 `/metrics`, large body), `:250` (200 `/healthz`, `"ok\n"`), `:254` (404). The brief's "7 call-sites" conflates the def with the sites (7 total `build_response` tokens = 1 def + 6 calls). **Only `:237` has a large body** (`emit_metrics` output); the other 5 calls carry tiny string-literal bodies. `build_response` is NOT in any `.hpp` (anon-namespace; `}  // namespace` closes at `:275`). `write_all(int fd, std::string_view data) noexcept` (def `:120`) returns `bool` and accepts a `string_view`, so two-step `write_all(headers)+write_all(body)` is mechanically trivial.
+3. **Patch-2 format sites — CONFIRMED 3 sites.** `out.append(std::format(FMT, ...))` at `prom_format.cpp:71-76` (packets_total), `:110-113` (rule_match known-action), `:117-119` (rule_match orphan `action="unknown"`). The HELP/TYPE lines at `:65-66`, `:84-85` are `out.append("<string-literal>")` — NOT `std::format` — and STAY UNCHANGED (patch 2 only rewrites the three `std::format`-producing sites; the literals get no `format_to`).
+4. **Patch-4 ordering + include + dedup — CONFIRMED observable; NEW subtlety found.** `std::unordered_map<std::uint32_t, std::string_view> action_for_rule` declared `:94`; populated `:98` via `action_for_rule.emplace(rm.rule_id, std::string_view{rm.action})`; iterated by range-for `:106` (FIRST rule_match emission loop — emits in **hash order**, observable in the `/metrics` byte stream); membership-tested `:116` `action_for_rule.contains(k)` in the orphan loop `:114-120` (which already iterates `k` ascending). `#include <unordered_map>` at `:12` is the ONLY `unordered_map` user → safe to drop. `#include <map>` at `:9` serves the `rule_meta_by_iface` parameter (`std::map`) → KEEP. There is **no `#include <algorithm>`** currently → patch 4 must ADD it for `std::sort`. **NEW SUBTLETY (brief did not flag):** `unordered_map::emplace` is **first-wins** on duplicate keys (no overwrite); the sorted-vector replacement MUST preserve first-wins dedup on duplicate `rule_id` to keep the line-SET identical (see D-3.4i-4 — load-bearing for PI-3.4i-B). **DO NOT TOUCH** `rule_meta_by_iface.find(s.iface)` at `:95` — that `.find` is on the `std::map` *parameter*, a different container from `action_for_rule`. `RuleMeta` = `{std::uint32_t rule_id; std::string action; std::string match_kind;}` (`sidecar_reader.hpp:26-30`); the pair's `string_view` aliases `rm.action` inside `it->second`, which outlives the per-iface emission → no lifetime hazard.
+5. **Byte/set-equivalence oracle — CONFIRMED all 3 tests order-insensitive (this is what lets patch 4 stay green).** `T_EXPORTER_METRICS_FORMAT.sh` (all `grep -qE`/`grep -cE` per-line presence/count; `:185,191,197,206,215,217`), `T_EXPORTER_VALUES_MATCH_STATS.sh` (`exporter_val()` = `grep -E '^...verdict="<v>"...' | awk '{print $NF}' | head -n1` — per-verdict value extraction, position-independent; `:177-178`), `T_EXPORTER_RULE_LABELS.sh` (per-line `grep -cE`/`grep -qE` + per-`rule_id` `grep -E ... | head -n1`; `:202,211,221,233,257,299`). **NONE asserts line ORDER.** Patch 4's sorted reorder of the known-rule lines keeps all three GREEN by construction.
+6. **PI-7 fence smoke (pre-commit).** `git diff db7e00e..HEAD -- src/common/logger.hpp src/lib/config.hpp src/lib/loader.hpp src/common/mac_filter.h` MUST be empty — these four exporter-`.cpp` edits touch none of them. (`db7e00e` = the §5.39 review-passed commit = the pre-§5.40 baseline.)
+7. **No `/metrics` semantic change — CONFIRMED.** The Prometheus FMT literals in `prom_format.cpp` (`:72-75`, `:111-112`, `:118-119`) and the HTTP status/header literals in `http.cpp` (`:165-171`) must be byte-identical pre/post; only the EMISSION MECHANISM changes (`append`→`format_to`, single-write→two-write, hash-map→sorted-vector). `--version` stays `xdpmf-exporter 0.10.0` (no VERSION bump; `T_EXPORTER_METRICS_FORMAT.sh:102` pins this literal → preserved).
+
+#### §5.40 Human-gate decisions (pre-loaded defaults from brief — confirmed by architect Phase A)
+
+- **HG-3.4i-1 — scope = patches 1-4; Med-4 fd-cache DEFERRED → CONFIRMED.** Med-4 multi-axis (cross-scrape state + apply/detach race + invalidation strategy) → OOS NEW FENCE; mvp-3.4j candidate.
+- **HG-3.4i-2 — byte-equivalence PI split → CONFIRMED (PI-3.4i-A stream + PI-3.4i-B set).** Patches 1/2/3 are byte-STREAM-identical (modulo live counter values); patch 4 is line-SET-identical (known-rule lines reorder from hash-order to deterministic sorted-by-`rule_id`; every line still emitted). See §6.5 below for the formal split.
+- **HG-3.4i-3 — NO new ctest → CONFIRMED.** The three oracle tests (`T_EXPORTER_METRICS_FORMAT` + `T_EXPORTER_VALUES_MATCH_STATS` + `T_EXPORTER_RULE_LABELS`) are the byte/set-equivalence oracle (Phase A grep #5). NO timing-based perf test (perf numbers are unbenchmarked estimates; a timing assert would flake under `-j4`). Architect declines even the optional patch-4 determinism-assert: the grep oracle is sufficient and a determinism test adds maintenance for a "minor bonus" property. ctest baseline **68 → 68**.
+- **HG-3.4i-4 — NO VERSION bump → CONFIRMED.** Pure internal perf; no operator-observable surface change. `--version` stays `0.10.0` (PI-8 + PI-33 preserved).
+- **HG-3.4i-5 — PI-7 fences → CONFIRMED.** All four edits are exporter `.cpp`. `logger.hpp` UNTOUCHED (its §5.39 PI-3.4h-K carve-out re-baseline restarts cleanly → PI-7-3.4i-logger-hpp = **restart-at-1**, see D-3.4i-PI7-LOGGER). `config.hpp` (10th ZERO-diff cycle) + `loader.hpp` + `mac_filter.h` streaks extend.
+
+#### §5.40 Q-decisions (mechanism)
+
+##### Q1: patch-1 `percpu_sum_u64` signature → **Q1.A1 (`std::span<std::uint8_t> buf`)**
+
+CONFIRMED per brief recommendation. New signature (both readers, `.cpp`-local): `percpu_sum_u64(int fd, std::uint32_t key, int num_cpus, std::span<std::uint8_t> buf)`. The function no longer allocates; it uses the caller-provided span for the `bpf_map_lookup_elem` destination and computes the per-slot stride internally via the existing `round_up_8(sizeof(std::uint64_t))`. `std::span` is bounds-carrying, idiomatic C++23, zero-overhead. Caller hoists one `std::vector<std::uint8_t>` above the per-iface loop, `resize(round_up_8(sizeof(std::uint64_t)) * num_cpus)` once, and passes `std::span{vec}`. `#include <span>` added to each reader `.cpp`. (Raw-pointer Q1.A2 rejected — span carries the size, matching the existing internal `round_up_8` discipline.)
+
+##### Q2: patch-3 `build_response` two-step shape → **Q2.A1 (`build_headers()` helper; `/metrics` path only)**
+
+CONFIRMED per brief recommendation. ADD `build_headers(int status, std::string_view status_text, std::string_view content_type, std::size_t body_size) -> std::string` (anon-namespace, near `build_response` at `:159`). The `/metrics` 200 path (`:237-239`) computes `body` then does `write_all(conn_fd, build_headers(200, "OK", "text/plain; version=0.0.4", body.size())); write_all(conn_fd, body);` — eliminating the full-body copy into a `build_response` format result. **Content-Length is computed from `body.size()` BEFORE writing headers (load-bearing — wrong length breaks the HTTP response).** The 6 small error/`/healthz` call-sites KEEP the existing single-write `build_response` (their bodies are tiny string literals; keeping them on the unchanged path GUARANTEES byte-identical wire bytes and zero regression risk). Impl MAY refactor `build_response` to delegate to `build_headers` + body-append internally (DRY) PROVIDED the produced bytes stay byte-identical to the current `build_response` format string. (Q2.A2 "always-two-step for all 7" rejected — needlessly perturbs 5 byte-stable error paths.)
+
+##### Q3: patch-4 sorted-vector shape → **Q3 linear-scan (`std::vector<std::pair<std::uint32_t, std::string_view>>`, sorted by `rule_id`)**
+
+CONFIRMED per brief recommendation. Replace `action_for_rule` (unordered_map) with `std::vector<std::pair<std::uint32_t, std::string_view>>`: populate from `it->second` preserving first-wins dedup (D-3.4i-4), `std::sort` by `.first` ascending once per iface, then **linear scan** for the orphan-loop membership test (cardinality ≤ `XDPMF_RULE_COUNTERS_MAX` = 64; report measures ~30 ns linear vs ~50 ns hash at this size; linear is simpler and report-recommended). The FIRST emission loop iterates the sorted vector → known-rule `rule_match` lines emit in ascending-`rule_id` order (deterministic; was hash-order). Line-SET unchanged → PI-3.4i-B. (Binary search rejected — overkill at ≤64 entries; linear scan keeps the code legible.)
+
+#### §5.40 LIFTED PI declarations (none — §5.30/§5.32/§5.36/§5.39 all UPHELD)
+
+No prior PI is LIFTED. PI-3.4h-K (§5.39 logger.hpp carve-out) is fully consumed (single-cycle); this slice does not touch `logger.hpp` so PI-7-3.4i-logger-hpp restarts at 1 from the §5.39 EDIT-point baseline (D-3.4i-PI7-LOGGER). PI-3.5-1 (logger text-mode byte-equivalence), PI-31/PI-31-3.4b (exporter read-only BPF surface), PI-32/PI-32-3.4b (graceful empty/partial + sidecar never throws), PI-8/PI-33 (VERSION string `0.10.0`) all UNCHANGED.
+
+#### §5.40 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+##### NEW (this slice)
+
+| Path | Role | Language | LOC est |
+|---|---|---|---|
+| *(none)* | NO new files — pure in-place refactor; existing 3 oracle tests are the verification. | — | 0 |
+
+##### EDITED (this slice)
+
+| Path | Change shape | LOC est |
+|---|---|---|
+| `src/exporter/stats_reader.cpp` | **P-1**: (a) add `#include <span>`. (b) change `percpu_sum_u64` (def `:84-107`) to accept a trailing `std::span<std::uint8_t> buf` param; drop the internal `std::vector<std::uint8_t> buf(... , std::uint8_t{0})` alloc+zero-init; use `buf.data()` as the `bpf_map_lookup_elem` destination; keep `round_up_8`/memcpy stride logic. (c) hoist one `std::vector<std::uint8_t> buf; buf.resize(round_up_8(sizeof(std::uint64_t)) * num_cpus);` between the num_cpus check (`:163-181`) and the per-iface loop (`:184`); pass `std::span{buf}` at the call (`:230`). | ~+3 / −3 (≈neutral) |
+| `src/exporter/rule_counters_reader.cpp` | **P-1 parallel**: same edits — `#include <span>`; `percpu_sum_u64` (def `:89-110`) gains `std::span<std::uint8_t> buf`, drops internal alloc+zero-init; hoist+resize buffer between num_cpus check (`:124-137`) and per-iface loop (`:140`); pass span at call (`:208`). Kept independently per-TU (the two readers stay duplicated per §5.31 "keep byte-equivalent" guidance — NO factor-out). | ~+3 / −3 (≈neutral) |
+| `src/exporter/prom_format.cpp` | **P-2** (3 sites): `out.append(std::format(FMT, ...))` → `std::format_to(std::back_inserter(out), FMT, ...)` at `:71-76`, `:110-113`, `:117-119`; FMT literals byte-identical; HELP/TYPE `out.append("literal")` lines UNCHANGED. **P-4**: replace `unordered_map action_for_rule` (`:94`) with sorted `std::vector<std::pair<std::uint32_t, std::string_view>>`; populate (`:97-100`) preserving first-wins dedup; `std::sort` by `.first`; FIRST loop (`:106`) iterates the vector; orphan-loop membership (`:116`) becomes a linear scan; swap `#include <unordered_map>` (`:12`) → `#include <algorithm>`. KEEP `#include <map>` (`:9`) + `rule_meta_by_iface.find` (`:95`). `emit_metrics` signature UNCHANGED. | ~+6 / −6 (≈neutral) |
+| `src/exporter/http.cpp` | **P-3**: add anon-namespace `build_headers(int, std::string_view, std::string_view, std::size_t) -> std::string` near `:159`; rewrite the `/metrics` 200 path (`:237-239`) to two `write_all` calls (headers from `build_headers(200,"OK","text/plain; version=0.0.4", body.size())` then `body`); leave the 5 other `build_response` call-sites unchanged. Optional: re-express `build_response` via `build_headers` internally (byte-identical). | ~+6-9 |
+| `mint/design.md` | APPEND §5.40 (this block). NO rewrites to prior §-sections. | ~+260-360 |
+| `CHANGELOG.md` | OPTIONAL ~1 line under `[Unreleased]` (Changed/Performance): e.g. `- xdpmf-exporter: reduce /metrics scrape CPU + allocations (PERCPU buffer hoist, format_to in-place, two-step HTTP write, sorted-vector rule lookup); output line-set unchanged (closes perf Major-1 + Med-1/2/3).` Operative-semantic — impl-flex on wording; reviewer inline-merge. | +1 |
+
+##### UNCHANGED-BUT-AFFECTED (zero git-diff fence; behaviour must hold)
+
+| Path | Why it ripples but stays identical | Check |
+|---|---|---|
+| `src/exporter/prom_format.hpp` | `emit_metrics(...)` public signature UNCHANGED — patch 2/4 touch only the body. | `git diff db7e00e -- src/exporter/prom_format.hpp` empty |
+| `src/exporter/stats_reader.hpp` + `rule_counters_reader.hpp` | `read_all_attached*` / `read_rule_counters` signatures UNCHANGED; `percpu_sum_u64` is `.cpp`-local (never in a header). | `git diff db7e00e -- src/exporter/stats_reader.hpp src/exporter/rule_counters_reader.hpp` empty |
+| `src/exporter/http.hpp` | `run()` / `handle_connection` / `install_signal_handlers` / `last_exit_six_total` UNCHANGED; `build_response`/`build_headers` are `.cpp`-local. | `git diff db7e00e -- src/exporter/http.hpp` empty |
+| `src/exporter/main.cpp`, `src/exporter/sidecar_reader.{cpp,hpp}` | Orthogonal to all four patches. | `git diff db7e00e -- ...` empty |
+| `src/common/logger.hpp` | **PI-7-3.4i-logger-hpp restart-at-1** (post-§5.39 PI-3.4h-K carve-out). No emit-site added, no kEventNames change, no text/format change. | `git diff db7e00e -- src/common/logger.hpp` empty |
+| `src/common/logger.cpp` | emit() impl untouched; no metric-line emission goes through the logger (Prometheus lines are plain `out.append`/`format_to`). | `git diff db7e00e -- src/common/logger.cpp` empty |
+| `src/lib/config.hpp` | **PI-7-3.4i-cpp — 10th consecutive ZERO-diff cycle.** | `git diff db7e00e -- src/lib/config.hpp` empty |
+| `src/lib/loader.hpp` | **PI-7-3.4i-loader-hpp** fence. | `git diff db7e00e -- src/lib/loader.hpp` empty |
+| `src/common/mac_filter.h` | **PI-7-3.4i-mac-filter-h** fence; no new constant (`STAT_MAX` / `XDPMF_RULE_COUNTERS_MAX` reused). | `git diff db7e00e -- src/common/mac_filter.h` empty |
+| `src/cli/**`, `src/bpf/**`, `src/lib/loader.cpp`, `src/lib/sidecar.cpp`, `src/lib/apply_internal.*`, `src/lib/cidr.*`, `src/lib/yaml_subset.*`, `src/lib/config.cpp`, `src/lib/raii.hpp`, `src/common/escape_util.{hpp,cpp}` | No perf-patch logic anywhere outside the 4 exporter `.cpp`. | `git diff db7e00e -- ...` empty |
+| All 68 pre-§5.40 ctest BODIES + `tests/CMakeLists.txt` + `tests/fixtures/log_events_v1.txt` | **PI-3.4i-CTEST-BASELINE**: 68 → 68 with ZERO new files + ZERO body edits. No catalog change (no kEventNames mutation). | `git diff db7e00e -- tests/` empty |
+| `CMakeLists.txt` (top-level) | No VERSION bump (HG-3.4i-4); no new source/flag (all 4 `.cpp` already in the `xdpmf-exporter` target). | `git diff db7e00e -- CMakeLists.txt` empty |
+| systemd/ansible, `docs/*.md`, `README.md`, `HANDOFF.md`, `docs/BACKLOG.md` | No env/caps/path/semantic change; doc work is a separate slice. Only optional `CHANGELOG.md` +1 line. | `git diff db7e00e -- systemd/ ansible/ docs/ README.md HANDOFF.md` empty |
+
+Anything not in NEW/EDITED/UNCHANGED-BUT-AFFECTED is off-limits for impl. If impl needs to edit a file not listed, that is a design gap → peer-DM architect.
+
+#### §5.40 DataStructures additions / changes
+
+No cross-module data structure changes. Two **internal, `.cpp`-local** representation changes:
+- **P-1**: the PERCPU read scratch buffer moves from a per-call `std::vector<std::uint8_t>` (inside `percpu_sum_u64`) to a single caller-owned `std::vector<std::uint8_t>` (above the per-iface loop), passed as `std::span<std::uint8_t>`. Size invariant unchanged: `round_up_8(sizeof(std::uint64_t)) * num_cpus` bytes; the kernel PERCPU lookup fills the whole span on success.
+- **P-4**: the per-iface `rule_id → action` lookup changes from `std::unordered_map<std::uint32_t, std::string_view>` to a `rule_id`-sorted `std::vector<std::pair<std::uint32_t, std::string_view>>`. The `string_view` aliases `RuleMeta::action` inside the `rule_meta_by_iface` map's value vector (`it->second`), which outlives the per-iface emission. First-wins dedup on duplicate `rule_id` is preserved (D-3.4i-4).
+
+No change to `StatsSample`, `RuleCountersSample`, `RuleMeta`, the BPF map layouts, or any wire/disk format.
+
+#### §5.40 Interfaces additions / changes
+
+No public interface changes (no new CLI flag, env var, IPC, exit code, or exported function). Two `.cpp`-local static-function signatures change (both invisible outside their TU):
+- `percpu_sum_u64(int fd, std::uint32_t key, int num_cpus, std::span<std::uint8_t> buf)` — was `percpu_sum_u64(int fd, std::uint32_t key, int num_cpus)`. Identical in `stats_reader.cpp` and `rule_counters_reader.cpp`.
+- `build_headers(int status, std::string_view status_text, std::string_view content_type, std::size_t body_size) -> std::string` — NEW anon-namespace helper in `http.cpp`. `build_response` retains its signature.
+
+`emit_metrics`, `read_all_attached*`, `read_rule_counters`, `run`, `handle_connection`, `write_all` signatures are all UNCHANGED.
+
+#### §5.40 Decisions (with rationale)
+
+##### D-3.4i-1 — patch-1 buffer hoist + `std::span` signature + drop zero-init — because
+
+The per-key `percpu_sum_u64` call allocated+zero-initialized a `num_cpus*8`-byte vector on EVERY (iface, key) read (`STAT_MAX`=4 or `XDPMF_RULE_COUNTERS_MAX`=64 allocations per iface). Hoisting one buffer above the per-iface loop and reusing it makes the allocation O(1) per scrape instead of O(ifaces×keys). **Correctness of reuse + dropped zero-init (load-bearing for PI-3.4i-A):** on `bpf_map_lookup_elem` success (`rc==0`) the kernel writes exactly `num_cpus*round_up_8(8)` bytes = the FULL span, so every byte the sum reads is freshly written by the current lookup — no stale data from a prior key/iface leaks in. On `rc<0` the function returns 0 WITHOUT reading the buffer, so stale contents are never observed. The zero-init was therefore always redundant. `std::span` (Q1.A1) carries the size so the function keeps its internal `round_up_8` stride discipline without a separate length param. `T_EXPORTER_VALUES_MATCH_STATS` (exporter sum == `read_stats.py` sum, strict `==`) is the direct correctness oracle for this patch — a reuse/aliasing/stale-data bug shows up as a value mismatch.
+
+##### D-3.4i-2 — patch-2 `std::format_to(std::back_inserter(out), ...)` in-place — because
+
+Each `out.append(std::format(FMT, ...))` materialized a temporary `std::string` (heap alloc + copy into `out` + free) per emitted metric line (~3400 lines on a max fleet). `std::format_to(std::back_inserter(out), FMT, ...)` formats directly into `out`'s storage (which is already `reserve`d at `:61`), eliminating the temp. The FMT strings and argument lists are byte-identical, so the produced bytes are identical → PI-3.4i-A. Only the three `std::format`-producing sites change; the HELP/TYPE `out.append("string-literal")` lines are not `std::format` and stay verbatim.
+
+##### D-3.4i-3 — patch-3 two-step write for `/metrics` only via `build_headers` — because
+
+`build_response` formats headers AND copies the entire `/metrics` body into a fresh `std::string` (a second full copy of a potentially 250 KiB body on a max fleet). Splitting into `write_all(headers)` + `write_all(body)` writes the existing `body` string directly, dropping the copy. **TCP is a byte stream**: two `write()` calls on the same `Connection: close` socket deliver the identical concatenated bytes a single write would — `curl` sees byte-identical output → PI-3.4i-A. Content-Length is computed from `body.size()` BEFORE emitting headers (the contract `build_response` already honored). The 5 small-body call-sites keep the single-write `build_response` path: their bodies are tiny literals where the copy is negligible, and leaving them untouched is the zero-risk guarantee of byte-identical error responses. Cost: +1 `write(2)` syscall on the hot path (~3 µs), dwarfed by the saved copy + alloc.
+
+##### D-3.4i-4 — patch-4 sorted-vector with FIRST-WINS dedup; linear scan — because
+
+`std::unordered_map::emplace` is **first-wins** on duplicate keys. The replacement vector MUST reproduce this: when populating from `it->second`, skip a `rule_id` already present (keep the first RuleMeta's action), THEN `std::sort` by `rule_id`. If impl naively `push_back`s every RuleMeta, a duplicate `rule_id` in a sidecar would emit a duplicate `rule_match` line → line-SET divergence → PI-3.4i-B violation. (Duplicate `rule_id`s are not expected in a well-formed `rule_index.json`, but the contract is preservation, so the dedup is load-bearing regardless.) A sorted vector at ≤64 entries scans faster than a hash map (cache-line locality; report ~30 ns vs ~50 ns) and removes ~500 small allocs/scrape. **Output reorders** (known-rule lines go from hash-order to ascending-`rule_id`); this is a byte-STREAM change but a line-SET preservation → PI-3.4i-B. The orphan loop already iterates ascending `k`, so its output order is unchanged. The grep oracle (`T_EXPORTER_RULE_LABELS`, per-line/per-`rule_id`, Phase A grep #5) stays green. `rule_meta_by_iface.find(s.iface)` (`:95`, on the `std::map` parameter) is a DIFFERENT container and is NOT touched.
+
+##### D-3.4i-PI7-LOGGER — `logger.hpp` PI-7 streak restarts at 1 — because
+
+§5.39's PI-3.4h-K carve-out EDITed `logger.hpp` (kEventNames 36→37), ending the prior PI-7-hpp streak by necessity. This slice does not touch `logger.hpp` at all, so the NEW streak `PI-7-3.4i-logger-hpp` counts as **restart-at-1** from the §5.39 EDIT-point baseline (NOT a continuation of the pre-§5.39 streak). `config.hpp` (PI-7-3.4i-cpp = 10th), `loader.hpp`, `mac_filter.h` streaks are uninterrupted and continue.
+
+##### D-3.4i-NO-CANARY — no NEW OPS canary needed — because
+
+The load-bearing OPS-canary heuristic fires when a slice introduces a NEW invocation path with a materially different runtime environment. This slice introduces NONE: same `xdpmf-exporter` binary, same `--bind 127.0.0.1`, same `/metrics` GET, same caps/uid/netns as the existing tests. The three oracle tests ALREADY exercise the exact codepath being optimized (curl `/metrics` after attach+inject), so they ARE the canary. Adding a new test would duplicate existing coverage. (Recorded explicitly so reviewer does not flag a missing canary.)
+
+##### D-3.4i-PROSE-VS-INVARIANTS — resolution rule (architect-stated for this amendment) — because
+
+If a prose statement in §5.40 conflicts with a §6.5 invariants-block item or the §5.40 verifiable-invariants list below, **the invariants-block / §6.5 item WINS** (prose loses). If impl deviates from any verifiable-invariants hint to satisfy a PI-3.4i-* contract in §6.5, reviewer's correct disposition is `inline-merge` on the hint text — NOT `[UNRELATED-EDIT]` on impl. Per architect-spec §6.5 verification-hints discipline; mirrors §5.37/§5.38/§5.39 precedent. The per-patch perf-µs numbers (~500/700/45/60 µs) and net-LOC estimates are SHOULD-level orientation, NOT contracts.
+
+#### §5.40 TestStrategy entries
+
+No new ctest (HG-3.4i-3). The verification spec is "the three exporter oracle tests + the full suite stay green; output is byte-stream-identical for patches 1/2/3 and line-set-identical for patch 4". Tester's role: re-run the suite, confirm zero regressions, and (optionally) capture a pre/post byte-diff of a fixed-input scrape to evidence the PI split.
+
+##### T-ORACLE-1 — `T_EXPORTER_VALUES_MATCH_STATS` is the patch-1 correctness oracle (PI-3.4i-A)
+
+**Trigger**: attach + inject known per-verdict counts; scrape `/metrics`; compare each `xdpfilter_packets_total{verdict=...}` value to `read_stats.py`'s PERCPU sum (strict `==`). **Observable**: all four verdicts match exactly. **Assertion mechanism**: per-verdict `grep -E ... | awk '{print $NF}'` then string `==`. **Catches**: buffer-reuse aliasing / stale-data / dropped-zero-init bug in patch 1 (would surface as a value mismatch). Stays GREEN unmodified.
+
+##### T-ORACLE-2 — `T_EXPORTER_METRICS_FORMAT` is the patch-2/3 byte-shape oracle (PI-3.4i-A)
+
+**Trigger**: attach + inject one PASS frame; scrape. **Observable**: HTTP 200; `Content-Type: text/plain; version=0.0.4`; exactly 1 HELP + 1 TYPE line; ≥1 sample line matching the packets ERE; `--version` == `xdpmf-exporter 0.10.0`. **Assertion mechanism**: `grep -qE`/`grep -cE` per-line + Content-Type header grep. **Catches**: a mangled status line / Content-Length / header from patch 3's two-step write, or a corrupted line from patch 2's `format_to`. Stays GREEN unmodified.
+
+##### T-ORACLE-3 — `T_EXPORTER_RULE_LABELS` is the patch-4 line-SET oracle (PI-3.4i-B)
+
+**Trigger**: apply per-rule-counter config; inject for `rule_id` 0/5/42; scrape; delete sidecar; re-scrape. **Observable**: exactly 1 HELP + 1 TYPE for `xdpfilter_rule_match_total`; ≥1 labelled sample line; per-`rule_id` action matches the fixture; post-sidecar-delete the same `rule_id`s emit `action="unknown"` (exporter alive). **Assertion mechanism**: per-line `grep -cE`/`grep -qE` + per-`rule_id` `grep -E ... | head -n1` — **order-insensitive** (Phase A grep #5). **Catches**: a dropped/duplicated `rule_match` line from patch 4 (e.g. a broken dedup) — the per-`rule_id` greps still find each line regardless of the new sorted order, but a MISSING or DUPLICATED line would change the count/presence assertions. Stays GREEN under the sorted reorder.
+
+##### T-SUITE — full ctest baseline 68 → 68
+
+All 68 pre-§5.40 ctests stay GREEN (or legitimately SKIP on absent `curl`/`jq`) with ZERO body edits. `ctest --output-on-failure -j4` → 68/68 (modulo SKIPs). No catalog/fixture/CMake change.
+
+##### (OPTIONAL, tester-discretion) byte-diff evidence for the PI split
+
+Tester MAY capture a fixed-input scrape pre-patch (`git stash`) and post-patch and `diff` them to evidence: patches-1/2/3-only diff = empty (byte-stream-identical); patch-4 diff = a pure reordering of `xdpfilter_rule_match_total` lines with identical line-SET (`sort` both → identical). NOT required; the grep oracle is the contract.
+
+#### §6.5 Preserved invariants (§5.40 MVP-3.4i brownfield)
+
+Reviewer's framework point 5 walks this list. Items here are **MUST contracts**; reviewer reports `[INVARIANT-VIOLATED]` per failed check. (`db7e00e` = pre-§5.40 baseline.)
+
+| PI | Property | Check mechanism |
+|---|---|---|
+| **PI-3.4i-A (NEW)** | `/metrics` output is **byte-STREAM-identical** (modulo live counter values) after patches 1+2+3. For a fixed kernel-counter state: header bytes, HELP/TYPE lines, `xdpfilter_packets_total` lines, and the per-rule line CONTENT are byte-for-byte unchanged; only patch 4 may reorder lines. | `T_EXPORTER_METRICS_FORMAT` + `T_EXPORTER_VALUES_MATCH_STATS` GREEN; optional pre/post byte-diff of a patches-1/2/3-only build is empty. |
+| **PI-3.4i-B (NEW)** | `/metrics` output is **line-SET-identical** after patch 4: every `xdpfilter_rule_match_total` line that was emitted pre-patch is still emitted (no add/drop/dup); order MAY change to deterministic ascending-`rule_id`. First-wins dedup on duplicate `rule_id` preserved. | `T_EXPORTER_RULE_LABELS` GREEN (per-line/per-`rule_id`, order-insensitive); `sort`-then-`diff` of pre/post bodies identical. |
+| **PI-7-3.4i-cpp** | `src/lib/config.hpp` byte-identical. **10th consecutive ZERO-diff cycle.** | `git diff db7e00e -- src/lib/config.hpp` empty |
+| **PI-7-3.4i-loader-hpp** | `src/lib/loader.hpp` byte-identical. | `git diff db7e00e -- src/lib/loader.hpp` empty |
+| **PI-7-3.4i-mac-filter-h** | `src/common/mac_filter.h` byte-identical (no new constant). | `git diff db7e00e -- src/common/mac_filter.h` empty |
+| **PI-7-3.4i-logger-hpp (restart-at-1)** | `src/common/logger.hpp` byte-identical (post-§5.39 PI-3.4h-K carve-out; D-3.4i-PI7-LOGGER). No kEventNames/emit change. | `git diff db7e00e -- src/common/logger.hpp` empty |
+| **PI-3.4i-CTEST-BASELINE (NEW)** | 68 pre-§5.40 ctests stay GREEN with ZERO new files + ZERO body edits; baseline 68 → 68. | `git diff db7e00e -- tests/` empty; `ctest -j4` 68/68 (or all pass + legitimate SKIPs). |
+| **PI-31 / PI-31-3.4b PRESERVED** | Exporter touches ONLY `bpf_obj_get` + PERCPU `bpf_map_lookup_elem` — NO update/delete/pin/link/prog_load. Patches do not add any BPF syscall. | `grep -nE 'bpf_map_update_elem\|bpf_map_delete_elem\|bpf_obj_pin\|bpf_link_create\|xdp_attach\|prog_load' src/exporter/` finds only the pre-existing read calls; reviewer grep over `src/exporter/`. |
+| **PI-32 / PI-32-3.4b PRESERVED** | Graceful empty/partial scrape + sidecar never throws; per-iface WARN-and-continue intact. Patches do not alter the failure/skip paths (P-1 keeps the `rc<0 → return 0` branch; P-4 keeps the orphan `action="unknown"` path). | `T_EXPORTER_RULE_LABELS` step (g) + `T_EXPORTER_NO_ATTACHED_IFACE` + `T_EXPORTER_EXITS_6_*` GREEN. |
+| **PI-3.5-1 PRESERVED** | Logger text-mode stderr byte-equivalent (no logger emit touched this slice). | `T_LOG_TEXT_BYTE_EQUIVALENT` GREEN. |
+| **PI-8 / PI-33 PRESERVED** | `CMakeLists.txt` VERSION unchanged; `xdpmf-exporter --version` == `xdpmf-exporter 0.10.0`. | `git diff db7e00e -- CMakeLists.txt` no VERSION edit; `T_EXPORTER_METRICS_FORMAT` (f) GREEN. |
+| **PI-3.5-7 PRESERVED** | No new external build dependency (`<span>`/`<algorithm>` are stdlib; already C++23). | `grep -E 'find_package\|pkg_check_modules\|FetchContent' CMakeLists.txt` — no new entries. |
+
+#### §5.40 verifiable invariants for reviewer (MAY-default per architect-spec §6.5 discipline)
+
+Guidance for reviewer, NOT contracts for impl. **Resolution rule (per D-3.4i-PROSE-VS-INVARIANTS): if any item below conflicts with a §6.5 PI-3.4i-* item, the §6.5 item wins; if impl deviates from an item to satisfy a PI, reviewer disposition is `inline-merge`, not `[UNRELATED-EDIT]`.**
+
+1. (MAY) `grep -nE 'std::span' src/exporter/stats_reader.cpp src/exporter/rule_counters_reader.cpp` returns ≥1 hit each (the `percpu_sum_u64` param); `grep -c '#include <span>'` returns 1 in each.
+2. (MAY) `grep -nE 'std::vector<std::uint8_t>' src/exporter/stats_reader.cpp` returns the hoisted buffer at the function scope of `read_all_attached_with_acc` (above the per-iface loop), NOT inside `percpu_sum_u64`. Same for `rule_counters_reader.cpp` / `read_rule_counters`.
+3. (MAY) `grep -nE 'std::uint8_t\{0\}|, std::uint8_t\{0\}\)' src/exporter/stats_reader.cpp src/exporter/rule_counters_reader.cpp` returns 0 hits (zero-init dropped). Operative-semantic — impl MAY retain a one-time `resize(...)` default-init; the per-call zero-init is what's removed.
+4. (MAY) `grep -nE 'format_to' src/exporter/prom_format.cpp` returns 3 hits; `grep -nE 'out.append\(std::format' src/exporter/prom_format.cpp` returns 0 hits.
+5. (MAY) `grep -nE 'std::back_inserter' src/exporter/prom_format.cpp` returns 3 hits.
+6. (MAY) `grep -nE 'unordered_map' src/exporter/prom_format.cpp` returns 0 hits; `#include <unordered_map>` removed; `#include <algorithm>` present; `#include <map>` retained.
+7. (MAY) `grep -nE 'std::sort' src/exporter/prom_format.cpp` returns ≥1 hit (the per-iface vector sort).
+8. (MAY) `grep -nE 'build_headers' src/exporter/http.cpp` returns ≥2 hits (def + ≥1 call from the `/metrics` path).
+9. (MAY) `grep -cE 'write_all\(conn_fd' src/exporter/http.cpp` increases by exactly 1 vs baseline (the `/metrics` path now does 2 writes; the 5 other paths unchanged) → 8 total (was 7).
+10. (MAY) The Prometheus FMT literals (`xdpfilter_packets_total{{...}}`, `xdpfilter_rule_match_total{{...}}`) and the HTTP `HTTP/1.0 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}` literal are byte-identical pre/post (only the emission mechanism changed). `git diff db7e00e -- src/exporter/prom_format.cpp src/exporter/http.cpp` shows no change to the quoted format strings.
+11. (MAY) `git diff db7e00e -- src/exporter/prom_format.hpp src/exporter/stats_reader.hpp src/exporter/rule_counters_reader.hpp src/exporter/http.hpp src/exporter/main.cpp src/exporter/sidecar_reader.cpp src/exporter/sidecar_reader.hpp src/common/logger.hpp src/common/logger.cpp src/lib/config.hpp src/lib/loader.hpp src/common/mac_filter.h` returns **empty** (UNCHANGED-BUT-AFFECTED contract).
+12. (MAY) `git diff db7e00e -- tests/ CMakeLists.txt` empty (no new ctest, no body edit, no VERSION bump).
+13. (MAY) `git diff db7e00e -- CHANGELOG.md` shows at most 1-2 added lines under `[Unreleased]`. Operative-semantic — reviewer inline-merge on wording.
+14. (MAY) Net LOC across the 4 `.cpp` files ≈ neutral-to-+15. Operative-semantic per Phase 4.4.
+
+#### §7 OOS additions (§5.40 — new fences)
+
+- **Med-4: per-scrape `bpf_obj_get` fd cache across scrapes** (`stats_reader.cpp:193,232` + `rule_counters_reader.cpp:155-178,210`) — ~1.4 ms/scrape, BUT introduces cross-scrape state + an apply/detach race window; invalidation strategy (TTL vs mtime-stat vs inotify vs per-scrape revalidate) is multi-axis. DEFERRED to mvp-3.4j; likely `/mint-hld` first. NEW FENCE.
+- **Low-severity perf findings** (BPF batch API for apply ops; `action_table` identity-map elision; O(N²) dedup in `extract_pass_macs`) — separate slices; the first two touch the datapath/loader hot paths (higher blast radius). NEW FENCES.
+- **Benchmark / timing ctest** — perf numbers are unbenchmarked algorithmic estimates (report residual_uncertainty); a timing-based ctest would flake under `-j4` contention (guard #12 history). NO perf-assertion test this slice. NEW FENCE.
+- **Patch-4 determinism ctest** — the sorted output is deterministic, but asserting it is a "minor bonus" not worth a new test; the grep oracle (order-insensitive) is the contract. NEW FENCE (declined-optional, not just absent).
+- **Factoring out the duplicated `percpu_sum_u64` / `list_iface_dirs` into a shared exporter util** — the two readers stay intentionally duplicated per §5.31 "keep byte-equivalent" guidance; consolidation is a separate refactor slice. NEW FENCE.
+- **`build_response` always-two-step (all 7 paths)** — Q2.A2 rejected; the 5 small-body paths stay single-write for zero regression risk. NEW FENCE.
+- **VERSION bump** — D-3.4i (HG-3.4i-4). NEW FENCE.
+- **Changing `/metrics` output semantics** (new labels/metrics/values) — strictly forbidden; preservation-only. NEW FENCE.
+- **KC-1 / KC-2 mitigation halves, Theme C/D remnants, CI/CD, README/HANDOFF rewrites** — separate slices.
+
+Carry-forward from §5.39 §7 OOS items NOT listed above — UNCHANGED.
+
+#### §5.40 Anti-misdiagnosis institutional learning (per architect-spec §6.6)
+
+No NEW guard from this slice. **Guard catalog stays at 21.** Rationale: this is a clean mechanical perf refactor of well-understood code. Guards applied:
+- **Guard #5 (Phase A code-grep)** — applied; documented in the §5.40 Phase A report. Surfaced TWO corrections the brief missed/imprecise: (i) `build_response` has 6 call-sites not 7 (brief conflated def+sites); (ii) the patch-4 `unordered_map::emplace` **first-wins dedup** must be preserved by the sorted-vector or the line-SET diverges (D-3.4i-4 — load-bearing for PI-3.4i-B). Also independently re-confirmed the 3 oracle tests are order-insensitive (the linchpin that lets patch 4 reorder while staying green) and that `percpu_sum_u64` is `.cpp`-local in both readers (no PI-7 ripple).
+- **Guard #12 (RESOURCE_LOCK / no flaky perf test)** — applied via HG-3.4i-3: no timing-based ctest; the grep oracle is the verification.
+- **Forward-defense note for future cycles touching the exporter scrape path**: when replacing an associative container whose iteration feeds `/metrics` output, ALWAYS check (a) whether iteration order is observable in the output (it is — feeds `rule_match` line order → use the line-SET vs byte-STREAM PI split, not a blanket "byte-identical" claim) AND (b) whether the old container's insert semantics (here `emplace` first-wins) carry a dedup the new container must replicate. Both were the load-bearing subtleties this slice; future container swaps in `prom_format.cpp` MUST re-check both. Cite §5.40 + PI-3.4i-A/B as the precedent for the stream-vs-set PI split on output-preservation slices.
+- **Guards #8/#10/#11/#13/#19** — N/A (no logger emit, no kEventNames catalog, no VERSION bump, no fixture, no logger text-mode prose). **Guards #14-21** — N/A (no map-shape/atomic-swap/bilateral/host-vs-netns/IO-model concerns).
+
+Evidence: `mint/task-brief.md` MVP-3.4i brief (HG-3.4i-1..5 + Q1-Q3 + Phase 2 grep footer); /mint-review performance dimension (`agent-teams-review/runs/mint-review-mint-l2-mac-filter-202605271147/raw/performance-reviewer.md` Major §1 + Medium §1/2/3; `report.md` compound chain lines 131-133); §5.29 exporter origin (stats_reader/http/prom_format module roles); §5.31/§5.34 `xdpfilter_rule_match_total` label emission + `RuleMeta` sidecar shape; §5.32 PI-3.5-1 text-mode byte-equivalence + `/metrics` format contract; §5.35 PI-3.4d-EXPORTER active_idx indirection in `rule_counters_reader.cpp`; §5.39 PI-3.4h-K logger.hpp carve-out (precedent for the PI-7-3.4i-logger-hpp restart-at-1).
