@@ -3,7 +3,7 @@
 #
 # WHY THIS TEST EXISTS (corpus-justified, NOT symmetry):
 #   The HK-9 bug class B20 guards against is an `_a`/`_b` slot swap inside
-#   `inactive_inner_fd` (the single `slot==0→_a` / `slot==1→_b` select site).
+#   `inactive_axis_fd` (the single `slot==0→_a` / `slot==1→_b` select site).
 #   That bug ONLY manifests when the REATTACH path runs with BOTH inactive=1
 #   (→_b) AND inactive=0 (→_a). Every existing apply/atomic-swap test does at
 #   most ONE reattach on a given attachment (fresh apply A + one re-apply B),

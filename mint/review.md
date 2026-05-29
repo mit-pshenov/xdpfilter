@@ -1,48 +1,71 @@
-# Review — MVP-4.7 MAC-axis return (6th exact-HASH axis, src-MAC) (§5.47) (mint triangulation)
+# Review — MVP-4.8 apply_request table-driven inactive-slot populate (B20) (mint triangulation)
 
 ## Verdict
-`pass` (round 1, 0 findings, 0 OOT requiring disposition)
+`pass` (round 1, 0 findings)
 
 ## Triangulation matrix
 
 | Framework point | Findings | Tags |
 |---|---|---|
 | 1. Spec ↔ Code | 0 | — |
-| 2. Spec ↔ Tests | 0 | — (negation controls present) |
-| 3. Code ↔ Tests | 0 | 84 ran, 82 pass + 2 legit skip, 0 fail (serial) |
+| 2. Spec ↔ Tests | 0 | — |
+| 3. Code ↔ Tests | 0 | (no UNEXERCISED-EXPORT — both helpers anon-namespace, called by both branches) |
 | 4. Out-of-Scope Drift | 0 | — |
 | 5. Behaviour preserved (brownfield) | 0 | — |
 
-Baseline (design git-diff) = `480e95b`. Prior shipped slice = `548d402` (§5.46).
+Plus 1 `[OUT-OF-TRIANGULATION]` (cosmetic test comment; does not affect verdict).
 
-## Assess-points (all confirmed independently)
-- **(a) src-MAC**: `.bpf.c:797` `memcpy(mac_key.octets, eth->h_source, 6)` — h_source (NOT h_dest), v1 semantic; eth bounds-checked at :576; read once, VLAN-agnostic (base-eth offset).
-- **(b) IPv4-GATE (PO-accepted)**: MAC lookup (:790-802) + 6-way acc (:809-814) inside `if (inner_proto==ETH_P_IP)` (:617); non-IPv4 → defaults[active] (:844). T_MAC_NON_IP (#84) exercises it. OOS fence reframed DEFERRED-to-IPv6-slice (D-mvp-4.7-Q2-GATE-DEFER, design:15025), not dropped.
-- **(c) reshape**: `xdpmf_allowlist_inner` value `allow_entry`→`__u64` (:95); pin names + rulesets topology UNCHANGED; `kManagedMaps[]`=**30** (counted; no new row); BITVEC_NUM_AXES=6, BV_AXIS_MAC=5; index active*6+5 (:715); `lower_mac_axis` per-MAC aggregate, NO closure (loader.cpp:1392-1416).
-- **(d) MAC parser RE-ADDED** (FINDING-2): `hex_nibble`+`parse_mac` (config.cpp:229-269); 17-char + non-hex/bad-sep→exit9; reject removed; `mac` in whitelist + at-least-one-of; config.hpp diff EMPTY (RuleMatch.mac reused). T_SCHEMA_V2_CUTOVER c2 (malformed→exit9) passes.
-- **(e) PI-mvp-4.3-MAC-DEFERRED retirement** DOCUMENTED verbatim (D-mvp-4.7-MAC-RETURN-SHIFT, design:14962 + §6.5 row). MAC bitmask RESET-on-apply (bulk-clear+insert, inactive half before flip); close_prefixes + copy_rule_counters_forward git-diff UNTOUCHED (guard #23 not extended).
-- **(f) rule_info +mac** (8 keys, mac LAST, :189; HELP "(6-axis)"); the two COUNTER blocks BYTE-UNCHANGED (PI-mvp-4.6-COUNTER-CONTRACT). T_EXPORTER_RULE_LABELS ERE 7→8.
-- **(g) 5 un-SKIP'd tests** assert LIVE MAC verdicts (no still-skip/weaken; only legit env-SKIP residue: jq-missing, runner-rate). T_PASS_MAC_OR_CIDR genuinely RE-AUTHORED OR→AND (4-case truth table; M-only & C-only both DROP). T_SCHEMA_V2_CUTOVER (c) reject→accept. Non-MAC corpus green.
-- **(h) git-diff fences**: config.hpp / loader.hpp / sidecar.cpp EMPTY vs 480e95b. T_SCHEMA_V2_CUTOVER + config_v2_mac edits §5.47-FileList-mandated → NOT [UNRELATED-EDIT]. All source EDITs ⊆ FileList.
+## Point-by-point evidence
 
-## Point-5 brownfield
-No REGRESSION (full corpus green), no UNRELATED-EDIT (31-file `git diff --stat` maps to FileList), no INVARIANT-VIOLATED (PI-mvp-4.7-* + CONTINUES set hold; VERSION 0.15.0, `grep 0.14.0`=ZERO). close_prefixes/copy_rule_counters_forward untouched.
+**1. Spec ↔ Code — CLEAN.**
+- Helpers exist `loader.cpp:1829` (`inactive_axis_fd`) + `:1850` (`populate_all_axes`). Named `inactive_axis_fd` not the brief's `inactive_inner_fd` — architect-blessed flex in D-mvp-4.8-NAME-SHADOW (avoids shadowing the `copy_rule_counters_forward` parameter). NOT drift.
+- **LOAD-BEARING (b) — `_a`/`_b`↔slot mapping**: `loader.cpp:1831` `bpf_map* inner = (slot == 0) ? a : b;` — slot==0→a, else(slot==1)→b. Correct for BOTH cases, single home. ✓
+- **LOAD-BEARING (a) — semantic diff**: both branches' 9-block sequences (mac→dst→src→proto→port→vlan→wildcard→defaults→rules) collapse to one `populate_all_axes` call each (reattach `:2338` slot=inactive; fresh `:2465` slot=0u). Order byte-identical in effect; wildcard arg order `dst,src,proto,port,vlan,mac` matches pre-refactor. ✓
+- **LOAD-BEARING (c) — guard #15**: `copy_rule_counters_forward` EXPLICIT per branch — reattach `:2373` `(old_rc_fd, inactive_rc_fd)`; fresh `:2489` `(rc_a_fd, rc_a_fd)`. `populate_action_table` explicit `:2350`/`:2474`. Neither folded into the RESET-shaped helper. ✓
+- **(d) B25**: config.cpp/config.hpp/apply_internal.hpp diffs comment-only. `config.hpp:60` `schema_version = 1;` is CODE and UNTOUCHED ✓ (parser requires `==2`, overrides the inert default).
+- **(e)**: VERSION `0.15.0`; `kManagedMaps`=30; `git diff 8335e2b -- loader.hpp src/bpf/ src/common/ CMakeLists.txt` EMPTY → UNCHANGED-BUT-AFFECTED byte-identical. ✓
+
+**2. Spec ↔ Tests — CLEAN.**
+- NEW-target=0 but justifies ONE reattach-twice canary (corpus gap = no existing test exercises reattach inactive=0→`_a`). `T_REATTACH_TWICE_SLOT_CANARY.sh` genuinely exercises it: A(fresh)→B(reattach#1, inactive=1→`_b`)→C(reattach#2, inactive=0→`_a`), ping-pong assertion `:166`, load-bearing verdict `MAC_C pass / MAC_B drop` `:174-175`. Targets outcome, not code-shape → no CIRCULAR-TEST.
+- Negation control `:181` MAC_DENY MUST DROP. Present.
+- Regression corpus maps to TestStrategy; all present.
+
+**3. Code ↔ Tests — CLEAN.** Reviewer rebuilt build-asan (GREEN) + ran 8/8 load-bearing PASS. No UNEXERCISED-EXPORT (both helpers anon-namespace, called from both branches; no new public API).
+
+**4. Out-of-Scope Drift — CLEAN.** No fold of copy-forward/action_table, no parameter rename, no `config.hpp:60` change, no `.bpf.c`/map/pin/schema/axis/VERSION change. No A2 constexpr-loop. No creep.
+
+**5. Behaviour preserved — CLEAN.**
+- PI-mvp-4.8-FD-SELECT/BEHAVIOR-EQUIV/ACTION-TABLE/SWAP-SEMANTICS/SINGLE-TU/CATALOG/VERSION/B25-COMMENT-ONLY + PI-mvp-4.3-COUNTER-PRESERVE — all verified by reading + diff + green suite.
+- UNCHANGED-BUT-AFFECTED EMPTY diff → no UNRELATED-EDIT.
+- REGRESSION floor: T_EXPORTER_RULE_LABELS (1 fail in tester's full run) re-verified standalone → PASS (4.17s); GREEN in MVP-4.7 baseline; refactor doesn't touch exporter scrape path → confirmed transient flake, NOT a regression.
 
 ## Test execution
-`/tmp/mint-review-tests-1780064939.log` — ran SERIALLY with root (avoids B16 -j4 flake):
 ```
-100% tests passed, 0 tests failed out of 84
-Total Test time (real) = 579.92 sec
-Did not run: #5 T_DROP_MALFORMED (Skipped, legit runt-pad), #37 T_ANSIBLE_PLAYBOOK_SYNTAX (Skipped, ansible absent)
+1/8 T_REATTACH_TWICE_SLOT_CANARY ..... Passed 7.58 sec
+2/8 T_APPLY_ATOMIC_SWAP_NO_DROP ...... Passed 7.17 sec
+3/8 T_CIDR_ATOMIC_SWAP_NO_DROP ....... Passed 7.16 sec
+4/8 T_RULE_COUNTER_SURVIVES_APPLY .... Passed 3.36 sec
+5/8 T_RULES_ATOMIC_SWAP_NO_DROP ...... Passed 8.01 sec
+6/8 T_RULE_COUNTERS_ATOMIC_SWAP ...... Passed 3.51 sec
+7/8 T_BITVEC_ORACLE_AGREEMENT ........ Passed 9.43 sec
+8/8 T_AND6_ORACLE_AGREEMENT .......... Passed 7.75 sec
+100% tests passed, 0 tests failed out of 8
+--- standalone flake re-verify ---
+1/1 T_EXPORTER_RULE_LABELS ........... Passed 4.17 sec
 ```
-T_BUILD (88.6s) + T_SANITIZER_BUILD (180.5s) PASS serially — NO flake (the -j4 timeouts in the tester's parallel run are backlog-B16 contention, not regressions). All MAC tests + T_AND6_ORACLE_AGREEMENT (#83) + T_MAC_NON_IP (#84) green.
-
-## UNEXERCISED-EXPORT
-None — new helpers (lower_mac_axis, parse_mac, populate_inner_slot reshape) anon-namespace/single-TU (guard #9), exercised via integration ctests; no public-API symbol added.
+Build: GREEN, no new warnings. Logs: /tmp/mint-review-tests-1780075335.log
+Tester full run (Phase B): 82 pass / 1 fail (adjudicated flake) / 2 skip of 85 → mint/test-run.log
 
 ## Out-of-triangulation findings
-None requiring disposition. (Informational: tester added MAC fixtures beyond the FileList NEW enumeration — within the §5.47 tester-fixture grant, NOT a finding.)
 
-— mint-dev-reviewer (round 1)
+### [OUT-OF-TRIANGULATION] Canary test header comment uses brief's old helper name
+**Location**: `tests/T_REATTACH_TWICE_SLOT_CANARY.sh:6`
+**Evidence**: comment says `inactive_inner_fd` but impl named the helper `inactive_axis_fd` (D-mvp-4.8-NAME-SHADOW). Doc-comment drift; zero behavioral impact.
+**Recommended disposition**: `inline-merge` (one-word comment fix).
 
-**FINAL: pass on round 1, 0 findings.** Effective tally 82/84 pass + 2 legit skip, 0 genuine fail (serial). 6-axis AND model (mac·dst·src·proto·port·vlan) live, observable, IPv4-gate boundary test-pinned.
+No rework assignments — verdict is `pass`.
+
+---
+
+### Post-review sweep — round 1
+- [OUT-OF-TRIANGULATION] canary header comment → `tests/T_REATTACH_TWICE_SLOT_CANARY.sh:6` edited → `inactive_inner_fd` renamed to `inactive_axis_fd` in the WHY-comment (matches the real symbol; rides Phase 6 final commit).
