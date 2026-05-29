@@ -1,0 +1,74 @@
+# config_valid_and5.yaml — §5.45 MVP-4.5 v2 5-axis AND-compose fixture.
+#
+# Used by §6.67 (T_VLAN_AND_COMPOSE), §6.68 (T_VLAN_UNTAGGED_WILDCARD), and
+# §6.69 (T_AND5_ORACLE_AGREEMENT).
+#
+# schema_version: 2 (ADDITIVE-within-v2 — `vlan` is a NEW OPTIONAL match key
+# per HG-mvp-4.5; existing dst/src/proto/port v2 configs parse unchanged).
+# Match grammar is {dst_cidr, src_cidr, protocol, dst_port, vlan} (>=1
+# required). `vlan`: single integer VID in [0,4095] (omitted ⇒ vlan-wildcard;
+# lists/ranges are OOS per D-mvp-4.5-VLAN-GRAMMAR). `protocol`: name
+# {tcp,udp,icmp} or numeric [0,255]. `dst_port`: integer (single) or "lo-hi"
+# string (inclusive range), [0,65535], lo<=hi. Each rule constrains a
+# different subset of the five axes.
+#
+# Rule layout (bit position == id; first-match by lowest id, ffsll):
+#   id 0 : dst 10.1.0.0/16 AND src 192.168.5.0/24 AND tcp AND port 1000-2000
+#          AND vlan 100                        pass   (FULL 5-axis rule)
+#   id 1 : vlan 200 AND udp                    pass   (vlan + proto)
+#   id 2 : vlan 300                            pass   (vlan-only; all other axes wildcard)
+#   id 3 : dst 10.5.0.0/16 AND vlan 100        pass   (dst + vlan)
+#   id 4 : dst 10.5.0.0/16                     pass   (dst-only; vlan-wildcard — id3's untagged partner)
+#   id 5 : dst_port 443                        pass   (port-only; vlan-wildcard)
+#   default_action: drop
+#
+# The 5-axis AND proof (§6.69): a packet matches id0 only when ALL five axes
+# are satisfied. Re-tagging the id0 5-tuple with a DIFFERENT vlan clears id0's
+# bit from the accumulator (vlan_mask=0 for the absent key) → the packet
+# routes elsewhere or to defaults — proving the vlan axis intersects (AND),
+# not unions.
+#
+# The untagged-frame proof (§6.68): an UNTAGGED frame has has_vlan=0 ⇒
+# vlan_mask=0 ⇒ EVERY vlan-constrained rule's bit is cleared. The id3 (dst +
+# vlan) / id4 (dst-only) pair share dst 10.5.0.0/16: a tagged-vlan-100 frame
+# on that dst hits id3 (lower id wins the tie); the SAME frame UNTAGGED hits
+# id4 (id3's vlan bit cleared, id4 survives as vlan-wildcard). This is the
+# anti-vacuity differential — a stripped tag would also route to id4, so the
+# tagged-vs-untagged outcome differs iff the tag reached XDP (guard #22).
+#
+# IMPORTANT: tests/bitvec/bitvec_oracle_prod.py transcribes these rules BY HAND
+# (table RULES_AND5). Any edit here MUST be mirrored there — data-independence
+# is intentional (divergence fails the §6.69 agreement test loudly).
+schema_version: 2
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      dst_cidr: "10.1.0.0/16"
+      src_cidr: "192.168.5.0/24"
+      protocol: tcp
+      dst_port: "1000-2000"
+      vlan: 100
+  - id: 1
+    action: pass
+    match:
+      vlan: 200
+      protocol: udp
+  - id: 2
+    action: pass
+    match:
+      vlan: 300
+  - id: 3
+    action: pass
+    match:
+      dst_cidr: "10.5.0.0/16"
+      vlan: 100
+  - id: 4
+    action: pass
+    match:
+      dst_cidr: "10.5.0.0/16"
+  - id: 5
+    action: pass
+    match:
+      dst_port: 443

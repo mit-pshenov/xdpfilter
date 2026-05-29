@@ -261,6 +261,36 @@ struct {
 };
 
 /*
+ * §5.45 (MVP-4.5) D-mvp-4.5-Q1: NEW vlan axis — an ARRAY_OF_MAPS[2] of HASH
+ * inners (vlan_bitmask_a/_b + vlan_rulesets) byte-mirroring the §5.44 proto
+ * axis (only key semantics differ: __u32 outer VID [0,4095] → __u64
+ * rule-bitmask). Exact-match keyed lookup, NO prefix-closure. A rule
+ * constraining `vlan=v` ORs its bit into vlan_bitmask[active][v]; the outer
+ * selects the active inner via the SHARED active_idx. The datapath ORs the
+ * looked-up mask into the vlan-axis survivors before the cross-axis AND, but
+ * ONLY when has_vlan (the frame carried an outer tag).
+ */
+struct xdpmf_vlan_inner {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u32);
+    __type(value, __u64);
+    __uint(max_entries, XDPMF_VLAN_HASH_MAX);
+};
+
+struct xdpmf_vlan_inner vlan_bitmask_a SEC(".maps");
+struct xdpmf_vlan_inner vlan_bitmask_b SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
+    __uint(max_entries, XDPMF_RULESET_COUNT);
+    __uint(key_size, sizeof(__u32));
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+    __array(values, struct xdpmf_vlan_inner);
+} vlan_rulesets SEC(".maps") = {
+    .values = { &vlan_bitmask_a, &vlan_bitmask_b },
+};
+
+/*
  * active_idx: single-slot ARRAY whose only entry is the index in {0,1}
  * naming the currently-live inner slot. Userspace atomic swap is a single
  * BPF_ANY update on key=0. §5.27: shared across MAC AND CIDR outers.
@@ -497,10 +527,18 @@ static __always_inline __u64 port_scan(void *port_inner, __u32 dport)
  * (HG-mvp-4.1-2; D-mvp-4.1-MALFORMED). The caller MUST still bounds-check
  * sizeof(struct iphdr) at *l3hdr before dereferencing (this helper validates
  * only the VLAN tags it consumed, not the L3 header). */
-static __always_inline __u16 l3_after_vlan(void *eth, void *data_end, void **l3hdr)
+static __always_inline __u16 l3_after_vlan(void *eth, void *data_end, void **l3hdr,
+                                           __u16 *out_vlan_id)
 {
     void *cursor = eth + sizeof(struct ethhdr);
     __u16 proto  = ((struct ethhdr *)eth)->h_proto;
+
+    /* §5.45 D-mvp-4.5-Q2: capture the OUTER (first) tag's VID during the
+     * existing walk. Sentinel until a tag is consumed; an untagged or
+     * truncated-outer-tag frame leaves it at XDPMF_VLAN_NONE so the datapath
+     * derives has_vlan=0. VID 0 is a valid distinct key, hence a sentinel
+     * outside [0,4095] rather than 0. */
+    *out_vlan_id = XDPMF_VLAN_NONE;
 
 #pragma unroll
     for (int i = 0; i < XDPMF_VLAN_MAX_DEPTH; i++) {
@@ -511,6 +549,12 @@ static __always_inline __u16 l3_after_vlan(void *eth, void *data_end, void **l3h
             break;
         }
         struct vlan_hdr *vlan = cursor;
+        /* Outer tag only (i==0): low 12 bits of the TCI are the VID; the high
+         * 4 bits (PCP[3]+DEI[1]) are masked off (NOT matched — §7 OOS). Inner
+         * tags (i>=1) do NOT overwrite the captured outer VID. */
+        if (i == 0) {
+            *out_vlan_id = bpf_ntohs(vlan->h_vlan_TCI) & 0x0FFF;
+        }
         proto  = vlan->h_vlan_encapsulated_proto;
         cursor += sizeof(struct vlan_hdr);
     }
@@ -562,7 +606,12 @@ int mac_filter_prog(struct xdp_md *ctx)
      * L3 axes. inner_proto / l3hdr come from the post-VLAN cursor; on an
      * untagged frame this is byte-equivalent to the prior `eth + 1` path. */
     void *l3hdr;
-    __u16 inner_proto = l3_after_vlan(eth, data_end, &l3hdr);
+    __u16 vlan_id = XDPMF_VLAN_NONE;
+    __u16 inner_proto = l3_after_vlan(eth, data_end, &l3hdr, &vlan_id);
+    /* §5.45 (MVP-4.5) D-mvp-4.5-Q2: an untagged/truncated-tag frame leaves
+     * vlan_id at the sentinel → has_vlan=0 → vlan axis contributes 0 (only
+     * vlan-wildcard rules survive). Parallels the §5.44 has_port semantic. */
+    int has_vlan = (vlan_id != XDPMF_VLAN_NONE);
     if (inner_proto == bpf_htons(ETH_P_IP)) {
         /* Verifier-required IPv4 header bounds check before daddr/saddr deref
          * — applied at the post-VLAN L3 offset (the only MALFORMED path). */
@@ -633,6 +682,11 @@ int mac_filter_prog(struct xdp_md *ctx)
             bump_stat(STAT_DROP_DENY);
             return XDP_DROP;
         }
+        void *vlan_inner = bpf_map_lookup_elem(&vlan_rulesets, &active);
+        if (unlikely(!vlan_inner)) {
+            bump_stat(STAT_DROP_DENY);
+            return XDP_DROP;
+        }
 
         /* §5.43 D-mvp-4.3-Q2 wildcard halves: wildcard[active*BITVEC_NUM_AXES
          * + axis]. A rule unconstrained on an axis lives here (and is ABSENT
@@ -642,10 +696,12 @@ int mac_filter_prog(struct xdp_md *ctx)
         __u64 wc_src   = 0;
         __u64 wc_proto = 0;
         __u64 wc_port  = 0;
+        __u64 wc_vlan  = 0;
         __u32 wc_dst_key   = active * BITVEC_NUM_AXES + BV_AXIS_DST;
         __u32 wc_src_key   = active * BITVEC_NUM_AXES + BV_AXIS_SRC;
         __u32 wc_proto_key = active * BITVEC_NUM_AXES + BV_AXIS_PROTO;
         __u32 wc_port_key  = active * BITVEC_NUM_AXES + BV_AXIS_PORT;
+        __u32 wc_vlan_key  = active * BITVEC_NUM_AXES + BV_AXIS_VLAN;
         __u64 *wc_dst_p = bpf_map_lookup_elem(&wildcard, &wc_dst_key);
         if (wc_dst_p) {
             wc_dst = *wc_dst_p;
@@ -661,6 +717,10 @@ int mac_filter_prog(struct xdp_md *ctx)
         __u64 *wc_port_p = bpf_map_lookup_elem(&wildcard, &wc_port_key);
         if (wc_port_p) {
             wc_port = *wc_port_p;
+        }
+        __u64 *wc_vlan_p = bpf_map_lookup_elem(&wildcard, &wc_vlan_key);
+        if (wc_vlan_p) {
+            wc_vlan = *wc_vlan_p;
         }
 
         /* /32 host-route LPM keys (network byte order, matches LPM_TRIE key
@@ -699,14 +759,29 @@ int mac_filter_prog(struct xdp_md *ctx)
         }
         __u64 port_mask = has_port ? port_scan(port_inner, dport) : 0;
 
-        /* The OR→AND pivot (PI-mvp-4.3-AND / PI-mvp-4.4-AND4): per axis, OR the
-         * axis survivors with the axis wildcard half, then INTERSECT across all
-         * four axes. A rule survives iff EVERY axis it constrains matches;
-         * unconstrained axes contribute the always-true wildcard half. */
+        /* §5.45 vlan axis: exact-HASH lookup keyed by the captured outer VID
+         * (NO closure), ONLY when the frame carried a tag (has_vlan). An
+         * untagged frame contributes 0 so only vlan-wildcard rules survive the
+         * vlan axis (HG-mvp-4.5-4; parallels the proto/port has_port logic). */
+        __u32 vlan_key = (__u32)vlan_id;
+        __u64 vlan_mask = 0;
+        if (has_vlan) {
+            __u64 *vm = bpf_map_lookup_elem(vlan_inner, &vlan_key);
+            if (vm) {
+                vlan_mask = *vm;
+            }
+        }
+
+        /* The OR→AND pivot (PI-mvp-4.3-AND / PI-mvp-4.4-AND4 / PI-mvp-4.5-AND5):
+         * per axis, OR the axis survivors with the axis wildcard half, then
+         * INTERSECT across all five axes. A rule survives iff EVERY axis it
+         * constrains matches; unconstrained axes contribute the always-true
+         * wildcard half. */
         __u64 acc = (dmask      | wc_dst)   &
                     (smask      | wc_src)   &
                     (proto_mask | wc_proto) &
-                    (port_mask  | wc_port);
+                    (port_mask  | wc_port)  &
+                    (vlan_mask  | wc_vlan);
         if (acc != 0) {
             /* HG-mvp-4.3-4 first-match-by-id: the lowest set bit IS the lowest
              * matching rule id (bit position == id), so ffsll picks it for

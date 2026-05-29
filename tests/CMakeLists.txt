@@ -1150,3 +1150,46 @@ foreach(T IN ITEMS
         SKIP_RETURN_CODE 77
     )
 endforeach()
+
+# ── §5.45 MVP-4.5 bit-vector axis 5: vlan (exact HASH, APN selector) ──────
+# Three NEW ctests (§6.67..§6.69) for the 5-axis AND-compose datapath. They
+# reuse the production O(N) reference classifier tests/bitvec/bitvec_oracle_prod.py
+# (now tri-table: --ruleset and5 selects the 5-axis table transcribed from
+# config_valid_and5.yaml; the default 2-axis and the --ruleset and4 paths for
+# §6.61/§6.66 are unchanged) and the existing L4 injector
+# tests/inject/inject_l4.py (--proto/--dport/--vlan). All three touch the veth
+# fixture (apply attaches + per-vector inject) → RESOURCE_LOCK xdp_fixture
+# (guard #12). SKIP_RETURN_CODE 77 for the passwordless-sudo / jq preconditions.
+#
+# GUARD #22 (load-bearing): every tagged-frame test disables NIC VLAN offload
+# (ethtool -K rxvlan/txvlan off) in setup + carries an anti-vacuity differential
+# (tag-captured vs tag-stripped outcomes differ), else the vlan assertion is
+# vacuous (D-mvp-4.5-OFFLOAD, §5.41 precedent).
+#
+# T_VLAN_AND_COMPOSE       (§6.67): vlan exact-HASH AND-intersection; vlan-miss
+#                                   negation + tagged-vs-untagged anti-vacuity.
+# T_VLAN_UNTAGGED_WILDCARD (§6.68): untagged ⇒ has_vlan=0 ⇒ only vlan-wildcard
+#                                   rules survive; tagged companion anti-vacuity.
+# T_AND5_ORACLE_AGREEMENT  (§6.69): table-driven 5-axis datapath-vs-oracle.
+set(TEST_ENV_AND5
+    ${TEST_ENV}
+    "AND_ORACLE_PROD=${CMAKE_SOURCE_DIR}/tests/bitvec/bitvec_oracle_prod.py"
+    "INJECT_L4=${CMAKE_SOURCE_DIR}/tests/inject/inject_l4.py"
+)
+foreach(T IN ITEMS
+    T_VLAN_AND_COMPOSE
+    T_VLAN_UNTAGGED_WILDCARD
+    T_AND5_ORACLE_AGREEMENT
+)
+    add_test(
+        NAME ${T}
+        COMMAND bash ${TEST_DIR}/${T}.sh
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    set_tests_properties(${T} PROPERTIES
+        ENVIRONMENT "${TEST_ENV_AND5}"
+        RESOURCE_LOCK xdp_fixture
+        TIMEOUT 120
+        SKIP_RETURN_CODE 77
+    )
+endforeach()

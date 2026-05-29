@@ -147,6 +147,11 @@ namespace {
                             ? std::to_string(pr.lo)
                             : std::format("{}-{}", pr.lo, pr.hi));
         }
+        /* §5.45 (MVP-4.5) PI-mvp-4.5-SIDECAR: emit the vlan axis as the numeric
+         * outer VID string (matching the single-integer config grammar). */
+        if (r.match.vlan.has_value()) {
+            append_kind("vlan", std::to_string(*r.match.vlan));
+        }
         const std::string match = std::format("{{{}}}", parts);
 
         body.append(std::format(

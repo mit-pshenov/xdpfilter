@@ -136,11 +136,34 @@ enum mac_filter_stat {
  * [0,255] (D-mvp-4.4-Q1). */
 #define XDPMF_PROTO_HASH_MAX 256
 
-#define BITVEC_NUM_AXES 4
+/* §5.45 (MVP-4.5) D-mvp-4.5-Q1: ADDITIVE +1 bit-vector axis — vlan (outer
+ * 802.1Q tag VID, exact-match HASH) — byte-mirroring the §5.44 proto axis.
+ * BITVEC_NUM_AXES 4→5 (the ONE foreseen value flip) auto-grows the `wildcard`
+ * ARRAY's max_entries 8→10 via the XDPMF_RULESET_COUNT * BITVEC_NUM_AXES
+ * formula (no literal edit in the .bpf.c decl). New axis index BV_AXIS_VLAN=4.
+ *
+ *   vlan: ARRAY_OF_MAPS[2] of HASH inners (vlan_bitmask_a/_b + vlan_rulesets),
+ *         key __u32 outer VID [0,4095], value __u64 rule-bitmask, NO closure. */
+#define XDPMF_MAP_VLAN_RULESETS_OUTER_NAME "vlan_rulesets"  /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] of HASH fds */
+#define XDPMF_MAP_VLAN_INNER_A_NAME        "vlan_bitmask_a" /* inner slot 0, HASH of __u64 */
+#define XDPMF_MAP_VLAN_INNER_B_NAME        "vlan_bitmask_b" /* inner slot 1, HASH of __u64 */
+
+/* Vlan HASH inner capacity — full 12-bit VID key space [0,4095]
+ * (D-mvp-4.5-Q1); occupancy bounded far lower by rule count. */
+#define XDPMF_VLAN_HASH_MAX 4096
+
+/* Capture sentinel: out of the valid VID range [0,4095] — l3_after_vlan writes
+ * it to *out_vlan_id on an untagged/truncated frame; the datapath derives
+ * has_vlan = (vlan_id != XDPMF_VLAN_NONE). VID 0 (priority-tagged) is a VALID
+ * distinct key, so 0 cannot mean "no tag" (D-mvp-4.5-Q2). */
+#define XDPMF_VLAN_NONE 0xFFFF
+
+#define BITVEC_NUM_AXES 5
 #define BV_AXIS_DST     0
 #define BV_AXIS_SRC     1
 #define BV_AXIS_PROTO   2
 #define BV_AXIS_PORT    3
+#define BV_AXIS_VLAN    4
 
 /* §5.44 (MVP-4.4) D-mvp-4.4-Q2: production-owned port-range slot — analog of
  * the §5.42 spike's `bv_port_range`. One slot per port-constrained rule; a

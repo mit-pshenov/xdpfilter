@@ -184,6 +184,15 @@ constexpr ManagedMapEntry kManagedMaps[] = {
     { &SkelMapsT::port_ranges_a,    XDPMF_MAP_PORT_INNER_A_NAME,        false },
     { &SkelMapsT::port_ranges_b,    XDPMF_MAP_PORT_INNER_B_NAME,        false },
     { &SkelMapsT::port_rulesets,    XDPMF_MAP_PORT_RULESETS_OUTER_NAME, false },
+    /* §5.45 (MVP-4.5) D-mvp-4.5-Q1 net +3 (27 → 30): the NEW vlan axis
+     * ARRAY_OF_MAPS trio (vlan_bitmask_a/_b + vlan_rulesets, HASH inners),
+     * byte-mirroring the §5.44 proto axis topology. The `wildcard` ARRAY is
+     * UNCHANGED here (its max_entries grows 8→10 via the BITVEC_NUM_AXES macro,
+     * not a new row). All three call-site loops (clear, pin, reuse) walk this
+     * single table — HK-9 again. */
+    { &SkelMapsT::vlan_bitmask_a,   XDPMF_MAP_VLAN_INNER_A_NAME,        false },
+    { &SkelMapsT::vlan_bitmask_b,   XDPMF_MAP_VLAN_INNER_B_NAME,        false },
+    { &SkelMapsT::vlan_rulesets,    XDPMF_MAP_VLAN_RULESETS_OUTER_NAME, false },
     { &SkelMapsT::active_idx,       XDPMF_MAP_ACTIVE_IDX_NAME,          false },
     { &SkelMapsT::defaults,         XDPMF_MAP_DEFAULTS_NAME,            false },
     { &SkelMapsT::stats,            XDPMF_MAP_STATS_NAME,               false },
@@ -1342,6 +1351,45 @@ struct PortLowering {
     return out;
 }
 
+/* §5.45 (MVP-4.5) per-vlan-axis lowering result — byte-mirrors ProtoLowering:
+ * one aggregate {vlan_id,bitmask} entry per distinct outer VID + the wildcard
+ * mask (rules NOT constraining vlan). NO prefix-closure (exact-match). */
+struct VlanLowering {
+    std::vector<std::pair<std::uint32_t, std::uint64_t>> entries;
+    std::uint64_t                                        wildcard = 0u;
+};
+
+/* Lower the vlan axis: a rule with `vlan` set ORs its bit into that VID's
+ * aggregate key (widening the config u16 → the BPF __u32 HASH key,
+ * D-mvp-4.5-VLAN-VALUE-WIDTH); a rule WITHOUT `vlan` contributes its bit to the
+ * vlan wildcard (FI-2 mutual exclusion). id range already validated in
+ * config.cpp (bit shift safe). */
+[[nodiscard]] VlanLowering lower_vlan_axis(const Config& c)
+{
+    VlanLowering out;
+    for (const Rule& r : c.rules) {
+        const std::uint64_t bit = std::uint64_t{1} << r.id;
+        if (r.match.vlan.has_value()) {
+            const std::uint32_t vid = *r.match.vlan;
+            // Aggregate rules sharing the same exact VID into one key.
+            bool merged = false;
+            for (std::pair<std::uint32_t, std::uint64_t>& e : out.entries) {
+                if (e.first == vid) {
+                    e.second |= bit;
+                    merged = true;
+                    break;
+                }
+            }
+            if (!merged) {
+                out.entries.emplace_back(vid, bit);
+            }
+        } else {
+            out.wildcard |= bit;
+        }
+    }
+    return out;
+}
+
 /* §5.26 Q2 inner-slot population — §5.31 PI-13-3.4b: writes full
  * `struct allow_entry` per insert (offset 0 = present=1, offset 4 = rule_id
  * from operator's YAML `id:`). Bulk-clear-then-insert preserved. Caller
@@ -1481,6 +1529,49 @@ void populate_proto_inner_slot(
     }
 }
 
+/* §5.45 (MVP-4.5) D-mvp-4.5-Q1: populate one vlan-axis HASH inner
+ * (vlan_bitmask_<a|b>) — key __u32 outer VID, value __u64 aggregated
+ * rule-bitmask. IDENTICAL shape to populate_proto_inner_slot (bulk-clear-then-
+ * insert; HASH key __u32). NO prefix-closure (exact-match — D-mvp-4.5-NO-
+ * CLOSURE). RESET-on-apply: caller passes the INACTIVE inner fd and writes
+ * BEFORE the active_idx flip. */
+void populate_vlan_inner_slot(
+    int inner_fd, const std::vector<std::pair<std::uint32_t, std::uint64_t>>& entries)
+{
+    std::uint32_t prev = 0;
+    std::uint32_t cur  = 0;
+    bool          have_prev = false;
+    while (true) {
+        const int rc = bpf_map_get_next_key(inner_fd,
+                                            have_prev ? &prev : nullptr,
+                                            &cur);
+        if (rc != 0) {
+            if (-rc == ENOENT) break;
+            throw_loader(classify(rc, LoaderError::LoadFailed),
+                         std::format("bpf_map_get_next_key(vlan_inner): {}",
+                                     std::strerror(-rc)));
+        }
+        const int drc = bpf_map_delete_elem(inner_fd, &cur);
+        if (drc != 0 && -drc != ENOENT) {
+            throw_loader(classify(drc, LoaderError::LoadFailed),
+                         std::format("bpf_map_delete_elem(vlan_inner): {}",
+                                     std::strerror(-drc)));
+        }
+        prev      = cur;
+        have_prev = true;
+    }
+    for (const std::pair<std::uint32_t, std::uint64_t>& e : entries) {
+        const std::uint32_t key  = e.first;
+        const std::uint64_t mask = e.second;
+        const int rc = bpf_map_update_elem(inner_fd, &key, &mask, BPF_ANY);
+        if (rc < 0) {
+            throw_loader(classify(rc, LoaderError::LoadFailed),
+                         std::format("bpf_map_update_elem(vlan_inner[{}]): {}",
+                                     key, std::strerror(-rc)));
+        }
+    }
+}
+
 /* §5.44 (MVP-4.4) D-mvp-4.4-Q2 + D-mvp-4.4-PORT-ARRAY-CLEAR: populate one
  * dst_port-axis ARRAY inner (port_ranges_<a|b>). BPF ARRAY maps have no
  * delete, so clear by overwriting ALL XDPMF_ALLOWLIST_MAX slots with the
@@ -1516,15 +1607,17 @@ void populate_port_inner_slot(int inner_fd, const std::vector<xdpmf_port_range>&
     }
 }
 
-/* §5.43 (MVP-4.3) D-mvp-4.3-Q2 + §5.44 (MVP-4.4) D-mvp-4.4-Q4: write the
- * INACTIVE half of the single combined `wildcard` ARRAY before the active_idx
- * flip — all FOUR axis slots [inactive*BITVEC_NUM_AXES + {DST,SRC,PROTO,PORT}].
- * The RESET-write (no copy-forward) parallels populate_bitvec_inner_slot; the
- * single active_idx u32 store commits the wildcard swap together with the
- * dst/src/proto/port/defaults/rules/rule_counters swap. */
+/* §5.43 (MVP-4.3) D-mvp-4.3-Q2 + §5.44 (MVP-4.4) D-mvp-4.4-Q4 + §5.45 (MVP-4.5)
+ * D-mvp-4.5-Q3: write the INACTIVE half of the single combined `wildcard` ARRAY
+ * before the active_idx flip — all FIVE axis slots [inactive*BITVEC_NUM_AXES +
+ * {DST,SRC,PROTO,PORT,VLAN}]. The RESET-write (no copy-forward) parallels
+ * populate_bitvec_inner_slot; the single active_idx u32 store commits the
+ * wildcard swap together with the dst/src/proto/port/vlan/defaults/rules/
+ * rule_counters swap. */
 void write_wildcard_slots(int wildcard_fd, std::uint32_t inactive,
                           std::uint64_t wc_dst, std::uint64_t wc_src,
-                          std::uint64_t wc_proto, std::uint64_t wc_port)
+                          std::uint64_t wc_proto, std::uint64_t wc_port,
+                          std::uint64_t wc_vlan)
 {
     const struct {
         std::uint32_t axis;
@@ -1535,6 +1628,7 @@ void write_wildcard_slots(int wildcard_fd, std::uint32_t inactive,
         { BV_AXIS_SRC,   wc_src,   "src"   },
         { BV_AXIS_PROTO, wc_proto, "proto" },
         { BV_AXIS_PORT,  wc_port,  "port"  },
+        { BV_AXIS_VLAN,  wc_vlan,  "vlan"  },
     };
     for (const auto& s : slots) {
         const std::uint32_t key = inactive * BITVEC_NUM_AXES + s.axis;
@@ -1933,6 +2027,9 @@ std::uint32_t apply_request(const ApplyRequest& req)
     // range) alongside the §5.43 LPM axes. NO closure (D-mvp-4.4-NO-CLOSURE).
     const ProtoLowering        proto_low   = lower_proto_axis(req.config);
     const PortLowering         port_low    = lower_port_axis(req.config);
+    // §5.45 (MVP-4.5): lower the NEW vlan axis (exact-HASH outer VID) alongside
+    // the §5.43/§5.44 axes. NO closure (D-mvp-4.5-NO-CLOSURE).
+    const VlanLowering         vlan_low    = lower_vlan_axis(req.config);
     const DefaultAction default_action     = req.config.default_action;
 
     if (deduped.size() > XDPMF_ALLOWLIST_MAX) {
@@ -2203,6 +2300,20 @@ std::uint32_t apply_request(const ApplyRequest& req)
             }
             populate_port_inner_slot(inactive_port_fd, port_low.ranges);
         }
+        // §5.45 (MVP-4.5): populate the INACTIVE vlan (HASH) inner BEFORE the
+        // active_idx flip so the single u32 store commits all FIVE axes' new
+        // ruleset atomically (RESET-on-apply).
+        {
+            bpf_map* inactive_vlan_inner = (inactive == 0)
+                                               ? skel->maps.vlan_bitmask_a
+                                               : skel->maps.vlan_bitmask_b;
+            const int inactive_vlan_fd = bpf_map__fd(inactive_vlan_inner);
+            if (inactive_vlan_fd < 0) {
+                throw_loader(LoaderError::LoadFailed,
+                             "inactive vlan inner fd unavailable (reattach)");
+            }
+            populate_vlan_inner_slot(inactive_vlan_fd, vlan_low.entries);
+        }
         {
             const int wildcard_fd = bpf_map__fd(skel->maps.wildcard);
             if (wildcard_fd < 0) {
@@ -2211,7 +2322,8 @@ std::uint32_t apply_request(const ApplyRequest& req)
             }
             write_wildcard_slots(wildcard_fd, inactive,
                                  dst_low.wildcard, src_low.wildcard,
-                                 proto_low.wildcard, port_low.wildcard);
+                                 proto_low.wildcard, port_low.wildcard,
+                                 vlan_low.wildcard);
         }
         {
             const int defaults_fd = bpf_map__fd(skel->maps.defaults);
@@ -2406,13 +2518,25 @@ std::uint32_t apply_request(const ApplyRequest& req)
         }
         populate_port_inner_slot(port_inner_fd, port_low.ranges);
     }
+    // §5.45 (MVP-4.5): fresh-attach populates slot 0 of the vlan (HASH) axis
+    // alongside the dst/src/proto/port slot-0 inners; the active_idx u32 write
+    // below (= 0) is the atomic commit for ALL five axes.
+    {
+        bpf_map* vlan_inner_map = skel->maps.vlan_bitmask_a;
+        const int vlan_inner_fd = bpf_map__fd(vlan_inner_map);
+        if (vlan_inner_fd < 0) {
+            throw_loader(LoaderError::LoadFailed, "vlan inner-map fd unavailable");
+        }
+        populate_vlan_inner_slot(vlan_inner_fd, vlan_low.entries);
+    }
     {
         const int wildcard_fd = bpf_map__fd(skel->maps.wildcard);
         if (wildcard_fd < 0) {
             throw_loader(LoaderError::LoadFailed, "wildcard map fd unavailable");
         }
         write_wildcard_slots(wildcard_fd, 0u, dst_low.wildcard, src_low.wildcard,
-                             proto_low.wildcard, port_low.wildcard);
+                             proto_low.wildcard, port_low.wildcard,
+                             vlan_low.wildcard);
     }
     {
         const int defaults_fd = bpf_map__fd(skel->maps.defaults);

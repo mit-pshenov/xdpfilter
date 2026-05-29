@@ -208,6 +208,20 @@ namespace {
     return out;
 }
 
+/* §5.45 (MVP-4.5) D-mvp-4.5-VLAN-GRAMMAR: parse a `vlan` scalar — a single
+ * integer outer VID ∈ [0,4095]. Lists/ranges are OOS this slice (multi-VID =
+ * multiple rules). Non-integer / out-of-range → ConfigError exit 9. */
+[[nodiscard]] std::uint16_t parse_vlan(const yaml::Node& v, std::string_view file)
+{
+    if (v.kind != yaml::Node::Kind::Scalar || v.scalar.empty()) {
+        throw_cfg("rule match vlan", file, v.line, v.col,
+                  "vlan must be an integer VID in [0,4095]");
+    }
+    const std::uint32_t n = parse_bounded_uint(v.scalar, 4095u, file,
+                                               v.line, v.col, "vlan");
+    return static_cast<std::uint16_t>(n);
+}
+
 }  // namespace
 
 Config validate(const yaml::Node& root, std::string_view file)
@@ -315,33 +329,39 @@ Config validate(const yaml::Node& root, std::string_view file)
                 // protocol, dst_port}. `mac` stays REJECTED (MAC-deferred). Any
                 // other key → ConfigError exit 9. Existing dst/src-only configs
                 // parse UNCHANGED (HG-mvp-4.4-4 additive-within-v2).
+                // §5.45 (MVP-4.5) D-mvp-4.5-VLAN-GRAMMAR: the v2 accepted
+                // match-key set is ADDITIVELY extended again to {dst_cidr,
+                // src_cidr, protocol, dst_port, vlan}. `mac` stays REJECTED.
                 for (const std::pair<std::string, yaml::Node>& kv : match->mapping) {
                     if (kv.first == "mac") {
                         throw_cfg("unsupported match type", file,
                                   kv.second.line, kv.second.col,
                                   "MAC matching deferred; schema_version 2 supports "
-                                  "dst_cidr + src_cidr + protocol + dst_port");
+                                  "dst_cidr + src_cidr + protocol + dst_port + vlan");
                     }
                     if (kv.first != "dst_cidr" && kv.first != "src_cidr"
-                        && kv.first != "protocol" && kv.first != "dst_port") {
+                        && kv.first != "protocol" && kv.first != "dst_port"
+                        && kv.first != "vlan") {
                         throw_cfg("unsupported match type", file,
                                   kv.second.line, kv.second.col,
                                   std::format("match type '{}' not supported in schema_version 2",
                                               kv.first));
                     }
                 }
-                // §5.44 v2 match grammar: each rule's match MUST contain AT
-                // LEAST ONE of {dst_cidr, src_cidr, protocol, dst_port}. Empty
-                // match: {} → exit 9.
+                // §5.45 v2 match grammar: each rule's match MUST contain AT
+                // LEAST ONE of {dst_cidr, src_cidr, protocol, dst_port, vlan}.
+                // Empty match: {} → exit 9.
                 const yaml::Node* dst_cidr_node = find_key(*match, "dst_cidr");
                 const yaml::Node* src_cidr_node = find_key(*match, "src_cidr");
                 const yaml::Node* protocol_node = find_key(*match, "protocol");
                 const yaml::Node* dst_port_node = find_key(*match, "dst_port");
+                const yaml::Node* vlan_node     = find_key(*match, "vlan");
                 if (dst_cidr_node == nullptr && src_cidr_node == nullptr
-                    && protocol_node == nullptr && dst_port_node == nullptr) {
+                    && protocol_node == nullptr && dst_port_node == nullptr
+                    && vlan_node == nullptr) {
                     throw_cfg("rule match", file, match->line, match->col,
                               "rule must specify at least one of "
-                              "'dst_cidr', 'src_cidr', 'protocol', 'dst_port'");
+                              "'dst_cidr', 'src_cidr', 'protocol', 'dst_port', 'vlan'");
                 }
                 if (dst_cidr_node != nullptr) {
                     if (dst_cidr_node->kind != yaml::Node::Kind::Scalar) {
@@ -382,6 +402,11 @@ Config validate(const yaml::Node& root, std::string_view file)
                 // both endpoints ∈ [0,65535], lo ≤ hi. → exit 9 otherwise.
                 if (dst_port_node != nullptr) {
                     r.match.dst_port = parse_dst_port(*dst_port_node, file);
+                }
+                // §5.45 D-mvp-4.5-VLAN-GRAMMAR: `vlan` accepts a single integer
+                // outer VID ∈ [0,4095]; exact-match. Out-of-range → exit 9.
+                if (vlan_node != nullptr) {
+                    r.match.vlan = parse_vlan(*vlan_node, file);
                 }
 
                 // Reject unknown sibling keys in the rule (forward-compat hinge).
