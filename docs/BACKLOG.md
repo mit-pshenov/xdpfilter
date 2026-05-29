@@ -116,3 +116,41 @@ This backlog is **manual prose work** — explicitly separated from `/mint-dev` 
 - Recommend tackling B1 + B3 + B4 + B6 together as a single README rewrite session (~80 LOC; closes 4 items).
 - B5 (Ansible) + B2 (HANDOFF) are XS — could land as one-line fixes any cycle.
 - B7 (FLEET trust_model metric) has implementation-vs-doc fork — needs decision before action.
+
+## Rule-model maturity audit (/mint-review 2026-05-29 — 6-axis model, src/)
+
+Full report: `/home/user/agent-teams-review/runs/mint-review-src-202605291445/report.md` (5-dim hybrid review; 0 Critical, 4 High; security A−, architecture A−; all High citations re-Read-validated). Items below are the actionable consolidation. None blocks ship.
+
+**Cheap wins (do soon — small effort):**
+### B18 [HIGH→cheap, perf] `port_scan` fixed 64 map-lookups/L4 packet → `continue`→`break`
+`src/bpf/mac_filter.bpf.c:498-516` (call :775). Loop always runs 64 `bpf_map_lookup_elem` even with N port rules; used slots dense-at-front (`loader.cpp:1603-1628` `populate_port_inner_slot`). Fix: sentinel `continue`→`break` (unroll stays 64-block/5.15-safe, runtime forward-jumps). N=4 → **−59 lookups/pkt (~67% of hot-path lookups)**. Document the dense-pack coupling at both sites.
+### B19 [HIGH→cheap, test-infra] structural fix for the `-j4` build-timeout flake (SUPERSEDES B16's option-a)
+`tests/CMakeLists.txt:70-78` (T_BUILD TIMEOUT 300, NO RESOURCE_LOCK) + :128-138 (T_SANITIZER_BUILD 240). Both full compiles → CPU oversubscription under `ctest -j4`. Fix: shared `RESOURCE_LOCK build_cpu` so the compile-heavy tests serialize (and/or ctest `PROCESSORS`). Lowest-risk; otherwise the next compile-unit-adding slice re-opens it. (Same root cause as **B16** — adopt this as B16's structural resolution.)
+### B21 [MEDIUM, test] de-vacuify the IPv4-gate boundary test `T_MAC_NON_IP` (KC-A)
+`tests/T_MAC_NON_IP.sh:68-85` asserts only `DROP_DENY/DROP_MALFORMED delta==0` with `||true` swallowing the wait-timeout → a LOST non-IPv4 frame greens the test without exercising the gate. The load-bearing "MAC-drop must not leak onto non-IPv4" boundary has a vacuous guard. Fix: add positive `(( p3-p2==1 ))` (defaults=pass) + drop `||true`. Same vacuity in `T_AND6_ORACLE_AGREEMENT.sh:130-152` NOMATCH vectors (assert defaults slot moved). **Do WITH the IPv6 slice** (guards the gate-widening).
+
+**Structural / before-IPv6:**
+### B20 [HIGH, code-quality] `apply_request` 14× inactive-slot-fd-populate dup → table-driven refactor
+`src/lib/loader.cpp:2233-2381` (reattach) + :2466-2578 (fresh-attach). Same 8-line idiom per axis in BOTH branches differing only in `_a`/`_b` + diag-string + populate_* — the HK-9 lockstep-failure class (wrong `_a`/`_b` in 1 of 14 silently corrupts the atomic swap, compiler-invisible). Fix: `inactive_inner_fd(a,b,slot,what)` + `populate_all_axes(skel,slot,…)` (table-driven pattern already blessed: `write_wildcard_slots`, `kManagedMaps[]`). ~250→60 LOC. **Pay BEFORE the IPv6/axis-#7 slice — that slice walks straight into this hazard.**
+### B28 [MEDIUM, code-quality] template the 3 near-dup HASH populate fns + 3 axis-merge fns (follow-on to B20)
+`loader.cpp:1424/1516/1559` (populate_inner/proto/vlan — proto+vlan byte-identical) → `template<Key> populate_hash_inner_slot`; `loader.cpp:1283/1353/1392` (lower_proto/vlan/mac merge) → `aggregate_axis<Key>`. ~145 LOC deletable.
+
+**Cleanup (cross-validated by ≥2 reviewers; doc/dead-code, Low):**
+### B24 [LOW, cleanup] delete vestigial `classify_match_kind` + `match_kind`
+`src/exporter/sidecar_reader.cpp:39-47`,:93,`.hpp:30`. Scans a retired `"cidr"` key the producer no longer emits (→ `has_cidr` permanently false); `match_kind` never consumed (live path = 6 `extract_axis` fields). Delete fn+assignment+member (−12 LOC).
+### B25 [LOW, cleanup] fix config schema_version / mac-rejected stale comments (bundle w/ B20)
+`config.hpp:5,14-15,45,60` + `apply_internal.hpp:27` say "schema_version 1 / mac DEFERRED"; `config.cpp:367-384`/:56-60 stack "mac REJECTED" then "RE-ACCEPTED" — but `config.cpp:286-297` requires `==2` + :413 re-accepts mac. `config.hpp:60 =1` dead init. 4 header comments actively mislead. Update to v2/6-axis; drop superseded paragraphs (history→git/RETROSPECTIVES).
+### B26 [LOW, observability] rename `pass_cidr` stat-label → `pass_rule`
+`src/exporter/prom_format.cpp:31` + enum `src/common/mac_filter.h:58` (set `bpf.c:836`). The label now misnames all 6-axis matches (mac/proto/port/vlan funnel to "pass_cidr"). Metric-contract rename (crosses kernel stat enum + dashboards depend) → fold into a slice already bumping the stat enum. Deferred.
+
+**Other Mediums:**
+### B22 [MEDIUM, test] sanitize the 6-axis lowering path
+`tests/T_SANITIZER_BUILD.sh:84-95` runs only 1 src_cidr rule under ASAN/UBSAN → `close_prefixes`/`populate_{proto,port,vlan,mac}_inner_slot`/`write_wildcard_slots`/per-axis bounds never sanitized. Point a sanitizer test at `config_valid_and6.yaml` + 2-3 vectors (full-6 + wildcard + NOMATCH).
+### B23 [MEDIUM, test] 5.15-verifier load of the PRODUCTION object
+`tests/T_BITVEC_VERIFIER_LOAD.sh:7,159` verifies only the 4-axis PROTOTYPE on the dev (6.1) kernel yet prints "verifies on the 5.15 floor". The production `mac_filter.bpf.c` (6 axes + variable IHL-offset L4 read) is untested on the stated floor. Fix: CI lane that `bpftool prog load`s the production `.o` on a 5.15 image, or at minimum reword the misleading message + flag in design §5.44/§5.47.
+### B27 [MEDIUM, security] exporter single-threaded HTTP connection-hold DoS
+`src/exporter/http.cpp:421`+:465, 5s/conn budget, single sync acceptor → sequential attacker blacks out /metrics+/healthz (CWE-400). Mitigated by the loopback-default bind. Fix: lower per-conn read deadline (~1s) and/or per-source cap.
+### B29 [LOW, cleanup] delete the legacy `allowlist` alias map (gated on ctest update)
+`src/bpf/mac_filter.bpf.c:103-106` + `loader.cpp:145/223/2205/2433/2442-2459` — a whole kernel map + bespoke `legacy_alias` control-flow retained only so MVP-2-era ctests grep pin-existence. Update the 4 MVP-2 ctests to grep `allowlist_a`, then delete (~30 LOC + 1 map). Re-confirm the out-of-tree-harness ABI promise (bpf.c:31-32) first.
+
+**Deferred-by-design (NOT backlog action — tracked elsewhere):** the IPv4-gate semantic gap (MAC/VLAN match IPv4 only) = `D-mvp-4.7-Q2-GATE-DEFER` → folded into the **IPv6 slice** (multi-ethertype gate-widening; PO leans L2-universal MAC). Perf H-2/M1/M2/M3 (proto+vlan HASH→ARRAY, wildcard struct-of-6, LPM hybrid, gate mac_mask) = for the future non-eBPF perf datapath (eBPF = model-validation vehicle), not the current vehicle.
