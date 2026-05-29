@@ -1,0 +1,15 @@
+# config_valid_mac.yaml — §5.47 MVP-4.7: MAC is a LIVE 6th exact-HASH axis.
+#
+# Single MAC-only PASS rule (all other 5 axes wildcard) + default_action drop.
+# Used by the converted T_PASS_ALLOWED (T_MAC_PASS) and T_DROP_DENY (T_MAC_DROP).
+#
+# Per D-mvp-4.7-Q2 the datapath keys on the SOURCE MAC (eth->h_source) and the
+# match is composed INSIDE the IPv4 block (D-mvp-4.7-Q2-GATE) — so the test
+# MUST inject an IPv4 frame (inject_ipv4.py) whose src_mac is the rule's MAC.
+schema_version: 2
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      mac: "02:00:00:00:00:01"

@@ -86,11 +86,13 @@
 struct xdpmf_allowlist_inner {
     __uint(type, BPF_MAP_TYPE_HASH);
     __type(key, struct xdpmf_mac);
-    /* §5.31 (MVP-3.4b) PI-13-3.4b adjudicated PASS-as-additive: inner-value
-     * extends from `__u8 present` (value_size 1) to `struct allow_entry`
-     * (value_size 8). Byte at offset 0 stays byte-equivalent to PI-27's
-     * `present` byte; offset-4 `rule_id` is the NEW per-rule counter index. */
-    __type(value, struct allow_entry);
+    /* §5.47 (MVP-4.7) D-mvp-4.7-Q1: MAC un-frozen as the 6th exact-match axis;
+     * inner-value reshaped `struct allow_entry` (8B) → `__u64` (8B) — a per-MAC
+     * rule-bitmask (bit k set iff rule k constrains this exact src-MAC). EXACT
+     * match, NO prefix-closure (unlike the LPM cidr axes). Byte-size-neutral
+     * reshape; topology + pin names (allowlist_a/_b, rulesets) UNCHANGED
+     * (guard #16) — the byte-for-byte mirror of §5.43's cidr_allowlist reshape. */
+    __type(value, __u64);
     __uint(max_entries, XDPMF_ALLOWLIST_MAX);
 };
 
@@ -687,6 +689,13 @@ int mac_filter_prog(struct xdp_md *ctx)
             bump_stat(STAT_DROP_DENY);
             return XDP_DROP;
         }
+        /* §5.47 (MVP-4.7) D-mvp-4.7-Q2: MAC axis un-frozen — the same shared
+         * `active` snapshot selects the active allowlist inner (HASH-AOM). */
+        void *mac_inner = bpf_map_lookup_elem(&rulesets, &active);
+        if (unlikely(!mac_inner)) {
+            bump_stat(STAT_DROP_DENY);
+            return XDP_DROP;
+        }
 
         /* §5.43 D-mvp-4.3-Q2 wildcard halves: wildcard[active*BITVEC_NUM_AXES
          * + axis]. A rule unconstrained on an axis lives here (and is ABSENT
@@ -697,11 +706,13 @@ int mac_filter_prog(struct xdp_md *ctx)
         __u64 wc_proto = 0;
         __u64 wc_port  = 0;
         __u64 wc_vlan  = 0;
+        __u64 wc_mac   = 0;
         __u32 wc_dst_key   = active * BITVEC_NUM_AXES + BV_AXIS_DST;
         __u32 wc_src_key   = active * BITVEC_NUM_AXES + BV_AXIS_SRC;
         __u32 wc_proto_key = active * BITVEC_NUM_AXES + BV_AXIS_PROTO;
         __u32 wc_port_key  = active * BITVEC_NUM_AXES + BV_AXIS_PORT;
         __u32 wc_vlan_key  = active * BITVEC_NUM_AXES + BV_AXIS_VLAN;
+        __u32 wc_mac_key   = active * BITVEC_NUM_AXES + BV_AXIS_MAC;
         __u64 *wc_dst_p = bpf_map_lookup_elem(&wildcard, &wc_dst_key);
         if (wc_dst_p) {
             wc_dst = *wc_dst_p;
@@ -721,6 +732,10 @@ int mac_filter_prog(struct xdp_md *ctx)
         __u64 *wc_vlan_p = bpf_map_lookup_elem(&wildcard, &wc_vlan_key);
         if (wc_vlan_p) {
             wc_vlan = *wc_vlan_p;
+        }
+        __u64 *wc_mac_p = bpf_map_lookup_elem(&wildcard, &wc_mac_key);
+        if (wc_mac_p) {
+            wc_mac = *wc_mac_p;
         }
 
         /* /32 host-route LPM keys (network byte order, matches LPM_TRIE key
@@ -772,16 +787,31 @@ int mac_filter_prog(struct xdp_md *ctx)
             }
         }
 
-        /* The OR→AND pivot (PI-mvp-4.3-AND / PI-mvp-4.4-AND4 / PI-mvp-4.5-AND5):
-         * per axis, OR the axis survivors with the axis wildcard half, then
-         * INTERSECT across all five axes. A rule survives iff EVERY axis it
+        /* §5.47 (MVP-4.7) D-mvp-4.7-Q2 MAC axis: exact-HASH lookup keyed by the
+         * SOURCE MAC (eth->h_source — the v1 semantic, §5.26; NO closure). The
+         * src MAC sits at the base-eth fixed offset (read before the VLAN walk,
+         * already bounds-checked above), so it is VLAN-agnostic. Every frame
+         * carries a src MAC → no "absent" sentinel (unlike vlan); a rule that
+         * omits `mac` survives via wc_mac. */
+        struct xdpmf_mac mac_key = {0};
+        __builtin_memcpy(mac_key.octets, eth->h_source, 6);
+        __u64 mac_mask = 0;
+        __u64 *mm = bpf_map_lookup_elem(mac_inner, &mac_key);
+        if (mm) {
+            mac_mask = *mm;
+        }
+
+        /* The OR→AND pivot (PI-mvp-4.3-AND / …4 / …5 / PI-mvp-4.7-MAC): per
+         * axis, OR the axis survivors with the axis wildcard half, then
+         * INTERSECT across all six axes. A rule survives iff EVERY axis it
          * constrains matches; unconstrained axes contribute the always-true
          * wildcard half. */
         __u64 acc = (dmask      | wc_dst)   &
                     (smask      | wc_src)   &
                     (proto_mask | wc_proto) &
                     (port_mask  | wc_port)  &
-                    (vlan_mask  | wc_vlan);
+                    (vlan_mask  | wc_vlan)  &
+                    (mac_mask   | wc_mac);
         if (acc != 0) {
             /* HG-mvp-4.3-4 first-match-by-id: the lowest set bit IS the lowest
              * matching rule id (bit position == id), so ffsll picks it for

@@ -1,0 +1,33 @@
+# config_mac_counters.yaml — §5.47 MVP-4.7 per-rule counter fixture (MAC axis).
+#
+# Mirror of config_per_rule_counters.yaml but keyed on the LIVE MAC axis.
+# Sparse ids 0/5/17/42 across [0,63] catch off-by-one / dense-only
+# assumptions; the operator's YAML `id:` IS the BPF ARRAY index (first-match
+# by lowest id). Each rule constrains ONLY the MAC axis (all other 5 axes
+# wildcard) so a frame's verdict is decided by its src-MAC alone:
+#   - id=0  : mac 02:00:00:00:00:01  PASS
+#   - id=5  : mac 02:00:00:00:00:05  PASS
+#   - id=17 : mac 02:00:00:00:00:11  DROP   (explicit drop-rule dispatch)
+#   - id=42 : mac 02:00:00:00:00:2a  PASS
+# A src-MAC in no rule (e.g. 02:00:00:00:00:fe) matches nothing → defaults drop.
+#
+# Frames MUST be IPv4 (inject_ipv4.py) — MAC is IPv4-gated (D-mvp-4.7-Q2-GATE).
+schema_version: 2
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      mac: "02:00:00:00:00:01"
+  - id: 5
+    action: pass
+    match:
+      mac: "02:00:00:00:00:05"
+  - id: 17
+    action: drop
+    match:
+      mac: "02:00:00:00:00:11"
+  - id: 42
+    action: pass
+    match:
+      mac: "02:00:00:00:00:2a"

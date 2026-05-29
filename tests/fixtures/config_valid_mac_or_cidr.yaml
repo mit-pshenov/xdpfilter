@@ -1,7 +1,12 @@
-# §6.30 — LOAD-BEARING OR-compose fixture (MVP-3.2 / §5.27).
-# Single rule with BOTH `mac:` AND `src_cidr:` — OR-compose semantic
-# per Q2 OR1: MAC HASH lookup short-circuits; CIDR LPM_TRIE checked
-# only if MAC missed AND ethertype == 0x0800.
+# §5.47 MVP-4.7 — LOAD-BEARING AND-compose fixture (re-authored OR→AND).
+# Single rule with BOTH `mac:` AND `src_cidr:`. Under the v2 bit-vector
+# AND-model the rule matches a frame ONLY when BOTH axes hold: src-MAC ==
+# AA:BB:CC:DD:EE:FF AND src_ip ∈ 10.0.0.0/8. The §6.30 OR short-circuit
+# (MAC hit short-circuits CIDR) is GONE (D-mvp-4.7-MAC-RETURN-SHIFT). Consumed
+# by the converted T_PASS_MAC_OR_CIDR (T_MAC_AND_CIDR). Frames are IPv4
+# (inject_ipv4.py) — MAC is IPv4-gated (D-mvp-4.7-Q2-GATE). schema_version: 2
+# is required (absent ⇒ exit 9 per the §6.63 cutover).
+schema_version: 2
 default_action: drop
 rules:
   - id: 0

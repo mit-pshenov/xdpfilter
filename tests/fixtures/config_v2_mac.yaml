@@ -1,10 +1,9 @@
-# config_v2_mac.yaml — §5.43 §6.63 (c): schema_version: 2 but match: {mac}.
+# config_v2_mac.yaml — §5.47 §6.63 (c): schema_version: 2 with match: {mac}.
 #
-# MAC matching is DEFERRED (HG-mvp-4.3-2 / PI-mvp-4.3-MAC-DEFERRED). Under
-# v2 the `mac` match-key is REJECTED at parse with exit 9 and a MAC-deferred
-# diagnostic ("MAC matching deferred; schema_version 2 supports dst_cidr +
-# src_cidr" per D-mvp-4.3-MAC-GRAMMAR). The schema_version is valid (2), so
-# the rejection is specifically the match-grammar gate, not the schema gate.
+# MAC is a LIVE 6th exact-HASH axis again (HG-mvp-4.7-2; PI-mvp-4.3-MAC-DEFERRED
+# RETIRED per D-mvp-4.7-MAC-RETURN-SHIFT). A well-formed `mac` match-key is now
+# ACCEPTED under v2 (apply exits 0, XDP attaches) — additive within schema_version
+# 2. (Malformed MACs still reject with exit 9: see config_malformed_mac.yaml.)
 schema_version: 2
 default_action: drop
 rules:

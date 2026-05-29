@@ -1,0 +1,73 @@
+# config_valid_and6.yaml — §5.47 MVP-4.7 v2 6-axis AND-compose fixture.
+#
+# Used by §6.70 (T_AND6_ORACLE_AGREEMENT) and the §6.51-EXT rule_info mac-label
+# assertions in T_EXPORTER_RULE_LABELS.
+#
+# schema_version: 2 (ADDITIVE-within-v2 — `mac` is the RE-ACCEPTED 6th match key
+# per HG-mvp-4.7-2; existing dst/src/proto/port/vlan v2 configs parse unchanged).
+# Match grammar is {mac, dst_cidr, src_cidr, protocol, dst_port, vlan} (>=1
+# required). `mac`: canonical 17-char "aa:bb:cc:dd:ee:ff" (src-MAC, h_source);
+# omitted ⇒ mac-wildcard. EXACT match (no prefix-closure — D-mvp-4.7-NO-CLOSURE).
+# A MAC-constrained rule matches IPv4 frames ONLY (D-mvp-4.7-Q2-GATE).
+#
+# Rule layout (bit position == id; first-match by lowest id, ffsll):
+#   id 0 : dst 10.1.0.0/16 AND src 192.168.5.0/24 AND tcp AND port 1000-2000
+#          AND vlan 100 AND mac aa:bb:cc:dd:ee:01   pass  (FULL 6-axis rule)
+#   id 1 : vlan 200 AND udp AND mac aa:bb:cc:dd:ee:02  pass  (mac + 2 axes)
+#   id 2 : vlan 300                                 pass  (vlan-only; mac-wildcard)
+#   id 3 : dst 10.5.0.0/16 AND vlan 100             pass  (dst+vlan; mac-wildcard)
+#   id 4 : dst 10.5.0.0/16                          pass  (dst-only; mac/vlan-wildcard)
+#   id 5 : dst_port 443                             pass  (port-only; mac-wildcard)
+#   id 6 : mac aa:bb:cc:dd:ee:06                    pass  (mac-only; 5 axes wildcard)
+#   default_action: drop
+#
+# The 6-axis AND proof (§6.70): a packet matches id0 only when ALL six axes are
+# satisfied. Re-keying the id0 6-tuple with a DIFFERENT src-MAC clears id0's bit
+# from the accumulator (mac_mask=0 for the absent key) → the packet routes
+# elsewhere or to defaults — proving the mac axis intersects (AND), not unions.
+# id6 (mac-only) proves a MAC-constrained rule survives with the other 5 axes
+# wildcard; ids 2/3/4/5 (mac-wildcard) prove a rule omitting `mac` matches ANY
+# src-MAC via wildcard[active*6+5].
+#
+# IMPORTANT: tests/bitvec/bitvec_oracle_prod.py transcribes these rules BY HAND
+# (table RULES_AND6). Any edit here MUST be mirrored there — data-independence
+# is intentional (divergence fails the §6.70 agreement test loudly).
+schema_version: 2
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      dst_cidr: "10.1.0.0/16"
+      src_cidr: "192.168.5.0/24"
+      protocol: tcp
+      dst_port: "1000-2000"
+      vlan: 100
+      mac: "aa:bb:cc:dd:ee:01"
+  - id: 1
+    action: pass
+    match:
+      vlan: 200
+      protocol: udp
+      mac: "aa:bb:cc:dd:ee:02"
+  - id: 2
+    action: pass
+    match:
+      vlan: 300
+  - id: 3
+    action: pass
+    match:
+      dst_cidr: "10.5.0.0/16"
+      vlan: 100
+  - id: 4
+    action: pass
+    match:
+      dst_cidr: "10.5.0.0/16"
+  - id: 5
+    action: pass
+    match:
+      dst_port: 443
+  - id: 6
+    action: pass
+    match:
+      mac: "aa:bb:cc:dd:ee:06"

@@ -75,10 +75,11 @@ EXPORTER_BIN=$(find_exporter) || {
 }
 FIXTURE="${TEST_DIR}/fixtures/config_per_rule_counters.yaml"
 [[ -f "${FIXTURE}" ]] || { echo "FAIL: missing fixture ${FIXTURE}" >&2; exit 1; }
-# §6.51-EXT (MVP-4.6 / §5.46): the 5-axis fixture drives the rule_info family
-# per-axis label assertions (config-derived; no traffic injection needed).
-AND5_FIXTURE="${TEST_DIR}/fixtures/config_valid_and5.yaml"
-[[ -f "${AND5_FIXTURE}" ]] || { echo "FAIL: missing fixture ${AND5_FIXTURE}" >&2; exit 1; }
+# §6.51-EXT (MVP-4.6 / §5.46; EXTENDED §5.47 MVP-4.7): the 6-axis fixture drives
+# the rule_info family per-axis label assertions (config-derived; no traffic
+# injection needed). MVP-4.7 adds the `mac` label (8th key, LAST).
+AND6_FIXTURE="${TEST_DIR}/fixtures/config_valid_and6.yaml"
+[[ -f "${AND6_FIXTURE}" ]] || { echo "FAIL: missing fixture ${AND6_FIXTURE}" >&2; exit 1; }
 
 # Port derived from PID; exporter_port_9417 RESOURCE_LOCK serializes
 # against the other exporter-spawning tests.
@@ -319,34 +320,37 @@ for id in 0 5 42; do
 done
 
 # ══════════════════════════════════════════════════════════════════════════
-# §6.51-EXT (MVP-4.6 / §5.46): xdpfilter_rule_info per-axis label family.
+# §6.51-EXT (MVP-4.6 / §5.46; EXTENDED §5.47 MVP-4.7): xdpfilter_rule_info
+# per-axis label family — now 6 axes.
 #
-# The new ADDITIVE info-metric surfaces each sidecar-known rule's 5-axis match
-# constraints as Prometheus labels:
-#   xdpfilter_rule_info{iface,rule_id,dst_cidr,src_cidr,protocol,dst_port,vlan} 1
-# Stable 7-key set in fixed order; unconstrained axis → empty sentinel "";
+# The info-metric surfaces each sidecar-known rule's 6-axis match constraints as
+# Prometheus labels (mac is the 8th key, appended LAST per D-mvp-4.7-Q3):
+#   xdpfilter_rule_info{iface,rule_id,dst_cidr,src_cidr,protocol,dst_port,vlan,mac} 1
+# Stable 8-key set in fixed order; unconstrained axis → empty sentinel "";
 # value always literal 1; emitted AFTER both counter families (block order).
 #
 # rule_info is CONFIG-derived (from rule_index.json), NOT packet-derived — no
 # traffic injection is needed. We re-setup the fixture on the SAME iface with
-# the rich 5-axis config_valid_and5.yaml so every axis is exercised:
-#   id 0 : FULL 5-axis  dst 10.1.0.0/16 + src 192.168.5.0/24 + tcp + 1000-2000 + vlan 100
-#   id 1 : vlan 200 + udp                (dst/src/dst_port unconstrained)
-#   id 2 : vlan 300 only                 (4 axes unconstrained)
-#   id 3 : dst 10.5.0.0/16 + vlan 100
-#   id 4 : dst 10.5.0.0/16 only          (vlan unconstrained)
-#   id 5 : dst_port 443 only             (4 axes unconstrained)
+# the rich 6-axis config_valid_and6.yaml so every axis is exercised:
+#   id 0 : FULL 6-axis  dst 10.1.0.0/16 + src 192.168.5.0/24 + tcp + 1000-2000
+#          + vlan 100 + mac aa:bb:cc:dd:ee:01
+#   id 1 : vlan 200 + udp + mac aa:bb:cc:dd:ee:02
+#   id 2 : vlan 300 only                 (5 axes unconstrained — incl. mac="")
+#   id 3 : dst 10.5.0.0/16 + vlan 100    (mac unconstrained)
+#   id 4 : dst 10.5.0.0/16 only          (vlan + mac unconstrained)
+#   id 5 : dst_port 443 only             (5 axes unconstrained — incl. mac="")
+#   id 6 : mac aa:bb:cc:dd:ee:06 only    (5 axes unconstrained)
 #
-# Assertions: (a) HELP/TYPE-once; (b) stable-key sample ERE, value=1;
-# (c) POSITIVE per-axis (id0 carries all five fixture values verbatim);
-# (d) SENTINEL (id5 unconstrained axes show ="" );
+# Assertions: (a) HELP/TYPE-once; (b) stable 8-key sample ERE, value=1;
+# (c) POSITIVE per-axis (id0 carries all SIX fixture values verbatim incl. mac);
+# (d) SENTINEL (id5 unconstrained axes incl. mac show ="" );
 # (e) NEGATION (an unconstrained axis is NEVER a bogus value — only ""; a
 #     non-configured rule_id emits NO rule_info series);
-# (f) STABLE KEY SET (every series matches the 7-key ERE);
-# (g) COUNTER-CONTRACT — verified above (existing steps a-g on the original
-#     fixture remain byte-equivalent; this block is purely additive).
+# (f) STABLE KEY SET (every series matches the 8-key ERE);
+# (g) COUNTER-CONTRACT — verified above (existing counter-family steps remain
+#     byte-equivalent; the rule_info label-set growth is purely additive).
 echo
-echo "═══ §6.51-EXT: xdpfilter_rule_info per-axis labels (config_valid_and5.yaml) ═══"
+echo "═══ §6.51-EXT: xdpfilter_rule_info per-axis labels (config_valid_and6.yaml) ═══"
 
 # Tear down scenario-1 exporter + veth; re-setup with the 5-axis fixture.
 if [[ -n "${EXPORTER_PID}" ]]; then
@@ -361,15 +365,15 @@ sudo -n rm -rf "${SIDECAR_DIR}" 2>/dev/null || true
 
 setup_veth
 
-echo "=== apply ${AND5_FIXTURE} on ${IFACE_A}"
+echo "=== apply ${AND6_FIXTURE} on ${IFACE_A}"
 set +e
-${NSEXEC} "${LOADER_BIN}" apply --iface "${IFACE_A}" -f "${AND5_FIXTURE}" 2>"${stderr_file}"
+${NSEXEC} "${LOADER_BIN}" apply --iface "${IFACE_A}" -f "${AND6_FIXTURE}" 2>"${stderr_file}"
 rc=$?
 set -e
 echo "rc=${rc}"
 cat "${stderr_file}" >&2 || true
 if [[ "${rc}" -ne 0 ]]; then
-    echo "FAIL[ri.apply]: apply exit ${rc} for 5-axis fixture" >&2
+    echo "FAIL[ri.apply]: apply exit ${rc} for 6-axis fixture" >&2
     exit 1
 fi
 
@@ -444,8 +448,9 @@ if [[ "${ri_type}" != "1" ]]; then
     fail=1
 fi
 
-# (b)+(f) ≥1 sample matches the stable 7-key ERE in fixed order, value EXACTLY 1.
-ri_ere='^xdpfilter_rule_info\{iface="[^"]+",rule_id="[0-9]+",dst_cidr="[^"]*",src_cidr="[^"]*",protocol="[^"]*",dst_port="[^"]*",vlan="[^"]*"\} 1$'
+# (b)+(f) ≥1 sample matches the stable 8-key ERE in fixed order, value EXACTLY 1.
+# §5.47 D-mvp-4.7-Q3: `mac` is the 8th key, appended LAST after `vlan`.
+ri_ere='^xdpfilter_rule_info\{iface="[^"]+",rule_id="[0-9]+",dst_cidr="[^"]*",src_cidr="[^"]*",protocol="[^"]*",dst_port="[^"]*",vlan="[^"]*",mac="[^"]*"\} 1$'
 ri_stable=$(grep -cE "${ri_ere}" "${metrics_body3}" 2>/dev/null || true)
 ri_stable=${ri_stable:-0}
 # Total rule_info SAMPLE lines (exclude HELP/TYPE comment lines).
@@ -453,18 +458,18 @@ ri_total=$(grep -cE '^xdpfilter_rule_info\{' "${metrics_body3}" 2>/dev/null || t
 ri_total=${ri_total:-0}
 echo "rule_info sample lines: stable-key-matching=${ri_stable} total=${ri_total}"
 if (( ri_stable < 1 )); then
-    echo "FAIL[ri.b]: no rule_info sample line matches the stable 7-key ERE:" >&2
+    echo "FAIL[ri.b]: no rule_info sample line matches the stable 8-key ERE:" >&2
     echo "            ${ri_ere}" >&2
     fail=1
 fi
-# (f) EVERY sample line must carry the same 7 keys in the same order + value 1.
+# (f) EVERY sample line must carry the same 8 keys in the same order + value 1.
 if [[ "${ri_stable}" != "${ri_total}" ]]; then
-    echo "FAIL[ri.f]: key set unstable — ${ri_total} rule_info lines but only ${ri_stable} match the 7-key ERE" >&2
+    echo "FAIL[ri.f]: key set unstable — ${ri_total} rule_info lines but only ${ri_stable} match the 8-key ERE" >&2
     fail=1
 fi
-# We applied 6 rules (ids 0..5); expect a series per configured rule.
-if (( ri_total < 6 )); then
-    echo "FAIL[ri.count]: expected ≥6 rule_info series (ids 0..5), got ${ri_total}" >&2
+# We applied 7 rules (ids 0..6); expect a series per configured rule.
+if (( ri_total < 7 )); then
+    echo "FAIL[ri.count]: expected ≥7 rule_info series (ids 0..6), got ${ri_total}" >&2
     fail=1
 fi
 
@@ -477,8 +482,9 @@ declare -A ID0_EXPECT=(
     [protocol]="tcp"
     [dst_port]="1000-2000"
     [vlan]="100"
+    [mac]="aa:bb:cc:dd:ee:01"
 )
-for key in dst_cidr src_cidr protocol dst_port vlan; do
+for key in dst_cidr src_cidr protocol dst_port vlan mac; do
     got=$(axis_of 0 "${key}")
     exp="${ID0_EXPECT[$key]}"
     echo "  id0 ${key}='${got}' (expect '${exp}')"
@@ -496,7 +502,9 @@ if [[ "${got}" != "443" ]]; then
     echo "FAIL[ri.d.port]: id5 dst_port='${got}' (expected '443')" >&2
     fail=1
 fi
-for key in dst_cidr src_cidr protocol vlan; do
+# id5 is port-only → every other axis, INCLUDING the new mac axis, is the
+# empty sentinel "" (PI-mvp-4.7-RULEINFO-MAC: mac="" for a MAC-wildcard rule).
+for key in dst_cidr src_cidr protocol vlan mac; do
     got=$(axis_of 5 "${key}")
     echo "  id5 ${key}='${got}' (expect empty sentinel)"
     if [[ -n "${got}" ]]; then
@@ -514,11 +522,29 @@ if [[ "${got}" != "300" ]]; then
     echo "FAIL[ri.e.vlan]: id2 vlan='${got}' (expected '300')" >&2
     fail=1
 fi
-for key in dst_cidr src_cidr protocol dst_port; do
+# id2 is vlan-only → every other axis incl. mac MUST be "" and NEVER a bogus
+# value (the negation control for the new mac axis too).
+for key in dst_cidr src_cidr protocol dst_port mac; do
     got=$(axis_of 2 "${key}")
     echo "  id2 ${key}='${got}' (expect empty — never bogus)"
     if [[ -n "${got}" ]]; then
         echo "FAIL[ri.e.${key}]: id2 unconstrained ${key}='${got}' — bogus value (expected \"\")" >&2
+        fail=1
+    fi
+done
+
+# (e.3) POSITIVE mac on a mac-only rule — id6 constrains ONLY mac; the mac label
+#       carries the fixture value verbatim and the other five axes are "".
+got=$(axis_of 6 mac)
+echo "  id6 mac='${got}' (expect 'aa:bb:cc:dd:ee:06')"
+if [[ "${got}" != "aa:bb:cc:dd:ee:06" ]]; then
+    echo "FAIL[ri.e.macpos]: id6 mac='${got}' (expected 'aa:bb:cc:dd:ee:06')" >&2
+    fail=1
+fi
+for key in dst_cidr src_cidr protocol dst_port vlan; do
+    got=$(axis_of 6 "${key}")
+    if [[ -n "${got}" ]]; then
+        echo "FAIL[ri.e.mac.${key}]: id6 (mac-only) ${key}='${got}' (expected empty sentinel)" >&2
         fail=1
     fi
 done

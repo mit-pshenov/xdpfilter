@@ -91,7 +91,10 @@ std::vector<RuleMeta> parse_rule_index(std::string_view path) noexcept
             rm.action     = m[3].str();
             const std::string body = m[2].str();
             rm.match_kind = classify_match_kind(body);
-            /* §5.46: populate the 5 live axes verbatim (empty when absent). */
+            /* §5.46/§5.47: populate the 6 live axes verbatim (empty when
+             * absent). `mac` un-frozen this slice (the producer's
+             * append_kind("mac",…) branch fires once a rule sets it). */
+            rm.mac      = extract_axis(body, "mac");
             rm.dst_cidr = extract_axis(body, "dst_cidr");
             rm.src_cidr = extract_axis(body, "src_cidr");
             rm.protocol = extract_axis(body, "protocol");

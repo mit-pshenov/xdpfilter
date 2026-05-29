@@ -14836,6 +14836,7 @@ Architect independently re-ran the brief's Phase-2 greps and read each codepath 
 |---|---|---|---|
 | `tests/fixtures/config_valid_and6.yaml` (OPTIONAL, tester-owned) | A 6-axis fixture incl. ≥1 MAC-constrained rule + ≥1 MAC-AND-other-axis rule + ≥1 MAC-wildcard rule, for the converted MAC tests + the `rule_info` mac-label assertion. Tester MAY instead extend `config_valid_and5.yaml`. | YAML | tester |
 | `tests/T_AND_COMPOSE_MAC.sh` (OPTIONAL, tester-owned) | A NEW MAC-AND-compose ctest IF the 5 converted tests don't cover the "MAC AND another axis must BOTH hold" vector. Tester decides per coverage. | bash | tester |
+| `tests/fixtures/config_malformed_mac.yaml` (tester-owned) | A schema_version:2 config with a malformed `match.mac` (bad hex / wrong length / wrong separator count) for the NEW T_SCHEMA_V2_CUTOVER malformed-MAC reject sub-case → exit 9 + `xdpmacfilter: config error:` (PI-mvp-4.7-GRAMMAR). | YAML | tester |
 
 ##### EDITED (this slice)
 
@@ -14859,6 +14860,8 @@ Architect independently re-ran the brief's Phase-2 greps and read each codepath 
 | `tests/T_EXPORTER_METRICS_FORMAT.sh` | T-LITERAL: `0.14.0→0.15.0` (per §5.46, 4 sites); HELP "(6-axis)" if the test pins the HELP text. | tester |
 | `tests/bitvec/bitvec_oracle_prod.py` | Extend the oracle to 6 axes (add the MAC exact-match axis to the AND-compose model). | tester |
 | `tests/CMakeLists.txt` | If `SKIP_RETURN_CODE 77` bookkeeping changes for the 5 un-SKIP'd tests (they no longer SKIP). | tester |
+| `tests/T_SCHEMA_V2_CUTOVER.sh` | **Brownfield regression-floor (Phase A tester finding 2026-05-29):** sub-case (c) currently asserts `config_v2_mac.yaml` (v2 + `match.mac`) is REJECTED (exit 9 + "MAC-deferred" diagnostic, citing the now-RETIRED PI-mvp-4.3-MAC-DEFERRED) — this MUST flip to ACCEPTED per PI-mvp-4.7-GRAMMAR. Re-author (c) reject→accept (well-formed mac → exit 0 + XDP attached); ADD a NEW malformed-MAC reject sub-case (bad hex / wrong length → exit 9 + `xdpmacfilter: config error:` prefix) exercising PI-mvp-4.7-GRAMMAR's "malformed MAC → exit 9". Update the header-comment cite (c) + the "Maps to:" PI line (drop the retired PI, add PI-mvp-4.7-GRAMMAR). | tester |
+| `tests/fixtures/config_v2_mac.yaml` | Re-purpose: was the "v2+mac → rejected/deferred" reject fixture; now a VALID well-formed-mac accept fixture. Rewrite the stale "rejected/deferred" header comment. | tester |
 | `mint/design.md` | APPEND §5.47 (this block). NO rewrites to prior §-sections except the §5.46 OOS inline-supersede for "MAC-axis label in rule_info", below. | ~+320 |
 | `CHANGELOG.md` | OPTIONAL ~2 lines under `[Unreleased]`: MAC 6th axis restored, VERSION 0.15.0. Operative-semantic; reviewer inline-merge. | +2 |
 

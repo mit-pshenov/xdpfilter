@@ -4,23 +4,31 @@
 # OPS canary for the M.1 hard cutover: the load-time config grammar changes
 # materially. supported schema_version set {1} -> {2}.
 #
-#   (a) schema_version: 1            -> exit 9 + re-author diagnostic
-#   (b) absent schema_version        -> exit 9 (default-to-1 path is gone)
-#   (c) schema_version: 2 + match.mac -> exit 9 + MAC-deferred diagnostic
-#                                        (HG-mvp-4.3-2 / PI-mvp-4.3-MAC-DEFERRED)
-#   (d) valid schema_version: 2      -> exit 0
+#   (a) schema_version: 1             -> exit 9 + re-author diagnostic
+#   (b) absent schema_version         -> exit 9 (default-to-1 path is gone)
+#   (c) schema_version: 2 + match.mac (WELL-FORMED) -> exit 0 + attach
+#                                        (§5.47 MVP-4.7: mac RE-ACCEPTED;
+#                                        PI-mvp-4.3-MAC-DEFERRED RETIRED per
+#                                        D-mvp-4.7-MAC-RETURN-SHIFT)
+#   (c2) schema_version: 2 + match.mac (MALFORMED) -> exit 9 + config-error
+#                                        (PI-mvp-4.7-GRAMMAR: the re-added
+#                                        canonical 17-char MAC parser rejects
+#                                        bad MACs)
+#   (d) valid schema_version: 2       -> exit 0
 #
-# (c) is the load-bearing distinction: the schema_version IS valid (2), so
-# the rejection must come from the match-GRAMMAR gate (mac deferred), NOT
-# the schema-version gate. Asserting the MAC-specific diagnostic proves the
-# config reached the grammar gate rather than tripping the schema gate.
+# §5.47 NOTE (regression-floor): sub-case (c) was a REJECT (mac deferred) under
+# §5.43; MVP-4.7 un-freezes MAC as the live 6th axis, so a well-formed `mac`
+# config is now ACCEPTED. (c2) preserves the negative grammar surface by proving
+# a MALFORMED mac still hard-rejects at the grammar gate.
 #
-# Sanity-floor smoke: (d) — a valid v2 config applies cleanly (exit 0).
-# Negation control: (a)/(b)/(c) — known-bad grammars MUST hard-reject
-# (exit 9). Together they bracket the accept/reject grammar surface; a
-# loader that still accepts v1/absent (no cutover) FAILS (a)/(b).
+# Sanity-floor smoke: (c)/(d) — valid v2 configs apply cleanly (exit 0).
+# Negation control: (a)/(b)/(c2) — known-bad grammars MUST hard-reject (exit 9).
+# Together they bracket the accept/reject grammar surface; a loader that still
+# accepts v1/absent (no cutover) FAILS (a)/(b); one that ignores a malformed MAC
+# FAILS (c2).
 #
-# Maps to: PI-mvp-4.3-SCHEMA-V2, PI-mvp-4.3-DSTCIDR, PI-mvp-4.3-MAC-DEFERRED.
+# Maps to: PI-mvp-4.3-SCHEMA-V2, PI-mvp-4.3-DSTCIDR, PI-mvp-4.7-GRAMMAR,
+#          PI-mvp-4.7-MAC.
 set -euo pipefail
 source "${TEST_DIR}/lib/common.sh"
 require_passwordless_sudo
@@ -29,10 +37,11 @@ LOADER_BIN=$(find_loader)
 FIX_DIR="${TEST_DIR}/fixtures"
 FIX_V1="${FIX_DIR}/config_schema_v1.yaml"
 FIX_ABSENT="${FIX_DIR}/config_schema_absent.yaml"
-FIX_MAC="${FIX_DIR}/config_v2_mac.yaml"
+FIX_MAC="${FIX_DIR}/config_v2_mac.yaml"            # §5.47: well-formed mac → ACCEPT
+FIX_BADMAC="${FIX_DIR}/config_malformed_mac.yaml"  # §5.47: malformed mac → REJECT
 FIX_VALID="${FIX_DIR}/config_valid_and.yaml"
 
-for f in "${FIX_V1}" "${FIX_ABSENT}" "${FIX_MAC}" "${FIX_VALID}"; do
+for f in "${FIX_V1}" "${FIX_ABSENT}" "${FIX_MAC}" "${FIX_BADMAC}" "${FIX_VALID}"; do
     [[ -f "${f}" ]] || { echo "FAIL: missing fixture ${f}" >&2; exit 1; }
 done
 
@@ -82,16 +91,28 @@ run_reject() {
 run_reject "(a) v1"      "${FIX_V1}"     'schema_version'
 # (b) absent → reject (the default-1 path is gone), diagnostic mentions schema_version.
 run_reject "(b) absent"  "${FIX_ABSENT}" 'schema_version'
-# (c) v2 + mac → reject at the GRAMMAR gate; diagnostic is MAC-specific, NOT
-#     a bare schema-version complaint. Spec quote: "MAC matching deferred;
-#     schema_version 2 supports dst_cidr + src_cidr".
-run_reject "(c) v2+mac"  "${FIX_MAC}"    'mac'
-# Extra (c): the MAC reject must be distinguishable from the schema reject.
-if grep -qiE -- 'mac' "${stderr_file}" && grep -qiE -- 'defer|dst_cidr|src_cidr|mvp-4\.5' "${stderr_file}"; then
-    echo "  (c) MAC-deferred diagnostic distinguishable from schema reject: OK"
-else
-    echo "  FAIL[(c).deferred]: v2+mac stderr does not carry a MAC-deferred diagnostic" >&2
-    echo "          (must reach the match-grammar gate, not the schema-version gate)" >&2
+# (c2) v2 + MALFORMED mac → reject at the GRAMMAR gate (the re-added canonical
+#      17-char MAC parser rejects bad hex / wrong length). The schema_version IS
+#      valid (2), so the rejection comes from the match-grammar gate.
+run_reject "(c2) v2+badmac" "${FIX_BADMAC}" 'mac'
+
+# (c) v2 + WELL-FORMED mac → ACCEPT (§5.47: mac is the live 6th axis again).
+: >"${stderr_file}"
+echo
+echo "=== (c) v2+mac (well-formed): ${FIX_MAC} (expect exit 0 + attach)"
+set +e
+${NSEXEC} "${LOADER_BIN}" apply --iface "${IFACE_A}" -f "${FIX_MAC}" 2>"${stderr_file}"
+rc=$?
+set -e
+echo "  rc=${rc}"
+cat "${stderr_file}" >&2 || true
+if [[ "${rc}" -ne 0 ]]; then
+    echo "  FAIL[(c).rc]: well-formed mac config rejected (rc=${rc}, expected 0)" >&2
+    echo "          §5.47 RETIRES PI-mvp-4.3-MAC-DEFERRED — mac must be ACCEPTED under v2" >&2
+    fail=1
+fi
+if ! sudo -n test -e "${PIN_DIR}/active_idx"; then
+    echo "  FAIL[(c).pin]: ${PIN_DIR}/active_idx missing after a valid mac apply" >&2
     fail=1
 fi
 

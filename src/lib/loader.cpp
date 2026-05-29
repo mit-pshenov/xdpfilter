@@ -1183,20 +1183,6 @@ void pin_fd(int fd, const std::string& path)
     }
 }
 
-/* §5.31 (MVP-3.4b) D-3.4b-15 Option A: rule_id-carrying intermediate
- * shapes for the inner-slot populate paths. Replaces the prior
- * std::vector<xdpmf_mac> / std::vector<xdpmf_cidr_v4> shapes so each
- * populate call carries the per-entry rule_id alongside the key (loader
- * writes a full `struct allow_entry` per insert).
- *
- * rule_id source: operator's YAML `id:` field per Q5 R1 — already
- * validated to [0, XDPMF_ALLOWLIST_MAX-1] by config.cpp. Anon-namespace
- * scope keeps these out of any public header (loader.hpp ZERO diff
- * preserved per PI-7-3.4b-hpp). */
-struct MacRule {
-    xdpmf_mac     mac;
-    std::uint32_t rule_id;
-};
 
 /* §5.43 (MVP-4.3) D-mvp-4.3-Q3: a constrained prefix on one LPM axis carrying
  * the rule's bit (= 1ULL << rule_id). `cidr.addr` is network byte order (the
@@ -1390,12 +1376,53 @@ struct VlanLowering {
     return out;
 }
 
-/* §5.26 Q2 inner-slot population — §5.31 PI-13-3.4b: writes full
- * `struct allow_entry` per insert (offset 0 = present=1, offset 4 = rule_id
- * from operator's YAML `id:`). Bulk-clear-then-insert preserved. Caller
- * passes the FD of the inactive inner allowlist (allowlist_a or
- * allowlist_b). */
-void populate_inner_slot(int inner_fd, const std::vector<MacRule>& pass_macs)
+/* §5.47 (MVP-4.7) per-mac-axis lowering result — byte-mirrors Proto/VlanLowering
+ * (key is the 6-octet xdpmf_mac instead of a __u32): per-MAC aggregated rule
+ * bitmasks + the wildcard mask (rules NOT constraining mac). EXACT match, NO
+ * prefix-closure (D-mvp-4.7-NO-CLOSURE). */
+struct MacLowering {
+    std::vector<std::pair<xdpmf_mac, std::uint64_t>> entries;
+    std::uint64_t                                    wildcard = 0u;
+};
+
+/* Lower the mac axis: a rule with `mac` set ORs its bit into that src-MAC's
+ * aggregate key; a rule WITHOUT `mac` contributes its bit to the mac wildcard
+ * (FI-2 mutual exclusion). id range already validated in config.cpp (bit shift
+ * safe). MAC equality is a byte compare over the 6 octets (network order). */
+[[nodiscard]] MacLowering lower_mac_axis(const Config& c)
+{
+    MacLowering out;
+    for (const Rule& r : c.rules) {
+        const std::uint64_t bit = std::uint64_t{1} << r.id;
+        if (r.match.mac.has_value()) {
+            const xdpmf_mac& mac = *r.match.mac;
+            // Aggregate rules sharing the same exact src-MAC into one key.
+            bool merged = false;
+            for (std::pair<xdpmf_mac, std::uint64_t>& e : out.entries) {
+                if (std::memcmp(e.first.octets, mac.octets, sizeof(mac.octets)) == 0) {
+                    e.second |= bit;
+                    merged = true;
+                    break;
+                }
+            }
+            if (!merged) {
+                out.entries.emplace_back(mac, bit);
+            }
+        } else {
+            out.wildcard |= bit;
+        }
+    }
+    return out;
+}
+
+/* §5.26 Q2 inner-slot population — §5.47 (MVP-4.7) D-mvp-4.7-Q1: the MAC inner
+ * value is reshaped `struct allow_entry`→`__u64` (a per-MAC aggregated rule-
+ * bitmask, bit k set iff rule k constrains this exact src-MAC). EXACT match,
+ * NO prefix-closure (mirrors populate_proto/vlan_inner_slot). Bulk-clear-then-
+ * insert preserved. RESET-on-apply: caller passes the INACTIVE inner fd
+ * (allowlist_a or allowlist_b) and writes BEFORE the active_idx flip. */
+void populate_inner_slot(
+    int inner_fd, const std::vector<std::pair<xdpmf_mac, std::uint64_t>>& entries)
 {
     // Bulk-clear: iterate keys via bpf_map_get_next_key and delete each.
     // The map is small (≤ 64 entries) so cost is bounded.
@@ -1421,16 +1448,10 @@ void populate_inner_slot(int inner_fd, const std::vector<MacRule>& pass_macs)
         prev      = cur;
         have_prev = true;
     }
-    for (const MacRule& m : pass_macs) {
-        /* §5.31 PI-13-3.4b: full struct write — offset-0 `present`=1 keeps
-         * PI-27 byte-equivalent reading at the operator-observable layer;
-         * offset-4 `rule_id` is the NEW per-rule counter index. `_pad[3]`
-         * zero-init via C++ struct-init `{}` defense against verifier
-         * uninitialized-byte pessimism (D-3.4b-1). */
-        struct allow_entry entry{};
-        entry.present = 1;
-        entry.rule_id = m.rule_id;
-        const int rc = bpf_map_update_elem(inner_fd, &m.mac, &entry, BPF_ANY);
+    for (const std::pair<xdpmf_mac, std::uint64_t>& e : entries) {
+        const xdpmf_mac     key  = e.first;
+        const std::uint64_t mask = e.second;
+        const int rc = bpf_map_update_elem(inner_fd, &key, &mask, BPF_ANY);
         if (rc < 0) {
             throw_loader(classify(rc, LoaderError::LoadFailed),
                          std::format("bpf_map_update_elem(inner): {}",
@@ -1608,16 +1629,16 @@ void populate_port_inner_slot(int inner_fd, const std::vector<xdpmf_port_range>&
 }
 
 /* §5.43 (MVP-4.3) D-mvp-4.3-Q2 + §5.44 (MVP-4.4) D-mvp-4.4-Q4 + §5.45 (MVP-4.5)
- * D-mvp-4.5-Q3: write the INACTIVE half of the single combined `wildcard` ARRAY
- * before the active_idx flip — all FIVE axis slots [inactive*BITVEC_NUM_AXES +
- * {DST,SRC,PROTO,PORT,VLAN}]. The RESET-write (no copy-forward) parallels
- * populate_bitvec_inner_slot; the single active_idx u32 store commits the
- * wildcard swap together with the dst/src/proto/port/vlan/defaults/rules/
- * rule_counters swap. */
+ * D-mvp-4.5-Q3 + §5.47 (MVP-4.7) D-mvp-4.7-Q4: write the INACTIVE half of the
+ * single combined `wildcard` ARRAY before the active_idx flip — all SIX axis
+ * slots [inactive*BITVEC_NUM_AXES + {DST,SRC,PROTO,PORT,VLAN,MAC}]. The RESET-
+ * write (no copy-forward) parallels populate_bitvec_inner_slot; the single
+ * active_idx u32 store commits the wildcard swap together with the
+ * dst/src/proto/port/vlan/mac/defaults/rules/rule_counters swap. */
 void write_wildcard_slots(int wildcard_fd, std::uint32_t inactive,
                           std::uint64_t wc_dst, std::uint64_t wc_src,
                           std::uint64_t wc_proto, std::uint64_t wc_port,
-                          std::uint64_t wc_vlan)
+                          std::uint64_t wc_vlan, std::uint64_t wc_mac)
 {
     const struct {
         std::uint32_t axis;
@@ -1629,6 +1650,7 @@ void write_wildcard_slots(int wildcard_fd, std::uint32_t inactive,
         { BV_AXIS_PROTO, wc_proto, "proto" },
         { BV_AXIS_PORT,  wc_port,  "port"  },
         { BV_AXIS_VLAN,  wc_vlan,  "vlan"  },
+        { BV_AXIS_MAC,   wc_mac,   "mac"   },
     };
     for (const auto& s : slots) {
         const std::uint32_t key = inactive * BITVEC_NUM_AXES + s.axis;
@@ -1979,36 +2001,6 @@ std::uint32_t detach(const std::string& iface)
 
 namespace internal {
 
-/* Extract the inner-allowlist contents from the validated Config: every
- * rule with a present `match.mac` contributes (action filter REMOVED per
- * §5.34 L-3 + D-3.4b-c2-2 — schema cycle 3 shift per HG-3.4b-c2-2).
- * Drop rules NOW populate the inner allowlist with their `rule_id`; the
- * action discrimination happens downstream at the datapath's
- * rules→action_table dispatch chain per HG-3.4b-c2-4.
- *
- * Function name retained per D-3.4b-c2-3 (rename would inflate diff for
- * no semantic benefit — "pass" in the name is now historical but the
- * function's purpose is the same: extract inner-allowlist entries).
- * Dedup preserved by insertion-order: retains the FIRST rule_id for a
- * given MAC (per §5.26 dedup precedent + D-3.4b-c2-7 documented
- * shadowing semantic). */
-[[nodiscard]] std::vector<MacRule> extract_pass_macs(const Config& c)
-{
-    std::vector<MacRule> out;
-    out.reserve(c.rules.size());
-    for (const Rule& r : c.rules) {
-        if (!r.match.mac.has_value()) continue;
-        const xdpmf_mac& m = *r.match.mac;
-        const bool already = std::any_of(
-            out.begin(), out.end(),
-            [&](const MacRule& e) {
-                return std::memcmp(e.mac.octets, m.octets, sizeof(m.octets)) == 0;
-            });
-        if (!already) out.push_back(MacRule{m, r.id});
-    }
-    return out;
-}
-
 /* §5.26 + EDIT-1 atomic apply (single source of truth for the swap flow):
  * see design §5.26 attach() flow update + Phase B EDIT-1 internal-helper
  * contract. Both loader::attach() and apply::apply_config_inmemory() route
@@ -2016,11 +2008,12 @@ namespace internal {
  * lives in exactly ONE place. */
 std::uint32_t apply_request(const ApplyRequest& req)
 {
-    // §5.43 (MVP-4.3): the MAC axis is FROZEN (mac rejected at parse under
-    // v2 → `deduped` is always empty here); the MAC inner is still populated
-    // (with nothing) so the frozen maps stay coherent. The two LPM axes are
-    // lowered to prefix+bit lists (constrained) + wildcard masks (unconstrained).
-    const std::vector<MacRule> deduped     = extract_pass_macs(req.config);
+    // §5.47 (MVP-4.7): the MAC axis is UN-FROZEN — lowered to a per-MAC
+    // aggregated rule-bitmask list (constrained) + a wildcard mask
+    // (unconstrained), exactly like the proto/vlan exact-HASH axes. NO closure
+    // (D-mvp-4.7-NO-CLOSURE). The two LPM axes are lowered to prefix+bit lists
+    // (constrained) + wildcard masks (unconstrained).
+    const MacLowering          mac_low     = lower_mac_axis(req.config);
     const AxisLowering         dst_low     = lower_axis(req.config, /*dst_axis=*/true);
     const AxisLowering         src_low     = lower_axis(req.config, /*dst_axis=*/false);
     // §5.44 (MVP-4.4): lower the two NEW axes (proto exact-HASH, dst_port
@@ -2032,10 +2025,10 @@ std::uint32_t apply_request(const ApplyRequest& req)
     const VlanLowering         vlan_low    = lower_vlan_axis(req.config);
     const DefaultAction default_action     = req.config.default_action;
 
-    if (deduped.size() > XDPMF_ALLOWLIST_MAX) {
+    if (mac_low.entries.size() > XDPMF_ALLOWLIST_MAX) {
         throw_loader(LoaderError::LoadFailed,
-                     std::format("apply: pass-rule count {} exceeds XDPMF_ALLOWLIST_MAX={}",
-                                 deduped.size(), XDPMF_ALLOWLIST_MAX));
+                     std::format("apply: mac-rule count {} exceeds XDPMF_ALLOWLIST_MAX={}",
+                                 mac_low.entries.size(), XDPMF_ALLOWLIST_MAX));
     }
     if (dst_low.prefixes.size() > XDPMF_ALLOWLIST_MAX) {
         throw_loader(LoaderError::LoadFailed,
@@ -2247,7 +2240,7 @@ std::uint32_t apply_request(const ApplyRequest& req)
                 throw_loader(LoaderError::LoadFailed,
                              "inactive inner fd unavailable (reattach)");
             }
-            populate_inner_slot(inactive_inner_fd, deduped);
+            populate_inner_slot(inactive_inner_fd, mac_low.entries);
         }
         // §5.43 (MVP-4.3) D-mvp-4.3-Q1/Q2: populate the INACTIVE dst + src LPM
         // bit-vector inners AND the inactive wildcard half BEFORE the active_idx
@@ -2323,7 +2316,7 @@ std::uint32_t apply_request(const ApplyRequest& req)
             write_wildcard_slots(wildcard_fd, inactive,
                                  dst_low.wildcard, src_low.wildcard,
                                  proto_low.wildcard, port_low.wildcard,
-                                 vlan_low.wildcard);
+                                 vlan_low.wildcard, mac_low.wildcard);
         }
         {
             const int defaults_fd = bpf_map__fd(skel->maps.defaults);
@@ -2476,7 +2469,7 @@ std::uint32_t apply_request(const ApplyRequest& req)
         if (inner_fd < 0) {
             throw_loader(LoaderError::LoadFailed, "inner-map fd unavailable");
         }
-        populate_inner_slot(inner_fd, deduped);
+        populate_inner_slot(inner_fd, mac_low.entries);
     }
     // §5.43 (MVP-4.3) D-mvp-4.3-Q1/Q2: fresh-attach populates slot 0 of BOTH
     // LPM axes (dst + src bit-vector inners) + the slot-0 wildcard half
@@ -2536,7 +2529,7 @@ std::uint32_t apply_request(const ApplyRequest& req)
         }
         write_wildcard_slots(wildcard_fd, 0u, dst_low.wildcard, src_low.wildcard,
                              proto_low.wildcard, port_low.wildcard,
-                             vlan_low.wildcard);
+                             vlan_low.wildcard, mac_low.wildcard);
     }
     {
         const int defaults_fd = bpf_map__fd(skel->maps.defaults);

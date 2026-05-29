@@ -31,6 +31,7 @@ struct RuleMeta {
     /* §5.46 (MVP-4.6): per-axis match values, extracted verbatim from the
      * sidecar's match-object body via a key-anchored scan (D-3.4b-10 — NO
      * JSON parser). Empty string ⇒ the rule does not constrain that axis. */
+    std::string   mac;        /* §5.47 (MVP-4.7) "aa:bb:cc:dd:ee:ff" or "" */
     std::string   dst_cidr;   /* "A.B.C.D/N" or "" */
     std::string   src_cidr;   /* "A.B.C.D/N" or "" */
     std::string   protocol;   /* "tcp" | "udp" | "icmp" | numeric | "" */

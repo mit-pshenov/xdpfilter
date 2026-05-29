@@ -222,6 +222,52 @@ namespace {
     return static_cast<std::uint16_t>(n);
 }
 
+// §5.47 (MVP-4.7) D-mvp-4.7-MAC-PARSER: a single hex nibble [0-9a-fA-F] → 0..15;
+// returns -1 for any non-hex char (caller rejects → exit 9). RE-ADDED this slice
+// (the §5.43 cutover DELETED the prior hex_nibble/parse_mac_canonical helpers —
+// Phase A FINDING-2; this is NOT a mere "remove the reject").
+[[nodiscard]] int hex_nibble(char c) noexcept
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+// §5.47 D-mvp-4.7-Q1/HG-mvp-4.7-1: canonical 17-char src-MAC parser
+// (AA:BB:CC:DD:EE:FF; lower/upper hex; ':'-separated) → xdpmf_mac{octets[6]}.
+// EXACT match (v1 semantic, src-MAC). Malformed → ConfigError exit 9 with the
+// §5.27 stderr-catalogue prefix.
+[[nodiscard]] xdpmf_mac parse_mac(const yaml::Node& v, std::string_view file)
+{
+    if (v.kind != yaml::Node::Kind::Scalar) {
+        throw_cfg("rule match mac", file, v.line, v.col,
+                  "mac must be a canonical MAC string 'AA:BB:CC:DD:EE:FF'");
+    }
+    const std::string& s = v.scalar;
+    // 6 octets * 2 hex + 5 ':' separators = 17 chars exactly.
+    if (s.size() != 17) {
+        throw_cfg("rule match mac", file, v.line, v.col,
+                  "mac must be a canonical 17-char MAC 'AA:BB:CC:DD:EE:FF'");
+    }
+    xdpmf_mac out{};
+    for (std::size_t oct = 0; oct < 6; ++oct) {
+        const std::size_t base = oct * 3;
+        const int hi = hex_nibble(s[base]);
+        const int lo = hex_nibble(s[base + 1]);
+        if (hi < 0 || lo < 0) {
+            throw_cfg("rule match mac", file, v.line, v.col,
+                      "mac contains a non-hex digit");
+        }
+        if (oct < 5 && s[base + 2] != ':') {
+            throw_cfg("rule match mac", file, v.line, v.col,
+                      "mac octets must be ':'-separated");
+        }
+        out.octets[oct] = static_cast<unsigned char>((hi << 4) | lo);
+    }
+    return out;
+}
+
 }  // namespace
 
 Config validate(const yaml::Node& root, std::string_view file)
@@ -331,37 +377,40 @@ Config validate(const yaml::Node& root, std::string_view file)
                 // parse UNCHANGED (HG-mvp-4.4-4 additive-within-v2).
                 // §5.45 (MVP-4.5) D-mvp-4.5-VLAN-GRAMMAR: the v2 accepted
                 // match-key set is ADDITIVELY extended again to {dst_cidr,
-                // src_cidr, protocol, dst_port, vlan}. `mac` stays REJECTED.
+                // src_cidr, protocol, dst_port, vlan}.
+                // §5.47 (MVP-4.7) HG-mvp-4.7-2: MAC un-frozen — `mac` is
+                // RE-ACCEPTED (additive within v2; PI-mvp-4.3-MAC-DEFERRED
+                // RETIRED). The v2 accepted match-key set is now {mac, dst_cidr,
+                // src_cidr, protocol, dst_port, vlan}. Any other key → exit 9.
                 for (const std::pair<std::string, yaml::Node>& kv : match->mapping) {
-                    if (kv.first == "mac") {
-                        throw_cfg("unsupported match type", file,
-                                  kv.second.line, kv.second.col,
-                                  "MAC matching deferred; schema_version 2 supports "
-                                  "dst_cidr + src_cidr + protocol + dst_port + vlan");
-                    }
-                    if (kv.first != "dst_cidr" && kv.first != "src_cidr"
-                        && kv.first != "protocol" && kv.first != "dst_port"
-                        && kv.first != "vlan") {
+                    if (kv.first != "mac" && kv.first != "dst_cidr"
+                        && kv.first != "src_cidr" && kv.first != "protocol"
+                        && kv.first != "dst_port" && kv.first != "vlan") {
                         throw_cfg("unsupported match type", file,
                                   kv.second.line, kv.second.col,
                                   std::format("match type '{}' not supported in schema_version 2",
                                               kv.first));
                     }
                 }
-                // §5.45 v2 match grammar: each rule's match MUST contain AT
-                // LEAST ONE of {dst_cidr, src_cidr, protocol, dst_port, vlan}.
-                // Empty match: {} → exit 9.
+                // §5.47 v2 match grammar: each rule's match MUST contain AT
+                // LEAST ONE of {mac, dst_cidr, src_cidr, protocol, dst_port,
+                // vlan}. Empty match: {} → exit 9.
+                const yaml::Node* mac_node      = find_key(*match, "mac");
                 const yaml::Node* dst_cidr_node = find_key(*match, "dst_cidr");
                 const yaml::Node* src_cidr_node = find_key(*match, "src_cidr");
                 const yaml::Node* protocol_node = find_key(*match, "protocol");
                 const yaml::Node* dst_port_node = find_key(*match, "dst_port");
                 const yaml::Node* vlan_node     = find_key(*match, "vlan");
-                if (dst_cidr_node == nullptr && src_cidr_node == nullptr
-                    && protocol_node == nullptr && dst_port_node == nullptr
-                    && vlan_node == nullptr) {
+                if (mac_node == nullptr && dst_cidr_node == nullptr
+                    && src_cidr_node == nullptr && protocol_node == nullptr
+                    && dst_port_node == nullptr && vlan_node == nullptr) {
                     throw_cfg("rule match", file, match->line, match->col,
                               "rule must specify at least one of "
-                              "'dst_cidr', 'src_cidr', 'protocol', 'dst_port', 'vlan'");
+                              "'mac', 'dst_cidr', 'src_cidr', 'protocol', 'dst_port', 'vlan'");
+                }
+                // §5.47 D-mvp-4.7-MAC-PARSER: canonical 17-char src-MAC → exact axis.
+                if (mac_node != nullptr) {
+                    r.match.mac = parse_mac(*mac_node, file);
                 }
                 if (dst_cidr_node != nullptr) {
                     if (dst_cidr_node->kind != yaml::Node::Kind::Scalar) {

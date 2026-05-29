@@ -1,0 +1,12 @@
+# config_mac_swap_a.yaml — §5.47 MVP-4.7 MAC-axis atomic-swap fixture (state A).
+#
+# Pass MAC_X (02:00:00:00:00:01) only. The converted T_APPLY_ATOMIC_SWAP_NO_DROP
+# swaps A→B under sustained in-flight IPv4 traffic from MAC_X (overlapping-allowed
+# in BOTH A and B) and asserts ZERO in-flight drop across the active_idx flip.
+schema_version: 2
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      mac: "02:00:00:00:00:01"

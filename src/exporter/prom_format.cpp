@@ -157,7 +157,7 @@ std::string emit_metrics(
      * NOT rule_counters — a counter-orphan rule_id has unknown axes and gets
      * NO series (D-mvp-4.6-METRIC-SOURCE). HELP+TYPE fire once unconditionally
      * (PI-32 empty-scrape). */
-    out.append("# HELP xdpfilter_rule_info Per-rule match constraints (5-axis) by iface and rule_id; constant gauge value 1.\n");
+    out.append("# HELP xdpfilter_rule_info Per-rule match constraints (6-axis) by iface and rule_id; constant gauge value 1.\n");
     out.append("# TYPE xdpfilter_rule_info gauge\n");
 
     for (const auto& [iface, metas] : rule_meta_by_iface) {
@@ -180,15 +180,19 @@ std::string emit_metrics(
                   });
 
         for (const RuleMeta* rm : rules) {
+            /* §5.47 (MVP-4.7) D-mvp-4.7-Q3: `mac` is the 8th (LAST) label key,
+             * appended after `vlan` so the existing 7 keys' order stays byte-
+             * stable; `""` for a MAC-unconstrained rule. */
             std::format_to(std::back_inserter(out),
-                "xdpfilter_rule_info{{iface=\"{}\",rule_id=\"{}\",dst_cidr=\"{}\",src_cidr=\"{}\",protocol=\"{}\",dst_port=\"{}\",vlan=\"{}\"}} 1\n",
+                "xdpfilter_rule_info{{iface=\"{}\",rule_id=\"{}\",dst_cidr=\"{}\",src_cidr=\"{}\",protocol=\"{}\",dst_port=\"{}\",vlan=\"{}\",mac=\"{}\"}} 1\n",
                 iface_escaped,
                 rm->rule_id,
                 escape_label_value(rm->dst_cidr),
                 escape_label_value(rm->src_cidr),
                 escape_label_value(rm->protocol),
                 escape_label_value(rm->dst_port),
-                escape_label_value(rm->vlan));
+                escape_label_value(rm->vlan),
+                escape_label_value(rm->mac));
         }
     }
 

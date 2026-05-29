@@ -1,0 +1,13 @@
+# config_malformed_mac.yaml — §5.47 MVP-4.7: malformed MAC → ConfigError (exit 9).
+#
+# `mac` is RE-ACCEPTED in v2 (HG-mvp-4.7-2), but the canonical 17-char parser
+# (re-added per D-mvp-4.7-MAC-PARSER) rejects a malformed MAC with the §5.27
+# stderr-catalogue prefix `xdpmacfilter: config error:` and exit 9
+# (PI-mvp-4.7-GRAMMAR). This fixture's MAC is too short / has a non-hex group.
+schema_version: 2
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      mac: "zz:bb:cc:dd:ee"

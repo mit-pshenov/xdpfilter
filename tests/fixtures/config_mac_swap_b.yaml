@@ -1,0 +1,17 @@
+# config_mac_swap_b.yaml — §5.47 MVP-4.7 MAC-axis atomic-swap fixture (state B).
+#
+# MAC_X (02:00:00:00:00:01) overlap is load-bearing — it must NEVER drop across
+# the swap. MAC_Y (02:00:00:00:00:02) is added by B (denied under A, allowed
+# under B). The MAC inner + wildcard are written to the INACTIVE half before the
+# active_idx flip (RESET-on-apply, guard #15).
+schema_version: 2
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      mac: "02:00:00:00:00:01"
+  - id: 1
+    action: pass
+    match:
+      mac: "02:00:00:00:00:02"

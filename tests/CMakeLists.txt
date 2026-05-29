@@ -1193,3 +1193,38 @@ foreach(T IN ITEMS
         SKIP_RETURN_CODE 77
     )
 endforeach()
+
+# ── §5.47 MVP-4.7: MAC-axis return (6th exact-HASH axis, src-MAC) ────────────
+# T_AND6_ORACLE_AGREEMENT (§6.70): table-driven 6-axis datapath-vs-oracle —
+#   adds the LIVE MAC axis (inject_l4.py --src-mac; oracle --ruleset and6).
+#   GUARD #22 applies (NIC VLAN offload disabled for tagged vectors). Needs
+#   AND_ORACLE_PROD + INJECT_L4. RESOURCE_LOCK xdp_fixture (guard #12).
+# T_MAC_NON_IP: D-mvp-4.7-Q2-GATE boundary — a MAC rule is IPv4-gated; a non-IPv4
+#   frame from the rule's MAC falls to defaults. RESOURCE_LOCK xdp_fixture.
+set(TEST_ENV_AND6
+    ${TEST_ENV}
+    "AND_ORACLE_PROD=${CMAKE_SOURCE_DIR}/tests/bitvec/bitvec_oracle_prod.py"
+    "INJECT_L4=${CMAKE_SOURCE_DIR}/tests/inject/inject_l4.py"
+)
+add_test(
+    NAME T_AND6_ORACLE_AGREEMENT
+    COMMAND bash ${TEST_DIR}/T_AND6_ORACLE_AGREEMENT.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_AND6_ORACLE_AGREEMENT PROPERTIES
+    ENVIRONMENT "${TEST_ENV_AND6}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 120
+    SKIP_RETURN_CODE 77
+)
+add_test(
+    NAME T_MAC_NON_IP
+    COMMAND bash ${TEST_DIR}/T_MAC_NON_IP.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_MAC_NON_IP PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 120
+    SKIP_RETURN_CODE 77
+)

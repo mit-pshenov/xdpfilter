@@ -13,17 +13,17 @@
  *   # HELP xdpfilter_rule_match_total Total per-rule packet matches by iface and rule_id, labelled with action.
  *   # TYPE xdpfilter_rule_match_total counter
  *   xdpfilter_rule_match_total{iface="<I>",rule_id="<N>",action="(pass|drop|unknown)"} <N>
- *   # HELP xdpfilter_rule_info Per-rule match constraints (5-axis) by iface and rule_id; constant gauge value 1.
+ *   # HELP xdpfilter_rule_info Per-rule match constraints (6-axis) by iface and rule_id; constant gauge value 1.
  *   # TYPE xdpfilter_rule_info gauge
- *   xdpfilter_rule_info{iface="<I>",rule_id="<N>",dst_cidr="<v|>",src_cidr="<v|>",protocol="<v|>",dst_port="<v|>",vlan="<v|>"} 1
+ *   xdpfilter_rule_info{iface="<I>",rule_id="<N>",dst_cidr="<v|>",src_cidr="<v|>",protocol="<v|>",dst_port="<v|>",vlan="<v|>",mac="<v|>"} 1
  *
  * Block ordering: existing `xdpfilter_packets_total` HELP+TYPE+samples
  * FIRST, then `xdpfilter_rule_match_total` HELP+TYPE+samples, then the §5.46
  * `xdpfilter_rule_info` family LAST — preserves byte-equivalence of the
  * existing two-family prefix for any operator scrapers that pin
  * head-of-output substring matches (D-mvp-4.6-BLOCK-ORDER). The info family
- * carries a STABLE 7-label key set in fixed order; an unconstrained axis is
- * emitted with an empty value (D-mvp-4.6-Q3).
+ * carries a STABLE 8-label key set in fixed order (§5.47 added `mac` LAST); an
+ * unconstrained axis is emitted with an empty value (D-mvp-4.6-Q3 / D-mvp-4.7-Q3).
  *
  * Empty case (no samples): output is just HELP+TYPE lines, no sample lines.
  * Prometheus tolerates this (scrapes "0 timeseries" cleanly) per PI-32.

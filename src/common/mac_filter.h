@@ -158,12 +158,16 @@ enum mac_filter_stat {
  * distinct key, so 0 cannot mean "no tag" (D-mvp-4.5-Q2). */
 #define XDPMF_VLAN_NONE 0xFFFF
 
-#define BITVEC_NUM_AXES 5
+#define BITVEC_NUM_AXES 6
 #define BV_AXIS_DST     0
 #define BV_AXIS_SRC     1
 #define BV_AXIS_PROTO   2
 #define BV_AXIS_PORT    3
 #define BV_AXIS_VLAN    4
+/* §5.47 (MVP-4.7): axis 5 = src-MAC (eth->h_source) exact-match HASH; the v1
+ * MAC allowlist un-frozen as the 6th AND-composed bit-vector axis. wildcard
+ * max_entries (XDPMF_RULESET_COUNT * BITVEC_NUM_AXES) auto-grows 10→12. */
+#define BV_AXIS_MAC     5
 
 /* §5.44 (MVP-4.4) D-mvp-4.4-Q2: production-owned port-range slot — analog of
  * the §5.42 spike's `bv_port_range`. One slot per port-constrained rule; a
