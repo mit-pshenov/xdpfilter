@@ -1,0 +1,15 @@
+# config_reattach_canary_a.yaml — §5.48 MVP-4.8 reattach-twice slot canary (state A).
+#
+# Single-MAC allow: ONLY MAC_A (02:00:00:00:00:0a) passes; default drop.
+# Applied FIRST (fresh attach). The three canary configs A/B/C each allow a
+# DIFFERENT, mutually-exclusive MAC so that "verdict tracks the live config"
+# is observable at every apply step — including the SECOND reattach (apply C),
+# which is the inactive=0→_a slot selection the rest of the corpus never exercises
+# (B20 / HK-9 _a-_b-swap guard).
+schema_version: 2
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      mac: "02:00:00:00:00:0a"

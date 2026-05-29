@@ -1,0 +1,17 @@
+# config_reattach_canary_c.yaml — §5.48 MVP-4.8 reattach-twice slot canary (state C).
+#
+# Single-MAC allow: ONLY MAC_C (02:00:00:00:00:0c) passes; default drop.
+# Applied THIRD → REATTACH #2 (inactive=0 → _a slot). THIS is the load-bearing
+# step: the active_idx ping-pongs back to its fresh-attach value, so the new
+# ruleset is written through the inactive=0→_a selection — the exact path the
+# HK-9 _a/_b-swap bug (B20) corrupts and that no other test exercises on a
+# reattach. After apply C: MAC_C must PASS, MAC_B (state B) must DROP. Under the
+# swap bug, the _a slot would hold stale state B (MAC_B passes / MAC_C drops) and
+# these assertions fail — that is the canary's organic negation power.
+schema_version: 2
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      mac: "02:00:00:00:00:0c"

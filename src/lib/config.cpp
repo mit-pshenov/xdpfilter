@@ -53,11 +53,9 @@ namespace {
     return nullptr;
 }
 
-/* §5.43 (MVP-4.3) HG-mvp-4.3-2: MAC matching is DEFERRED in schema_version 2
- * — the `mac` match-key is rejected at parse (D-mvp-4.3-MAC-GRAMMAR), so the
- * prior canonical-MAC parser (hex_nibble / parse_mac_canonical) is no longer
- * reachable from this validator and was removed. It returns with the MAC-axis
- * slice (mvp-4.5). */
+/* §5.47 (MVP-4.7): MAC matching is ACCEPTED in schema_version 2 — the `mac`
+ * match-key parses to a src-MAC exact-match axis via the canonical-MAC parser
+ * (hex_nibble / parse_mac_canonical) restored for the MAC-axis slice. */
 
 [[nodiscard]] std::uint32_t parse_u32_or_throw(const yaml::Node& scalar_node,
                                                 std::string_view  file,
@@ -364,24 +362,11 @@ Config validate(const yaml::Node& root, std::string_view file)
                     throw_cfg("rule match", file, match->line, match->col,
                               "rule.match must be a mapping");
                 }
-                // §5.43 (MVP-4.3) D-mvp-4.3-MAC-GRAMMAR: the v2 accepted
-                // match-key set is {dst_cidr, src_cidr}. `mac` is REJECTED
-                // (not silently ignored) with a MAC-deferred diagnostic — a
-                // hard cutover should fail loud, not enforce a no-op MAC rule
-                // the operator believes is live (HG-mvp-4.3-2). Any other key
-                // (cidr, port, vlan, ...) → ConfigError exit 9.
-                // §5.44 (MVP-4.4) D-mvp-4.4-PROTO/PORT-GRAMMAR: the v2 accepted
-                // match-key set is ADDITIVELY extended to {dst_cidr, src_cidr,
-                // protocol, dst_port}. `mac` stays REJECTED (MAC-deferred). Any
-                // other key → ConfigError exit 9. Existing dst/src-only configs
-                // parse UNCHANGED (HG-mvp-4.4-4 additive-within-v2).
-                // §5.45 (MVP-4.5) D-mvp-4.5-VLAN-GRAMMAR: the v2 accepted
-                // match-key set is ADDITIVELY extended again to {dst_cidr,
-                // src_cidr, protocol, dst_port, vlan}.
-                // §5.47 (MVP-4.7) HG-mvp-4.7-2: MAC un-frozen — `mac` is
-                // RE-ACCEPTED (additive within v2; PI-mvp-4.3-MAC-DEFERRED
-                // RETIRED). The v2 accepted match-key set is now {mac, dst_cidr,
-                // src_cidr, protocol, dst_port, vlan}. Any other key → exit 9.
+                // §5.47 (MVP-4.7) v2 match grammar: the accepted match-key set
+                // is the 6 axes {mac, dst_cidr, src_cidr, protocol, dst_port,
+                // vlan}. Any other key → ConfigError exit 9 (fail loud, not a
+                // silent no-op the operator believes is live). (Per-axis grammar
+                // lineage §5.43–§5.47 lives in git/RETROSPECTIVES.)
                 for (const std::pair<std::string, yaml::Node>& kv : match->mapping) {
                     if (kv.first != "mac" && kv.first != "dst_cidr"
                         && kv.first != "src_cidr" && kv.first != "protocol"

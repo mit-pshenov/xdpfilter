@@ -1,0 +1,12 @@
+# config_reattach_canary_b.yaml — §5.48 MVP-4.8 reattach-twice slot canary (state B).
+#
+# Single-MAC allow: ONLY MAC_B (02:00:00:00:00:0b) passes; default drop.
+# Applied SECOND → REATTACH #1 (inactive=1 → _b slot). MAC_A (state A) must now
+# DROP and MAC_B must now PASS, proving the first reattach committed the new slot.
+schema_version: 2
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      mac: "02:00:00:00:00:0b"

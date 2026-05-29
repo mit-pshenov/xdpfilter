@@ -24,7 +24,7 @@
 namespace xdpmf::internal {
 
 /* Per design §5.26 EDIT-1 contract. Caller is responsible for:
- *   - validating the Config against schema_version 1 (config.cpp::validate),
+ *   - validating the Config against schema_version 2 (config.cpp::validate),
  *   - reconciling Config.iface with the CLI --iface (mismatch → ConfigError 9).
  * apply_request() then runs the full kernel-touch flow:
  *   kernel-version probe → trust_model env parse + stderr-log →

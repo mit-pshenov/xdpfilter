@@ -1817,6 +1817,102 @@ void populate_action_table(int action_table_fd)
     }
 }
 
+/* §5.48 (MVP-4.8) D-mvp-4.8-Q1 + D-mvp-4.8-FD-HELPER-SCOPE: fd-selector for the
+ * 7 PAIRED axis inners (allowlist / dst_bitmask / cidr_allowlist /
+ * proto_bitmask / port_ranges / vlan_bitmask / rules). Picks slot==0?a:b,
+ * fetches the inner-map fd, throws LoadFailed(what) on <0. This is the SINGLE
+ * home for the `_a`/`_b`<->slot decision — the HK-9 lockstep hazard B20 closes
+ * (a wrong pair/slot in any one of the former 14 hand-rolled sites silently
+ * corrupted the atomic swap and was compiler-invisible). Named `inactive_axis_fd`
+ * (not the brief's `inactive_inner_fd`) to avoid shadowing the same-named
+ * parameter in copy_rule_counters_forward — D-mvp-4.8-NAME-SHADOW. */
+int inactive_axis_fd(bpf_map* a, bpf_map* b, std::uint32_t slot, const char* what)
+{
+    bpf_map*  inner = (slot == 0) ? a : b;
+    const int fd    = bpf_map__fd(inner);
+    if (fd < 0) {
+        throw_loader(LoaderError::LoadFailed, what);
+    }
+    return fd;
+}
+
+/* §5.48 (MVP-4.8) D-mvp-4.8-BOUNDARY/ORDER: populate ALL RESET-on-apply
+ * destinations into `slot` (fresh=0, reattach=inactive), in the EXACT current
+ * order — mac, dst, src, proto, port, vlan, wildcard, defaults, rules. BOTH
+ * apply_request branches call this; it replaces the per-branch hand-rolled
+ * (slot==0?_a:_b)->fd->throw->populate blocks (the HK-9 14x idiom). EXCLUDES
+ * populate_action_table (shared static {PASS,DROP}, no slot dimension) and
+ * copy_rule_counters_forward (PRESERVE, branch-divergent args — guard #15);
+ * those stay EXPLICIT per branch. Behavior-preserving: same maps, same slots,
+ * same populate_* callees, same order as before the refactor. wildcard +
+ * defaults are SINGLE maps indexed BY slot (direct bpf_map__fd, not pair-select
+ * — D-mvp-4.8-FD-HELPER-SCOPE). */
+void populate_all_axes(mac_filter_bpf* skel, std::uint32_t slot,
+                       const MacLowering&        mac_low,
+                       const AxisLowering&       dst_low,
+                       const AxisLowering&       src_low,
+                       const ProtoLowering&      proto_low,
+                       const PortLowering&       port_low,
+                       const VlanLowering&       vlan_low,
+                       const std::vector<Rule>&  rules,
+                       DefaultAction             default_action)
+{
+    // 1 mac — paired allowlist_a/_b -> __u64 aggregated rule-bitmask
+    populate_inner_slot(
+        inactive_axis_fd(skel->maps.allowlist_a, skel->maps.allowlist_b, slot,
+                         "inactive mac inner fd unavailable"),
+        mac_low.entries);
+    // 2 dst — paired dst_bitmask_a/_b LPM bit-vector
+    populate_bitvec_inner_slot(
+        inactive_axis_fd(skel->maps.dst_bitmask_a, skel->maps.dst_bitmask_b, slot,
+                         "inactive dst inner fd unavailable"),
+        dst_low.prefixes);
+    // 3 src — paired cidr_allowlist_a/_b LPM bit-vector
+    populate_bitvec_inner_slot(
+        inactive_axis_fd(skel->maps.cidr_allowlist_a, skel->maps.cidr_allowlist_b, slot,
+                         "inactive src inner fd unavailable"),
+        src_low.prefixes);
+    // 4 proto — paired proto_bitmask_a/_b exact-HASH
+    populate_proto_inner_slot(
+        inactive_axis_fd(skel->maps.proto_bitmask_a, skel->maps.proto_bitmask_b, slot,
+                         "inactive proto inner fd unavailable"),
+        proto_low.entries);
+    // 5 port — paired port_ranges_a/_b range ARRAY
+    populate_port_inner_slot(
+        inactive_axis_fd(skel->maps.port_ranges_a, skel->maps.port_ranges_b, slot,
+                         "inactive port inner fd unavailable"),
+        port_low.ranges);
+    // 6 vlan — paired vlan_bitmask_a/_b exact-HASH
+    populate_vlan_inner_slot(
+        inactive_axis_fd(skel->maps.vlan_bitmask_a, skel->maps.vlan_bitmask_b, slot,
+                         "inactive vlan inner fd unavailable"),
+        vlan_low.entries);
+    // 7 wildcard — SINGLE map indexed by slot (D-mvp-4.8-FD-HELPER-SCOPE)
+    {
+        const int wildcard_fd = bpf_map__fd(skel->maps.wildcard);
+        if (wildcard_fd < 0) {
+            throw_loader(LoaderError::LoadFailed, "wildcard fd unavailable");
+        }
+        write_wildcard_slots(wildcard_fd, slot,
+                             dst_low.wildcard, src_low.wildcard,
+                             proto_low.wildcard, port_low.wildcard,
+                             vlan_low.wildcard, mac_low.wildcard);
+    }
+    // 8 defaults — SINGLE map indexed by slot
+    {
+        const int defaults_fd = bpf_map__fd(skel->maps.defaults);
+        if (defaults_fd < 0) {
+            throw_loader(LoaderError::LoadFailed, "defaults fd unavailable");
+        }
+        write_default_slot(defaults_fd, slot, default_action);
+    }
+    // 9 rules — paired rules_a/_b inner ARRAY
+    populate_rules_inner_slot(
+        inactive_axis_fd(skel->maps.rules_a, skel->maps.rules_b, slot,
+                         "inactive rules inner fd unavailable"),
+        rules);
+}
+
 /* Read active_idx[0]. Returns 0 if unset; throws on real lookup error. */
 [[nodiscard]] std::uint32_t read_active_idx(int active_idx_fd)
 {
@@ -2230,121 +2326,18 @@ std::uint32_t apply_request(const ApplyRequest& req)
         const std::uint32_t cur      = read_active_idx(active_idx_reused_fd);
         const std::uint32_t inactive = (cur == 0) ? 1u : 0u;
 
-        // Populate the INACTIVE slot via the (reused) inner-map fds.
-        {
-            bpf_map* inactive_inner = (inactive == 0)
-                                          ? skel->maps.allowlist_a
-                                          : skel->maps.allowlist_b;
-            const int inactive_inner_fd = bpf_map__fd(inactive_inner);
-            if (inactive_inner_fd < 0) {
-                throw_loader(LoaderError::LoadFailed,
-                             "inactive inner fd unavailable (reattach)");
-            }
-            populate_inner_slot(inactive_inner_fd, mac_low.entries);
-        }
-        // §5.43 (MVP-4.3) D-mvp-4.3-Q1/Q2: populate the INACTIVE dst + src LPM
-        // bit-vector inners AND the inactive wildcard half BEFORE the active_idx
-        // flip, so the single u32 store commits ALL axes' new ruleset atomically
-        // (D-mvp-4.3-RESET-VS-PRESERVE — match/wildcard maps RESET-on-apply).
-        {
-            bpf_map* inactive_dst_inner = (inactive == 0)
-                                              ? skel->maps.dst_bitmask_a
-                                              : skel->maps.dst_bitmask_b;
-            const int inactive_dst_fd = bpf_map__fd(inactive_dst_inner);
-            if (inactive_dst_fd < 0) {
-                throw_loader(LoaderError::LoadFailed,
-                             "inactive dst inner fd unavailable (reattach)");
-            }
-            populate_bitvec_inner_slot(inactive_dst_fd, dst_low.prefixes);
-        }
-        {
-            bpf_map* inactive_src_inner = (inactive == 0)
-                                              ? skel->maps.cidr_allowlist_a
-                                              : skel->maps.cidr_allowlist_b;
-            const int inactive_src_fd = bpf_map__fd(inactive_src_inner);
-            if (inactive_src_fd < 0) {
-                throw_loader(LoaderError::LoadFailed,
-                             "inactive src inner fd unavailable (reattach)");
-            }
-            populate_bitvec_inner_slot(inactive_src_fd, src_low.prefixes);
-        }
-        // §5.44 (MVP-4.4): populate the INACTIVE proto (HASH) + port (ARRAY)
-        // inners BEFORE the active_idx flip so the single u32 store commits
-        // all FOUR axes' new ruleset atomically (RESET-on-apply).
-        {
-            bpf_map* inactive_proto_inner = (inactive == 0)
-                                                ? skel->maps.proto_bitmask_a
-                                                : skel->maps.proto_bitmask_b;
-            const int inactive_proto_fd = bpf_map__fd(inactive_proto_inner);
-            if (inactive_proto_fd < 0) {
-                throw_loader(LoaderError::LoadFailed,
-                             "inactive proto inner fd unavailable (reattach)");
-            }
-            populate_proto_inner_slot(inactive_proto_fd, proto_low.entries);
-        }
-        {
-            bpf_map* inactive_port_inner = (inactive == 0)
-                                               ? skel->maps.port_ranges_a
-                                               : skel->maps.port_ranges_b;
-            const int inactive_port_fd = bpf_map__fd(inactive_port_inner);
-            if (inactive_port_fd < 0) {
-                throw_loader(LoaderError::LoadFailed,
-                             "inactive port inner fd unavailable (reattach)");
-            }
-            populate_port_inner_slot(inactive_port_fd, port_low.ranges);
-        }
-        // §5.45 (MVP-4.5): populate the INACTIVE vlan (HASH) inner BEFORE the
-        // active_idx flip so the single u32 store commits all FIVE axes' new
-        // ruleset atomically (RESET-on-apply).
-        {
-            bpf_map* inactive_vlan_inner = (inactive == 0)
-                                               ? skel->maps.vlan_bitmask_a
-                                               : skel->maps.vlan_bitmask_b;
-            const int inactive_vlan_fd = bpf_map__fd(inactive_vlan_inner);
-            if (inactive_vlan_fd < 0) {
-                throw_loader(LoaderError::LoadFailed,
-                             "inactive vlan inner fd unavailable (reattach)");
-            }
-            populate_vlan_inner_slot(inactive_vlan_fd, vlan_low.entries);
-        }
-        {
-            const int wildcard_fd = bpf_map__fd(skel->maps.wildcard);
-            if (wildcard_fd < 0) {
-                throw_loader(LoaderError::LoadFailed,
-                             "wildcard fd unavailable (reattach)");
-            }
-            write_wildcard_slots(wildcard_fd, inactive,
-                                 dst_low.wildcard, src_low.wildcard,
-                                 proto_low.wildcard, port_low.wildcard,
-                                 vlan_low.wildcard, mac_low.wildcard);
-        }
-        {
-            const int defaults_fd = bpf_map__fd(skel->maps.defaults);
-            if (defaults_fd < 0) {
-                throw_loader(LoaderError::LoadFailed,
-                             "defaults fd unavailable (reattach)");
-            }
-            write_default_slot(defaults_fd, inactive, default_action);
-        }
-
-        // §5.34 (MVP-3.4b cycle 2) D-3.4b-c2-8: populate the INACTIVE
-        // `rules` inner ARRAY slot BEFORE the active_idx flip — parallel
-        // to populate_inner_slot / populate_cidr_inner_slot above. The
-        // single u32 store at active_idx[0] below atomically commits the
-        // 4-axis swap (MAC + CIDR + defaults + rules). The datapath's
-        // single active_idx snapshot at the head of mac_filter_prog
-        // indexes all 4 outers consistently per §5.27 Q1 AS1 extended.
-        {
-            bpf_map* inactive_rules_inner = (inactive == 0)
-                                                ? skel->maps.rules_a
-                                                : skel->maps.rules_b;
-            const int inactive_rules_fd = bpf_map__fd(inactive_rules_inner);
-            if (inactive_rules_fd < 0) {
-                throw_loader(LoaderError::LoadFailed,
-                             "inactive rules inner fd unavailable (reattach)");
-            }
-            populate_rules_inner_slot(inactive_rules_fd, req.config.rules);
-        }
+        // §5.48 (MVP-4.8) D-mvp-4.8-BOUNDARY: populate ALL RESET-on-apply axes
+        // (mac/dst/src/proto/port/vlan/wildcard/defaults/rules) into the
+        // INACTIVE slot via the table-driven helper BEFORE the active_idx flip,
+        // so the single u32 store commits the whole 6-axis+rules+wildcard+
+        // defaults swap atomically (D-mvp-4.3-RESET-VS-PRESERVE — match/wildcard
+        // maps RESET-on-apply). The HK-9 `_a`/`_b`<->slot hazard now lives in
+        // exactly ONE place (inactive_axis_fd). populate_action_table (shared
+        // static) + copy_rule_counters_forward (PRESERVE) stay EXPLICIT below
+        // (guard #15 / D-mvp-4.8-BOUNDARY).
+        populate_all_axes(skel.get(), inactive, mac_low, dst_low, src_low,
+                          proto_low, port_low, vlan_low, req.config.rules,
+                          default_action);
         // §5.29 (MVP-3.4) step 8.5: `action_table` STAYS SHARED per
         // §5.34 HG-3.4b-c2-3 / D-3.4b-c2-6 — values are static
         // {PASS=0, DROP=1}, never mutate at runtime; atomic-swap meaningless.
@@ -2463,95 +2456,14 @@ std::uint32_t apply_request(const ApplyRequest& req)
     if (active_idx_fd < 0) {
         throw_loader(LoaderError::LoadFailed, "active_idx map fd unavailable");
     }
-    {
-        bpf_map* inner_map = skel->maps.allowlist_a;
-        const int inner_fd = bpf_map__fd(inner_map);
-        if (inner_fd < 0) {
-            throw_loader(LoaderError::LoadFailed, "inner-map fd unavailable");
-        }
-        populate_inner_slot(inner_fd, mac_low.entries);
-    }
-    // §5.43 (MVP-4.3) D-mvp-4.3-Q1/Q2: fresh-attach populates slot 0 of BOTH
-    // LPM axes (dst + src bit-vector inners) + the slot-0 wildcard half
-    // alongside MAC slot 0. All axes share the same active_idx (0 on fresh
-    // attach); the single u32 store at active_idx_fd below is the atomic
-    // commit for ALL of them.
-    {
-        bpf_map* dst_inner_map = skel->maps.dst_bitmask_a;
-        const int dst_inner_fd = bpf_map__fd(dst_inner_map);
-        if (dst_inner_fd < 0) {
-            throw_loader(LoaderError::LoadFailed, "dst inner-map fd unavailable");
-        }
-        populate_bitvec_inner_slot(dst_inner_fd, dst_low.prefixes);
-    }
-    {
-        bpf_map* src_inner_map = skel->maps.cidr_allowlist_a;
-        const int src_inner_fd = bpf_map__fd(src_inner_map);
-        if (src_inner_fd < 0) {
-            throw_loader(LoaderError::LoadFailed, "src inner-map fd unavailable");
-        }
-        populate_bitvec_inner_slot(src_inner_fd, src_low.prefixes);
-    }
-    // §5.44 (MVP-4.4): fresh-attach populates slot 0 of the proto (HASH) +
-    // port (ARRAY) axes alongside the dst/src slot-0 inners; the active_idx
-    // u32 write below (= 0) is the atomic commit for ALL four axes.
-    {
-        bpf_map* proto_inner_map = skel->maps.proto_bitmask_a;
-        const int proto_inner_fd = bpf_map__fd(proto_inner_map);
-        if (proto_inner_fd < 0) {
-            throw_loader(LoaderError::LoadFailed, "proto inner-map fd unavailable");
-        }
-        populate_proto_inner_slot(proto_inner_fd, proto_low.entries);
-    }
-    {
-        bpf_map* port_inner_map = skel->maps.port_ranges_a;
-        const int port_inner_fd = bpf_map__fd(port_inner_map);
-        if (port_inner_fd < 0) {
-            throw_loader(LoaderError::LoadFailed, "port inner-map fd unavailable");
-        }
-        populate_port_inner_slot(port_inner_fd, port_low.ranges);
-    }
-    // §5.45 (MVP-4.5): fresh-attach populates slot 0 of the vlan (HASH) axis
-    // alongside the dst/src/proto/port slot-0 inners; the active_idx u32 write
-    // below (= 0) is the atomic commit for ALL five axes.
-    {
-        bpf_map* vlan_inner_map = skel->maps.vlan_bitmask_a;
-        const int vlan_inner_fd = bpf_map__fd(vlan_inner_map);
-        if (vlan_inner_fd < 0) {
-            throw_loader(LoaderError::LoadFailed, "vlan inner-map fd unavailable");
-        }
-        populate_vlan_inner_slot(vlan_inner_fd, vlan_low.entries);
-    }
-    {
-        const int wildcard_fd = bpf_map__fd(skel->maps.wildcard);
-        if (wildcard_fd < 0) {
-            throw_loader(LoaderError::LoadFailed, "wildcard map fd unavailable");
-        }
-        write_wildcard_slots(wildcard_fd, 0u, dst_low.wildcard, src_low.wildcard,
-                             proto_low.wildcard, port_low.wildcard,
-                             vlan_low.wildcard, mac_low.wildcard);
-    }
-    {
-        const int defaults_fd = bpf_map__fd(skel->maps.defaults);
-        if (defaults_fd < 0) {
-            throw_loader(LoaderError::LoadFailed, "defaults map fd unavailable");
-        }
-        write_default_slot(defaults_fd, 0u, default_action);
-    }
-
-    // §5.34 (MVP-3.4b cycle 2) D-3.4b-c2-8: fresh-attach populates slot 0
-    // of the `rules` inner ARRAY axis alongside MAC slot 0 + CIDR slot 0;
-    // the active_idx u32 write below (= 0) is the atomic commit for ALL
-    // 4 axes. The datapath consults rules_outer[0] → rules_inner[rule_id]
-    // → action_table[action_id] per match per HG-3.4b-c2-4.
-    {
-        bpf_map* rules_inner_map = skel->maps.rules_a;
-        const int rules_inner_fd = bpf_map__fd(rules_inner_map);
-        if (rules_inner_fd < 0) {
-            throw_loader(LoaderError::LoadFailed, "rules inner-map fd unavailable");
-        }
-        populate_rules_inner_slot(rules_inner_fd, req.config.rules);
-    }
+    // §5.48 (MVP-4.8) D-mvp-4.8-BOUNDARY: fresh-attach populates slot 0 of ALL
+    // RESET-on-apply axes (mac/dst/src/proto/port/vlan/wildcard/defaults/rules)
+    // via the SAME table-driven helper the reattach branch uses; the active_idx
+    // u32 store below (= 0) is the atomic commit for all of them. slot==0 ->
+    // the `_a` inners (inactive_axis_fd). populate_action_table + the self-copy
+    // copy_rule_counters_forward stay EXPLICIT below (guard #15).
+    populate_all_axes(skel.get(), 0u, mac_low, dst_low, src_low, proto_low,
+                      port_low, vlan_low, req.config.rules, default_action);
     // §5.29 (MVP-3.4) step 8.5: `action_table` STAYS SHARED per §5.34
     // HG-3.4b-c2-3 / D-3.4b-c2-6 — static {PASS=0, DROP=1} mapping.
     {

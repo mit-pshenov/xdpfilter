@@ -2,8 +2,8 @@
  * config.hpp — typed schema for the §5.26/§5.27 YAML config.
  *
  * The schema (cycles 1+2) is a top-level block mapping with:
- *   schema_version: 1     (optional; default 1; supported set {1}; §5.27 Q5 V1
- *                          additive: `src_cidr` extension grandfathered into v1)
+ *   schema_version: 2     (REQUIRED; MUST be 2; supported set {2} — §5.43
+ *                          HG-mvp-4.3-3 hard cutover from {1})
  *   interface: <name>     (optional; redundant with CLI --iface)
  *   default_action: drop|pass    (REQUIRED)
  *   rules:                (optional; list of rule mappings)
@@ -11,7 +11,7 @@
  *       action: pass|drop (REQUIRED)
  *       match:            (REQUIRED mapping; §5.27 rule 7: at-least-one-of
  *                          mac/src_cidr required)
- *         mac: "AA:BB:..."         (§5.26 — optional in cycle 2 if src_cidr set)
+ *         mac: "AA:BB:..."         (§5.47 — src-MAC exact-match axis; re-accepted in v2)
  *         src_cidr: "10.0.0.0/8"   (§5.27 — IPv4 dotted-decimal CIDR; v6 rejected)
  *
  * All validation failures throw std::system_error{LoaderError::ConfigError, ...}
@@ -42,7 +42,7 @@ struct PortRange {
 };
 
 struct RuleMatch {
-    std::optional<xdpmf_mac>     mac;       // §5.26 MAC axis (DEFERRED in v2 — §5.43 HG-mvp-4.3-2; rejected at parse)
+    std::optional<xdpmf_mac>     mac;       // §5.47 (MVP-4.7) — src-MAC exact-match axis (re-accepted in v2)
     std::optional<xdpmf_cidr_v4> dst_cidr;  // §5.43 NEW (MVP-4.3) — IPv4 dst-CIDR axis (#1 selection gap)
     std::optional<xdpmf_cidr_v4> src_cidr;  // §5.27 (Q3 K2) — IPv4 src-CIDR axis
     std::optional<std::uint8_t>  protocol;  // §5.44 NEW (MVP-4.4) — L4 proto axis (exact-match; tcp/udp/icmp/numeric)

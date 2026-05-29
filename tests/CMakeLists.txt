@@ -358,12 +358,19 @@ set_tests_properties(T_VERIFIER_REJECT PROPERTIES
 #   fails closed exit 9. Uses xdp_pass.bpf.o alien fixture (already built).
 # T_EXIT_CODE_9_ON_CONFIG_ERROR (§6.27): bare-bones exit-9 audit-grep via
 #   garbage XDPMF_TRUST_MODEL — NO veth, NO root, NO fixture deps.
+# T_REATTACH_TWICE_SLOT_CANARY (§5.48 / MVP-4.8 / B20): corpus-justified
+#   reattach-twice canary. apply A (fresh) → B (reattach #1, inactive=1→_b)
+#   → C (reattach #2, inactive=0→_a); per-MAC PASS/DROP must track the live
+#   config at each step. Exercises the inactive=0→_a reattach selection no
+#   other test reaches — the exact path the HK-9 _a/_b-swap bug corrupts.
+#   Deterministic fixed-count injection (no rate-dependent SKIP path).
 foreach(T IN ITEMS
     T_APPLY_VALID_CONFIG
     T_APPLY_REJECTS_MALFORMED
     T_APPLY_REPLACES_RULESET
     T_LINK_PERSIST_ACROSS_LOADER_EXIT
     T_TRUST_MODEL_FLEET_RELAXES_GATE
+    T_REATTACH_TWICE_SLOT_CANARY
 )
     add_test(
         NAME ${T}
