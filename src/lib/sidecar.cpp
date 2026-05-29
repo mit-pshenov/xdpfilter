@@ -62,7 +62,12 @@ namespace {
     const unsigned int b = (c.addr >>  8) & 0xFFu;
     const unsigned int d = (c.addr >> 16) & 0xFFu;
     const unsigned int e = (c.addr >> 24) & 0xFFu;
-    return std::format("{}.{}.{}.{}/{}", a, b, d, e, c.prefixlen);
+    // §5.43: copy the PACKED `prefixlen` field to an aligned local before
+    // formatting — std::format binds a `const unsigned int&`, which is UB
+    // (misaligned reference bind, UBSan) when bound directly to a packed
+    // member. a/b/d/e are already such aligned local copies.
+    const unsigned int plen = c.prefixlen;
+    return std::format("{}.{}.{}.{}/{}", a, b, d, e, plen);
 }
 
 /* §5.37 (MVP-3.4f) D-3.4f-1: `format_timestamp_utc` + `json_escape`

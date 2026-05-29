@@ -101,3 +101,27 @@ Both OOT findings dispositioned `defer` (per reviewer recommendation; no promote
 
 1. **Stale MAC-era comments in `tests/T_DROP_RULE_BUMPS_COUNTER.sh:15-39`** + possibly-vestigial `mac_to_oct_json`/`mac_in_inner_pin` helpers — cosmetic comment/code mismatch, test passes. Tidy when the MAC axis returns (mvp-4.5).
 2. **MAY-invariant #11 literal `grep 'tests/bitvec' src/` returns 2 prose-comment hits** (`mac_filter.bpf.c:366`, `loader.cpp:1191`) — the guard #9 contract (no `#include` of the spike) holds; the literal grep is a proxy. Optionally reword the §5.43 invariant or the comments in a future cycle.
+
+---
+
+## ROUND 2 — verdict: `pass` (mint-dev-reviewer-2, fresh/independent)
+
+Round-1 sole blocker (UBSan misaligned-reference-bind at `sidecar.cpp:65`) INDEPENDENTLY confirmed FIXED. Reviewer-2 re-derived all 5 points from scratch (did not trust round-1).
+
+| Framework point | Findings |
+|---|---|
+| 1. Spec ↔ Code | 0 |
+| 2. Spec ↔ Tests | 0 |
+| 3. Code ↔ Tests | 0 |
+| 4. Out-of-Scope Drift | 0 |
+| 5. Behaviour preserved | 0 ([REGRESSION] RESOLVED) |
+
+- **Fix verified**: `sidecar.cpp:69` `const unsigned int plen = c.prefixlen;` then `std::format(..., plen)` — packed field copied to aligned local before the `const&` bind. 1-line + comment, no interface change.
+- **T_SANITIZER_BUILD** Passed 175.38s; `grep -ciE 'UndefinedBehaviorSanitizer|misaligned|undefined-behavior'` over the full 76-test log = **0**.
+- Full run: **100% tests passed, 0 failed out of 76; 7 skipped**.
+- All round-1 clean findings re-confirmed: FI-1 prefix-closure cover-direction correct (`loader.cpp:1209-1226`), FI-7 wildcard ×2 swap rides `active_idx`, M.1 cutover, MAC frozen-not-retired, `kManagedMaps[]`=21, `BITVEC_NUM_AXES`=2, `wildcard` max_entries=4, guard #9 transcription (no `#include tests/bitvec`), all git-diff fences empty, `copy_rule_counters_forward` PRESERVE byte-equivalent.
+- 7 skips all legitimate (4 MAC-deferred cited, 1 dup, 2 pre-existing env). Impl's 2 deviations design-sanctioned (inline-merge).
+- 2 OOT findings re-confirmed, both still `defer` — do NOT affect verdict.
+- Reviewer-2 run log: `/tmp/mint-review2-tests-1780048026.log`.
+
+**FINAL: pass on round 2.** Test tally 69 pass / 0 fail / 7 skip (76 registered).
