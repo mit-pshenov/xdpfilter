@@ -15038,3 +15038,192 @@ Guards applied: **#5** (Phase A code-grep — re-anchored every literal independ
 > **Forward-defense note #2 (future cycles un-freezing a "deferred" axis):** a DEFERRED axis may have had its support CODE deleted, not just bypassed (here: `parse_mac_canonical`/`hex_nibble` removed in §5.43, FINDING-2). When un-freezing, grep for the helper's DEFINITION (not just its call-site) before assuming "just remove the reject" — re-adding deleted code is a larger touch than re-enabling a guarded branch. Audit trail: this slice's Phase A FINDING-2.
 
 Evidence: `mint/task-brief.md` MVP-4.7 brief (HG-1..6, Q1-Q4, S7-1..6, guards #5/#9/#10/#11/#12/#13/#15/#16/#22/#23); §5.26 (v1 src-MAC `h_source` semantic); §5.27 (HASH-AOM allowlist topology + `active_idx` shared-flip); §5.31 (`allow_entry` inner value + sidecar/exporter split); §5.43 (the OR→AND pivot + `cidr_allowlist` value-reshape template + `PI-mvp-4.3-MAC-DEFERRED` verbatim + the deleted MAC parser); §5.44/§5.45 (proto/vlan exact-HASH axis template + `lower_proto/vlan_axis`/`populate_proto/vlan_inner_slot`); §5.46 (`rule_info` per-axis labels + `extract_axis` + `PI-mvp-4.6-COUNTER-CONTRACT` + the EXPORTER-AGNOSTIC retirement precedent); independent Phase A reads of `src/bpf/mac_filter.bpf.c:80-240,600-828` (full datapath + maps), `src/lib/config.cpp:54-60,300-400` (reject + deleted parser + grammar), `src/lib/config.hpp:45`, `src/lib/sidecar.cpp:45,110-153`, `src/lib/loader.cpp:155-200,1390-1640,1980-2040` (kManagedMaps + populate/lower helpers + apply_request), `src/common/mac_filter.h:67,104-166,241-261`, `src/exporter/prom_format.cpp:155-194`, `src/exporter/sidecar_reader.hpp:27-43`, `CMakeLists.txt:13-14`, `tests/T_PASS_MAC_OR_CIDR.sh` (full), `tests/T_EXPORTER_RULE_LABELS.sh:320-455`.
+
+---
+
+### §5.48 MVP-4.8: `apply_request` table-driven inactive-slot populate (B20 debt-paydown + B25 stale-comment correctness) (brownfield, BEHAVIOR-PRESERVING refactor, 2026-05-29)
+
+#### §5.48 Problem statement
+
+`internal::apply_request` in `src/lib/loader.cpp` repeats the *same* per-axis inactive-slot fd-populate idiom — `(slot==0?_a:_b) → bpf_map__fd → throw_loader(LoadFailed, "<diag>") if <0 → populate_*` — across its **reattach** branch (`loader.cpp` ~2233-2347) and its **fresh-attach** branch (~2466-2553). Across the two branches the idiom appears **14×** (7 paired axis inners × 2 branches), differing only in the `_a`/`_b` map-pair, the diagnostic string, and the `populate_*` callee. This is the **HK-9 lockstep-failure class**: a wrong `_a`/`_b` (or wrong slot) in any 1 of the 14 sites silently corrupts the atomic swap, is **compiler-invisible**, and is invisible to any test of the *un-mutated* axis.
+
+This slice collapses the 14 hand-rolled blocks into two single-TU helpers following the blessed `write_wildcard_slots`/`kManagedMaps[]` precedents: a fd-selector `inactive_inner_fd(a, b, slot, what)` + a `populate_all_axes(skel, slot, …)` wrapper that **both** branches call (fresh `slot=0`, reattach `slot=inactive`). **Pure behavior-preserving refactor** — it changes *how* the inactive slot is populated, not *what* lands there: no map/pin/schema/axis change, no VERSION bump, no datapath touch, no swap-semantics change. Boundary: only the RESET-on-apply axes fold; `copy_rule_counters_forward` (PRESERVE, branch-divergent args — **guard #15**) + `populate_action_table` (shared static, no slot dimension) **stay explicit per branch**. Secondary item **B25** corrects stale schema/MAC comments (comment-only). Target ≈250 → ≈60 LOC in the two branches.
+
+**Why now:** S8 (IPv6 `cidr6`, axis #7) walks straight into this idiom — paying B20 first means S8 adds *one* call into `populate_all_axes`, not *two* more hand-rolled blocks that must agree.
+
+#### §5.48 Phase A grep verification report (architect-independent — 2026-05-29, per guard #5)
+
+Every literal in this amendment re-anchored against the live tree (`src/lib/loader.cpp`, `config.{hpp,cpp}`, `apply_internal.hpp`, `tests/`):
+
+- **14× idiom CONFIRMED.** Reattach branch: MAC@2234-2244, dst@2249-2259, src@2260-2270, proto@2274-2284, port@2285-2295, vlan@2299-2309, wildcard@2310-2320, defaults@2321-2328, rules@2337-2347, action_table@2348-2358, copy_rule_counters_forward@2360-2381. Fresh-attach branch: MAC@2466-2473, dst@2479-2486, src@2487-2494, proto@2498-2505, port@2506-2513, vlan@2517-2524, wildcard@2525-2533, defaults@2534-2540, rules@2547-2554, action_table@2555-2563, copy_rule_counters_forward (self-copy)@2565-2578. **7 paired axis inners** (mac/dst/src/proto/port/vlan/rules) use `_a`/`_b` select-by-slot; **wildcard + defaults are SINGLE maps** indexed by slot (no `_a`/`_b` pair).
+- **Populate callees + signatures CONFIRMED** (anon-namespace, loader.cpp:1424-1813): `populate_inner_slot(int, const std::vector<std::pair<xdpmf_mac,std::uint64_t>>&)`, `populate_bitvec_inner_slot(int, const std::vector<BitPrefix>&)`, `populate_proto_inner_slot(int, const std::vector<std::pair<std::uint32_t,std::uint64_t>>&)`, `populate_vlan_inner_slot(int, const std::vector<std::pair<std::uint32_t,std::uint64_t>>&)`, `populate_port_inner_slot(int, const std::vector<xdpmf_port_range>&)`, `populate_rules_inner_slot(int, const std::vector<Rule>&)`, `write_wildcard_slots(int, std::uint32_t, …6 u64…)`, `write_default_slot(int, std::uint32_t, DefaultAction)`.
+- **Lowering inputs CONFIRMED** (loader.cpp:2016-2026): `mac_low`(`MacLowering`), `dst_low`/`src_low`(`AxisLowering`), `proto_low`(`ProtoLowering`), `port_low`(`PortLowering`), `vlan_low`(`VlanLowering`), `req.config.rules`(`std::vector<Rule>`), `default_action`(`DefaultAction`). Lowering struct defs at 1240-1413.
+- **`_a`/`_b` accessors CONFIRMED:** `skel->maps.{allowlist,dst_bitmask,cidr_allowlist,proto_bitmask,port_ranges,vlan_bitmask,rules}_{a,b}` + single maps `skel->maps.{wildcard,defaults,action_table}`. `skel` is `BpfSkeleton` (raii.hpp:28) wrapping `mac_filter_bpf*`; `.get()` → raw ptr; `operator->` exposes `.maps`.
+- **`copy_rule_counters_forward` args DIVERGE per branch CONFIRMED:** reattach `(old_rc_fd, inactive_rc_fd)` = old-active→inactive (2374-2380); fresh `(rc_a_fd, rc_a_fd)` = self-copy (2572-2577). Body byte-equivalent target (1765-1793). **This is the guard #15 hazard.**
+- **Name-collision check** (`grep -nE 'inactive_inner_fd|populate_all_axes'`): NO existing free function of either name. `inactive_inner_fd` DOES appear as a **local variable** (2238, removed by this refactor) and as a **parameter** in `copy_rule_counters_forward(int old_active_inner_fd, int inactive_inner_fd)` (1765). See D-mvp-4.8-NAME-SHADOW.
+- **Diagnostic strings NOT test-pinned** (`grep -n 'fd unavailable\|inner-map fd' tests/` → ZERO). Unifying them is safe (see D-mvp-4.8-DIAG).
+- **B25 sites CONFIRMED:** `config.hpp:5-6` ("schema_version 1; default 1; supported set {1}"), `:14` ("optional in cycle 2"), `:45` ("MAC axis DEFERRED in v2 … rejected at parse"); `apply_internal.hpp:27` ("schema_version 1"); `config.cpp:56-60` (stale "MAC DEFERRED … parser removed … returns with mvp-4.5" block) + `:367-384` (stacked REJECTED→RE-ACCEPTED grammar-history paragraphs). **CATCH: `config.hpp:60` is CODE** (`std::uint32_t schema_version = 1;` — a struct field default), **NOT a comment** — see D-mvp-4.8-B25.
+- **Regression corpus EXISTS:** `tests/T_{APPLY,CIDR,RULES}_ATOMIC_SWAP_NO_DROP.sh`, `T_RULE_COUNTERS_ATOMIC_SWAP.sh`, `T_RULE_COUNTER_SURVIVES_APPLY.sh`, `T_{AND,AND4,AND5,AND6,BITVEC}_ORACLE_AGREEMENT.sh` all present.
+- **VERSION** = `0.15.0` (per §5.47). `kManagedMaps[]` = 30, `BITVEC_NUM_AXES` = 6 — both UNCHANGED this slice.
+
+#### §5.48 Human-gate decisions (defaults from brief — architect resolution)
+
+- **HG-mvp-4.8-1 — VERSION → NO bump (stay 0.15.0). CONFIRMED.** Behavior-preserving loader-internal refactor, zero operator-observable change; mirrors the MVP-3.4e internal-hardening precedent. Guard #11 N/A (no literal to propagate).
+- **HG-mvp-4.8-2 — B25 stale-comment fixes IN SCOPE (secondary, fenced). CONFIRMED.** Comment-only; zero behavior, zero test ripple. See D-mvp-4.8-B25 + the `config.hpp:60`-is-code catch.
+- **HG-mvp-4.8-3 — extraction boundary = RESET-on-apply axes ONLY. CONFIRMED + made precise in D-mvp-4.8-BOUNDARY.** `populate_all_axes` covers the 6 match axes + `rules` + `wildcard` + `defaults`. `copy_rule_counters_forward` (PRESERVE, branch-divergent args, guard #15) + `populate_action_table` (shared static) stay explicit per branch.
+
+#### §5.48 Q-decisions (mechanism)
+
+- **Q1 — helper shape → A1 (two helpers).** `inactive_inner_fd` fd-selector + `populate_all_axes` wrapper that calls the fd-helper per axis then the matching `populate_*`. **Rejected A2** (constexpr axis-descriptor table walked in a loop): the `populate_*` callee + its payload *type* varies per axis (`xdpmf_mac` pairs vs `BitPrefix` vs `std::uint32_t` pairs vs `xdpmf_port_range` vs `Rule`); a uniform loop needs type-erasure or per-axis lambdas — fights the heterogeneous payloads for no readability gain. A1 kills the actual HK-9 hazard (the 14× select-throw) with zero type-erasure cost and keeps each `populate_*` call explicit/readable.
+
+#### §5.48 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+**NEW:** none (helpers are added inside the existing TU; no new file).
+
+**EDITED:**
+
+| Path | Role (this slice) | Language | LOC est |
+|---|---|---|---|
+| `src/lib/loader.cpp` | Add `inactive_inner_fd` + `populate_all_axes` in anon namespace (near `populate_*`, ~1424-1813). Collapse the reattach (~2233-2347) + fresh-attach (~2466-2553) 7-axis+wildcard+defaults+rules blocks to ONE `populate_all_axes(...)` call each. `populate_action_table` + `copy_rule_counters_forward` stay explicit per branch, UNCHANGED. Net ≈ +40 helper / −190 branch ≈ −150. | C++23 | ~60 (helpers) / −190 (branches) |
+| `src/lib/config.hpp` | B25 comment-only: `:5-6`/`:14`/`:45` → v2 / 6-axis / MAC-re-accepted reality. **Field default `schema_version = 1` at `:60` is CODE — UNTOUCHED.** | C++ (comments) | ~4 lines |
+| `src/lib/config.cpp` | B25 comment-only: `:56-60` stale "MAC DEFERRED/parser-removed" block + `:367-384` stacked grammar-history paragraphs → trim to current v2 6-axis reality; drop superseded history prose (lives in git/RETROSPECTIVES). | C++ (comments) | ~10 lines |
+| `src/lib/apply_internal.hpp` | B25 comment-only: `:27` "schema_version 1" → "schema_version 2". | C++ (comment) | 1 line |
+
+**UNCHANGED-BUT-AFFECTED (must remain byte-identical; reviewer asserts zero git-diff):**
+
+| Path | Why touched-adjacent yet must not change | Check |
+|---|---|---|
+| `src/lib/loader.hpp` | Both helpers are anon-namespace/single-TU (guard #9) — NOT hoisted to any header. | `git diff -- src/lib/loader.hpp` EMPTY |
+| `src/lib/apply_internal.hpp` (the `ApplyRequest` struct + `apply_request` decl) | Signature/contract unchanged; only the `:27` comment edits. | decl/struct byte-equivalent |
+| `copy_rule_counters_forward` body (loader.cpp:1765-1793) | PRESERVE semantics, branch-divergent args — guard #15; stays an explicit per-branch call, NOT folded. **Its parameter `inactive_inner_fd` MUST NOT be renamed.** | body byte-equivalent; both call-sites intact |
+| `populate_action_table` + the `active_idx` flip / link / sidecar / legacy-alias-pin steps | Shared static + commit-timing — outside the extraction boundary. | code-review: same calls, same order, same flip site |
+| `src/bpf/mac_filter.bpf.c`, `src/common/mac_filter.h`, all `tests/T_*`, `CMakeLists.txt` VERSION | No datapath/map/pin/schema/axis/version change. | `git diff` byte-equivalent |
+
+#### §5.48 DataStructures
+
+**None new.** The helper signatures consume already-defined types: `MacLowering`/`AxisLowering`/`ProtoLowering`/`PortLowering`/`VlanLowering` (loader.cpp:1240-1413, anon-namespace), `Rule`/`DefaultAction` (config.hpp:33,53), `bpf_map*` (libbpf), `mac_filter_bpf*` (skel). No map, struct, schema, or BPF-side layout change.
+
+#### §5.48 Interfaces
+
+Both functions are **anon-namespace / single-TU** in `loader.cpp` (guard #9 — NOT exported, NOT in any header). Placement: alongside the other `populate_*` helpers (~1424-1813).
+
+```
+// fd-selector: picks slot==0?a:b, fetches the inner-map fd, throws
+// LoadFailed(what) on <0, returns the fd. Single home for the _a/_b<->slot
+// decision (the HK-9 hazard B20 kills). Used for the 7 PAIRED axis inners only.
+int inactive_inner_fd(bpf_map* a, bpf_map* b, std::uint32_t slot, const char* what);
+
+// Populates ALL RESET-on-apply destinations into `slot` (fresh=0, reattach=inactive),
+// in the EXACT current order:
+//   1 mac   (allowlist_a/_b      -> populate_inner_slot,        mac_low.entries)
+//   2 dst   (dst_bitmask_a/_b    -> populate_bitvec_inner_slot, dst_low.prefixes)
+//   3 src   (cidr_allowlist_a/_b -> populate_bitvec_inner_slot, src_low.prefixes)
+//   4 proto (proto_bitmask_a/_b  -> populate_proto_inner_slot,  proto_low.entries)
+//   5 port  (port_ranges_a/_b    -> populate_port_inner_slot,   port_low.ranges)
+//   6 vlan  (vlan_bitmask_a/_b   -> populate_vlan_inner_slot,   vlan_low.entries)
+//   7 wildcard (single map, index-by-slot -> write_wildcard_slots(fd, slot, …6 wc…))
+//   8 defaults (single map, index-by-slot -> write_default_slot(fd, slot, default_action))
+//   9 rules (rules_a/_b          -> populate_rules_inner_slot,  rules)
+// EXCLUDES populate_action_table (shared static) + copy_rule_counters_forward (PRESERVE).
+void populate_all_axes(mac_filter_bpf* skel, std::uint32_t slot,
+                       const MacLowering&        mac_low,
+                       const AxisLowering&       dst_low,
+                       const AxisLowering&       src_low,
+                       const ProtoLowering&      proto_low,
+                       const PortLowering&       port_low,
+                       const VlanLowering&       vlan_low,
+                       const std::vector<Rule>&  rules,
+                       DefaultAction             default_action);
+```
+
+**fd-fetch scope (D-mvp-4.8-FD-HELPER-SCOPE):** `inactive_inner_fd` handles the **7 paired `_a`/`_b` axis inners** (mac/dst/src/proto/port/vlan/rules — pair-select-by-slot). **`wildcard` + `defaults` are SINGLE maps** indexed *by* slot (not pair-selected); inside `populate_all_axes` they use a direct `bpf_map__fd(skel->maps.wildcard|defaults)` + throw-if-`<0` (2 inline sites). Impl MAY add a trivial `int map_fd_or_throw(bpf_map*, const char*)` sub-helper that `inactive_inner_fd` also delegates to — architect-flex, not contractual.
+
+**Collapsed call sites (success path byte-identical to current):**
+- **Reattach** (replaces ~2233-2347): `populate_all_axes(skel.get(), inactive, mac_low, dst_low, src_low, proto_low, port_low, vlan_low, req.config.rules, default_action);` — then the EXISTING explicit `populate_action_table(...)` block (~2348-2358) and the EXISTING explicit `copy_rule_counters_forward(old_rc_fd, inactive_rc_fd)` block (~2360-2381) UNCHANGED, then the link-update + `write_active_idx(active_idx_reused_fd, inactive)` flip UNCHANGED.
+- **Fresh-attach** (replaces ~2466-2553): `populate_all_axes(skel.get(), 0u, mac_low, dst_low, src_low, proto_low, port_low, vlan_low, req.config.rules, default_action);` — then the EXISTING explicit `populate_action_table(...)` (~2555-2563) and the EXISTING explicit `copy_rule_counters_forward(rc_a_fd, rc_a_fd)` self-copy (~2565-2578) UNCHANGED, then link-create+pin + `write_active_idx(active_idx_fd, 0u)` flip UNCHANGED. The legacy-`allowlist`-alias pin (~2448-2459) + `active_idx_fd` fetch (~2462-2465) stay BEFORE the `populate_all_axes` call, UNCHANGED.
+
+#### §5.48 Decisions (with rationale)
+
+- **D-mvp-4.8-Q1 — two helpers (A1), reject the constexpr-table loop (A2)** — see Q1. **Because** heterogeneous per-axis payload types make a uniform data-table loop require type-erasure/lambdas; A1 kills the HK-9 select-throw hazard with zero such cost and keeps each `populate_*` explicit.
+- **D-mvp-4.8-BOUNDARY (HG-3, load-bearing) — `populate_all_axes` covers the 6 match axes + `rules` + `wildcard` + `defaults` (all RESET-on-apply, identical select-fd-throw-populate shape). `copy_rule_counters_forward` (PRESERVE, branch-divergent args) + `populate_action_table` (shared static, no slot dimension) are EXCLUDED and stay explicit per branch.** **Because** folding the PRESERVE copy-forward into a RESET-shaped uniform helper would wipe operator-grade counter monotonicity (PI-mvp-4.3-COUNTER-PRESERVE) — this is **guard #15**, the load-bearing reason the refactor is non-trivial. `populate_action_table` writes a static `{PASS,DROP}` mapping with no slot dimension; it has no place in a per-slot axis helper.
+- **D-mvp-4.8-ORDER — the populate order is preserved EXACTLY: mac → dst → src → proto → port → vlan → wildcard → defaults → rules (inside `populate_all_axes`), then `populate_action_table`, then `copy_rule_counters_forward` (per branch); the `active_idx` flip stays the SINGLE atomic commit AFTER all populates.** **Because** although all writes target the *unobserved* inactive slot (order is behavior-irrelevant pre-flip), preserving order gives reviewer a clean semantic diff and keeps the swap-commit timing provably unchanged. Swap semantics, axis set, and flip timing are NOT touched (brief §62/§67 fence).
+- **D-mvp-4.8-FD-HELPER-SCOPE — `inactive_inner_fd` is for pair-select-by-slot (the 7 `_a`/`_b` inners); `wildcard`/`defaults` are single maps indexed by slot → direct `bpf_map__fd`+throw inline.** **Because** conflating "select one of two map objects" with "index slot into one map" into a single helper would muddy its single responsibility; the two single-map fetches are trivial and already pass `slot` into `write_wildcard_slots`/`write_default_slot`.
+- **D-mvp-4.8-DIAG — the per-branch diagnostic suffix on the fd-unavailable error strings ("(reattach)"/"(fresh)" and the fresh-branch's shorter "inner-map fd unavailable") is UNIFIED to branch-agnostic `what` strings** (e.g. `"inactive mac inner fd unavailable"`, `"inactive dst inner fd unavailable"`, …). **Because** these fire only on a `bpf_map__fd<0` never-in-practice path and `grep tests/` confirms ZERO tests pin them; the success path is byte-identical. Behavior-equivalence holds (no observable change for any passing or realistically-failing case).
+- **D-mvp-4.8-NAME-SHADOW — keep the brief's name `inactive_inner_fd` for the free function.** It coexists with the same-named **parameter** in `copy_rule_counters_forward(int old_active_inner_fd, int inactive_inner_fd)` (loader.cpp:1765). A free function + a parameter sharing a name is **legal C++**; inside that function the parameter shadows the free function, but the function is **never called there**, so behavior is identical and the shadow is benign. **Impl MUST NOT rename the `copy_rule_counters_forward` parameter** (guard #15 byte-equivalence). Reviewer: this is intentional, NOT a collision defect. (If impl prefers, it MAY name the helper `inactive_axis_fd` to eliminate the shadow — architect-flex; downstream references no internal helper name.)
+- **D-mvp-4.8-SINGLE-TU (guard #9) — both helpers stay anon-namespace/single-TU; NOT hoisted to `loader.hpp` or any header.** **Because** they have a single consumer family (`apply_request`) — extraction is internal de-duplication, not cross-file API. Mirrors `write_wildcard_slots`/`kManagedMaps[]`.
+- **D-mvp-4.8-NO-BUMP (HG-1) — VERSION stays `0.15.0`; no test-literal propagation (guard #11 N/A).** **Because** zero operator-observable change.
+- **D-mvp-4.8-B25 (HG-2, comment-only) — correct the stale schema/MAC comments in `config.hpp:5-6/:14/:45`, `config.cpp:56-60/:367-384`, `apply_internal.hpp:27` to v2 / 6-axis / MAC-re-accepted reality; drop superseded history prose. The struct field default `schema_version = 1` at `config.hpp:60` is CODE, NOT a comment — it stays UNTOUCHED.** **Because** B25 is comment-only with zero behavior/test ripple; the parser (`config.cpp:286-297`) *requires* `schema_version==2` and overrides the field default before any behaviorally-significant read, so changing the default is (a) out of comment-only scope and (b) a needless behavior-adjacent edit. Reviewer MAY split B25 to a follow-up if it prefers single-purpose — non-blocking.
+- **D-mvp-4.8-PROSE-VS-INVARIANTS — resolution rule for THIS amendment:** if §5.48 prose conflicts with a §6.5 PI-mvp-4.8-* item or the verifiable-invariants list, the **§6.5 invariants-block WINS (prose loses)**. If impl deviates from a verifiable-invariants hint to satisfy a §6.5 PI or a load-bearing regression assertion, reviewer disposition is `inline-merge` on the hint, NOT `[UNRELATED-EDIT]`. Load-bearing (MUST): the extraction boundary (D-BOUNDARY), the `_a`/`_b`↔slot mapping, copy-forward + action_table staying explicit, swap-semantics/flip-timing unchanged, VERSION 0.15.0, `kManagedMaps`=30.
+
+#### §5.48 TestStrategy
+
+Tester writes against THIS section, not impl's code. **NEW ctests target = 0** — this is a behavior-preserving refactor; the regression net is the *existing* suite. **Baseline GREEN unchanged (84/84 per MVP-4.7 DoD; reconcile via fresh `ctest -N` at Phase 2.5).**
+
+**OPS canary — N/A this slice (stated so reviewer does NOT demand one).** No new invocation path / runtime environment: the refactor lives entirely inside `apply_request`, reached through the SAME `attach`/`apply` XDP+bpffs path the existing ctests already exercise (same caps, same netns, same uid, same bpffs root). No stripped-down/alternate context introduced.
+
+The refactor is correct **iff** both the fresh-attach AND reattach paths produce byte-identical inactive-slot population for all 7 paired axes at BOTH `slot=0` (→`_a`) and `slot=1` (→`_b`), plus wildcard/defaults/rules, with `copy_rule_counters_forward` PRESERVE intact. The regression net:
+
+- **`T_APPLY_ATOMIC_SWAP_NO_DROP`** — re-apply under sustained traffic exercises the **reattach** branch + `active_idx` flip → no in-flight drop. Covers the populate→flip ordering.
+- **`T_CIDR_ATOMIC_SWAP_NO_DROP`** — same, src/dst CIDR axis populated correctly across the swap.
+- **`T_RULES_ATOMIC_SWAP_NO_DROP`** — `rules` inner populated correctly across the swap.
+- **`T_RULE_COUNTERS_ATOMIC_SWAP`** — the `rule_counters` outer swap (PRESERVE path) survives.
+- **`T_RULE_COUNTER_SURVIVES_APPLY`** — **guards that `copy_rule_counters_forward` was NOT folded into the RESET-shaped helper** (monotonic counters across apply). Load-bearing for guard #15.
+- **`T_AND/AND4/AND5/AND6/BITVEC_ORACLE_AGREEMENT`** — every axis exercised through both branches; oracle agreement proves all 6 match axes + wildcard land correctly in whichever slot is inactive-then-active.
+
+**Targeted regression — tester's call, justified-not-symmetric.** The exact HK-9 bug (`_a`/`_b` swapped inside `inactive_inner_fd`) only manifests when the reattach path runs with **both** `inactive=1` (→`_b`) **and** `inactive=0` (→`_a`). A single re-apply only flips `0→1` (hits `_b`). **Tester MUST verify against the corpus** whether any existing test re-applies *twice* (so a second reattach flips `1→0`, hitting `_a` as the inactive selection). If NO existing test exercises the `inactive=0`/`_a` reattach selection, a **"reattach-twice per-axis swap canary"** is justified: apply config A → apply config B (reattach, inactive=1→`_b`) → apply config C (reattach, inactive=0→`_a`), asserting per-axis verdicts track the live config at each step. If the corpus already covers both slot cases, add NOTHING (per brief: justify against the corpus, don't add for symmetry).
+
+**Reviewer load-bearing checks (brief §24):** (1) semantic diff of the populate sequence — same maps, same slots, same `populate_*` fns, same order, both branches; (2) the `_a`/`_b`↔slot mapping inside `inactive_inner_fd` is correct for BOTH `slot=0`→`a` and `slot=1`→`b` — **verify by READING, not by trusting the green suite** (this is the exact bug class B20 exists to kill); (3) `copy_rule_counters_forward` (PRESERVE, branch-divergent args) and `populate_action_table` (shared static) are NOT swept into the uniform RESET-on-apply helper (guard #15).
+
+**(impl Phase 2.5 smoke):** build GREEN (no new warnings); `ctest` full suite GREEN at the reconciled baseline; `git diff -- src/lib/loader.hpp` EMPTY; `git diff -- src/bpf/ src/common/ CMakeLists.txt tests/` byte-equivalent; `grep -n 'fd unavailable' src/lib/loader.cpp` shows the unified branch-agnostic strings only.
+
+#### §6.5 Preserved invariants (§5.48 MVP-4.8 brownfield)
+
+Reviewer's framework point 5 walks this list. Items are **MUST contracts**; `[INVARIANT-VIOLATED]` per failed check. **ALL prior PIs (PI-1 … PI-mvp-4.7-*) CONTINUE byte-equivalent** — this slice retires/adds NO behavioral PI (only NEW internal-refactor PIs below).
+
+| PI | Property | Check mechanism |
+|---|---|---|
+| **PI-mvp-4.8-BEHAVIOR-EQUIV (NEW)** | The inactive-slot populate sequence is semantically byte-equivalent across BOTH branches post-refactor: same maps, same slots, same `populate_*` callees, same order; the success path is unchanged. | Semantic code-diff (reviewer check 1) + full regression suite GREEN. |
+| **PI-mvp-4.8-FD-SELECT (NEW, load-bearing)** | `inactive_inner_fd` maps `slot==0`→`a` and `slot==1`→`b` for ALL 7 paired axis inners; the `_a`/`_b`↔slot decision lives in ONE place. | Code-review of the single select site for BOTH slot cases (reviewer check 2) — NOT inferred from the green suite. |
+| **PI-mvp-4.3-COUNTER-PRESERVE (CONTINUES, guard #15)** | `copy_rule_counters_forward` body byte-equivalent; stays an EXPLICIT per-branch call OUTSIDE `populate_all_axes`; branch-divergent args intact (reattach `old_active→inactive`; fresh `a→a`). | `git diff` byte-equivalent for the fn body; code-review both call-sites; `T_RULE_COUNTER_SURVIVES_APPLY` GREEN. |
+| **PI-mvp-4.8-ACTION-TABLE (NEW)** | `populate_action_table` stays an EXPLICIT per-branch call (shared static `{PASS,DROP}`, no slot dimension), NOT folded into `populate_all_axes`. | Code-review both branches. |
+| **PI-mvp-4.8-SWAP-SEMANTICS (CONTINUES)** | Atomic-swap semantics, axis set, and `active_idx` flip timing UNCHANGED — single u32 store AFTER all populates, per branch. | `T_*_ATOMIC_SWAP_NO_DROP` GREEN; code-review flip site unchanged. |
+| **PI-mvp-4.8-SINGLE-TU (NEW, guard #9)** | Both helpers are anon-namespace/single-TU in `loader.cpp`; NOT in `loader.hpp` or any header. | `git diff -- src/lib/loader.hpp` EMPTY; `grep -n 'inactive_inner_fd\|populate_all_axes' src/lib/*.hpp` → none. |
+| **PI-7-mvp-4.8-loader-hpp (CONTINUES)** | `src/lib/loader.hpp` byte-identical. | `git diff -- src/lib/loader.hpp` EMPTY. |
+| **PI-mvp-4.8-CATALOG (CONTINUES, guard #10/#16)** | `kManagedMaps[]` STAYS 30; no map add/remove; no pin/map rename; no `.bpf.c`/`mac_filter.h` change. | Code-review; `git diff -- src/bpf/ src/common/` byte-equivalent. |
+| **PI-mvp-4.8-VERSION (CONTINUES)** | VERSION stays `0.15.0`; no literal propagation (guard #11 N/A). | `--version` ⇒ `0.15.0`; `grep -rn '0\.15\.0' tests/` unchanged. |
+| **PI-mvp-4.8-B25-COMMENT-ONLY (NEW)** | The `config.hpp`/`config.cpp`/`apply_internal.hpp` edits are COMMENT-ONLY — zero code-token/AST change; the `schema_version = 1` field default at `config.hpp:60` stays untouched. | `git diff` shows only comment-line changes; full ctest GREEN; schema-validation behavior unchanged. |
+
+#### §5.48 verifiable invariants for reviewer (MAY-default per architect-spec §6.5 discipline)
+
+Guidance for reviewer, NOT contracts for impl. **Resolution rule (per D-mvp-4.8-PROSE-VS-INVARIANTS): if any item conflicts with a §6.5 PI-mvp-4.8-* item, the §6.5 item wins; if impl deviates from a hint to satisfy a PI or load-bearing regression assertion, disposition is `inline-merge`, NOT `[UNRELATED-EDIT]`.**
+
+1. (MUST) `inactive_inner_fd`: `slot==0`→`a`, `slot==1`→`b` for all 7 paired axes — verified by READING both cases.
+2. (MUST) `copy_rule_counters_forward` + `populate_action_table` NOT folded into `populate_all_axes`; copy-forward body byte-equivalent + branch-divergent args (reattach `old_active→inactive`; fresh `a→a`) intact.
+3. (MUST) populate order preserved + `active_idx` flip timing unchanged (single commit after populate, per branch).
+4. (MUST) swap semantics / axis set / `kManagedMaps`=30 / no pin-rename — unchanged.
+5. (MAY) `git diff -- src/lib/loader.hpp` EMPTY; both helpers single-TU/anon-namespace (mirror `write_wildcard_slots`).
+6. (MAY) B25 edits comment-only; `config.hpp:60` field default `schema_version = 1` UNTOUCHED (it's code).
+7. (MAY) the two branches collapse toward ≈250→≈60 LOC — *guidance, not a contract*; impl may land a different LOC if readability/order-preservation warrants. Reviewer should see one `populate_all_axes(...)` call per branch + explicit `populate_action_table` + explicit `copy_rule_counters_forward`.
+8. (MAY) the fd-unavailable diagnostic strings are unified branch-agnostic (D-mvp-4.8-DIAG); no test pins them.
+
+#### §7 OOS additions (§5.48 — new fences)
+
+- **B28 (template the 3 near-dup HASH `populate_*` fns + 3 axis-merge fns)** — the explicit *follow-on* to B20; expands scope into the `populate_*` definitions themselves. Natural NEXT refactor, NOT this slice. NEW FENCE.
+- **B18 (`port_scan` `continue`→`break`)** — datapath `mac_filter.bpf.c`, behavior-changing (perf), different file/concern. Separate cheap-win. NEW FENCE.
+- **B19 (RESOURCE_LOCK `build_cpu`)** — test-infra, separate. NEW FENCE.
+- **Folding `copy_rule_counters_forward` or `populate_action_table` into `populate_all_axes`** — explicitly FENCED (guard #15 / D-mvp-4.8-BOUNDARY). NEW FENCE.
+- **Renaming the `copy_rule_counters_forward` parameter `inactive_inner_fd`** — byte-equivalence; the free-function shadow is benign (D-mvp-4.8-NAME-SHADOW). NEW FENCE.
+- **Changing the `config.hpp:60` `schema_version = 1` field default** — out of B25 comment-only scope; behavior-adjacent. NEW FENCE.
+- **Any `.bpf.c` / map / pin / schema / axis change; any change to atomic-swap semantics, axis set, or `active_idx` flip timing; any VERSION bump** — UNCHANGED (S8 territory / non-goals). NEW FENCE.
+- **A2 constexpr-table loop with type-erasure** — rejected (D-mvp-4.8-Q1). NEW FENCE.
+- Carry-forward §5.41–§5.47 OOS items NOT superseded — UNCHANGED.
+
+#### §5.48 Anti-misdiagnosis institutional learning (per architect-spec §6.6)
+
+Guards applied: **#5** (Phase A code-grep — re-anchored all 14 idiom-block line ranges, all `populate_*`/lowering signatures, the `_a`/`_b` accessors, the divergent copy-forward args, the no-collision check, the B25 sites, and the regression corpus independently; **CATCH: `config.hpp:60` is CODE not a comment** — the brief's B25 line-list grouped a code-line into the "comment block", caught before publishing per the Phase-A grep-discipline rule); **#9** (both helpers single-TU/anon-namespace — internal de-dup, NOT a header API; mirror `write_wildcard_slots`/`kManagedMaps[]`); **#10** (`kManagedMaps`=30 unchanged — pure logic refactor, no count churn); **#11** (no VERSION bump → N/A); **#15 CRITICAL** (`copy_rule_counters_forward` PRESERVE with branch-divergent args stays OUTSIDE the RESET-shaped uniform helper — the load-bearing reason this refactor is non-trivial); **#16 N/A** (no pin/map rename, no test-body pin-dump ripple).
+
+> **Forward-defense note (future cycles extending `populate_all_axes`):** S8 (IPv6 `cidr6`, axis #7) and B28 (templating the HASH populates) both touch this helper. When adding axis #7, add ONE paired-inner case to `populate_all_axes` + ONE `inactive_inner_fd` call — do **NOT** re-introduce a hand-rolled `(slot==0?_a:_b)→fd→throw→populate` block (that re-opens the HK-9 lockstep hazard B20 just closed). The `_a`/`_b`↔slot decision MUST remain in the single `inactive_inner_fd` site. When extending, also re-confirm guard #15: the new axis is RESET-on-apply (folds into `populate_all_axes`); only `rule_counters` is PRESERVE (stays out). Audit trail: this slice (B20 paydown) + brief §9 (S8 lands as one call, not two blocks).
+>
+> **HK-9 reviewer discipline:** the whole value of this refactor is that the `_a`/`_b`↔slot decision now lives in ONE place. Reviewer MUST read that ONE place for BOTH `slot=0`→`a` and `slot=1`→`b` — the green suite alone does NOT prove correctness if no test exercises the reattach `inactive=0`/`_a` selection (see TestStrategy targeted-regression note).
+
+Evidence: `mint/task-brief.md` MVP-4.8 brief (HG-1..3, Q1, B20-1/B20-2/B25-1, guards #9/#10/#11/#15/#16, HK-9 class, Phase-1 sub-check #5); independent Phase A reads of `src/lib/loader.cpp:155-220` (kManagedMaps), `:1240-1413` (lowering structs), `:1424-1813` (populate_* helpers + `copy_rule_counters_forward` + `populate_action_table`), `:2009-2026` (apply_request lowerings), `:2233-2381` (reattach branch), `:2461-2602` (fresh-attach branch); `src/lib/raii.hpp:28-62` (BpfSkeleton); `src/lib/config.hpp:1-62`, `src/lib/config.cpp:56-60,282-297,360-394`, `src/lib/apply_internal.hpp:15-39` (B25 sites); `tests/` glob (regression corpus existence + ZERO pins on the fd-unavailable strings); §5.43/§5.44/§5.45/§5.47 (the per-axis RESET-on-apply template + guard #15 lineage + the `write_wildcard_slots`/`kManagedMaps[]` blessed precedents).
