@@ -1,93 +1,106 @@
-# Task brief — MVP-4.6: exporter per-axis labels (make the 5-axis match model observable) (rule-model S6, brownfield)
+# Task brief — MVP-4.7: MAC-axis return (un-freeze) — 6th bit-vector axis (src-MAC exact HASH) (rule-model S7, brownfield)
 
 ## Goal
 
-Make the 5-axis match model (`dst_cidr/src_cidr/proto/dst_port/vlan`, landed §5.43-§5.45) **visible in Prometheus metrics**. The exporter has been deliberately axis-AGNOSTIC for several slices (`PI-mvp-4.3-EXPORTER-AGNOSTIC`), emitting only `xdpfilter_rule_match_total{iface,rule_id,action}` — an operator can see THAT rule N matched but not WHICH axes rule N selects on. This slice surfaces each rule's match constraints as Prometheus labels.
+Return **MAC** as the 6th bit-vector match axis, un-freezing the maps deferred at the v2 cutover. When §5.43's M.1 cutover landed AND-compose, MAC matching was DEFERRED (HG-mvp-4.3-2, PI-mvp-4.3-MAC-DEFERRED): the `allowlist_a/_b` HASH + `rulesets` ARRAY_OF_MAPS stayed declared+pinned but **UNCONSULTED** (frozen), and the `mac` config key was REJECTED at parse with a "MAC matching deferred" diagnostic. This slice makes MAC a first-class exact-match axis again — symmetric to proto (§5.44) / vlan (§5.45) — keyed on the **source MAC** (`eth->h_source`, the original v1 semantic — design.md §5.26: "Reads `h_source` only").
 
-The data already flows: the loader's sidecar (`src/lib/sidecar.cpp`) ALREADY emits per-rule match objects with all 5 axes (`{"rule_id":N,"match":{"dst_cidr":"…","protocol":"tcp","dst_port":"443","vlan":"100",…},"action":"…"}`, verified — 5 `append_kind` emitters). The **exporter-side reader** (`src/exporter/sidecar_reader.cpp`) regex already CAPTURES the whole match-object body but `classify_match_kind()` collapses it to `match_kind ∈ {mac,cidr,both}`, **discarding the axis values**. So this slice is **consumer-only**: extend the reader to parse the per-axis values + extend `prom_format` to emit them. **`sidecar.cpp` is UNCHANGED** (producer already complete). NO BPF / datapath / loader / config / schema / map change. Rule count ≤64 bounds label cardinality.
+Mechanically: reshape the frozen `allowlist` inner VALUE `struct allow_entry` → `__u64` bitmask (exactly the §5.43 `cidr_allowlist` reshape pattern), re-consult it in the datapath, `acc &= (mac_mask | wc_mac)`. The `allowlist_a/_b` + `rulesets` topology ALREADY exists and ALREADY rides `active_idx` (it was the original v1 MAC axis) → **`kManagedMaps[]` UNCHANGED at 30** (reshape, not add); only `BITVEC_NUM_AXES` 5→6 + `wildcard` 10→12 + `BV_AXIS_MAC=5`. Re-accept the `mac` key (RETIRE the reject + PI-mvp-4.3-MAC-DEFERRED — a PI shift, like §5.46's EXPORTER-AGNOSTIC retirement). Un-SKIP + convert the 5 MAC-verdict SKIP-77 tests. Add a `mac` label to the §5.46 `xdpfilter_rule_info` metric so the now-6-axis model stays fully observable. Additive within `schema_version 2` (no cutover). VERSION 0.14.0→0.15.0.
 
-Anchors: §5.43-§5.45 (the 5 axes the sidecar emits); the §5.31 sidecar/exporter split (`PI-31-3.4b` read-only reader, `D-3.4b-10` no-JSON-parser budget, `PI-32-3.4b` orphan-tolerance `action="unknown"`).
+Anchors: §5.43 (the MAC-freeze + the `cidr_allowlist` value-reshape pattern), §5.44/§5.45 (proto/vlan exact-HASH axis template), §5.26 (original src-MAC allowlist semantic), §5.46 (`rule_info` per-axis labels).
 
 ## Context: prior work
 
-- **All prior briefs**: archived in `mint/task-brief-*.md` (this supersedes `mint/task-brief-mvp-4.5.md`).
-- **Existing design**: `mint/design.md` §5.31 (MVP-3.4b — the sidecar `rule_index.json` + the exporter `sidecar_reader` + `prom_format` rule_id→action lookup; `PI-31/32-3.4b`), §5.43-§5.45 (the 5 axes now in the sidecar match objects).
-- **Architecture doc**: `mint/architecture-rule-model.md` — observability of the selection axes is operator value; exporter labels were explicitly deferred from each axis slice to "a later exporter slice" (now).
-- **Phase A code-grep verification** (brief author): `src/lib/sidecar.cpp` emits 5 axes (UNCHANGED this slice); `src/exporter/sidecar_reader.cpp` regex captures the match body (group 2) but `classify_match_kind` reduces it to a kind; `struct RuleMeta {rule_id, action, match_kind}` (sidecar_reader.hpp); `prom_format.cpp` emits `xdpfilter_rule_match_total{iface,rule_id,action}` from a rule_id→action vector; VERSION=0.13.0 (pinned only in `T_EXPORTER_METRICS_FORMAT.sh`); ctest baseline=82; T_EXPORTER_RULE_LABELS / T_EXPORTER_METRICS_FORMAT / T_SIDECAR_JSON_SHAPE exist.
-- **PI continuity — IMPORTANT SHIFT**: `PI-mvp-4.3-EXPORTER-AGNOSTIC` ("exporter is rule_id-keyed + axis-agnostic; zero exporter edits") is **intentionally RETIRED/superseded** this slice — the exporter becomes axis-AWARE by design. Document the shift as a new PI (mirror the §5.34 PRESERVE→shift precedent; cite the retired PI text verbatim per [[impl-role-discipline]]). The existing `xdpfilter_rule_match_total` + `xdpfilter_packets_total` label sets stay byte-identical (the COUNTER contract is preserved; the new info is additive — see Q1). `PI-31-3.4b` (reader READ-ONLY) + `PI-32-3.4b` (orphan tolerance) CONTINUE.
+- **All prior briefs**: archived in `mint/task-brief-*.md` (this supersedes `mint/task-brief-mvp-4.6.md`).
+- **Existing design**: `mint/design.md` §5.43 (MAC-freeze decision + the `cidr_allowlist` `allow_entry`→`__u64` reshape — the byte-for-byte template for the MAC reshape; PI-mvp-4.3-MAC-DEFERRED), §5.44/§5.45 (proto/vlan exact-HASH axes), §5.46 (the `rule_info` metric this extends with a `mac` label), §5.26 (the original src-MAC allowlist: `h_source` only, src-MAC is at the base-eth fixed offset even on VLAN-tagged frames — design.md:512-513).
+- **Phase A code-grep verification** (brief author): `xdpmf_allowlist_inner` = HASH<`xdpmf_mac`, `allow_entry`> frozen (`mac_filter.bpf.c`); `allowlist_a/_b` + `rulesets` declared + ride `active_idx`; the `mac` reject at `config.cpp` (~"MAC matching deferred"); `RuleMatch.mac` field ALREADY EXISTS (`config.hpp:45`, dormant — rejected not absent → config.hpp UNCHANGED); sidecar `append_kind("mac", …)` branch ALREADY EXISTS (`sidecar.cpp:121`, dormant → fires once `r.match.mac` is populated → sidecar.cpp likely UNCHANGED); src-MAC = `h_source` (design.md §5.26); BITVEC_NUM_AXES=5/BV_AXIS_VLAN=4; kManagedMaps=30; VERSION=0.14.0; ctest baseline=82; 5 SKIP-77 tests confirmed (T_PASS_ALLOWED/T_DROP_DENY/T_PASS_MAC_OR_CIDR/T_RULE_COUNTER_MAC_HIT_BUMPS/T_APPLY_ATOMIC_SWAP_NO_DROP); `rule_info` currently emits 5 axis labels (NO mac).
+- **PI continuity — IMPORTANT SHIFT**: `PI-mvp-4.3-MAC-DEFERRED` ("`mac` rejected; datapath does not consult MAC maps; MAC maps frozen") is **INTENTIONALLY RETIRED** — MAC returns as a live axis. Document the shift (cite the retired PI verbatim per [[impl-role-discipline]], mirror §5.46's EXPORTER-AGNOSTIC retirement). PI-mvp-4.3-AND/-WILDCARD/-SCHEMA-V2 extend to 6 axes; proto/vlan exact-axis PIs are the template; COUNTER-PRESERVE + close_prefixes-UNCHANGED CONTINUE; PI-mvp-4.6-COUNTER-CONTRACT continues (the rule_info label-set change is the ONE intended exporter delta).
 
 ## Workflow rules (brownfield)
 
-- **Architect**: read `design.md` §5.31 (the sidecar/exporter split + reader regex + the D-3.4b-10 no-JSON-parser discipline + PI-31/32) + the brief. EDIT `design.md` in place; append **§5.46**. Resolve Q1–Q3 + HG defaults. Explicitly document the `PI-mvp-4.3-EXPORTER-AGNOSTIC` retirement + the new axis-aware PI.
-- **Impl**: brownfield FileList DIFF. This is the slice that EDITS the exporter (`prom_format.cpp` + `sidecar_reader.{hpp,cpp}`) — previously fenced UNCHANGED. Keep the reader's no-full-JSON-parser discipline (D-3.4b-10 — line/regex extraction, not a parser dep). `sidecar.cpp` is NOT touched (producer already emits the axes).
-- **Tester**: extend `T_EXPORTER_RULE_LABELS` to assert the per-axis labels/info-metric for a known 5-axis config; extend `T_EXPORTER_METRICS_FORMAT` (version literal + any new HELP/TYPE). Exporter tests bind a fixed port — `RESOURCE_LOCK` (guard #12) + be aware of the known port-9524 flake (backlog B17). Existing metric assertions must still hold (the counter contract is preserved per HG-2).
-- **Reviewer**: 5-point brownfield. Special attention: (a) the new metric is Prometheus-valid (HELP/TYPE once per family, label escaping, stable label-key set across series); (b) label cardinality bounded (≤64 rules/iface, no unbounded value); (c) the existing `xdpfilter_rule_match_total` / `xdpfilter_packets_total` label sets are byte-UNCHANGED (counter contract preserved); (d) reader stays READ-ONLY (PI-31) + no full-JSON-parser dep (D-3.4b-10) + orphan tolerance (PI-32) holds; (e) `sidecar.cpp` + datapath/loader/config git-diff fences empty (consumer-only slice); (f) the EXPORTER-AGNOSTIC PI retirement is documented, not silently broken.
+- **Architect**: read §5.43 (MAC-freeze + cidr_allowlist reshape template) + §5.44/§5.45 (exact-axis pattern) + §5.46 (rule_info) + §5.26 (h_source semantic) + brief. EDIT `design.md` in place; append **§5.47**. Resolve Q1–Q4 + HG defaults. Document the PI-mvp-4.3-MAC-DEFERRED retirement. State that MAC is exact (NO closure — guard #23 does not extend) + that src-MAC is at the fixed base-eth offset (no VLAN-walk interaction).
+- **Impl**: brownfield FileList DIFF. Reshape the frozen `allowlist` inner value `allow_entry`→`__u64` (mirror the §5.43 cidr reshape); read `eth->h_source` (already bounds-checked for the ethhdr; before the VLAN walk); MAC HASH lookup in `allowlist[active]`; `acc &= (mac_mask|wc_mac)`. `BITVEC_NUM_AXES` 5→6 (wildcard auto 10→12). Every Ethernet frame HAS a src MAC (no "absent" sentinel like vlan-untagged) — a rule omitting `mac` survives via `wildcard[active*6+5]`. Re-run the bpftool-load smoke.
+- **Tester**: UN-SKIP + convert the 5 MAC tests to the AND-model (MAC matching is live again — they assert real MAC verdicts now, not SKIP-77). Extend the oracle to 6 axes. Extend T_EXPORTER_RULE_LABELS for the new `mac` label. Existing non-MAC corpus stays green (additive). Reconcile baseline (was 82; the 5 un-SKIPs become active, count unchanged but 5 move SKIP→pass).
+- **Reviewer**: 5-point brownfield. Special attention: (a) src-MAC (`h_source`) semantic preserved (NOT h_dest); (b) the allowlist reshape mirrors cidr (value-only, pin names + topology unchanged — guard #16); (c) kManagedMaps UNCHANGED at 30 (reshape not add — guard #10); (d) MAC maps RESET-on-apply (no copy-forward; they were frozen, now live-populated each apply); (e) PI-mvp-4.3-MAC-DEFERRED retirement documented, not silently broken; (f) the 5 un-SKIP'd tests assert real MAC verdicts (not still-skipping, not weakened); (g) rule_info `mac` label added + T_EXPORTER_RULE_LABELS ERE updated (the existing counter families STILL byte-identical — only rule_info's label-set grows, PI-mvp-4.6-COUNTER-CONTRACT holds).
 
 ## Human-gate decisions (defaults applied — architect overrides at Phase A with evidence)
 
-### HG-mvp-4.6-1: Scope → **exporter consumer-only** (prom_format + sidecar_reader)
-NO datapath/loader/config/schema/map/sidecar-producer change. The sidecar already emits all 5 axes; this slice only reads + emits them. `sidecar.cpp` UNCHANGED.
+### HG-mvp-4.7-1: MAC → **6th exact-match HASH axis on src-MAC (`h_source`)**
+Keyed by `xdpmf_mac` (6-byte), value `__u64` bitmask, mirroring proto/vlan. `BITVEC_NUM_AXES` 5→6, `BV_AXIS_MAC=5`. NO prefix-closure (exact). src-MAC per the original v1 semantic (design.md §5.26 "h_source only"); dst-MAC matching → OOS.
 
-### HG-mvp-4.6-2: Metric shape → **separate `xdpfilter_rule_info{iface,rule_id,<axis labels>} 1` gauge (Prometheus info-metric pattern)**
-Default: emit a NEW info-metric (constant gauge value `1`) carrying the axis labels, keyed by `iface`+`rule_id`; operators join it to `xdpfilter_rule_match_total` on `(iface,rule_id)`. This leaves the existing counter's label set **byte-unchanged** (preserves its contract + the existing tests + avoids per-axis cardinality on the counter) — the Prometheus-idiomatic way to attach metadata. Architect Q to weigh vs enriching the counter directly (which would break the counter's label contract + ripple T_EXPORTER_METRICS_FORMAT/RULE_LABELS assertions).
+### HG-mvp-4.7-2: `mac` config key → **RE-ACCEPTED in v2 (RETIRE the deferral)**
+Remove the parse-reject; parse `mac` via the existing MAC parser; `mac` joins the at-least-one-of set `{mac, dst_cidr, src_cidr, protocol, dst_port, vlan}`. `RuleMatch.mac` field already exists (config.hpp UNCHANGED). PI-mvp-4.3-MAC-DEFERRED RETIRED (documented). Additive within schema_version 2 — no cutover.
 
-### HG-mvp-4.6-3: Label encoding → **one label per axis carrying the constraint value; unconstrained axis → stable empty sentinel**
-Labels `dst_cidr`, `src_cidr`, `protocol`, `dst_port`, `vlan`; value = the rule's constraint (e.g. `dst_cidr="10.1.2.0/24"`, `protocol="tcp"`, `dst_port="443"` or `"1000-2000"`, `vlan="100"`). A rule that does NOT constrain an axis emits that label as a stable sentinel (`""` default — architect picks `""` vs `"*"`) so every `rule_info` series carries the SAME label-key set (Prometheus best practice — avoid sometimes-present keys). Bounded cardinality (≤64 rules/iface).
+### HG-mvp-4.7-3: maps → **reshape the frozen `allowlist` (value-only), +0 kManagedMaps**
+`allowlist_a/_b` inner VALUE `allow_entry`→`__u64` (mirror §5.43 cidr reshape); pin names + topology + the `rulesets` outer UNCHANGED (they already ride `active_idx`). `kManagedMaps[]` STAYS 30. RESET-on-apply (guard #15; the maps were frozen, now populated from mac-constrained rules each apply; no copy-forward).
 
-### HG-mvp-4.6-4: VERSION → **bump 0.13.0 → 0.14.0 + DESCRIPTION** (new observability capability; propagate the literal per guard #11 — only `T_EXPORTER_METRICS_FORMAT` pins it).
+### HG-mvp-4.7-4: exporter `rule_info` → **add a `mac` label (6th axis)**
+The §5.46 `xdpfilter_rule_info` gauge gains a `mac` label so mac-constrained rules are observable (else they'd show all-empty axes — inconsistent). Label-set grows 5→6 axes (7→8 total keys). The two COUNTER families (`packets_total`, `rule_match_total`) stay byte-identical (PI-mvp-4.6-COUNTER-CONTRACT). T_EXPORTER_RULE_LABELS's stable-key ERE ripples (guard #13). Architect Q to weigh vs deferring the label (rejected default — leaves mac-rules unlabeled).
 
-### HG-mvp-4.6-5: Existing metrics → **UNCHANGED label sets** (`xdpfilter_rule_match_total`, `xdpfilter_packets_total` byte-identical). The new info is ADDITIVE. PI-31/32-3.4b continue.
+### HG-mvp-4.7-5: the 5 SKIP-77 tests → **un-SKIP + convert to live MAC-AND assertions** (MAC is a real axis again; they assert MAC verdicts under the AND-model, NOT SKIP, NOT weakened).
 
-## Open mechanism questions (architect decides; document in §5.46)
+### HG-mvp-4.7-6: VERSION → **bump 0.14.0 → 0.15.0 + DESCRIPTION** (MAC axis restored; propagate the literal, guard #11 — only T_EXPORTER_METRICS_FORMAT pins it).
 
-### Q1: info-metric vs enrich-the-counter
-- **A1**: NEW `xdpfilter_rule_info{iface,rule_id,dst_cidr,src_cidr,protocol,dst_port,vlan} 1` gauge; counter untouched (join on iface+rule_id). Additive → existing tests hold; idiomatic; stable counter cardinality.
-- **A2**: add the axis labels directly to `xdpfilter_rule_match_total`. Fewer series but CHANGES the counter's label contract (breaks existing format assertions + any operator query) + couples metadata to the counter's cardinality.
-- **Recommendation**: **A1** (info-metric) — preserves the counter contract, additive test ripple, Prometheus-idiomatic.
+## Open mechanism questions (architect decides; document in §5.47)
 
-### Q2: sidecar_reader per-axis extraction (keep D-3.4b-10 no-JSON-parser discipline)
-- **A1**: keep the existing line-regex (it already captures the match-object body as group 2); add a small per-axis key extractor over that body (e.g. find `"dst_cidr":"…"` substrings) populating new `RuleMeta` fields. No full JSON parser. `classify_match_kind` MAY stay or be superseded.
-- **Recommendation**: **A1** — minimal, respects D-3.4b-10; `RuleMeta` gains `dst_cidr/src_cidr/protocol/dst_port/vlan` string fields (empty when absent).
+### Q1: MAC axis map (reshape vs new)
+- **A1**: reshape the existing frozen `allowlist_a/_b` inner value `allow_entry`→`__u64`; `rulesets` outer unchanged (rides active_idx). +0 kManagedMaps. NO closure.
+- **A2**: fresh parallel `mac_bitmask` axis + retire the frozen allowlist — rejected (gratuitous pin churn + map count growth; the frozen maps are PRECISELY the right shape).
+- **Recommendation**: **A1** — value-only reshape, mirrors §5.43 cidr exactly; guard #16 satisfied (no pin rename).
 
-### Q3: wildcard-axis label sentinel
-- `""` (empty) vs `"*"` vs `"(any)"` — **Recommendation**: `""` (stable key, empty value); architect picks. Always emit ALL axis label keys per `rule_info` series for a uniform label set.
+### Q2: datapath MAC read
+- **A1**: read `eth->h_source` (fixed offset in the base ethhdr — already bounds-checked; BEFORE the VLAN walk, so VLAN-agnostic per design.md:513); HASH lookup `allowlist[active]` by `xdpmf_mac`; `mac_mask = lookup_or_0`; `acc &= (mac_mask|wc_mac)`. Every frame has a src MAC → no "absent" case (unlike vlan-untagged); a rule omitting `mac` → wildcard.
+- **Recommendation**: **A1** (preserves the v1 `h_source` semantic).
 
-## Scope (cycle S6 / mvp-4.6 — concrete items; estimates are UPPER BOUNDS)
+### Q3: rule_info `mac` label placement + T_EXPORTER_RULE_LABELS ripple
+- **A1**: add `mac` as a label key in the `xdpfilter_rule_info` line (architect picks position — e.g. first, mirroring axis order, or last); empty "" sentinel when unconstrained (same convention as the other 5); update the T_EXPORTER_RULE_LABELS stable-key ERE 7→8 keys.
+- **Recommendation**: **A1** — keeps the metric complete; the ripple is one test's ERE (guard #13, pre-listed).
 
-### Item S6-1 — sidecar_reader: parse per-axis values
-**Where**: `src/exporter/sidecar_reader.{hpp,cpp}`
-- `struct RuleMeta` gains per-axis string fields (`dst_cidr/src_cidr/protocol/dst_port/vlan`); parse from the already-captured match body (Q2), no full-JSON dep (D-3.4b-10). READ-ONLY (PI-31).
+### Q4: wildcard growth + axis index
+- `wildcard` max_entries `RULESET_COUNT*BITVEC_NUM_AXES` auto 10→12; `BV_AXIS_MAC=5`; datapath `wildcard[active*6+5]`; loader writes 6 axis slots; RESET-on-apply (guard #15). Architect confirms `active*6+axis` holds for 6 axes (same mechanism as §5.44/§5.45, N=6).
 
-### Item S6-2 — prom_format: emit axis labels
-**Where**: `src/exporter/prom_format.{cpp,hpp}`
-- Emit the `xdpfilter_rule_info` info-metric (Q1/A1) with HELP+TYPE once + one `… 1` line per (iface,rule_id) carrying the 5 axis labels (Q3 sentinel for unconstrained). Existing `xdpfilter_rule_match_total`/`xdpfilter_packets_total` emission UNCHANGED (HG-5). Label-value escaping per the existing escaper.
+## Scope (cycle S7 / mvp-4.7 — concrete items; estimates are UPPER BOUNDS)
 
-### Item S6-3 — VERSION bump + DESCRIPTION + literal propagation
+### Item S7-1 — config grammar: re-accept `mac`
+**Where**: `src/lib/config.cpp` (config.hpp UNCHANGED — `RuleMatch.mac` exists)
+- Remove the `mac`-reject branch (the "MAC matching deferred" diagnostic); parse `mac` via the existing MAC parser; add `mac` to the at-least-one-of set. Schema stays 2.
+
+### Item S7-2 — datapath: MAC axis + reshape
+**Where**: `src/bpf/mac_filter.bpf.c`
+- Reshape `xdpmf_allowlist_inner` value `allow_entry`→`__u64`; read `eth->h_source`; MAC HASH lookup; `acc &= (mac_mask|wildcard[active*6+5])`; `BV_AXIS_MAC=5`; `BITVEC_NUM_AXES` 5→6. first_set_u64/dispatch/bump_rule/defaults/close_prefixes/other 5 axes UNCHANGED.
+
+### Item S7-3 — loader: lower MAC bitmask
+**Where**: `src/lib/loader.cpp`, `src/common/mac_filter.h`
+- `BITVEC_NUM_AXES` 5→6 (mac_filter.h); `BV_AXIS_MAC=5`. Lower mac-constrained rules → `allowlist` `__u64` bitmask (exact, NO closure; mirror the cidr/proto populate); extend `write_wildcard_slots` to 6 axes; RESET-write the inactive allowlist inner + inactive wildcard half before the `active_idx` flip. `kManagedMaps[]` UNCHANGED (30). close_prefixes/copy_rule_counters_forward UNCHANGED.
+
+### Item S7-4 — exporter: rule_info `mac` label
+**Where**: `src/exporter/sidecar_reader.{hpp,cpp}` (RuleMeta gains a `mac` field + extract_axis for "mac") + `src/exporter/prom_format.cpp` (add the `mac` label to the rule_info line). Counter families byte-unchanged.
+
+### Item S7-5 — VERSION + DESCRIPTION + literal propagation
 **Where**: `CMakeLists.txt` + `T_EXPORTER_METRICS_FORMAT` (guard #11).
 
-### Item S6-4 — tests
-**Where**: `tests/T_EXPORTER_RULE_LABELS.sh` (assert the new info-metric + axis labels for a known 5-axis config + unconstrained-axis sentinel + a negation: an axis NOT in the config does not appear with a bogus value), `tests/T_EXPORTER_METRICS_FORMAT.sh` (version literal + new HELP/TYPE), `tests/CMakeLists.txt` if a NEW test is added. `RESOURCE_LOCK` (guard #12); known port-9524 flake (B17) awareness. Existing exporter assertions must still pass (counter contract preserved).
+### Item S7-6 — tests: un-SKIP + convert + 6-axis
+**Where**: `tests/T_PASS_ALLOWED.sh`, `T_DROP_DENY.sh`, `T_PASS_MAC_OR_CIDR.sh`, `T_RULE_COUNTER_MAC_HIT_BUMPS.sh`, `T_APPLY_ATOMIC_SWAP_NO_DROP.sh` (un-SKIP → live MAC-AND assertions), `tests/T_EXPORTER_RULE_LABELS.sh` (+mac label, ERE 7→8 keys), `tests/bitvec/bitvec_oracle_prod.py` (→6 axes), a NEW mac-AND fixture/test if the converted set doesn't cover the AND-compose-with-mac case, `tests/CMakeLists.txt` if SKIP_RETURN_CODE bookkeeping changes. `RESOURCE_LOCK xdp_fixture` (guard #12). NOTE: src-MAC is at base-eth (NOT VLAN-offload-stripped) → guard #22 likely N/A for MAC, but the un-SKIP'd tests inject L2 frames — verify their setup.
 
 ## Out of scope (explicit)
-- **`sidecar.cpp` (producer)** — already emits all 5 axes; UNCHANGED. NEW FENCE.
-- **Any datapath / loader / config / schema / BPF-map change** — consumer-only slice. NEW FENCE.
-- **MAC-axis return; IPv6 cidr6; feed-objects; N>64; most-specific-wins; sequential** — later slices. NEW FENCE.
-- **Per-axis MATCH counters** (a counter per axis-value) — this slice is metadata labels (info-metric), not new counters. NEW FENCE.
+- **dst-MAC matching; MAC ranges/masks/OUI-prefix** — src-MAC exact only (v1 semantic). NEW FENCE.
+- **IPv6 cidr6; feed-objects; N>64; most-specific-wins; sequential** — later slices. NEW FENCE.
+- **schema_version v2→v3** — re-accepting `mac` is additive within v2. NEW FENCE.
 - **Non-eBPF datapath / 40 Gbps** — deferred per [[real-requirements-and-strategy]].
-- Carry-forward §5.41-§5.45 OOS items not superseded — UNCHANGED.
+- Carry-forward §5.41-§5.46 OOS items not superseded — UNCHANGED.
 
 ## Definition of done
-- §5.46 amendment appended to `mint/design.md` (Phase A grep report + HG/Q resolutions + the EXPORTER-AGNOSTIC PI retirement + new PIs).
-- **PIs**: NEW PI-mvp-4.6-EXPORTER-AXIS-AWARE (the new info-metric carries the 5 axis labels; unconstrained→sentinel); NEW PI-mvp-4.6-COUNTER-CONTRACT (existing counter/packets label sets byte-unchanged); `PI-mvp-4.3-EXPORTER-AGNOSTIC` RETIRED (cite verbatim); `PI-31-3.4b` (reader READ-ONLY) + `PI-32-3.4b` (orphan tolerance) CONTINUE.
-- ctest baseline = **82** (mvp-4.5 left it here; tester reconciles) + extended/NEW exporter-label tests; all existing exporter tests still green.
-- VERSION 0.13.0 → 0.14.0, literal propagated.
+- §5.47 amendment appended to `mint/design.md` (Phase A grep report + HG/Q resolutions + PI-mvp-4.3-MAC-DEFERRED retirement + new PIs).
+- **PIs**: NEW PI-mvp-4.7-MAC (src-MAC exact HASH axis, h_source); PI-mvp-4.3-MAC-DEFERRED RETIRED (verbatim cite); PI-mvp-4.3-AND/-WILDCARD/-SCHEMA-V2 → 6 axes; PI-mvp-4.6-COUNTER-CONTRACT continues (only rule_info label-set grows); COUNTER-PRESERVE + close_prefixes-UNCHANGED CONTINUE.
+- ctest baseline = **82** (mvp-4.6; tester reconciles — the 5 SKIP-77 become live pass, count unchanged); existing non-MAC corpus green.
+- VERSION 0.14.0 → 0.15.0, literal propagated.
+- impl Phase 2.5 bpftool-load smoke rc=0 (6-axis + MAC HASH verifies).
 - `mint/review.md` round-1 verdict = pass.
 - One git commit per phase boundary.
 
 ## Dependencies
-- Build: clang-19 / CMake; the exporter binary + its test harness.
-- Runtime: a fixed metrics port for the exporter ctests (guard #12; known B17 port-9524 flake).
-- No new third-party dep (D-3.4b-10 no-JSON-parser discipline).
+- Build: clang-19 / libbpf / CMake; `bpftool`; `inject_eth.py` (`<iface> <src_mac> <dst_mac>`) for MAC injection.
+- Runtime: `bpf()` HASH + ARRAY_OF_MAPS (all used); fixed metrics port for exporter ctests (guard #12, B17).
+- Platform: passwordless sudo for XDP/veth/bpffs ctests.
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 ```yaml
@@ -102,28 +115,33 @@ packs:
 ---
 
 ## Pre-brief sanity check (per [[mint-hld-scope-discipline]])
-- **One-sentence goal**: surface each rule's 5 match-axis constraints as Prometheus labels via an additive `xdpfilter_rule_info` metric, consumer-side only (the sidecar already emits the data).
-- **Multi-axis design space?** BORDERLINE-NO. There is ONE real design fork (metric shape: info-metric vs enrich-counter, Q1) + a sub-choice (sentinel, Q3); both have clear Prometheus-idiomatic defaults (info-metric + stable-key labels). Not a sprawling ≥3-axis space; single-architect resolvable. Slightly expensive-to-undo (operator-facing metric contract) → mitigated by the info-metric default (additive, doesn't touch the existing contract). `/mint-hld` NOT needed; flagged as borderline.
-- **Mechanical?** Mostly — "parse the axis values the sidecar already emits + emit an info-metric." Single-architect via `/mint-dev`.
-- **Scope-size**: small, single-subsystem (exporter consumer-only). No split.
-- **Overconfidence check**: VERIFIED the producer (sidecar.cpp) already emits all 5 axes (so it's OOS, not an EDIT) and the consumer (sidecar_reader) captures-but-discards the body — the change is genuinely consumer-only, not assumed. The EXPORTER-AGNOSTIC PI retirement is a real semantic shift, flagged (not silently broken).
+- **One-sentence goal**: un-freeze MAC as the 6th exact-HASH bit-vector axis (src-MAC, value-reshape of the frozen allowlist), re-accept the `mac` key, un-SKIP the 5 MAC tests, add a rule_info mac label — additive within schema_version 2.
+- **Multi-axis design space?** NO — structure resolved (bit-vector); proto/vlan are proven exact-axis templates; the maps already exist (frozen) in exactly the right shape; src-MAC semantic is documented (§5.26). `/mint-hld` NOT needed.
+- **Mechanical?** YES — "reshape the frozen allowlist like §5.43 did cidr + re-accept the key + un-SKIP." Single-architect via `/mint-dev`.
+- **Scope-size**: moderate, ONE coherent slice. Slightly more touch than 4.4-4.6 (un-SKIP 5 tests + a 2nd exporter touch) but no structural change. No split.
+- **Overconfidence check**: VERIFIED RuleMatch.mac + sidecar mac-branch ALREADY EXIST (dormant) → config.hpp + likely sidecar.cpp UNCHANGED (not new code). VERIFIED src-MAC=h_source (§5.26, not assumed). kManagedMaps=30 stays (reshape not add). The rule_info label-change re-touches the just-stabilized §5.46 metric — flagged as the one intended exporter ripple (guard #13), not assumed-away.
 
 ## Notes for architect Phase A code-grep discipline (per architect spec rules)
 Brief author ran these (Phase 2). Architect re-verifies + extends:
-- `grep -nE 'append_kind\("(dst_cidr|src_cidr|protocol|dst_port|vlan)"' src/lib/sidecar.cpp` (CONFIRM producer emits all 5 → sidecar.cpp is OOS/UNCHANGED).
-- `sed -n '/struct RuleMeta/,/};/p' src/exporter/sidecar_reader.hpp` + the regex in `sidecar_reader.cpp` (the match body is captured as group 2 today, reduced by `classify_match_kind`).
-- `grep -nE 'xdpfilter_rule_match_total|xdpfilter_packets_total|HELP|TYPE|action=' src/exporter/prom_format.cpp` (the emission to keep byte-unchanged + the family to add).
-- `grep -rn '0\.13\.0' CMakeLists.txt tests/` (VERSION propagation = only T_EXPORTER_METRICS_FORMAT).
-- `git diff` fences: confirm `src/lib/sidecar.cpp`, `src/bpf/`, `src/lib/loader.cpp`, `src/lib/config.*` stay EMPTY (consumer-only).
-- `grep -rn 'rule_match_total\|rule_info\|RULE_LABELS' tests/` (which tests assert the metric label schema → guard #13 ripple surface).
+- `sed -n '/struct xdpmf_allowlist_inner/,/};/p' src/bpf/mac_filter.bpf.c` (value = `allow_entry`, frozen → reshape to `__u64`).
+- `grep -nE 'h_source|h_dest' mint/design.md src/bpf/mac_filter.bpf.c` (CONFIRM v1 = `h_source` only, design.md §5.26 / :242/:512; the datapath MAC branch was removed in §5.43 — re-add reading h_source).
+- `grep -nE '"mac"|MAC matching deferred' src/lib/config.cpp` (the reject to remove) + `grep -nE 'mac;' src/lib/config.hpp` (RuleMatch.mac EXISTS → config.hpp UNCHANGED).
+- `grep -nE 'append_kind\("mac"' src/lib/sidecar.cpp` (the dormant emit branch — fires once mac is set; likely sidecar.cpp UNCHANGED).
+- `sed -n '/kManagedMaps/,/};/p' src/lib/loader.cpp` (30 entries — CONFIRM stays 30; allowlist_a/_b + rulesets already present).
+- `grep -nE 'BITVEC_NUM_AXES|BV_AXIS_' src/common/mac_filter.h` (=5; add BV_AXIS_MAC=5, flip→6).
+- `grep -nE 'rule_info|dst_cidr.*src_cidr' src/exporter/prom_format.cpp` (the 5-axis label line → add mac) + `grep -nE 'rule_info|stable.*key|7' tests/T_EXPORTER_RULE_LABELS.sh` (the ERE to update 7→8 keys).
+- `grep -rn '0\.14\.0' CMakeLists.txt tests/` (VERSION propagation).
+- the 5 SKIP tests: `grep -l 'exit 77' tests/T_PASS_ALLOWED.sh tests/T_DROP_DENY.sh tests/T_PASS_MAC_OR_CIDR.sh tests/T_RULE_COUNTER_MAC_HIT_BUMPS.sh tests/T_APPLY_ATOMIC_SWAP_NO_DROP.sh` (the SKIP guards to remove).
 
 ### Anti-misdiagnosis guards applicable to this slice (per Phase 3)
 - **Guard #5 (Phase A code-grep)** — always; architect repeats independently.
-- **Guard #8 (interactive-vs-log distinction)** — N/A-ish: this is metric OUTPUT not a log event; but the same discipline (don't conflate the operator-facing metric contract with internal state) applies to the EXPORTER-AGNOSTIC PI shift.
-- **Guard #9 (helper duplication-over-extraction)** — the per-axis extractor is exporter-internal single-consumer; do not over-share.
-- **Guard #10 (catalog arithmetic)** — a NEW metric family (HELP/TYPE pair) is added; state it; no array/table size literal.
-- **Guard #11 (VERSION-bump test-literal propagation)** — applies (HG-4); grep every `0.13.0`.
-- **Guard #12 (RESOURCE_LOCK for shared host state)** — exporter ctests bind a fixed port; keep RESOURCE_LOCK + note the known port-9524 flake (backlog B17).
-- **Guard #13 (retired/changed emit-site string ripple)** — the metric output format is asserted by `T_EXPORTER_METRICS_FORMAT` + `T_EXPORTER_RULE_LABELS`; the info-metric default is ADDITIVE (existing assertions hold + new ones added). If the architect picks Q1/A2 (enrich the counter) instead, the existing counter-format assertions RIPPLE — pre-list them. The EXPORTER-AGNOSTIC PI is the retired "string" here — document the retirement.
-- **Guard #15 (PRESERVE-vs-RESET)** — N/A (no map change; rule_counters PRESERVE continues, untouched).
-- **Operative-semantic discipline**: label-name/sentinel choices in §5.46 verifiable-invariants are SHOULD-level orientation; impl deviations mirroring the existing escaper / HELP-TYPE-once precedent are `inline-merge`.
+- **Guard #9 (helper duplication-over-extraction)** — the MAC populate/lookup mirrors the proto/cidr helpers; reuse the established pattern, don't over-share.
+- **Guard #10 (catalog arithmetic)** — `kManagedMaps[]` STAYS 30 (reshape, NOT add — state explicitly it does NOT grow); `wildcard` 10→12; `BITVEC_NUM_AXES` 5→6. Load-bearing.
+- **Guard #11 (VERSION-bump test-literal propagation)** — applies (HG-6); grep every `0.14.0`.
+- **Guard #12 (RESOURCE_LOCK)** — the un-SKIP'd + new MAC ctests take `RESOURCE_LOCK xdp_fixture` + cleanup trap.
+- **Guard #13 (retired/changed emit-site string ripple)** — the `rule_info` label-set grows 5→6 axes → T_EXPORTER_RULE_LABELS's stable-key ERE (7→8 keys) MUST update; pre-listed. The retired "string" = the MAC-deferred reject diagnostic + PI-mvp-4.3-MAC-DEFERRED (document the retirement). Also: the 5 SKIP-77 tests' "MAC deferred to mvp-X" echo lines are retired — grep + remove.
+- **Guard #15 (PRESERVE-vs-RESET)** — the reshaped MAC bitmask + grown wildcard are RESET-on-apply (no copy-forward; were frozen, now live each apply); `rule_counters` stays PRESERVE.
+- **Guard #16 (retired pin-path/map-name ripple)** — NO pin rename (value-only reshape keeps `allowlist`/`rulesets` names) → no test-body pin-dump ripple. Confirm.
+- **Guard #22 (L2-mutation test vacuity)** — src-MAC is at the base-eth fixed offset, NOT a NIC-offloaded/stripped field (unlike VLAN) → likely N/A for MAC; but the un-SKIP'd tests inject L2 frames — verify their setup doesn't need it.
+- **Guard #23 (prefix-closure)** — does NOT extend to MAC (exact-match, like proto/vlan). close_prefixes + the dst/src §6.62 canary UNCHANGED. State explicitly.
+- **Operative-semantic discipline**: counts in §5.47 verifiable-invariants (kManagedMaps=30 UNCHANGED, wildcard=12, BITVEC_NUM_AXES=6 are load-bearing MUST; ctest delta, PI numbering SHOULD) — impl deviations mirroring precedent are `inline-merge`.
