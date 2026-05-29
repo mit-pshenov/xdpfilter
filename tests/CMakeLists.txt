@@ -66,7 +66,10 @@ add_bpf_object(mac_filter_alt ${CMAKE_SOURCE_DIR}/tests/fixtures/mac_filter_alt.
 add_bpf_object(mac_filter_bad ${CMAKE_SOURCE_DIR}/tests/fixtures/mac_filter_bad.bpf.c)
 
 # T_BUILD performs an isolated clean rebuild in /tmp and greps for warnings;
-# it does NOT need the veth fixture and does NOT take the resource lock.
+# it does NOT need the veth fixture (no xdp_fixture lock). B19 (§5.49): it
+# DOES take the shared compile-serialization RESOURCE_LOCK (see below) so it
+# serializes against the only other full-compile ctest (T_SANITIZER_BUILD) —
+# prevents CPU oversubscription SIGKILL/TIMEOUT flakes under ctest -j4.
 add_test(
     NAME T_BUILD
     COMMAND bash ${TEST_DIR}/T_BUILD.sh
@@ -74,6 +77,7 @@ add_test(
 )
 set_tests_properties(T_BUILD PROPERTIES
     ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK build_cpu
     TIMEOUT 300
 )
 
@@ -132,7 +136,7 @@ add_test(
 )
 set_tests_properties(T_SANITIZER_BUILD PROPERTIES
     ENVIRONMENT "${TEST_ENV}"
-    RESOURCE_LOCK xdp_fixture
+    RESOURCE_LOCK "xdp_fixture;build_cpu"
     TIMEOUT 240
     SKIP_RETURN_CODE 77
 )

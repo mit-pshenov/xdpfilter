@@ -1599,7 +1599,15 @@ void populate_vlan_inner_slot(
  * UNUSED sentinel {lo=1, hi=0, bit=0} (lo>hi → datapath port_scan skips it),
  * then write the used range slots (mirrors populate_rules_inner_slot's
  * clear-all-slots-then-write precedent). RESET-on-apply: caller passes the
- * INACTIVE inner fd and writes BEFORE the active_idx flip. */
+ * INACTIVE inner fd and writes BEFORE the active_idx flip.
+ *
+ * B18 (§5.49) PRODUCER end of a NON-LOCAL coupling: the datapath port_scan
+ * early-`break`s on the first lo>hi sentinel. That break is correct ONLY
+ * because this function packs used slots DENSE-AT-FRONT (ranges[0..N-1]
+ * contiguous after the bulk-clear) AND config.cpp parse_dst_port guarantees
+ * every real range has lo<=hi (so no real slot can masquerade as a sentinel).
+ * Do NOT introduce gaps/holes in the used-slot range or the break would skip
+ * legit slots. Consumer note: port_scan in mac_filter.bpf.c — guard #26. */
 void populate_port_inner_slot(int inner_fd, const std::vector<xdpmf_port_range>& ranges)
 {
     /* Clear all slots to the unused sentinel (lo>hi). */

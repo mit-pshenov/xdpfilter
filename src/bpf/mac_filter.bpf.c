@@ -491,10 +491,21 @@ static __always_inline __u32 first_set_u64(__u64 x)
 /* §5.44 (MVP-4.4) D-mvp-4.4-Q2 production-owned bounded port range-scan
  * (transcribed from the §5.42 spike's `bitvec_port_scan`, guard #9 — NOT
  * #include'd from tests/bitvec). OR `bit` of every USED slot whose inclusive
- * [lo,hi] contains `dport`; `lo > hi` marks an unused slot (skipped). The
+ * [lo,hi] contains `dport`; `lo > hi` marks an unused slot. The
  * `#pragma unroll` over XDPMF_ALLOWLIST_MAX has no back-edge, so the 5.15
  * verifier sees straight-line code (mirrors l3_after_vlan / first_set_u64).
- * `port_inner` is the active inner ARRAY fd from port_rulesets[active]. */
+ * `port_inner` is the active inner ARRAY fd from port_rulesets[active].
+ *
+ * B18 (§5.49) early-`break` on the `lo > hi` sentinel: used slots are
+ * dense-at-front (populate_port_inner_slot writes ranges[0..N-1] after
+ * bulk-clearing all 64 to the lo=1,hi=0 sentinel) AND every real range has
+ * lo<=hi (config.cpp parse_dst_port rejects lo>hi at exit 9; single-port ⇒
+ * lo==hi). So the first `lo > hi` slot is the dense-pack boundary and every
+ * slot beyond it is also a sentinel — `break` skips ONLY sentinels and is
+ * bit-identical to the old full-walk `continue`. This coupling is NON-LOCAL:
+ * see the matching note at populate_port_inner_slot (loader.cpp) — guard #26.
+ * The `!r` null-check above STAYS a `continue`: it is verifier-mandated and a
+ * transient null on slot i says nothing about slots >i (PI-mvp-4.9). */
 static __always_inline __u64 port_scan(void *port_inner, __u32 dport)
 {
     __u64 mask = 0;
@@ -506,7 +517,9 @@ static __always_inline __u64 port_scan(void *port_inner, __u32 dport)
             continue;
         }
         if (r->lo > r->hi) {
-            continue;  /* unused slot */
+            break;  /* B18 (§5.49): sentinel = dense-pack boundary; all slots
+                     * beyond are sentinels too, so break is safe + saves
+                     * ~(64-N) lookups/packet. See header comment. */
         }
         if (dport >= r->lo && dport <= r->hi) {
             mask |= r->bit;
