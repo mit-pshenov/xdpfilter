@@ -83,7 +83,10 @@ namespace {
     body.append("{\n");
     body.append(std::format("  \"iface\": \"{}\",\n",
                             xdpmf::escape_util::escape_json(iface)));
-    body.append("  \"schema_version\": 1,\n");
+    /* §5.43 (MVP-4.3) C1 + PI-mvp-4.3-SIDECAR: emit schema_version 2 (M.1
+     * cutover); the loader only ever applies v2 configs (config.cpp rejects
+     * v1/absent), so cfg.schema_version is always 2 here. */
+    body.append("  \"schema_version\": 2,\n");
     body.append(std::format("  \"applied_at\": \"{}\",\n",
                             xdpmf::escape_util::format_timestamp_utc()));
     body.append("  \"rules\": [");
@@ -96,25 +99,29 @@ namespace {
         const char* action_str = (r.action == RuleAction::Pass) ? "pass" : "drop";
 
         /* Build the `match` sub-object inline so the rule lives on one line
-         * (one-rule-per-line per D-3.4b-20). At-least-one-of mac/src_cidr
-         * is guaranteed by config.cpp validation; both keys can appear if
-         * the rule had both per §5.27 schema. */
-        std::string match;
-        if (r.match.mac.has_value() && r.match.src_cidr.has_value()) {
-            match = std::format(
-                "{{\"mac\": \"{}\", \"cidr\": \"{}\"}}",
-                format_mac(*r.match.mac), format_cidr(*r.match.src_cidr));
-        } else if (r.match.mac.has_value()) {
-            match = std::format("{{\"mac\": \"{}\"}}",
-                                 format_mac(*r.match.mac));
-        } else if (r.match.src_cidr.has_value()) {
-            match = std::format("{{\"cidr\": \"{}\"}}",
-                                 format_cidr(*r.match.src_cidr));
-        } else {
-            /* Shouldn't happen — config validation rejects (mac=null && cidr=null);
-             * defensive empty object preserves valid JSON shape. */
-            match = "{}";
+         * (one-rule-per-line per D-3.4b-20). §5.43 (MVP-4.3) C1: the v2
+         * match grammar is at-least-one-of {dst_cidr, src_cidr} (guaranteed
+         * by config.cpp validation); emit the explicit `dst_cidr` / `src_cidr`
+         * match-kinds (PI-mvp-4.3-SIDECAR). The `mac` branch is dead-but-
+         * harmless under v2 (config.cpp rejects `mac` at parse — HG-mvp-4.3-2),
+         * retained so the MAC-axis slice (mvp-4.5) re-activates it cleanly. */
+        std::string parts;
+        bool match_first = true;
+        const auto append_kind = [&](const char* key, const std::string& value) {
+            if (!match_first) parts.append(", ");
+            parts.append(std::format("\"{}\": \"{}\"", key, value));
+            match_first = false;
+        };
+        if (r.match.mac.has_value()) {        // dead under v2; live again mvp-4.5
+            append_kind("mac", format_mac(*r.match.mac));
         }
+        if (r.match.dst_cidr.has_value()) {
+            append_kind("dst_cidr", format_cidr(*r.match.dst_cidr));
+        }
+        if (r.match.src_cidr.has_value()) {
+            append_kind("src_cidr", format_cidr(*r.match.src_cidr));
+        }
+        const std::string match = std::format("{{{}}}", parts);
 
         body.append(std::format(
             "    {{\"rule_id\": {}, \"match\": {}, \"action\": \"{}\"}}",

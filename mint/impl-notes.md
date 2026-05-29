@@ -546,3 +546,35 @@ Production datapath + 70 ctests byte-untouched (git diff fences clean).
 ## Deviations from design
 
 None. Implemented per §5.42 FileList / DataStructures / Interfaces / Decisions.
+
+# MVP-4.3 — OR→AND bit-vector pivot (§5.43)
+
+No design deviations. Two in-scope judgment calls (both sanctioned by the
+design's own resolution rules — NOT silent deviations):
+
+## 1. Sidecar match-kind key naming — resolved via D-mvp-4.3-PROSE-VS-INVARIANTS
+- §5.43 FileList prose for `sidecar.cpp` ("emits `dst_cidr` (+ keeps
+  `src_cidr`/`cidr`)") is ambiguous on whether the src key stays the historical
+  `"cidr"` or becomes `"src_cidr"`.
+- §6.5 PI-mvp-4.3-SIDECAR + TestStrategy say `T_SIDECAR_JSON_SHAPE` asserts
+  "`.schema_version==2`, **dst_cidr/src_cidr** match-kinds".
+- Per **D-mvp-4.3-PROSE-VS-INVARIANTS** (§6.5 invariants-block WINS over prose),
+  the JSON match object emits explicit `"dst_cidr"` / `"src_cidr"` keys (the
+  historical `"cidr"` key is retired in the sidecar). The `mac` branch is kept
+  as dead-but-harmless (design-sanctioned) so `format_mac` stays referenced and
+  mvp-4.5 re-activates it cleanly.
+
+## 2. Removed now-unreachable MAC parser from config.cpp
+- v2 rejects the `mac` key at parse (D-mvp-4.3-MAC-GRAMMAR), so
+  `parse_mac_canonical` / `hex_nibble` became unused → `-Werror=unused-function`
+  (warning floor = build failure). Removed both (one-line note left). Mechanical
+  consequence of the grammar change, not a behaviour change.
+
+## Phase 2.5 production ffsll smoke (D-mvp-4.3-FFS)
+`bpftool prog load build/mac_filter.bpf.o /sys/fs/bpf/probe type xdp` → **rc=0**.
+Default `__builtin_ffsll` lowering verifies on the floor; `-DXDPMF_FFS_FALLBACK`
+NOT needed (the `#ifdef` alt is retained but inactive).
+
+## Cross-check against tester §6.60–§6.63
+T_AND_COMPOSE_OK / T_AND_ORACLE_AGREEMENT / T_AND_PREFIX_CLOSURE_OVERLAP
+(guard #23) / T_SCHEMA_V2_CUTOVER → 4/4 PASS against this impl.

@@ -1,11 +1,15 @@
 # Schema violation: two rules share id=0. Used by §6.22 sub-case 3.
+# §5.43 MVP-4.3: converted to v2 dst_cidr/src_cidr grammar (MAC deferred) so
+# the config reaches the duplicate-id schema check rather than rejecting at
+# the MAC-deferred match gate first.
+schema_version: 2
 default_action: drop
 rules:
   - id: 0
     action: pass
     match:
-      mac: "02:00:00:00:00:01"
+      src_cidr: "10.0.0.0/8"
   - id: 0
     action: pass
     match:
-      mac: "02:00:00:00:00:02"
+      src_cidr: "192.168.0.0/16"

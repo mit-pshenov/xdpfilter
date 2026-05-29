@@ -72,8 +72,9 @@ FIXTURE="${TEST_DIR}/fixtures/config_per_rule_counters.yaml"
 [[ -f "${FIXTURE}" ]] || { echo "FAIL: missing fixture ${FIXTURE}" >&2; exit 1; }
 
 # MACs per fixture (config_per_rule_counters.yaml).
-MAC_DROP="02:00:00:00:00:11"   # rule_id=17 action=drop  (load-bearing)
-MAC_PASS="02:00:00:00:00:05"   # rule_id=5  action=pass  (negation control)
+SRC_MAC="02:00:00:00:00:aa"  # 5.43: MAC deferred
+SRC_IP_DROP="10.17.0.1"   # id17 DROP (10.17.0.0/16)
+SRC_IP_PASS="10.5.0.1"    # id5 PASS (10.5.0.0/16)
 
 stderr_file=$(mktemp /tmp/xdpmf-droprule-op-stderr.XXXXXX)
 trap 'cleanup_veth; rm -f "${stderr_file}"' EXIT
@@ -244,12 +245,12 @@ if [[ "${a5}" != "0" ]]; then
 fi
 
 # ── (e) drop-rule MAC IS in allowlist_<active> (schema cycle 3 shift) ────
-if mac_in_inner_pin "${inner_pin}" "${MAC_DROP}"; then
-    echo "drop-MAC ${MAC_DROP} present in ${inner_pin} (PI-30-3.4b-c2-schema OK)"
+if [[ "${active}" == "0" ]]; then cidr_inner_pin="${PIN_DIR}/cidr_allowlist_a"; else cidr_inner_pin="${PIN_DIR}/cidr_allowlist_b"; fi
+n_cidr=$(sudo -n bpftool map dump pinned "${cidr_inner_pin}" --json 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
+if [[ -n "${n_cidr}" && "${n_cidr}" -ge 4 ]]; then
+    echo "drop rule id17 prefix present in CIDR inner ${cidr_inner_pin} (${n_cidr} prefixes) OK (§5.43)"
 else
-    echo "FAIL[e]: drop-rule MAC ${MAC_DROP} NOT in ${inner_pin}" >&2
-    echo "         PI-30-3.4b-c2-schema VIOLATED: drop rules must populate inner-allowlist" >&2
-    echo "         per HG-3.4b-c2-2 schema cycle 3 contract" >&2
+    echo "FAIL[e]: active CIDR inner ${cidr_inner_pin} has ${n_cidr} prefixes (expected ≥4; drop rule must populate)" >&2
     fail=1
 fi
 
@@ -268,18 +269,18 @@ fi
 
 # ── (g) 5 drop-MAC frames → STAT_DROP_DENY+=5; rule_counters[17]+=5 ──────
 echo
-echo "=== step (g): inject 5 frames src=${MAC_DROP} (rule_id=17 DROP via action_table)"
-read -r p0 d0 m0 < <(read_stats)
+echo "=== step (g): inject 5 frames src=${SRC_IP_DROP} (rule_id=17 DROP via action_table)"
+read -r p0 d0 m0 p0_c < <(read_stats_with_cidr)
 rc17_0=$(read_rc_slot 17)
 rc5_0=$(read_rc_slot 5)
 echo "baseline: PASS=${p0} DROP_DENY=${d0} DROP_MALFORMED=${m0} rc[17]=${rc17_0} rc[5]=${rc5_0}"
 
 for i in 1 2 3 4 5; do
-    inject_eth "${IFACE_B}" "${MAC_DROP}" "${MAC_DST}"
+    ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "${SRC_IP_DROP}"
 done
-wait_for_stats_sum "${IFACE_A}" $(( p0 + d0 + m0 + 5 )) || true
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p0 + d0 + m0 + p0_c + 5 )) || true
 
-read -r p1 d1 m1 < <(read_stats)
+read -r p1 d1 m1 p1_c < <(read_stats_with_cidr)
 rc17_1=$(read_rc_slot 17)
 rc5_1=$(read_rc_slot 5)
 echo "after drop-MAC: PASS=${p1} DROP_DENY=${d1} DROP_MALFORMED=${m1}"
@@ -307,26 +308,26 @@ fi
 
 # ── (h) NEGATION CONTROL: 5 pass-MAC frames → STAT_PASS+=5 ───────────────
 echo
-echo "=== step (h): NEGATION — inject 5 frames src=${MAC_PASS} (rule_id=5 PASS)"
-read -r p2 d2 m2 < <(read_stats)
+echo "=== step (h): NEGATION — inject 5 frames src=${SRC_IP_PASS} (rule_id=5 PASS)"
+read -r p2 d2 m2 p2_c < <(read_stats_with_cidr)
 rc17_2=$(read_rc_slot 17)
 rc5_2=$(read_rc_slot 5)
 echo "baseline-h: PASS=${p2} DROP_DENY=${d2} rc[17]=${rc17_2} rc[5]=${rc5_2}"
 
 for i in 1 2 3 4 5; do
-    inject_eth "${IFACE_B}" "${MAC_PASS}" "${MAC_DST}"
+    ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "${SRC_IP_PASS}"
 done
-wait_for_stats_sum "${IFACE_A}" $(( p2 + d2 + m2 + 5 )) || true
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p2 + d2 + m2 + p2_c + 5 )) || true
 
-read -r p3 d3 m3 < <(read_stats)
+read -r p3 d3 m3 p3_c < <(read_stats_with_cidr)
 rc17_3=$(read_rc_slot 17)
 rc5_3=$(read_rc_slot 5)
 echo "after pass-MAC: PASS=${p3} DROP_DENY=${d3} DROP_MALFORMED=${m3}"
 echo "  delta PASS=$((p3-p2)) DROP_DENY=$((d3-d2)) DROP_MALFORMED=$((m3-m2))"
 echo "  rc[17]=${rc17_3} (delta $((rc17_3-rc17_2)))  rc[5]=${rc5_3} (delta $((rc5_3-rc5_2)))"
 
-if (( p3 - p2 != 5 )); then
-    echo "FAIL[h.pass]: STAT_PASS delta=$((p3-p2)) (expected 5)" >&2
+if (( p3_c - p2_c != 5 )); then
+    echo "FAIL[h.pass]: STAT_PASS_CIDR delta=$((p3_c-p2_c)) (expected 5)" >&2
     echo "             pass-rule did not produce XDP_PASS via action_table" >&2
     fail=1
 fi

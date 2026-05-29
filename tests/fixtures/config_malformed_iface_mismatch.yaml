@@ -1,10 +1,13 @@
 # Valid YAML/schema but declared `interface:` differs from runtime --iface.
 # Used by §6.22 sub-case 4. Tests pass --iface ${IFACE_A} where ${IFACE_A}
 # is PID-suffixed (xdpmf_a_$$); a literal `notthisiface` will never match.
+# §5.43 MVP-4.3: converted to v2 src_cidr grammar (MAC deferred) so the
+# config is otherwise valid and the iface-mismatch is the rejecting check.
+schema_version: 2
 interface: notthisiface
 default_action: drop
 rules:
   - id: 0
     action: pass
     match:
-      mac: "02:00:00:00:00:01"
+      src_cidr: "10.0.0.0/8"

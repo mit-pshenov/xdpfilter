@@ -47,6 +47,7 @@ FIXTURE="${TEST_DIR}/fixtures/config_per_rule_counters.yaml"
 
 # MACs in fixture (must match config_per_rule_counters.yaml exactly).
 MAC_ID0="02:00:00:00:00:01"   # rule_id=0 PASS
+SRC_MAC="02:00:00:00:00:aa"  # 5.43: MAC deferred; src_mac irrelevant
 MAC_ID5="02:00:00:00:00:05"   # rule_id=5 PASS
 MAC_ID17="02:00:00:00:00:11"  # rule_id=17 DROP — post-§5.34 cycle 2 STILL bumps counter
 
@@ -123,11 +124,11 @@ fi
 
 # ── inject baseline bumps: 5xid5 + 3xid17 + 2xid0 ────────────────────────
 echo "=== inject baseline: 5 x ${MAC_ID5} + 3 x ${MAC_ID17} + 2 x ${MAC_ID0}"
-read -r p0 d0 m0 < <(read_stats)
-for i in 1 2 3 4 5; do inject_eth "${IFACE_B}" "${MAC_ID5}"  "${MAC_DST}"; done
-for i in 1 2 3;       do inject_eth "${IFACE_B}" "${MAC_ID17}" "${MAC_DST}"; done
-for i in 1 2;         do inject_eth "${IFACE_B}" "${MAC_ID0}"  "${MAC_DST}"; done
-wait_for_stats_sum "${IFACE_A}" $(( p0 + d0 + m0 + 10 )) || true
+read -r p0 d0 m0 p0_c < <(read_stats_with_cidr)
+for i in 1 2 3 4 5; do ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "10.5.0.1"; done
+for i in 1 2 3;       do ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "10.17.0.1"; done
+for i in 1 2;         do ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "10.0.0.1"; done
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p0 + d0 + m0 + p0_c + 10 )) || true
 
 # Read baseline rule_counters.
 c0_pre=$(read_rc_slot 0)
@@ -179,9 +180,9 @@ fi
 
 # ── (d) re-inject 1 frame id=5 → rule_counters[5]=1 (post-reset bump works) ─
 echo "=== re-inject 1 frame ${MAC_ID5} (rule_id=5) — post-reset baseline"
-read -r p1 d1 m1 < <(read_stats)
-inject_eth "${IFACE_B}" "${MAC_ID5}" "${MAC_DST}"
-wait_for_stats_sum "${IFACE_A}" $(( p1 + d1 + m1 + 1 )) || true
+read -r p1 d1 m1 p1_c < <(read_stats_with_cidr)
+${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "10.5.0.1"
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p1 + d1 + m1 + p1_c + 1 )) || true
 
 c5_final=$(read_rc_slot 5)
 c0_final=$(read_rc_slot 0)

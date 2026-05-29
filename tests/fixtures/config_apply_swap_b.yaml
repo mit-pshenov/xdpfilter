@@ -1,14 +1,15 @@
-# Apply-B ruleset for §6.23 + §6.24: pass MAC_GOOD + MAC_BAD.
-# MAC_GOOD overlap is the load-bearing element for §6.23 (must NEVER drop
-# across the swap). MAC_BAD becomes allowed under B (was denied under A) —
-# the discriminator for §6.24 bidirectional verification.
+# Apply-B ruleset for §6.23 + §6.24. §5.43 MVP-4.3: MAC→src_cidr (deferred).
+# 10.0.0.0/8 overlap is load-bearing for §6.23 (must NEVER drop across the
+# swap). 192.168.0.0/16 is the §6.24 discriminator (denied under A, allowed
+# under B).
+schema_version: 2
 default_action: drop
 rules:
   - id: 0
     action: pass
     match:
-      mac: "02:00:00:00:00:01"
+      src_cidr: "10.0.0.0/8"
   - id: 1
     action: pass
     match:
-      mac: "02:00:00:00:00:02"
+      src_cidr: "192.168.0.0/16"

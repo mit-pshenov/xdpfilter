@@ -1,0 +1,14 @@
+# config_v2_mac.yaml — §5.43 §6.63 (c): schema_version: 2 but match: {mac}.
+#
+# MAC matching is DEFERRED (HG-mvp-4.3-2 / PI-mvp-4.3-MAC-DEFERRED). Under
+# v2 the `mac` match-key is REJECTED at parse with exit 9 and a MAC-deferred
+# diagnostic ("MAC matching deferred; schema_version 2 supports dst_cidr +
+# src_cidr" per D-mvp-4.3-MAC-GRAMMAR). The schema_version is valid (2), so
+# the rejection is specifically the match-grammar gate, not the schema gate.
+schema_version: 2
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      mac: "02:00:00:00:00:01"

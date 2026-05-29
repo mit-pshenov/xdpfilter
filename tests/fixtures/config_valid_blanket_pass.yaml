@@ -1,3 +1,4 @@
 # Valid YAML: blanket-pass mode (default_action: pass, empty rules).
 # Used by §6.21 T_APPLY_VALID_CONFIG sanity sub-case.
+schema_version: 2
 default_action: pass

@@ -77,23 +77,28 @@ echo "sanitized loader = ${SANITIZED_LOADER}"
 # ── Step 3: standard veth fixture (cleanup wired via trap) ───────────────
 setup_veth
 
-# ── Step 4: attach via sanitized binary, capture stderr ──────────────────
-echo "=== T_SANITIZER_BUILD: attach (sanitized) iface=${IFACE_A} allow=${MAC_GOOD}"
+# ── Step 4: apply via sanitized binary, capture stderr ───────────────────
+# §5.43 MVP-4.3: MAC matching deferred → exercise the sanitized datapath via
+# a v2 src_cidr config (10.0.0.0/8 PASS) instead of `attach --allow <mac>`.
+# A matched src_cidr rule lands on STAT_PASS_CIDR (per §5.43 Interfaces).
+CIDR_FIXTURE="${TEST_DIR}/fixtures/config_valid_cidr.yaml"
+echo "=== T_SANITIZER_BUILD: apply (sanitized) iface=${IFACE_A} -f ${CIDR_FIXTURE}"
 set +e
-${NSEXEC} "${SANITIZED_LOADER}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" \
+${NSEXEC} "${SANITIZED_LOADER}" apply --iface "${IFACE_A}" -f "${CIDR_FIXTURE}" \
     2>>"${STDERR_FILE}"
 attach_rc=$?
 set -e
 sleep 0.3
 
-# ── Step 5: inject one well-formed allowed frame ────────────────────────
-inject_eth "${IFACE_B}" "${MAC_GOOD}" "${MAC_DST}"
+# ── Step 5: inject one well-formed allowed frame (src ∈ 10.0.0.0/8) ──────
+${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" \
+    "${IFACE_B}" "02:00:00:00:00:aa" "${MAC_DST}" "10.0.0.5"
 # Per §5.21 C1: replace post-inject sleep with stats-sum poll.
-wait_for_stats_sum "${IFACE_A}" 1 || true
+wait_for_stats_sum_with_cidr "${IFACE_A}" 1 || true
 
-# ── Step 6: read stats ──────────────────────────────────────────────────
-read -r pass deny mal < <(read_stats)
-echo "stats: PASS=${pass} DROP_DENY=${deny} DROP_MALFORMED=${mal}"
+# ── Step 6: read stats (4-col for the CIDR axis) ────────────────────────
+read -r pass deny mal pass_cidr < <(read_stats_with_cidr)
+echo "stats: PASS=${pass} DROP_DENY=${deny} DROP_MALFORMED=${mal} PASS_CIDR=${pass_cidr}"
 
 # ── Step 7: detach via sanitized binary, capture stderr ─────────────────
 echo "=== T_SANITIZER_BUILD: detach (sanitized)"
@@ -114,7 +119,7 @@ fail=0
 
 # Exit codes of the sanitized invocations.
 [[ "${attach_rc}" == "0" ]] \
-    || { echo "FAIL: sanitized attach exit=${attach_rc} (expected 0)" >&2; fail=1; }
+    || { echo "FAIL: sanitized apply exit=${attach_rc} (expected 0)" >&2; fail=1; }
 [[ "${detach_rc}" == "0" ]] \
     || { echo "FAIL: sanitized detach exit=${detach_rc} (expected 0)" >&2; fail=1; }
 
@@ -122,8 +127,8 @@ fail=0
 # BPF userspace hot path (not just exited cleanly without doing work).
 # Per §6.8 only STAT_PASS is asserted in this test; the other slots are
 # covered by §6.3–6.5.
-[[ "${pass}" == "1" ]] \
-    || { echo "FAIL: expected STAT_PASS=1, got ${pass}" >&2; fail=1; }
+[[ "${pass_cidr}" == "1" ]] \
+    || { echo "FAIL: expected STAT_PASS_CIDR=1, got ${pass_cidr}" >&2; fail=1; }
 
 # THE key assertion: no sanitizer report in stderr.  Match is the failure
 # condition (§6.8 "Negation form": a regex match means the test fails).

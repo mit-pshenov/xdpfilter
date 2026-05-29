@@ -1,36 +1,29 @@
-# §6.47..§6.52 + §6.NN..§6.NN+2 fixture (MVP-3.4b cycle 1 / §5.31 + cycle 2 / §5.34).
-#
-# Sparse rule_id allocation (per Q5 R1 — operator's `id:` IS the BPF
-# rule_counters[] array index directly). The 4 ids 0, 5, 17, 42 are spread
-# across [0, 63] to catch off-by-one / dense-only assumptions.
-#
-# Mix of match kinds:
-#   - id=0  : MAC-only PASS (baseline allow)
-#   - id=5  : MAC-only PASS (used by §6.47 hit-bumps + §6.49 survives-apply)
-#   - id=17 : MAC-only DROP (used by §6.52 + §6.NN T_DROP_RULE_OPERATIVE —
-#             POST-§5.34 schema cycle 3: drop rule populated into BOTH `rules`
-#             outer/inners AND inner-allowlist; datapath reaches bump_rule +
-#             rules→action_table dispatch; rule_counters[17] BUMPS per
-#             HG-3.4b-c2-5; XDP_DROP via action_table[DROP] per HG-3.4b-c2-4.
-#             PRE-§5.34 cycle-2 contract — "MAC NOT in inner-allowlist,
-#             rule_counters stays 0, drop via defaults-fallthrough" — RETIRED.
-#             T_DROP_RULE_BUMPS_COUNTER assertions inverted per Q3.A.)
-#   - id=42 : CIDR-only PASS (used by §6.48 CIDR hit-bumps)
+# §6.47..§6.52 fixture. §5.43 MVP-4.3: converted MAC→src_cidr grammar (MAC
+# deferred to mvp-4.5); schema_version: 2. Sparse ids 0/5/17/42 across [0,63]
+# to catch off-by-one / dense-only assumptions. Per-id src_cidr ranges are
+# DISJOINT /16s (no lower-id containment) so each id is matched by exactly
+# one src_ip and first-match-by-id is unambiguous:
+#   - id=0  : src 10.0.0.0/16    PASS   (inject 10.0.0.x)
+#   - id=5  : src 10.5.0.0/16    PASS   (inject 10.5.0.x)  survives-apply canary
+#   - id=17 : src 10.17.0.0/16   DROP   (inject 10.17.0.x) drop-dispatch canary
+#   - id=42 : src 10.42.0.0/16   PASS   (inject 10.42.0.x) CIDR hit-bumps
+# An out-of-range src (e.g. 8.8.8.8) matches nothing → defaults drop.
+schema_version: 2
 default_action: drop
 rules:
   - id: 0
     action: pass
     match:
-      mac: "02:00:00:00:00:01"
+      src_cidr: "10.0.0.0/16"
   - id: 5
     action: pass
     match:
-      mac: "02:00:00:00:00:05"
+      src_cidr: "10.5.0.0/16"
   - id: 17
     action: drop
     match:
-      mac: "02:00:00:00:00:11"
+      src_cidr: "10.17.0.0/16"
   - id: 42
     action: pass
     match:
-      src_cidr: "10.0.0.0/24"
+      src_cidr: "10.42.0.0/16"

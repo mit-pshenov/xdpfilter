@@ -1,5 +1,14 @@
 /*
- * mac_filter.bpf.c — XDP program with L2 MAC + L3 src-CIDR OR-compose match.
+ * mac_filter.bpf.c — XDP program with L3 dst-CIDR AND src-CIDR bit-vector match.
+ *
+ * §5.43 (MVP-4.3): OR→AND structural pivot. The prior two independent OR
+ * branches (MAC HASH + standalone src-CIDR LPM) are REPLACED by a single
+ * bit-vector AND classification over two LPM axes (dst_cidr AND src_cidr):
+ * acc = (lpm(dst_bitmask[active], /32 daddr) | wildcard[active*2+0])
+ *     & (lpm(cidr_allowlist[active], /32 saddr) | wildcard[active*2+1]);
+ * the matched rule id = __builtin_ffsll(acc)-1 (lowest-id survivor). MAC
+ * matching is DEFERRED (HG-mvp-4.3-2) — the MAC maps stay declared + pinned
+ * but UNCONSULTED (frozen); they return as a bit-vector axis in mvp-4.5.
  *
  * §5.27 (MVP-3.2): two-axis match per Q2 OR1 (MAC HASH first, short-circuit;
  * then on IPv4 frames lookup src_ip in the CIDR LPM_TRIE). On miss-both,
@@ -110,10 +119,12 @@ struct {
 struct xdpmf_cidr_inner {
     __uint(type, BPF_MAP_TYPE_LPM_TRIE);
     __type(key, struct xdpmf_cidr_v4);
-    /* §5.31 (MVP-3.4b) PI-13-3.4b CIDR symmetry per T.5 OQ #3: inner-value
-     * extends to `struct allow_entry` matching MAC HASH branch — without
-     * symmetry MAC and CIDR rule_ids would live in different shape-spaces. */
-    __type(value, struct allow_entry);
+    /* §5.43 (MVP-4.3) D-mvp-4.3-Q1: src-CIDR axis VALUE reshaped from
+     * `struct allow_entry` (8B) → `__u64` (8B) — a prefix-closed per-rule
+     * bitmask (bit k set iff rule k constrains a prefix COVERING this entry).
+     * Topology + pin names (cidr_allowlist_a/_b, cidr_rulesets) UNCHANGED
+     * (guard #16). The datapath ORs this mask into the src axis survivors. */
+    __type(value, __u64);
     __uint(max_entries, XDPMF_ALLOWLIST_MAX);
     __uint(map_flags, BPF_F_NO_PREALLOC);
 };
@@ -130,6 +141,54 @@ struct {
 } cidr_rulesets SEC(".maps") = {
     .values = { &cidr_allowlist_a, &cidr_allowlist_b },
 };
+
+/*
+ * §5.43 (MVP-4.3) D-mvp-4.3-Q1: NEW dst-CIDR axis — an ARRAY_OF_MAPS[2] LPM
+ * trio mirroring the src-CIDR (§5.27) topology exactly. Inner LPM_TRIE
+ * templates dst_bitmask_a/_b hold `__u64` prefix-closed bitmasks keyed by
+ * the /32-padded destination address; the outer dst_rulesets selects the
+ * active inner via the SAME shared active_idx. A single userspace u32 store
+ * at active_idx[0] commits the swap for dst + src + wildcard + defaults +
+ * rules + rule_counters together (D-mvp-4.3-Q2 / §5.27 Q1 AS1 extended).
+ */
+struct xdpmf_dst_inner {
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __type(key, struct xdpmf_cidr_v4);
+    __type(value, __u64);
+    __uint(max_entries, XDPMF_ALLOWLIST_MAX);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+};
+
+struct xdpmf_dst_inner dst_bitmask_a SEC(".maps");
+struct xdpmf_dst_inner dst_bitmask_b SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
+    __uint(max_entries, XDPMF_RULESET_COUNT);
+    __uint(key_size, sizeof(__u32));
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+    __array(values, struct xdpmf_dst_inner);
+} dst_rulesets SEC(".maps") = {
+    .values = { &dst_bitmask_a, &dst_bitmask_b },
+};
+
+/*
+ * §5.43 (MVP-4.3) D-mvp-4.3-Q2: single combined `wildcard` ARRAY of __u64,
+ * max_entries = XDPMF_RULESET_COUNT * BITVEC_NUM_AXES (= 4), indexed
+ * wildcard[active * BITVEC_NUM_AXES + axis] (axis 0 = dst, 1 = src). A rule
+ * that does NOT constrain an axis has its bit set here (and is ABSENT from
+ * the axis LPM map); the datapath ORs the wildcard half into that axis's
+ * survivors. This is the realizable analog of the `defaults` precedent — a
+ * runtime active_idx cannot select between two top-level map symbols, only
+ * between slots of ONE indexed ARRAY (see design Anti-misdiagnosis note).
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __type(key, __u32);
+    __type(value, __u64);
+    __uint(max_entries, XDPMF_RULESET_COUNT * BITVEC_NUM_AXES);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} wildcard SEC(".maps");
 
 /*
  * active_idx: single-slot ARRAY whose only entry is the index in {0,1}
@@ -302,6 +361,31 @@ static __always_inline void bump_rule(__u32 rule_id, __u32 active)
     }
 }
 
+/* §5.43 (MVP-4.3) D-mvp-4.3-FFS: 1-based index of the lowest set bit of `x`
+ * (0 if x == 0). Production-owned, single-consumer (guard #9 — transcribed,
+ * NOT #include'd from the tests/bitvec spike). The caller computes
+ * `rid = first_set_u64(acc) - 1` only when acc != 0, so the lowest-id
+ * survivor wins (HG-mvp-4.3-4 first-match-by-id, free via ffsll).
+ *
+ * Default lowering = __builtin_ffsll (spike §5.42 verdict ADOPT confirmed it
+ * verifies on the 5.15 floor). XDPMF_FFS_FALLBACK swaps in a bounded
+ * #pragma unroll bit-scan (no back-edge) for verifier floors that reject the
+ * builtin — activated only if the Phase 2.5 production load fails. */
+static __always_inline __u32 first_set_u64(__u64 x)
+{
+#ifdef XDPMF_FFS_FALLBACK
+    #pragma unroll
+    for (__u32 i = 0; i < 64; i++) {
+        if (x & (1ULL << i)) {
+            return i + 1;
+        }
+    }
+    return 0;
+#else
+    return (__u32)__builtin_ffsll((long long)x);
+#endif
+}
+
 /* §5.41 (MVP-4.1) Q1.A2 single-consumer helper: walk up to
  * XDPMF_VLAN_MAX_DEPTH stacked VLAN tags (802.1Q C-TAG or 802.1AD S-TAG) and
  * return the inner EtherType + the first byte past the L2/VLAN headers (the
@@ -352,14 +436,14 @@ int mac_filter_prog(struct xdp_md *ctx)
     }
 
     struct ethhdr *eth = data;
-    struct xdpmf_mac key;
-    __builtin_memcpy(key.octets, eth->h_source, sizeof(key.octets));
 
-    /* §5.26 Q2 A1: read active_idx (single u32 read, atomic), then chain
-     * map-of-maps lookup to obtain the live inner hash, then look up the
-     * source MAC. Both NULL checks are verifier-required on map_of_maps
-     * lookups and percpu map lookups; they should be unreachable in
-     * practice because userspace populates both slots before the first attach. */
+    /* §5.26 Q2 A1: read active_idx (single u32 read, atomic) at the head of
+     * the datapath. The SAME `active` snapshot indexes every per-ruleset
+     * outer (dst_rulesets, cidr_rulesets, wildcard, rules_outer,
+     * rule_counters_outer, defaults), so a concurrent userspace active_idx
+     * flip cannot split the axes mid-packet (§5.27 Q1 AS1, extended in §5.43).
+     * The NULL check is verifier-required; unreachable in practice because
+     * userspace populates both slots before the first attach. */
     __u32 zero = 0;
     __u32 *active_p = bpf_map_lookup_elem(&active_idx, &zero);
     if (unlikely(!active_p)) {
@@ -368,97 +452,102 @@ int mac_filter_prog(struct xdp_md *ctx)
     }
     __u32 active = *active_p;
 
-    void *inner = bpf_map_lookup_elem(&rulesets, &active);
-    if (unlikely(!inner)) {
-        bump_stat(STAT_DROP_DENY);
-        return XDP_DROP;
-    }
+    /* §5.43 (MVP-4.3) OR→AND bit-vector classification. The MAC HASH maps
+     * are FROZEN (declared + pinned, NOT consulted — HG-mvp-4.3-2); MAC
+     * matching returns as a bit-vector axis in mvp-4.5. Classification is the
+     * AND-intersection of two LPM axes (dst_cidr AND src_cidr), both read
+     * from the post-VLAN IPv4 header — so only IPv4 frames are classified;
+     * every other ethertype (ARP, IPv6, non-IPv4-after-VLAN, truncated-tag)
+     * falls through to defaults[active] (preserves the pre-§5.43 non-IP
+     * semantic per brief §1). */
 
-    /* §5.31 (MVP-3.4b) PI-28-3.4b: inner-VALUE is `struct allow_entry`
-     * (PI-13-3.4b adjudication). Offset-0 byte-equivalent null-check
-     * pattern is preserved; offset-4 `rule_id` is read for bump_rule + the
-     * §5.34 rules→action_table dispatch chain below.
-     *
-     * §5.34 (MVP-3.4b cycle 2) HG-3.4b-c2-4 dispatch chain — datapath now
-     * consults `rules_outer[active] → rules_inner[rule_id] → action_table[
-     * action_id]` per match. bump_rule() runs BEFORE the chain per
-     * HG-3.4b-c2-5 (per-rule counter bumps on every match regardless of
-     * verdict). On `action_type == ACTION_DROP` we bump STAT_DROP_DENY
-     * (Q1.B re-uses the existing bucket — no new STAT enum slot) and
-     * return XDP_DROP. On ACTION_PASS or NULL-fallthrough at any chain
-     * step (defense-in-depth — practically unreachable because loader
-     * populates rules_inner + action_table before the active_idx flip)
-     * we fall through to the existing STAT_PASS branch. */
-    struct allow_entry *entry = bpf_map_lookup_elem(inner, &key);
-    if (entry) {
-        bump_rule(entry->rule_id, active);
-        __u32 rid = entry->rule_id;
-        void *rules_inner_map = bpf_map_lookup_elem(&rules_outer, &active);
-        if (rules_inner_map) {
-            struct rule_entry *r = bpf_map_lookup_elem(rules_inner_map, &rid);
-            if (r && r->present) {
-                __u32 aid = r->action_id;
-                struct action_entry *a = bpf_map_lookup_elem(&action_table, &aid);
-                if (a && a->action_type == ACTION_DROP) {
-                    bump_stat(STAT_DROP_DENY);
-                    return XDP_DROP;
-                }
-            }
-        }
-        bump_stat(STAT_PASS);
-        return XDP_PASS;
-    }
-
-    /* §5.27 Q2 OR1: MAC miss → CIDR axis (only on IPv4 ethertype). §5.41
-     * (MVP-4.1): the IPv4 ethertype is now the INNER proto after walking ≤2
-     * VLAN tags, so a VLAN/QinQ-tagged IPv4 frame reaches the CIDR branch.
-     * Non-IPv4-after-VLAN frames (ARP, IPv6, other, truncated-tag) still skip
-     * the CIDR branch and fall through to defaults — preserves the MVP-3.1
-     * non-IP semantic per brief §1. Read the same `active` snapshot so a
-     * concurrent userspace flip cannot split the MAC/CIDR axes mid-packet. */
     /* §5.41 (MVP-4.1): walk up to 2 VLAN tags so a tagged Gi frame reaches the
-     * CIDR axis. inner_proto / l3hdr come from the post-VLAN cursor; on an
+     * L3 axes. inner_proto / l3hdr come from the post-VLAN cursor; on an
      * untagged frame this is byte-equivalent to the prior `eth + 1` path. */
     void *l3hdr;
     __u16 inner_proto = l3_after_vlan(eth, data_end, &l3hdr);
     if (inner_proto == bpf_htons(ETH_P_IP)) {
-        /* Verifier-required IPv4 header bounds check before saddr deref —
-         * applied at the post-VLAN L3 offset (the only MALFORMED path). */
+        /* Verifier-required IPv4 header bounds check before daddr/saddr deref
+         * — applied at the post-VLAN L3 offset (the only MALFORMED path). */
         if (unlikely(l3hdr + sizeof(struct iphdr) > data_end)) {
             bump_stat(STAT_DROP_MALFORMED);
             return XDP_DROP;
         }
         struct iphdr *ip = (struct iphdr *)l3hdr;
 
-        void *cidr_inner = bpf_map_lookup_elem(&cidr_rulesets, &active);
-        if (unlikely(!cidr_inner)) {
+        /* Per-axis active inners (dst + src) via the shared `active` snapshot. */
+        void *dst_inner = bpf_map_lookup_elem(&dst_rulesets, &active);
+        if (unlikely(!dst_inner)) {
             bump_stat(STAT_DROP_DENY);
             return XDP_DROP;
         }
-        struct xdpmf_cidr_v4 cidr_key = {
-            .prefixlen = 32u,        /* lookup is /32 host-route; LPM_TRIE picks longest matching prefix */
-            .addr      = ip->saddr,  /* network byte order on wire, matches LPM_TRIE key shape */
+        void *src_inner = bpf_map_lookup_elem(&cidr_rulesets, &active);
+        if (unlikely(!src_inner)) {
+            bump_stat(STAT_DROP_DENY);
+            return XDP_DROP;
+        }
+
+        /* §5.43 D-mvp-4.3-Q2 wildcard halves: wildcard[active*BITVEC_NUM_AXES
+         * + axis]. A rule unconstrained on an axis lives here (and is ABSENT
+         * from that axis's LPM map — mutual exclusion). NULL → 0 (no wildcard
+         * survivors on that axis). */
+        __u64 wc_dst = 0;
+        __u64 wc_src = 0;
+        __u32 wc_dst_key = active * BITVEC_NUM_AXES + BV_AXIS_DST;
+        __u32 wc_src_key = active * BITVEC_NUM_AXES + BV_AXIS_SRC;
+        __u64 *wc_dst_p = bpf_map_lookup_elem(&wildcard, &wc_dst_key);
+        if (wc_dst_p) {
+            wc_dst = *wc_dst_p;
+        }
+        __u64 *wc_src_p = bpf_map_lookup_elem(&wildcard, &wc_src_key);
+        if (wc_src_p) {
+            wc_src = *wc_src_p;
+        }
+
+        /* /32 host-route LPM keys (network byte order, matches LPM_TRIE key
+         * shape). LPM_TRIE returns the longest matching prefix's value — the
+         * prefix-closed __u64 bitmask (FI-1 cover-closure computed loader-side
+         * in close_prefixes). NULL → 0 (no LPM survivors on that axis). */
+        struct xdpmf_cidr_v4 dst_key = {
+            .prefixlen = 32u,
+            .addr      = ip->daddr,
         };
-        /* §5.31 (MVP-3.4b) PI-28-3.4b CIDR symmetry + §5.34 HG-3.4b-c2-4
-         * dispatch chain: same shape as MAC HASH-hit branch above —
-         * bump_rule first (HG-3.4b-c2-5), then rules_outer → rules_inner →
-         * action_table chain. STAT_DROP_DENY on DROP (Q1.B); STAT_PASS_CIDR
-         * preserved on PASS / NULL-fallthrough. Active snapshot discipline:
-         * the SAME `active` u32 read at the head of the datapath indexes
-         * BOTH `cidr_rulesets` AND `rules_outer` here — concurrent
-         * userspace flip is benign per §5.27 Q1 AS1 race-window analysis
-         * extended to the 4th axis. */
-        struct allow_entry *cidr_hit = bpf_map_lookup_elem(cidr_inner, &cidr_key);
-        if (cidr_hit) {
-            bump_rule(cidr_hit->rule_id, active);
-            __u32 c_rid = cidr_hit->rule_id;
-            void *c_rules_inner_map = bpf_map_lookup_elem(&rules_outer, &active);
-            if (c_rules_inner_map) {
-                struct rule_entry *cr = bpf_map_lookup_elem(c_rules_inner_map, &c_rid);
-                if (cr && cr->present) {
-                    __u32 c_aid = cr->action_id;
-                    struct action_entry *ca = bpf_map_lookup_elem(&action_table, &c_aid);
-                    if (ca && ca->action_type == ACTION_DROP) {
+        struct xdpmf_cidr_v4 src_key = {
+            .prefixlen = 32u,
+            .addr      = ip->saddr,
+        };
+        __u64 dmask = 0;
+        __u64 smask = 0;
+        __u64 *dm = bpf_map_lookup_elem(dst_inner, &dst_key);
+        if (dm) {
+            dmask = *dm;
+        }
+        __u64 *sm = bpf_map_lookup_elem(src_inner, &src_key);
+        if (sm) {
+            smask = *sm;
+        }
+
+        /* The OR→AND pivot (PI-mvp-4.3-AND): per axis, OR the LPM survivors
+         * with the axis wildcard half, then INTERSECT across axes. A rule
+         * survives iff EVERY axis it constrains matches; unconstrained axes
+         * contribute the always-true wildcard half. */
+        __u64 acc = (dmask | wc_dst) & (smask | wc_src);
+        if (acc != 0) {
+            /* HG-mvp-4.3-4 first-match-by-id: the lowest set bit IS the lowest
+             * matching rule id (bit position == id), so ffsll picks it for
+             * free with NO sort. bump_rule first (per-match counter, HG-5),
+             * then the reused rules_outer → rules_inner → action_table
+             * dispatch (DROP → STAT_DROP_DENY + XDP_DROP; PASS or any
+             * NULL-fallthrough → STAT_PASS_CIDR + XDP_PASS, D-mvp-4.3-STAT). */
+            __u32 rid = first_set_u64(acc) - 1;
+            bump_rule(rid, active);
+            void *rules_inner_map = bpf_map_lookup_elem(&rules_outer, &active);
+            if (rules_inner_map) {
+                struct rule_entry *r = bpf_map_lookup_elem(rules_inner_map, &rid);
+                if (r && r->present) {
+                    __u32 aid = r->action_id;
+                    struct action_entry *a = bpf_map_lookup_elem(&action_table, &aid);
+                    if (a && a->action_type == ACTION_DROP) {
                         bump_stat(STAT_DROP_DENY);
                         return XDP_DROP;
                     }
@@ -467,10 +556,11 @@ int mac_filter_prog(struct xdp_md *ctx)
             bump_stat(STAT_PASS_CIDR);
             return XDP_PASS;
         }
+        /* acc == 0 → no rule matched; fall through to defaults[active]. */
     }
 
-    /* Inner miss (both axes) — consult defaults[active]. Q2-extension: same
-     * active_idx value indexes ruleset+CIDR+default; one u32 flip swaps all. */
+    /* No match (non-IPv4, or IPv4 with acc==0) — consult defaults[active].
+     * The same active_idx value indexes every outer; one u32 flip swaps all. */
     __u32 *default_p = bpf_map_lookup_elem(&defaults, &active);
     if (unlikely(!default_p)) {
         bump_stat(STAT_DROP_DENY);

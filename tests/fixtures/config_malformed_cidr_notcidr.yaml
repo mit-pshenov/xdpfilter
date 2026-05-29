@@ -2,6 +2,7 @@
 # Garbage string with no '/' — validator collapses to 'missing prefix
 # length' (per §5.27 §4.1 stderr message catalogue). Exit 9 with
 # stderr matching 'malformed CIDR: missing prefix length'.
+schema_version: 2
 default_action: drop
 rules:
   - id: 0

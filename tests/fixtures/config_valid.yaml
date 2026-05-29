@@ -1,13 +1,15 @@
 # Minimal valid YAML config for §6.21 T_APPLY_VALID_CONFIG.
 # Also used as the "swap-A" side of §6.23 / §6.24 atomic-swap tests.
-# MAC 02:00:00:00:00:01 == MAC_GOOD in tests/lib/common.sh.
+# §5.43 MVP-4.3: converted MAC→src_cidr grammar (MAC deferred to mvp-4.5);
+# schema_version: 2. SRC_IP 10.x.y.z matches id0; 172.16.x matches id1.
+schema_version: 2
 default_action: drop
 rules:
   - id: 0
     action: pass
     match:
-      mac: "02:00:00:00:00:01"
+      src_cidr: "10.0.0.0/8"
   - id: 1
     action: pass
     match:
-      mac: "02:00:00:00:00:03"
+      src_cidr: "172.16.0.0/12"

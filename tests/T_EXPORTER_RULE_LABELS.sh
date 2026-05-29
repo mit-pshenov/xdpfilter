@@ -109,11 +109,13 @@ cleanup_test() {
 }
 trap cleanup_test EXIT
 
-# MACs / IPs in fixture.
-MAC_ID0="02:00:00:00:00:01"
-MAC_ID5="02:00:00:00:00:05"
-MAC_CIDR_HIT="99:99:99:99:99:99"   # NOT in any MAC rule, but src_ip in 10.0.0.0/24
-SRC_IP_IN="10.0.0.5"
+# §5.43 MVP-4.3: MAC deferred → all rules src_cidr. Per-id src_ip:
+#   id0 → 10.0.0.1 (10.0.0.0/16), id5 → 10.5.0.1 (10.5.0.0/16),
+#   id42 → 10.42.0.5 (10.42.0.0/16).
+SRC_MAC="02:00:00:00:00:aa"         # MAC axis deferred — value irrelevant
+SRC_IP_ID0="10.0.0.1"
+SRC_IP_ID5="10.5.0.1"
+SRC_IP_ID42="10.42.0.5"
 
 setup_veth
 
@@ -130,14 +132,14 @@ if [[ "${rc}" -ne 0 ]]; then
     exit 1
 fi
 
-# Inject mixed: 2× id=0 MAC, 3× id=5 MAC, 1× id=42 CIDR.
-echo "=== inject 2× rule_id=0 MAC"
-for i in 1 2; do inject_eth "${IFACE_B}" "${MAC_ID0}" "${MAC_DST}"; done
-echo "=== inject 3× rule_id=5 MAC"
-for i in 1 2 3; do inject_eth "${IFACE_B}" "${MAC_ID5}" "${MAC_DST}"; done
-echo "=== inject 1× rule_id=42 via CIDR"
+# Inject mixed: 2× id=0, 3× id=5, 1× id=42 — all via src_cidr (§5.43).
+echo "=== inject 2× rule_id=0 (src ${SRC_IP_ID0})"
+for i in 1 2; do ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "${SRC_IP_ID0}"; done
+echo "=== inject 3× rule_id=5 (src ${SRC_IP_ID5})"
+for i in 1 2 3; do ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "${SRC_IP_ID5}"; done
+echo "=== inject 1× rule_id=42 (src ${SRC_IP_ID42})"
 ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" \
-    "${IFACE_B}" "${MAC_CIDR_HIT}" "${MAC_DST}" "${SRC_IP_IN}"
+    "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "${SRC_IP_ID42}"
 
 # Wait for the BPF stats counters to catch up before scraping.
 sleep 0.3

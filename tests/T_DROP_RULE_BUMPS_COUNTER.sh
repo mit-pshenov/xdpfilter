@@ -58,8 +58,9 @@ LOADER_BIN=$(find_loader)
 FIXTURE="${TEST_DIR}/fixtures/config_per_rule_counters.yaml"
 [[ -f "${FIXTURE}" ]] || { echo "FAIL: missing fixture ${FIXTURE}" >&2; exit 1; }
 
-MAC_DROP="02:00:00:00:00:11"   # rule_id=17 DROP
-MAC_ID5="02:00:00:00:00:05"    # rule_id=5 PASS (negation control)
+SRC_MAC="02:00:00:00:00:aa"  # 5.43: MAC deferred
+SRC_IP_DROP="10.17.0.1"   # id17 DROP (10.17.0.0/16)
+SRC_IP_PASS="10.5.0.1"    # id5 PASS (10.5.0.0/16)
 
 # §5.31 EDIT-1: sidecar path = /run/xdpmacfilter/<iface>/rule_index.json
 SIDECAR_ROOT="/run/xdpmacfilter"
@@ -190,17 +191,17 @@ case "${active}" in
 esac
 
 # ── (b/c) inject 5 drop-MAC frames → STAT_DROP_DENY += 5; rc[17] += 5 ──
-echo "=== step (b/c): inject 5 frames src=${MAC_DROP} (rule_id=17 DROP via action_table)"
-read -r p0 d0 m0 < <(read_stats)
+echo "=== step (b/c): inject 5 frames src=${SRC_IP_DROP} (rule_id=17 DROP via action_table)"
+read -r p0 d0 m0 p0_c < <(read_stats_with_cidr)
 rc17_0=$(read_rc_slot 17)
 echo "baseline: PASS=${p0} DROP_DENY=${d0} DROP_MALFORMED=${m0} rc[17]=${rc17_0}"
 
 for i in 1 2 3 4 5; do
-    inject_eth "${IFACE_B}" "${MAC_DROP}" "${MAC_DST}"
+    ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "${SRC_IP_DROP}"
 done
-wait_for_stats_sum "${IFACE_A}" $(( p0 + d0 + m0 + 5 )) || true
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p0 + d0 + m0 + p0_c + 5 )) || true
 
-read -r p1 d1 m1 < <(read_stats)
+read -r p1 d1 m1 p1_c < <(read_stats_with_cidr)
 rc17_1=$(read_rc_slot 17)
 echo "after drop-MAC: PASS=${p1} DROP_DENY=${d1} rc[17]=${rc17_1}"
 echo "  delta PASS=$((p1-p0)) DROP_DENY=$((d1-d0)) rc[17]=$((rc17_1-rc17_0))"
@@ -253,39 +254,43 @@ else
     fi
 fi
 
-# ── (f) drop-rule MAC IS in active inner-allowlist (INVERTED from pre-§5.34) ─
-if ! sudo -n test -e "${inner_pin}"; then
-    echo "FAIL[f.pin]: active inner pin ${inner_pin} missing" >&2
+# ── (f) drop-rule's prefix IS in the active CIDR inner (§5.43 bit-vector) ─
+# Under the OR→AND pivot a DROP rule is a constrained src_cidr entry in the
+# cidr_allowlist bitmask (its action comes from action_table). So the active
+# cidr inner must hold all 4 rules' prefixes (drop rule id17 included).
+if [[ "${active}" == "0" ]]; then cidr_inner_pin="${PIN_DIR}/cidr_allowlist_a"; else cidr_inner_pin="${PIN_DIR}/cidr_allowlist_b"; fi
+if ! sudo -n test -e "${cidr_inner_pin}"; then
+    echo "FAIL[f.pin]: active CIDR inner pin ${cidr_inner_pin} missing" >&2
     fail=1
 else
-    if mac_in_inner_pin "${inner_pin}" "${MAC_DROP}"; then
-        echo "drop-rule MAC ${MAC_DROP} present in ${inner_pin} (PI-30-3.4b-c2-schema OK)"
+    n_cidr=$(sudo -n bpftool map dump pinned "${cidr_inner_pin}" --json 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
+    if [[ -n "${n_cidr}" && "${n_cidr}" -ge 4 ]]; then
+        echo "active CIDR inner ${cidr_inner_pin} has ${n_cidr} prefixes (drop rule id17 included) OK"
     else
-        echo "FAIL[f]: drop-rule MAC ${MAC_DROP} (id=17) NOT in active inner-allowlist" >&2
-        echo "         PI-30-3.4b-c2-schema VIOLATED: drop rules MUST populate inner-allowlist" >&2
-        echo "         per HG-3.4b-c2-2 schema cycle 3 contract" >&2
+        echo "FAIL[f]: active CIDR inner ${cidr_inner_pin} has ${n_cidr} prefixes (expected ≥4; drop rule must populate)" >&2
+        sudo -n bpftool map dump pinned "${cidr_inner_pin}" >&2 || true
         fail=1
     fi
 fi
 
 # ── (g) NEGATION CONTROL: PASS rule bumps rc[5]; drop rc[17] stays at 5 ─
 echo
-echo "=== step (g): NEGATION — inject 2 frames src=${MAC_ID5} (rule_id=5 PASS)"
-read -r p2 d2 m2 < <(read_stats)
+echo "=== step (g): NEGATION — inject 2 frames src=${SRC_IP_PASS} (rule_id=5 PASS)"
+read -r p2 d2 m2 p2_c < <(read_stats_with_cidr)
 rc5_0=$(read_rc_slot 5)
 for i in 1 2; do
-    inject_eth "${IFACE_B}" "${MAC_ID5}" "${MAC_DST}"
+    ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "${SRC_IP_PASS}"
 done
-wait_for_stats_sum "${IFACE_A}" $(( p2 + d2 + m2 + 2 )) || true
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p2 + d2 + m2 + p2_c + 2 )) || true
 
-read -r p3 d3 m3 < <(read_stats)
+read -r p3 d3 m3 p3_c < <(read_stats_with_cidr)
 c5=$(read_rc_slot 5)
 c17_final=$(read_rc_slot 17)
 echo "after pass-MAC: PASS_delta=$((p3-p2)) DROP_delta=$((d3-d2))  rc[5]=${c5} (delta $((c5-rc5_0)))  rc[17]=${c17_final}"
 
 # (g.PASS) STAT_PASS delta == 2.
-if (( p3 - p2 != 2 )); then
-    echo "FAIL[g.pass]: STAT_PASS delta=$((p3-p2)) (expected 2)" >&2
+if (( p3_c - p2_c != 2 )); then
+    echo "FAIL[g.pass]: STAT_PASS_CIDR delta=$((p3_c-p2_c)) (expected 2)" >&2
     fail=1
 fi
 # (g.rc5) rule_counters[5] delta == 2.

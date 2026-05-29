@@ -1076,3 +1076,39 @@ foreach(T IN ITEMS
         SKIP_RETURN_CODE 77
     )
 endforeach()
+
+# ── §5.43 MVP-4.3 production OR→AND bit-vector pivot (axis-1) ─────────────
+# Four NEW ctests (§6.60..§6.63) for the dst_cidr + src_cidr AND-compose
+# datapath. The independent O(N) reference classifier lives at
+# tests/bitvec/bitvec_oracle_prod.py (naive scan, NO bitmask/closure — guard
+# #23 / §6.61); exported via AND_ORACLE_PROD so the test body needn't hardcode
+# build-layout knowledge. All four touch the veth fixture (apply attaches +
+# §6.63(d) attaches) → RESOURCE_LOCK xdp_fixture (guard #12). SKIP_RETURN_CODE
+# 77 for the passwordless-sudo / jq preconditions.
+#
+# T_AND_COMPOSE_OK            (§6.60): dst AND src compose; OR→AND proof.
+# T_AND_ORACLE_AGREEMENT      (§6.61): table-driven datapath-vs-oracle agreement.
+# T_AND_PREFIX_CLOSURE_OVERLAP(§6.62): guard #23 cover-direction + first-match.
+# T_SCHEMA_V2_CUTOVER         (§6.63): M.1 hard cutover (v1/absent reject, v2 ok).
+set(TEST_ENV_AND
+    ${TEST_ENV}
+    "AND_ORACLE_PROD=${CMAKE_SOURCE_DIR}/tests/bitvec/bitvec_oracle_prod.py"
+)
+foreach(T IN ITEMS
+    T_AND_COMPOSE_OK
+    T_AND_ORACLE_AGREEMENT
+    T_AND_PREFIX_CLOSURE_OVERLAP
+    T_SCHEMA_V2_CUTOVER
+)
+    add_test(
+        NAME ${T}
+        COMMAND bash ${TEST_DIR}/${T}.sh
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    set_tests_properties(${T} PROPERTIES
+        ENVIRONMENT "${TEST_ENV_AND}"
+        RESOURCE_LOCK xdp_fixture
+        TIMEOUT 90
+        SKIP_RETURN_CODE 77
+    )
+endforeach()

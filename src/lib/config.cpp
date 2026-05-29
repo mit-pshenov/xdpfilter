@@ -53,31 +53,11 @@ namespace {
     return nullptr;
 }
 
-/* Parse "XX:XX:XX:XX:XX:XX" (case-insensitive) into xdpmf_mac. Returns true
- * iff valid. Same shape as cli.cpp's parse_mac but isolated here to avoid
- * cli.hpp ↔ config.hpp circular include. */
-[[nodiscard]] constexpr int hex_nibble(char c) noexcept
-{
-    if (c >= '0' && c <= '9') return c - '0';
-    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
-    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
-    return -1;
-}
-
-[[nodiscard]] bool parse_mac_canonical(std::string_view tok, xdpmf_mac& out) noexcept
-{
-    constexpr std::size_t kExpectedLen = 17;
-    if (tok.size() != kExpectedLen) return false;
-    for (std::size_t i = 0; i < 6; ++i) {
-        const std::size_t pos = i * 3;
-        const int hi = hex_nibble(tok[pos]);
-        const int lo = hex_nibble(tok[pos + 1]);
-        if (hi < 0 || lo < 0) return false;
-        if (i < 5 && tok[pos + 2] != ':') return false;
-        out.octets[i] = static_cast<unsigned char>((hi << 4) | lo);
-    }
-    return true;
-}
+/* §5.43 (MVP-4.3) HG-mvp-4.3-2: MAC matching is DEFERRED in schema_version 2
+ * — the `mac` match-key is rejected at parse (D-mvp-4.3-MAC-GRAMMAR), so the
+ * prior canonical-MAC parser (hex_nibble / parse_mac_canonical) is no longer
+ * reachable from this validator and was removed. It returns with the MAC-axis
+ * slice (mvp-4.5). */
 
 [[nodiscard]] std::uint32_t parse_u32_or_throw(const yaml::Node& scalar_node,
                                                 std::string_view  file,
@@ -149,16 +129,22 @@ Config validate(const yaml::Node& root, std::string_view file)
 
     Config out;
 
-    // schema_version (optional; default 1; supported {1}).
+    // §5.43 (MVP-4.3) HG-mvp-4.3-3 M.1 hard cutover: supported set {1}→{2}.
+    // schema_version is now REQUIRED and MUST be 2 — both absent AND v1
+    // (and any other value) hard-reject with a re-author diagnostic
+    // (ConfigError exit 9). PO-confirmed safe (0 deployments).
     if (const yaml::Node* sv = find_key(root, "schema_version")) {
         const std::uint32_t v = parse_u32_or_throw(*sv, file, "schema_version");
-        if (v != 1u) {
+        if (v != 2u) {
             throw_cfg("schema_version", file, sv->line, sv->col,
-                      std::format("unsupported schema_version: {} (supported: 1)", v));
+                      std::format("unsupported schema_version: {} (supported: 2); "
+                                  "re-author config to schema_version 2", v));
         }
         out.schema_version = v;
     } else {
-        out.schema_version = 1;
+        throw_cfg("schema_version", file, root.line, root.col,
+                  "schema_version is required and must be 2; "
+                  "re-author config to schema_version 2");
     }
 
     // interface (optional).
@@ -228,40 +214,46 @@ Config validate(const yaml::Node& root, std::string_view file)
                     throw_cfg("rule match", file, match->line, match->col,
                               "rule.match must be a mapping");
                 }
-                // §5.27 schema rule 6 (refined): the accepted match-key set
-                // is {mac, src_cidr}. Other keys (cidr, port, dst_cidr,
-                // vlan, ...) → ConfigError exit 9. `src_cidr` is the §5.27
-                // Q3 K2 chosen name; `cidr` (bare) stays rejected per Q3
-                // rationale (cycle-1 forward-compat hinge for §5.26).
+                // §5.43 (MVP-4.3) D-mvp-4.3-MAC-GRAMMAR: the v2 accepted
+                // match-key set is {dst_cidr, src_cidr}. `mac` is REJECTED
+                // (not silently ignored) with a MAC-deferred diagnostic — a
+                // hard cutover should fail loud, not enforce a no-op MAC rule
+                // the operator believes is live (HG-mvp-4.3-2). Any other key
+                // (cidr, port, vlan, ...) → ConfigError exit 9.
                 for (const std::pair<std::string, yaml::Node>& kv : match->mapping) {
-                    if (kv.first != "mac" && kv.first != "src_cidr") {
+                    if (kv.first == "mac") {
                         throw_cfg("unsupported match type", file,
                                   kv.second.line, kv.second.col,
-                                  std::format("match type '{}' not supported in schema_version 1",
+                                  "MAC matching deferred; schema_version 2 supports "
+                                  "dst_cidr + src_cidr");
+                    }
+                    if (kv.first != "dst_cidr" && kv.first != "src_cidr") {
+                        throw_cfg("unsupported match type", file,
+                                  kv.second.line, kv.second.col,
+                                  std::format("match type '{}' not supported in schema_version 2",
                                               kv.first));
                     }
                 }
-                // §5.27 schema rule 7 (supersedes §5.26 rule 5): each rule's
-                // match MUST contain AT LEAST ONE of {mac, src_cidr}. Empty
-                // match: {} → exit 9 with the catalogue message.
-                const yaml::Node* mac_node      = find_key(*match, "mac");
+                // §5.43 v2 match grammar: each rule's match MUST contain AT
+                // LEAST ONE of {dst_cidr, src_cidr}. Empty match: {} → exit 9.
+                const yaml::Node* dst_cidr_node = find_key(*match, "dst_cidr");
                 const yaml::Node* src_cidr_node = find_key(*match, "src_cidr");
-                if (mac_node == nullptr && src_cidr_node == nullptr) {
+                if (dst_cidr_node == nullptr && src_cidr_node == nullptr) {
                     throw_cfg("rule match", file, match->line, match->col,
-                              "rule must specify 'mac' or 'src_cidr' (or both)");
+                              "rule must specify 'dst_cidr' or 'src_cidr' (or both)");
                 }
-                if (mac_node != nullptr) {
-                    if (mac_node->kind != yaml::Node::Kind::Scalar) {
-                        throw_cfg("rule match mac", file, mac_node->line, mac_node->col,
-                                  "rule.match.mac must be a string");
+                if (dst_cidr_node != nullptr) {
+                    if (dst_cidr_node->kind != yaml::Node::Kind::Scalar) {
+                        throw_cfg("rule match dst_cidr", file,
+                                  dst_cidr_node->line, dst_cidr_node->col,
+                                  "rule.match.dst_cidr must be a string");
                     }
-                    xdpmf_mac mac{};
-                    if (!parse_mac_canonical(mac_node->scalar, mac)) {
-                        throw_cfg("invalid MAC", file, mac_node->line, mac_node->col,
-                                  std::format("'{}' is not a valid MAC (expected XX:XX:XX:XX:XX:XX)",
-                                              mac_node->scalar));
-                    }
-                    r.match.mac = mac;
+                    // §5.43 PI-mvp-4.3-DSTCIDR: parse via the SAME
+                    // cidr::parse_cidr_v4 as src_cidr (IPv4 dotted-CIDR;
+                    // IPv6 rejected; host-bits-zero enforced).
+                    r.match.dst_cidr = cidr::parse_cidr_v4(
+                        dst_cidr_node->scalar, file,
+                        dst_cidr_node->line, dst_cidr_node->col);
                 }
                 if (src_cidr_node != nullptr) {
                     if (src_cidr_node->kind != yaml::Node::Kind::Scalar) {

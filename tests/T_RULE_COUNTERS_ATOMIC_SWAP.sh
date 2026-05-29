@@ -64,6 +64,7 @@ FIXTURE="${TEST_DIR}/fixtures/config_per_rule_counters.yaml"
 [[ -f "${FIXTURE}" ]] || { echo "FAIL: missing fixture ${FIXTURE}" >&2; exit 1; }
 
 MAC_ID5="02:00:00:00:00:05"
+SRC_MAC="02:00:00:00:00:aa"  # 5.43: MAC deferred; src_mac irrelevant
 MAC_ID17="02:00:00:00:00:11"
 
 stderr_apply_a=$(mktemp /tmp/xdpmf-rcswap-apply-a.XXXXXX)
@@ -122,10 +123,10 @@ fail=0
 
 # ── (3) bump rule_counters[5]=5, [17]=3 in active_A inner ───────────────
 echo "=== step 3: inject 5 x id=5 + 3 x id=17"
-read -r p0 d0 m0 < <(read_stats)
-for i in 1 2 3 4 5; do inject_eth "${IFACE_B}" "${MAC_ID5}"  "${MAC_DST}"; done
-for i in 1 2 3;     do inject_eth "${IFACE_B}" "${MAC_ID17}" "${MAC_DST}"; done
-wait_for_stats_sum "${IFACE_A}" $(( p0 + d0 + m0 + 8 )) || true
+read -r p0 d0 m0 p0_c < <(read_stats_with_cidr)
+for i in 1 2 3 4 5; do ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "10.5.0.1"; done
+for i in 1 2 3;     do ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "10.17.0.1"; done
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p0 + d0 + m0 + p0_c + 8 )) || true
 
 # ── (4) read active_A + verify baseline ──────────────────────────────────
 active_A=$(read_active_idx)
@@ -200,9 +201,9 @@ fi
 
 # ── (8) post-flip bumps continue monotonically: [5] → 7 ─────────────────
 echo "=== step 8: inject 2 more frames id=5 → expect [5]=7"
-read -r p1 d1 m1 < <(read_stats)
-for i in 1 2; do inject_eth "${IFACE_B}" "${MAC_ID5}" "${MAC_DST}"; done
-wait_for_stats_sum "${IFACE_A}" $(( p1 + d1 + m1 + 2 )) || true
+read -r p1 d1 m1 p1_c < <(read_stats_with_cidr)
+for i in 1 2; do ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "10.5.0.1"; done
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p1 + d1 + m1 + p1_c + 2 )) || true
 
 c5_final=$(read_rc_slot_at "${rc_inner_B}" 5)
 echo "post-flip+rebump: rule_counters_<active_B>[5]=${c5_final}"
@@ -217,9 +218,9 @@ fi
 
 # ── (9) post-flip bump on id=17: [17] → 4 ───────────────────────────────
 echo "=== step 9: inject 1 more frame id=17 → expect [17]=4"
-read -r p2 d2 m2 < <(read_stats)
-inject_eth "${IFACE_B}" "${MAC_ID17}" "${MAC_DST}"
-wait_for_stats_sum "${IFACE_A}" $(( p2 + d2 + m2 + 1 )) || true
+read -r p2 d2 m2 p2_c < <(read_stats_with_cidr)
+${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "10.17.0.1"
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p2 + d2 + m2 + p2_c + 1 )) || true
 
 c17_final=$(read_rc_slot_at "${rc_inner_B}" 17)
 echo "post-flip+rebump: rule_counters_<active_B>[17]=${c17_final}"

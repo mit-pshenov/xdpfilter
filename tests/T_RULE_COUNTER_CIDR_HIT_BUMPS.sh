@@ -50,10 +50,12 @@ LOADER_BIN=$(find_loader)
 FIXTURE="${TEST_DIR}/fixtures/config_per_rule_counters.yaml"
 [[ -f "${FIXTURE}" ]] || { echo "FAIL: missing fixture ${FIXTURE}" >&2; exit 1; }
 
-MAC_NONALLOW="99:99:99:99:99:99"   # NOT in any MAC rule
-MAC_ID5="02:00:00:00:00:05"        # rule_id=5 MAC PASS
-SRC_IP_IN="10.0.0.5"               # IN 10.0.0.0/24 (rule_id=42)
-SRC_IP_OUT="192.168.1.1"           # OUTSIDE 10.0.0.0/24
+# §5.43 MVP-4.3: MAC axis deferred to mvp-4.5; fixture id42 now src_cidr
+# 10.42.0.0/16. The former step (d) MAC-axis-isolation sub-case is dropped
+# (MAC-is-the-point → covered by the SKIP'd MAC suite per PI-mvp-4.3-MAC-DEFERRED).
+SRC_MAC="02:00:00:00:00:aa"        # MAC axis deferred — value irrelevant
+SRC_IP_IN="10.42.0.5"              # ∈ 10.42.0.0/16 (rule_id=42 PASS)
+SRC_IP_OUT="8.8.8.8"               # ∉ any rule → defaults drop
 
 stderr_file=$(mktemp /tmp/xdpmf-rulecidr-stderr.XXXXXX)
 # §5.33 HK-B: explicit signal trap-set covers SIGINT/SIGTERM/SIGHUP in
@@ -127,10 +129,10 @@ if [[ "${c42_before}" != "0" ]]; then
 fi
 
 # ── (b) Inject N=4 IPv4 frames IN-range → rule_counters[42] == 4 ────────
-echo "=== step (b): inject 4 IPv4 frames src_ip=${SRC_IP_IN} mac=${MAC_NONALLOW}"
+echo "=== step (b): inject 4 IPv4 frames src_ip=${SRC_IP_IN} mac=${SRC_MAC}"
 for i in 1 2 3 4; do
     ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" \
-        "${IFACE_B}" "${MAC_NONALLOW}" "${MAC_DST}" "${SRC_IP_IN}"
+        "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "${SRC_IP_IN}"
 done
 wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p0 + d0 + m0 + c0 + 4 )) || true
 
@@ -168,7 +170,7 @@ done
 # ── (c) NEGATION CONTROL: out-of-range src_ip → rule_counters[42] STAYS ─
 echo "=== step (c): NEGATION — inject 1 IPv4 frame src_ip=${SRC_IP_OUT} (OUTSIDE 10.0.0.0/24)"
 ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" \
-    "${IFACE_B}" "${MAC_NONALLOW}" "${MAC_DST}" "${SRC_IP_OUT}"
+    "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "${SRC_IP_OUT}"
 wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p1 + d1 + m1 + c1 + 1 )) || true
 
 c42_after_c=$(read_rc_slot 42)
@@ -190,28 +192,31 @@ if (( c2 - c1 != 0 )); then
     fail=1
 fi
 
-# ── (d) MAC axis: rule_id=5 MAC hit → counters[5] bumps; [42] unchanged ─
-echo "=== step (d): inject 1 frame src=${MAC_ID5} (MAC rule_id=5)"
-inject_eth "${IFACE_B}" "${MAC_ID5}" "${MAC_DST}"
+# ── (d) RULE isolation (§5.43): a DIFFERENT rule's range (id5) bumps only
+#       counters[5]; counters[42] unchanged. (Replaces the retired MAC-axis
+#       sub-case — MAC deferred to mvp-4.5. Same isolation intent, CIDR-only.)
+echo "=== step (d): inject 1 frame src_ip=10.5.0.5 (rule_id=5 PASS)"
+${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" \
+    "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "10.5.0.5"
 wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p2 + d2 + m2 + c2 + 1 )) || true
 
 c5_after_d=$(read_rc_slot 5)
 c42_after_d=$(read_rc_slot 42)
 read -r p3 d3 m3 c3 < <(read_stats_with_cidr)
 echo "rule_counters[5]=${c5_after_d} (expected 1); rule_counters[42]=${c42_after_d} (expected STILL 4)"
-echo "stats: PASS delta=$((p3-p2)) PASS_CIDR delta=$((c3-c2))"
+echo "stats: PASS_CIDR delta=$((c3-c2))"
 
 if [[ "${c5_after_d}" != "1" ]]; then
-    echo "FAIL[d1]: rule_counters[5]='${c5_after_d}' (expected 1 from MAC hit)" >&2
+    echo "FAIL[d1]: rule_counters[5]='${c5_after_d}' (expected 1 from id5 CIDR hit)" >&2
     fail=1
 fi
 if [[ "${c42_after_d}" != "4" ]]; then
-    echo "FAIL[d2]: rule_counters[42]='${c42_after_d}' bumped on MAC-axis hit (expected STILL 4)" >&2
-    echo "          axis isolation broken: MAC hit should short-circuit before CIDR per §5.27 OR1" >&2
+    echo "FAIL[d2]: rule_counters[42]='${c42_after_d}' bumped on id5 hit (expected STILL 4)" >&2
+    echo "          rule isolation broken: id5 hit must not touch id42's slot" >&2
     fail=1
 fi
-if (( p3 - p2 != 1 )); then
-    echo "FAIL[d3]: STAT_PASS delta=$((p3-p2)) (expected 1 from MAC hit)" >&2
+if (( c3 - c2 != 1 )); then
+    echo "FAIL[d3]: STAT_PASS_CIDR delta=$((c3-c2)) (expected 1 from id5 PASS hit)" >&2
     fail=1
 fi
 

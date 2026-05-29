@@ -5,6 +5,9 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **MVP-4.3 (§5.43)** — production OR→AND structural pivot (rule-model S3): the datapath's two independent OR branches (MAC HASH + standalone src-CIDR LPM) are REPLACED by a single bit-vector AND over two LPM axes — NEW `dst_cidr` + reshaped `src_cidr` — composed as `acc = (lpm(dst) | wildcard_dst) & (lpm(src) | wildcard_src)`, first-match by `__builtin_ffsll(acc)-1` (lowest rule `id` wins). Config flips to **`schema_version: 2`** with an M.1 hard cutover (v1 and absent both rejected, exit 9). **MAC matching is DEFERRED** (mvp-4.5): the `mac` match-key is rejected at parse and the MAC maps stay pinned-but-unconsulted (frozen). VERSION `0.10.0` → `0.11.0`; `kManagedMaps[]` 17 → 21 (+`dst_bitmask_a`/`_b`, `dst_rulesets`, `wildcard`).
+
 ### Spike
 - **MVP-4.2 (§5.42)** — isolated bit-vector AND-classification prototype (rule-model S2): a separate `tests/bitvec/` prototype BPF datapath + test-only populate/dump harness + L4 injector over a hardcoded 12-rule canonical Gi set, exercising per-axis `u64`-bitmask composition (`acc &= matched|wildcard`), LPM prefix-closure, dst-port range encoding, and first-set-bit lowering. Evidence for the bit-vector-vs-sequential decision gate; NO production datapath/schema/operator-surface change, no VERSION bump.
 

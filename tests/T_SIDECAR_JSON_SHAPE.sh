@@ -119,9 +119,9 @@ if ! jq -e --arg iface "${IFACE_A}" '.iface == $iface' "${sidecar_local}" >/dev/
     fail=1
 fi
 
-# ── (d) .schema_version == 1 ─────────────────────────────────────────────
-if ! jq -e '.schema_version == 1' "${sidecar_local}" >/dev/null 2>&1; then
-    echo "FAIL[d]: .schema_version != 1" >&2
+# ── (d) .schema_version == 2 (§5.43 C1 / PI-mvp-4.3-SIDECAR) ─────────────
+if ! jq -e '.schema_version == 2' "${sidecar_local}" >/dev/null 2>&1; then
+    echo "FAIL[d]: .schema_version != 2 (M.1 cutover; sidecar must emit 2)" >&2
     fail=1
 fi
 
@@ -163,21 +163,18 @@ for id in 0 5 17 42; do
     fi
 done
 
-# ── (h) match-kind per rule ──────────────────────────────────────────────
-# Per fixture: ids 0, 5, 17 are MAC; id 42 is CIDR.
-for id in 0 5 17; do
-    has_mac=$(jq --argjson id "${id}" '[.rules[] | select(.rule_id == $id) | .match | has("mac")] | first // false' "${sidecar_local}" 2>/dev/null)
-    if [[ "${has_mac}" != "true" ]]; then
-        echo "FAIL[h.mac.${id}]: rule_id=${id} sidecar match missing 'mac' key" >&2
+# ── (h) match-kind per rule (§5.43: MAC deferred → all rules src_cidr) ────
+# Per converted fixture: ids 0/5/17/42 are all src_cidr (MAC deferred to
+# mvp-4.5 per PI-mvp-4.3-MAC-DEFERRED; sidecar emits the explicit src_cidr/
+# dst_cidr match-kinds per PI-mvp-4.3-SIDECAR).
+for id in 0 5 17 42; do
+    has_src_cidr=$(jq --argjson id "${id}" '[.rules[] | select(.rule_id == $id) | .match | has("src_cidr")] | first // false' "${sidecar_local}" 2>/dev/null)
+    if [[ "${has_src_cidr}" != "true" ]]; then
+        echo "FAIL[h.src_cidr.${id}]: rule_id=${id} sidecar match missing 'src_cidr' key" >&2
         sudo -n jq --argjson id "${id}" '.rules[] | select(.rule_id == $id)' "${SIDECAR_PATH}" >&2 || true
         fail=1
     fi
 done
-has_cidr_42=$(jq '[.rules[] | select(.rule_id == 42) | .match | has("cidr")] | first // false' "${sidecar_local}" 2>/dev/null)
-if [[ "${has_cidr_42}" != "true" ]]; then
-    echo "FAIL[h.cidr.42]: rule_id=42 sidecar match missing 'cidr' key" >&2
-    fail=1
-fi
 
 # ── (i) NEGATION CONTROL: apply malformed → sidecar UNCHANGED ───────────
 echo
@@ -214,7 +211,7 @@ else
         fail=1
     fi
     # Still valid JSON?
-    if ! sudo -n jq -e '.schema_version == 1' "${SIDECAR_PATH}" >/dev/null 2>&1; then
+    if ! sudo -n jq -e '.schema_version == 2' "${SIDECAR_PATH}" >/dev/null 2>&1; then
         echo "FAIL[i4]: sidecar no longer parses as expected after failed apply" >&2
         fail=1
     fi

@@ -1,0 +1,12 @@
+# config_schema_absent.yaml — §5.43 §6.63 (b): NO schema_version key.
+#
+# Under the M.1 hard cutover, an absent schema_version is hard-rejected
+# (the pre-§5.43 default-to-1 path is gone). Expect exit 9 + re-author
+# diagnostic. Rule body is otherwise well-formed so the schema gate is
+# the rejecting stage.
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      src_cidr: "10.0.0.0/8"

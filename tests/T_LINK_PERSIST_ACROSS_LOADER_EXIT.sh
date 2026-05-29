@@ -57,6 +57,7 @@ cleanup_persist() {
 trap cleanup_persist EXIT
 
 MAC_X="02:00:00:00:00:01"   # in A (and B)
+SRC_MAC="02:00:00:00:00:aa"  # 5.43: MAC deferred; src_mac irrelevant
 MAC_Y="02:00:00:00:00:02"   # in B only; denied under A
 
 setup_veth
@@ -134,23 +135,24 @@ fi
 
 # ── Step 6: inject MAC_X → STAT_PASS += 1 (filter alive!) ───────────────
 echo "=== step 6: inject MAC_X (allowed under A) — filter MUST still enforce"
-read -r p0 d0 m0 < <(read_stats)
-inject_eth "${IFACE_B}" "${MAC_X}" "${MAC_DST}"
-wait_for_stats_sum "${IFACE_A}" $(( p0 + d0 + m0 + 1 )) || true
-read -r p1 d1 m1 < <(read_stats)
+read -r p0 d0 m0 p0_c < <(read_stats_with_cidr)
+${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "10.0.0.1"
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p0 + d0 + m0 + p0_c + 1 )) || true
+read -r p1 d1 m1 p1_c < <(read_stats_with_cidr)
 echo "  stats: PASS=${p1} DROP_DENY=${d1} (delta P=$(( p1-p0 )) D=$(( d1-d0 )))"
-if (( p1 - p0 != 1 )); then
-    echo "FAIL[6]: expected STAT_PASS delta=1 (MAC_X passes post-loader-exit), got $(( p1-p0 ))" >&2
-    echo "        P0a load-bearing assertion: filter must still allow MAC_X after apply exits." >&2
+# §5.43: matched-rule PASS lands on STAT_PASS_CIDR (not STAT_PASS).
+if (( p1_c - p0_c != 1 )); then
+    echo "FAIL[6]: expected STAT_PASS_CIDR delta=1 (src∈id0 passes post-loader-exit), got $(( p1_c-p0_c ))" >&2
+    echo "        P0a load-bearing assertion: filter must still allow the rule src after apply exits." >&2
     fail=1
 fi
 
 # ── Step 7: inject MAC_Y → STAT_DROP_DENY += 1 (default drop alive!) ────
 echo "=== step 7: inject MAC_Y (denied under A) — default-drop MUST still enforce"
-read -r p2 d2 m2 < <(read_stats)
-inject_eth "${IFACE_B}" "${MAC_Y}" "${MAC_DST}"
-wait_for_stats_sum "${IFACE_A}" $(( p2 + d2 + m2 + 1 )) || true
-read -r p3 d3 m3 < <(read_stats)
+read -r p2 d2 m2 p2_c < <(read_stats_with_cidr)
+${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "192.168.0.1"
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p2 + d2 + m2 + p2_c + 1 )) || true
+read -r p3 d3 m3 p3_c < <(read_stats_with_cidr)
 echo "  stats: PASS=${p3} DROP_DENY=${d3} (delta P=$(( p3-p2 )) D=$(( d3-d2 )))"
 if (( d3 - d2 != 1 )); then
     echo "FAIL[7]: expected STAT_DROP_DENY delta=1 (MAC_Y dropped post-loader-exit), got $(( d3-d2 ))" >&2
@@ -176,13 +178,13 @@ fi
 
 # ── Step 9: inject MAC_Y → STAT_PASS += 1 (new ruleset took effect) ─────
 echo "=== step 9: inject MAC_Y (now allowed under B)"
-read -r p4 d4 m4 < <(read_stats)
-inject_eth "${IFACE_B}" "${MAC_Y}" "${MAC_DST}"
-wait_for_stats_sum "${IFACE_A}" $(( p4 + d4 + m4 + 1 )) || true
-read -r p5 d5 m5 < <(read_stats)
+read -r p4 d4 m4 p4_c < <(read_stats_with_cidr)
+${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "192.168.0.1"
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p4 + d4 + m4 + p4_c + 1 )) || true
+read -r p5 d5 m5 p5_c < <(read_stats_with_cidr)
 echo "  stats: PASS=${p5} DROP_DENY=${d5} (delta P=$(( p5-p4 )) D=$(( d5-d4 )))"
-if (( p5 - p4 != 1 )); then
-    echo "FAIL[9]: expected STAT_PASS delta=1 (MAC_Y now allowed under B), got $(( p5-p4 ))" >&2
+if (( p5_c - p4_c != 1 )); then
+    echo "FAIL[9]: expected STAT_PASS_CIDR delta=1 (src∈id1 now allowed under B), got $(( p5_c-p4_c ))" >&2
     fail=1
 fi
 

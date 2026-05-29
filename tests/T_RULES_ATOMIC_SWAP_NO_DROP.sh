@@ -71,9 +71,11 @@ WINDOW_SEC=2
 LOWER_BOUND=$(( WINDOW_SEC * RATE_HZ * 3 / 4 ))
 if (( LOWER_BOUND < 10 )); then LOWER_BOUND=10; fi
 
-MAC_05="02:00:00:00:00:05"     # rule_id=5  pass-in-A / drop-in-B
-MAC_11="02:00:00:00:00:11"     # rule_id=17 drop-in-A / pass-in-B
-MAC_DENY="02:00:00:00:00:99"   # not in any rule — for negation control
+# §5.43 MVP-4.3: MAC deferred → src_cidr ranges per rule id.
+SRC_IP_05="10.5.0.1"      # rule_id=5  (10.5.0.0/16)  pass-in-A / drop-in-B
+SRC_IP_11="10.17.0.1"     # rule_id=17 (10.17.0.0/16) drop-in-A / pass-in-B
+SRC_IP_DENY="8.8.8.8"     # not in any rule — for negation control
+SRC_MAC="02:00:00:00:00:aa"    # MAC axis deferred — value irrelevant
 
 INJECT_SCRIPT="$(mktemp /tmp/xdpmf_rules_swap_inject_$$_XXXXXX.py)"
 stderr_apply_a=$(mktemp /tmp/xdpmf-rulesswap-apply-a-stderr.XXXXXX)
@@ -122,30 +124,43 @@ cleanup_swap() {
 }
 trap cleanup_swap EXIT
 
-# Background injector: ONE python process; alternates between MAC_05 and
-# MAC_11 each iteration → both rules get matches across the swap window.
-# Same persistent-socket pattern as §6.23: bind once, send-in-loop.
+# §5.43 MVP-4.3: MAC deferred → inject IPv4 frames whose src_ip alternates
+# between the two rules' src_cidr ranges (id5 ↔ id17). Builds a minimal
+# IPv4 frame (mirrors inject_ipv4.py) so the OR→AND CIDR datapath classifies
+# on src_ip. ONE python process; alternates each iteration → both rules get
+# matches across the swap window. Persistent-socket: bind once, send-in-loop.
 cat > "${INJECT_SCRIPT}" <<'PYEOF'
-import socket, sys, time
+import socket, struct, sys, time
 iface = sys.argv[1]
-src_a = sys.argv[2]
-src_b = sys.argv[3]
-dst   = sys.argv[4]
+src_ip_a = sys.argv[2]   # id5  range (10.5.0.1)
+src_ip_b = sys.argv[3]   # id17 range (10.17.0.1)
+dst_mac  = sys.argv[4]
 duration_s = float(sys.argv[5])
 rate_hz    = float(sys.argv[6])
 
 def mac_to_bytes(s):
     return bytes(int(b, 16) for b in s.split(":"))
 
-dst_b   = mac_to_bytes(dst)
-src_a_b = mac_to_bytes(src_a)
-src_b_b = mac_to_bytes(src_b)
-ethertype = (0x88B5).to_bytes(2, "big")  # locally experimental — no L3 stack
-payload = b"\x00" * 46                   # 14 + 46 = 60-byte minimum frame
-frame_a = dst_b + src_a_b + ethertype + payload
-frame_b = dst_b + src_b_b + ethertype + payload
+def ip_csum(h):
+    if len(h) % 2: h += b"\x00"
+    s = 0
+    for i in range(0, len(h), 2):
+        s += (h[i] << 8) | h[i+1]; s = (s & 0xFFFF) + (s >> 16)
+    return (~s) & 0xFFFF
 
-sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x88B5))
+def build(src_ip):
+    dst_b = mac_to_bytes(dst_mac)
+    src_b = mac_to_bytes("02:00:00:00:00:aa")  # MAC deferred — irrelevant
+    sip = socket.inet_aton(src_ip); dip = socket.inet_aton("192.0.2.1")
+    tot = 20 + 26
+    hdr = struct.pack("!BBHHHBBH4s4s", 0x45, 0, tot, 0, 0x4000, 64, 17, 0, sip, dip)
+    hdr = struct.pack("!BBHHHBBH4s4s", 0x45, 0, tot, 0, 0x4000, 64, 17, ip_csum(hdr), sip, dip)
+    return dst_b + src_b + (0x0800).to_bytes(2,"big") + hdr + b"\x00"*26
+
+frame_a = build(src_ip_a)
+frame_b = build(src_ip_b)
+
+sock = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0800))
 try:
     sock.bind((iface, 0))
 except OSError as e:
@@ -192,7 +207,7 @@ fi
 INJECTOR_DURATION=$(( WINDOW_SEC * 2 + 10 ))
 echo "=== start background injector (MAC_05+MAC_11 alternating @ ${RATE_HZ}Hz for ${INJECTOR_DURATION}s)"
 ${NSEXEC} python3 "${INJECT_SCRIPT}" \
-    "${IFACE_B}" "${MAC_05}" "${MAC_11}" "${MAC_DST}" \
+    "${IFACE_B}" "${SRC_IP_05}" "${SRC_IP_11}" "${MAC_DST}" \
     "${INJECTOR_DURATION}" "${RATE_HZ}" \
     >/dev/null 2>&1 &
 INJECT_PID=$!
@@ -202,14 +217,14 @@ echo "INJECT_PID=${INJECT_PID}"
 sleep 0.5
 
 # ── Step 3: baseline window ──────────────────────────────────────────────
-read -r p0 d0 m0 < <(read_stats)
+read -r _pp d0 m0 p0 < <(read_stats_with_cidr)
 rc5_0=$(read_rc_slot 5)
 rc17_0=$(read_rc_slot 17)
 echo "T0 baseline-pre: PASS=${p0} DROP_DENY=${d0} rc[5]=${rc5_0} rc[17]=${rc17_0}"
 
 sleep "${WINDOW_SEC}"
 
-read -r p_bl d_bl m_bl < <(read_stats)
+read -r _pp d_bl m_bl p_bl < <(read_stats_with_cidr)
 rc5_bl=$(read_rc_slot 5)
 rc17_bl=$(read_rc_slot 17)
 echo "T1 baseline (post-${WINDOW_SEC}s): PASS=${p_bl} DROP_DENY=${d_bl} rc[5]=${rc5_bl} rc[17]=${rc17_bl}"
@@ -282,7 +297,7 @@ INJECT_PID=""
 
 sleep 0.3
 
-read -r p_f d_f m_f < <(read_stats)
+read -r _pp d_f m_f p_f < <(read_stats_with_cidr)
 rc5_f=$(read_rc_slot 5)
 rc17_f=$(read_rc_slot 17)
 echo "T2 final: PASS=${p_f} DROP_DENY=${d_f} rc[5]=${rc5_f} rc[17]=${rc17_f}"
@@ -356,10 +371,10 @@ fi
 # (12) Negation control: prove the drop machinery is functional on this
 #      runner. ONE frame from MAC_DENY (in NEITHER config) → drops.
 echo "=== negation control: inject one MAC_DENY (never-allowed) → STAT_DROP_DENY MUST increment"
-read -r p_n0 d_n0 m_n0 < <(read_stats)
-inject_eth "${IFACE_B}" "${MAC_DENY}" "${MAC_DST}"
-wait_for_stats_sum "${IFACE_A}" $(( p_n0 + d_n0 + m_n0 + 1 )) || true
-read -r p_n1 d_n1 m_n1 < <(read_stats)
+read -r _pp d_n0 m_n0 p_n0 < <(read_stats_with_cidr)
+${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "${SRC_IP_DENY}"
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( _pp + p_n0 + d_n0 + m_n0 + 1 )) || true
+read -r _pp d_n1 m_n1 p_n1 < <(read_stats_with_cidr)
 neg_drop_delta=$(( d_n1 - d_n0 ))
 echo "negation-control drop_delta = ${neg_drop_delta} (expected >= 1)"
 if (( neg_drop_delta < 1 )); then

@@ -1,6 +1,7 @@
 # §6.22 sub-case 6 (MVP-3.2 / §5.27 HG-3.2-1).
 # IPv6 CIDR string MUST be rejected at validator with exit 9 and
 # stderr matching 'IPv6 CIDR not supported until MVP-3.2.5'.
+schema_version: 2
 default_action: drop
 rules:
   - id: 0

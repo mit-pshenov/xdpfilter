@@ -47,6 +47,7 @@ FIXTURE="${TEST_DIR}/fixtures/config_per_rule_counters.yaml"
 [[ -f "${FIXTURE}" ]] || { echo "FAIL: missing fixture ${FIXTURE}" >&2; exit 1; }
 
 MAC_ID5="02:00:00:00:00:05"   # rule_id=5 PASS
+SRC_MAC="02:00:00:00:00:aa"  # 5.43: MAC deferred; src_mac irrelevant
 
 stderr_file=$(mktemp /tmp/xdpmf-rulesurv-stderr.XXXXXX)
 # §5.33 HK-B: explicit signal trap-set covers SIGINT/SIGTERM/SIGHUP in
@@ -117,11 +118,11 @@ echo "active_idx after step 1 = '${active_1}'"
 
 # ── (2) inject 7 frames → rule_counters[5] == 7 ──────────────────────────
 echo "=== step 2: inject 7 frames src=${MAC_ID5}"
-read -r p0 d0 m0 < <(read_stats)
+read -r p0 d0 m0 p0_c < <(read_stats_with_cidr)
 for i in 1 2 3 4 5 6 7; do
-    inject_eth "${IFACE_B}" "${MAC_ID5}" "${MAC_DST}"
+    ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "10.5.0.1"
 done
-wait_for_stats_sum "${IFACE_A}" $(( p0 + d0 + m0 + 7 )) || true
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p0 + d0 + m0 + p0_c + 7 )) || true
 
 c5_after_step2=$(read_rc_slot 5)
 echo "rule_counters[5] after step 2 = ${c5_after_step2} (expected 7)"
@@ -167,11 +168,11 @@ fi
 
 # ── (5) inject 3 more → rule_counters[5] == 10 (continuation) ────────────
 echo "=== step 5: inject 3 more frames src=${MAC_ID5} (continuation from 7)"
-read -r p_pre5 d_pre5 m_pre5 < <(read_stats)
+read -r p_pre5 d_pre5 m_pre5 p_pre5_c < <(read_stats_with_cidr)
 for i in 1 2 3; do
-    inject_eth "${IFACE_B}" "${MAC_ID5}" "${MAC_DST}"
+    ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "10.5.0.1"
 done
-wait_for_stats_sum "${IFACE_A}" $(( p_pre5 + d_pre5 + m_pre5 + 3 )) || true
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p_pre5 + d_pre5 + m_pre5 + p_pre5_c + 3 )) || true
 
 c5_after_step5=$(read_rc_slot 5)
 echo "rule_counters[5] after step 5 = ${c5_after_step5} (expected 10)"

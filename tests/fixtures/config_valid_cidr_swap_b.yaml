@@ -3,6 +3,7 @@
 # the same in-flight src_ip (10.x.y.z) must NOT drop across the A→B
 # swap. 192.168.0.0/16 is the discriminator (denied under A, allowed
 # under B).
+schema_version: 2
 default_action: drop
 rules:
   - id: 0

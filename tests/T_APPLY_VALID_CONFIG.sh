@@ -35,9 +35,13 @@ trap 'cleanup_veth; rm -f "${stderr_file}"' EXIT
 [[ -f "${FIXTURE_VALID}" ]]   || { echo "FAIL: missing fixture ${FIXTURE_VALID}"   >&2; exit 1; }
 [[ -f "${FIXTURE_BLANKET}" ]] || { echo "FAIL: missing fixture ${FIXTURE_BLANKET}" >&2; exit 1; }
 
-# MACs declared in config_valid.yaml.
-MAC_IN_FIXTURE="02:00:00:00:00:01"     # also MAC_GOOD
-MAC_NOT_IN_FIXTURE="02:00:00:00:00:99" # never appears in any fixture
+# §5.43 MVP-4.3: MAC matching deferred → config_valid.yaml converted to
+# src_cidr grammar. Inject IPv4 src_ip in/out of the rule CIDR instead of
+# MAC frames; a matched rule PASS lands on STAT_PASS_CIDR (per §5.43 Interfaces).
+SRC_MAC="02:00:00:00:00:aa"            # MAC axis deferred — value irrelevant
+SRC_IP_IN="10.1.2.3"                   # ∈ 10.0.0.0/8 (rule id0 PASS)
+SRC_IP_OUT="8.8.8.8"                   # ∉ any rule → defaults drop
+inject_ip() { ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "$1"; }
 
 setup_veth
 
@@ -117,80 +121,59 @@ else
     fi
 fi
 
-# (6) Active inner allowlist contains the MAC from the fixture.
-#     bpftool emits the key as a BTF-formatted struct ({"octets": [...]})
-#     with decimal byte values when called WITHOUT --json on modern
-#     libbpf builds. Use jq to query for the target MAC's octet array.
-#     Helper: convert "AA:BB:CC:DD:EE:FF" → JSON "[170,187,...]".
-mac_to_oct_json() {
-    # Bash-native hex → decimal CSV (mawk has no strtonum()).
-    local mac="$1" oct_arr="[" first=1 hex
-    local IFS=':'
-    for hex in ${mac}; do
-        if [[ ${first} -eq 1 ]]; then first=0; else oct_arr+=","; fi
-        oct_arr+=$(printf '%d' "0x${hex}")
-    done
-    oct_arr+="]"
-    printf '%s' "${oct_arr}"
-}
-mac_in_inner_pin() {
-    local pin="$1" mac="$2" oct_arr
-    oct_arr=$(mac_to_oct_json "${mac}")
-    sudo -n bpftool map dump pinned "${pin}" 2>/dev/null \
-        | jq -e --argjson tgt "${oct_arr}" '
-            [.[] | (.key.octets // .formatted.key.octets // null)]
-            | map(select(. != null))
-            | any(. == $tgt)
-        ' >/dev/null 2>&1
-}
-
+# (6) Active inner CIDR allowlist pin exists + non-empty after apply.
+#     (§5.43: src_cidr axis reuses cidr_allowlist_<active>; the exact LPM
+#     entry shape is bitmask-valued, so we assert pin presence + ≥1 entry
+#     rather than a byte-level key match — the verdict checks below are the
+#     load-bearing membership proof.)
 if [[ "${active:-}" == "0" ]]; then
-    inner_pin="${PIN_DIR}/allowlist_a"
+    inner_pin="${PIN_DIR}/cidr_allowlist_a"
 elif [[ "${active:-}" == "1" ]]; then
-    inner_pin="${PIN_DIR}/allowlist_b"
+    inner_pin="${PIN_DIR}/cidr_allowlist_b"
 else
     inner_pin=""
 fi
 if [[ -n "${inner_pin}" ]]; then
     if ! sudo -n test -e "${inner_pin}"; then
-        echo "FAIL[6a]: active inner pin ${inner_pin} missing" >&2
+        echo "FAIL[6a]: active CIDR inner pin ${inner_pin} missing" >&2
         fail=1
     else
-        if ! mac_in_inner_pin "${inner_pin}" "${MAC_IN_FIXTURE}"; then
-            echo "FAIL[6b]: active inner pin ${inner_pin} missing fixture MAC ${MAC_IN_FIXTURE}" >&2
+        n_entries=$(sudo -n bpftool map dump pinned "${inner_pin}" --json 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
+        if [[ -z "${n_entries}" || "${n_entries}" -lt 1 ]]; then
+            echo "FAIL[6b]: active CIDR inner pin ${inner_pin} empty (expected ≥1 prefix)" >&2
             sudo -n bpftool map dump pinned "${inner_pin}" >&2 || true
             fail=1
         fi
     fi
 fi
 
-# (7) Inject from MAC in the fixture → STAT_PASS += 1.
-read -r p0 d0 m0 < <(read_stats)
-echo "stats baseline (after apply): PASS=${p0} DROP_DENY=${d0} DROP_MALFORMED=${m0}"
-inject_eth "${IFACE_B}" "${MAC_IN_FIXTURE}" "${MAC_DST}"
-wait_for_stats_sum "${IFACE_A}" $(( p0 + d0 + m0 + 1 )) || true
-read -r p1 d1 m1 < <(read_stats)
-echo "stats after MAC_IN_FIXTURE: PASS=${p1} DROP_DENY=${d1} DROP_MALFORMED=${m1}"
-if (( p1 - p0 != 1 )); then
-    echo "FAIL[7a]: STAT_PASS delta != 1 (got $(( p1 - p0 )))" >&2
+# (7) Inject src_ip IN a rule CIDR → matched-rule PASS → STAT_PASS_CIDR += 1.
+read -r p0 d0 m0 c0 < <(read_stats_with_cidr)
+echo "stats baseline (after apply): PASS=${p0} DROP_DENY=${d0} DROP_MALFORMED=${m0} PASS_CIDR=${c0}"
+inject_ip "${SRC_IP_IN}"
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p0 + d0 + m0 + c0 + 1 )) || true
+read -r p1 d1 m1 c1 < <(read_stats_with_cidr)
+echo "stats after SRC_IP_IN: PASS=${p1} DROP_DENY=${d1} DROP_MALFORMED=${m1} PASS_CIDR=${c1}"
+if (( c1 - c0 != 1 )); then
+    echo "FAIL[7a]: STAT_PASS_CIDR delta != 1 (got $(( c1 - c0 )))" >&2
     fail=1
 fi
 if (( d1 - d0 != 0 )); then
-    echo "FAIL[7b]: STAT_DROP_DENY moved on MAC-in-fixture (got delta $(( d1 - d0 )))" >&2
+    echo "FAIL[7b]: STAT_DROP_DENY moved on src-in-CIDR (got delta $(( d1 - d0 )))" >&2
     fail=1
 fi
 
-# (8) Inject from MAC NOT in fixture → STAT_DROP_DENY += 1 (negation control).
-inject_eth "${IFACE_B}" "${MAC_NOT_IN_FIXTURE}" "${MAC_DST}"
-wait_for_stats_sum "${IFACE_A}" $(( p1 + d1 + m1 + 1 )) || true
-read -r p2 d2 m2 < <(read_stats)
-echo "stats after MAC_NOT_IN_FIXTURE: PASS=${p2} DROP_DENY=${d2} DROP_MALFORMED=${m2}"
+# (8) Inject src_ip NOT in any rule CIDR → STAT_DROP_DENY += 1 (negation control).
+inject_ip "${SRC_IP_OUT}"
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p1 + d1 + m1 + c1 + 1 )) || true
+read -r p2 d2 m2 c2 < <(read_stats_with_cidr)
+echo "stats after SRC_IP_OUT: PASS=${p2} DROP_DENY=${d2} DROP_MALFORMED=${m2} PASS_CIDR=${c2}"
 if (( d2 - d1 != 1 )); then
     echo "FAIL[8a]: STAT_DROP_DENY delta != 1 (got $(( d2 - d1 )))" >&2
     fail=1
 fi
-if (( p2 - p1 != 0 )); then
-    echo "FAIL[8b]: STAT_PASS moved on MAC-not-in-fixture (got delta $(( p2 - p1 )))" >&2
+if (( c2 - c1 != 0 )); then
+    echo "FAIL[8b]: STAT_PASS_CIDR moved on src-not-in-CIDR (got delta $(( c2 - c1 )))" >&2
     fail=1
 fi
 
@@ -212,14 +195,15 @@ if [[ "${rc_b}" -ne 0 ]]; then
     fail=1
 fi
 
-# Inject a fresh random MAC (definitely not in any list — blanket-pass
-# should accept it).
-MAC_RANDOM="02:00:00:00:de:ad"
-read -r pb0 db0 mb0 < <(read_stats)
-inject_eth "${IFACE_B}" "${MAC_RANDOM}" "${MAC_DST}"
-wait_for_stats_sum "${IFACE_A}" $(( pb0 + db0 + mb0 + 1 )) || true
-read -r pb1 db1 mb1 < <(read_stats)
-echo "stats after blanket-pass + MAC_RANDOM: PASS=${pb1} DROP_DENY=${db1} DROP_MALFORMED=${mb1}"
+# Inject a fresh src_ip matching NO rule — blanket-pass (default_action:
+# pass, no rules) → defaults fallthrough → STAT_PASS (NOT STAT_PASS_CIDR,
+# which is reserved for matched-rule hits per §5.43 Interfaces).
+SRC_IP_RANDOM="198.51.100.7"
+read -r pb0 db0 mb0 cb0 < <(read_stats_with_cidr)
+inject_ip "${SRC_IP_RANDOM}"
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( pb0 + db0 + mb0 + cb0 + 1 )) || true
+read -r pb1 db1 mb1 cb1 < <(read_stats_with_cidr)
+echo "stats after blanket-pass + SRC_IP_RANDOM: PASS=${pb1} DROP_DENY=${db1} DROP_MALFORMED=${mb1} PASS_CIDR=${cb1}"
 if (( pb1 - pb0 != 1 )); then
     echo "FAIL[B2]: blanket-pass: STAT_PASS delta != 1 (got $(( pb1 - pb0 )))" >&2
     fail=1

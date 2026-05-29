@@ -33,6 +33,7 @@ stderr_file=$(mktemp /tmp/xdpmf-replaces-stderr.XXXXXX)
 trap 'cleanup_veth; rm -f "${stderr_file}"' EXIT
 
 MAC_X="02:00:00:00:00:01"   # in both A and B
+SRC_MAC="02:00:00:00:00:aa"  # 5.43: MAC deferred; src_mac irrelevant
 MAC_Y="02:00:00:00:00:02"   # in B only
 
 # Helper: invoke apply, capturing rc + stderr.
@@ -83,10 +84,10 @@ fi
 
 # ── Step 2: inject MAC_Y → STAT_DROP_DENY += 1 ───────────────────────────
 echo "=== step 2: inject MAC_Y (expected DENY under A)"
-read -r p0 d0 m0 < <(read_stats)
-inject_eth "${IFACE_B}" "${MAC_Y}" "${MAC_DST}"
-wait_for_stats_sum "${IFACE_A}" $(( p0 + d0 + m0 + 1 )) || true
-read -r p1 d1 m1 < <(read_stats)
+read -r p0 d0 m0 p0_c < <(read_stats_with_cidr)
+${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "192.168.0.1"
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p0 + d0 + m0 + p0_c + 1 )) || true
+read -r p1 d1 m1 p1_c < <(read_stats_with_cidr)
 echo "  stats: PASS=${p1} DROP_DENY=${d1} (delta P=$(( p1-p0 )) D=$(( d1-d0 )))"
 if (( d1 - d0 != 1 )); then
     echo "FAIL[2.d]: expected STAT_DROP_DENY delta=1 under A for MAC_Y, got $(( d1-d0 ))" >&2
@@ -110,41 +111,20 @@ if [[ -n "${active_1}" && -n "${active_2}" && "${active_2}" == "${active_1}" ]];
     fail=1
 fi
 
-# Inner-map contents check: read the new active slot and verify MAC_Y
-# is present. bpftool emits BTF-formatted keys as {"octets": [decimals]}
-# (NOT space-separated hex bytes) — query via jq instead of grep.
-mac_to_oct_json() {
-    # Bash-native hex → decimal CSV (mawk has no strtonum()).
-    local mac="$1" oct_arr="[" first=1 hex
-    local IFS=':'
-    for hex in ${mac}; do
-        if [[ ${first} -eq 1 ]]; then first=0; else oct_arr+=","; fi
-        oct_arr+=$(printf '%d' "0x${hex}")
-    done
-    oct_arr+="]"
-    printf '%s' "${oct_arr}"
-}
-mac_in_inner_pin() {
-    local pin="$1" mac="$2" oct_arr
-    oct_arr=$(mac_to_oct_json "${mac}")
-    sudo -n bpftool map dump pinned "${pin}" 2>/dev/null \
-        | jq -e --argjson tgt "${oct_arr}" '
-            [.[] | (.key.octets // .formatted.key.octets // null)]
-            | map(select(. != null))
-            | any(. == $tgt)
-        ' >/dev/null 2>&1
-}
-
+# §5.43: src_cidr axis → check the active cidr_allowlist inner pin grew to
+# the expected ruleset (B has 2 prefixes). The verdict in step 4 is the
+# load-bearing membership proof; here we assert the inner has ≥2 entries.
 if [[ "${active_2}" == "0" ]]; then
-    inner_pin="${PIN_DIR}/allowlist_a"
+    inner_pin="${PIN_DIR}/cidr_allowlist_a"
 elif [[ "${active_2}" == "1" ]]; then
-    inner_pin="${PIN_DIR}/allowlist_b"
+    inner_pin="${PIN_DIR}/cidr_allowlist_b"
 else
     inner_pin=""
 fi
 if [[ -n "${inner_pin}" ]]; then
-    if ! mac_in_inner_pin "${inner_pin}" "${MAC_Y}"; then
-        echo "FAIL[3.inner]: active inner ${inner_pin} missing MAC_Y after apply B" >&2
+    n_entries=$(sudo -n bpftool map dump pinned "${inner_pin}" --json 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
+    if [[ -z "${n_entries}" || "${n_entries}" -lt 2 ]]; then
+        echo "FAIL[3.inner]: active CIDR inner ${inner_pin} has ${n_entries} prefixes (expected ≥2 under B)" >&2
         sudo -n bpftool map dump pinned "${inner_pin}" >&2 || true
         fail=1
     fi
@@ -152,13 +132,14 @@ fi
 
 # ── Step 4: inject MAC_Y → STAT_PASS += 1 ────────────────────────────────
 echo "=== step 4: inject MAC_Y (expected PASS under B)"
-read -r p2 d2 m2 < <(read_stats)
-inject_eth "${IFACE_B}" "${MAC_Y}" "${MAC_DST}"
-wait_for_stats_sum "${IFACE_A}" $(( p2 + d2 + m2 + 1 )) || true
-read -r p3 d3 m3 < <(read_stats)
+read -r p2 d2 m2 p2_c < <(read_stats_with_cidr)
+${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "192.168.0.1"
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p2 + d2 + m2 + p2_c + 1 )) || true
+read -r p3 d3 m3 p3_c < <(read_stats_with_cidr)
 echo "  stats: PASS=${p3} DROP_DENY=${d3} (delta P=$(( p3-p2 )) D=$(( d3-d2 )))"
-if (( p3 - p2 != 1 )); then
-    echo "FAIL[4.p]: expected STAT_PASS delta=1 under B for MAC_Y, got $(( p3-p2 ))" >&2
+# §5.43: matched-rule PASS → STAT_PASS_CIDR.
+if (( p3_c - p2_c != 1 )); then
+    echo "FAIL[4.p]: expected STAT_PASS_CIDR delta=1 under B for src∈id1, got $(( p3_c-p2_c ))" >&2
     fail=1
 fi
 if (( d3 - d2 != 0 )); then
@@ -181,10 +162,10 @@ fi
 
 # ── Step 6: inject MAC_Y → STAT_DROP_DENY += 1 (negation differential) ──
 echo "=== step 6: inject MAC_Y (expected DENY again under A — NEGATION DIFFERENTIAL)"
-read -r p4 d4 m4 < <(read_stats)
-inject_eth "${IFACE_B}" "${MAC_Y}" "${MAC_DST}"
-wait_for_stats_sum "${IFACE_A}" $(( p4 + d4 + m4 + 1 )) || true
-read -r p5 d5 m5 < <(read_stats)
+read -r p4 d4 m4 p4_c < <(read_stats_with_cidr)
+${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "192.168.0.1"
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p4 + d4 + m4 + p4_c + 1 )) || true
+read -r p5 d5 m5 p5_c < <(read_stats_with_cidr)
 echo "  stats: PASS=${p5} DROP_DENY=${d5} (delta P=$(( p5-p4 )) D=$(( d5-d4 )))"
 if (( d5 - d4 != 1 )); then
     echo "FAIL[6.d]: expected STAT_DROP_DENY delta=1 (MAC_Y denied AGAIN under A), got $(( d5-d4 ))" >&2

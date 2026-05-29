@@ -1,0 +1,14 @@
+# config_schema_v1.yaml — §5.43 §6.63 (a): explicit schema_version: 1.
+#
+# Under the M.1 hard cutover (supported set {1} -> {2}) this MUST be
+# hard-rejected at validate() with exit 9 and a "re-author to
+# schema_version 2" diagnostic. The rule body is otherwise well-formed
+# (v1 src_cidr grammar) so it is the SCHEMA gate that rejects, not a
+# downstream parse error.
+schema_version: 1
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      src_cidr: "10.0.0.0/8"

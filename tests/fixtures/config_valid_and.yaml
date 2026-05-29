@@ -1,0 +1,43 @@
+# config_valid_and.yaml — §5.43 MVP-4.3 v2 AND-compose fixture.
+#
+# Used by §6.60 (T_AND_COMPOSE_OK), §6.61 (T_AND_ORACLE_AGREEMENT), and as
+# the valid-v2 accept case of §6.63 (T_SCHEMA_V2_CUTOVER).
+#
+# schema_version: 2 (M.1 hard cutover — absent/1 is rejected). Match grammar
+# is {dst_cidr, src_cidr}; mac is REJECTED at parse (HG-mvp-4.3-2). Each rule
+# constrains dst_cidr and/or src_cidr (>=1 required).
+#
+# Rule layout (bit position == id; first-match by lowest id, ffsll):
+#   id 0 : dst 10.1.0.0/16 AND src 192.168.5.0/24  pass  (full-AND rule)
+#   id 1 : dst 10.3.0.0/16                          pass  (dst-only; src wildcard)
+#   id 2 : src 10.9.0.0/16                          drop  (src-only; dst wildcard)
+#   id 4 : dst 10.3.5.0/24                          drop  (more-specific; overlaps id1)
+#
+# The bit-vector AND proof (§6.60): a packet matching ONLY one axis of id0
+# must NOT hit id0 (under the retired OR model it would have). The overlap
+# of id1/id4 exercises first-match-by-id (lowest id wins → id1 PASS over the
+# more-specific id4 DROP).
+#
+# IMPORTANT: tests/bitvec/bitvec_oracle_prod.py transcribes these rules BY
+# HAND. Any edit here MUST be mirrored there (data-independence is
+# intentional — divergence fails the §6.61 agreement test loudly).
+schema_version: 2
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      dst_cidr: "10.1.0.0/16"
+      src_cidr: "192.168.5.0/24"
+  - id: 1
+    action: pass
+    match:
+      dst_cidr: "10.3.0.0/16"
+  - id: 2
+    action: drop
+    match:
+      src_cidr: "10.9.0.0/16"
+  - id: 4
+    action: drop
+    match:
+      dst_cidr: "10.3.5.0/24"

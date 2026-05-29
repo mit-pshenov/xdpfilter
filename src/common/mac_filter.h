@@ -93,6 +93,30 @@ enum mac_filter_stat {
 #define XDPMF_MAP_CIDR_INNER_A_NAME         "cidr_allowlist_a"  /* inner slot 0, LPM_TRIE */
 #define XDPMF_MAP_CIDR_INNER_B_NAME         "cidr_allowlist_b"  /* inner slot 1, LPM_TRIE */
 
+/* §5.43 (MVP-4.3) OR→AND bit-vector pivot — see design §5.43 Q1/Q2.
+ *
+ * Two LPM axes (dst_cidr NEW + src_cidr reshaped) composed by per-axis __u64
+ * bitmask intersection; first-match by __builtin_ffsll(acc)-1. The src axis
+ * REUSES the existing cidr_allowlist_a/_b/cidr_rulesets pins (value reshaped
+ * from `struct allow_entry` → `__u64`; pin names UNCHANGED per guard #16).
+ * The dst axis is a NEW ARRAY_OF_MAPS trio mirroring the §5.27 CIDR topology.
+ *
+ * BITVEC_NUM_AXES = number of LPM axes this slice (dst, src). The `wildcard`
+ * map is ONE BPF_MAP_TYPE_ARRAY of __u64 with max_entries
+ * XDPMF_RULESET_COUNT * BITVEC_NUM_AXES (= 4), indexed wildcard[active *
+ * BITVEC_NUM_AXES + axis] — the realizable analog of the `defaults` precedent
+ * (D-mvp-4.3-Q2; a runtime active_idx cannot select between two top-level map
+ * symbols, only between slots of ONE indexed ARRAY). A rule that does NOT
+ * constrain an axis has its bit set in that axis's wildcard half and is ABSENT
+ * from the axis LPM map (mutual exclusion). */
+#define XDPMF_MAP_DST_RULESETS_OUTER_NAME  "dst_rulesets"   /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] of LPM_TRIE fds */
+#define XDPMF_MAP_DST_INNER_A_NAME         "dst_bitmask_a"  /* inner slot 0, LPM_TRIE of __u64 */
+#define XDPMF_MAP_DST_INNER_B_NAME         "dst_bitmask_b"  /* inner slot 1, LPM_TRIE of __u64 */
+#define XDPMF_MAP_WILDCARD_NAME            "wildcard"       /* ARRAY[XDPMF_RULESET_COUNT*BITVEC_NUM_AXES] of __u64 */
+#define BITVEC_NUM_AXES 2
+#define BV_AXIS_DST     0
+#define BV_AXIS_SRC     1
+
 /* §5.29 (MVP-3.4): rules + action_table skeleton — see design §5.29 HG-3.4-1 + Q3.
  *
  * STRUCTURAL-ONLY this slice. Populated on apply; NOT consulted in datapath

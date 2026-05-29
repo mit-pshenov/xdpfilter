@@ -51,6 +51,7 @@
 #include <utility>
 #include <vector>
 
+#include <arpa/inet.h>       // §5.43 (MVP-4.3): ntohl for prefix-closure masking
 #include <dirent.h>
 #include <fcntl.h>           // O_PATH, O_DIRECTORY, O_NOFOLLOW, O_CLOEXEC, openat
 #include <linux/bpf.h>       // BPF_XDP, BPF_LINK_TYPE_XDP
@@ -158,6 +159,18 @@ constexpr ManagedMapEntry kManagedMaps[] = {
     { &SkelMapsT::cidr_allowlist_a, XDPMF_MAP_CIDR_INNER_A_NAME,        false },
     { &SkelMapsT::cidr_allowlist_b, XDPMF_MAP_CIDR_INNER_B_NAME,        false },
     { &SkelMapsT::cidr_rulesets,    XDPMF_MAP_CIDR_RULESETS_OUTER_NAME, false },
+    /* §5.43 (MVP-4.3) D-mvp-4.3-Q1/Q2 net +4 (17 → 21): the NEW dst-CIDR
+     * ARRAY_OF_MAPS trio (dst_bitmask_a/_b + dst_rulesets) mirroring the
+     * §5.27 CIDR-axis triple, plus the single combined `wildcard` ARRAY
+     * (D-mvp-4.3-Q2 — ONE indexed map, NOT two). The src-CIDR axis reuses
+     * the existing cidr_allowlist_a/_b/cidr_rulesets entries (value-only
+     * reshape, pin names unchanged — guard #16, so NO kManagedMaps churn
+     * there). All three call-site loops (clear, pin, reuse) walk this single
+     * table — HK-9 dividend collected again. */
+    { &SkelMapsT::dst_bitmask_a,    XDPMF_MAP_DST_INNER_A_NAME,         false },
+    { &SkelMapsT::dst_bitmask_b,    XDPMF_MAP_DST_INNER_B_NAME,         false },
+    { &SkelMapsT::dst_rulesets,     XDPMF_MAP_DST_RULESETS_OUTER_NAME,  false },
+    { &SkelMapsT::wildcard,         XDPMF_MAP_WILDCARD_NAME,            false },
     { &SkelMapsT::active_idx,       XDPMF_MAP_ACTIVE_IDX_NAME,          false },
     { &SkelMapsT::defaults,         XDPMF_MAP_DEFAULTS_NAME,            false },
     { &SkelMapsT::stats,            XDPMF_MAP_STATS_NAME,               false },
@@ -1163,10 +1176,88 @@ struct MacRule {
     std::uint32_t rule_id;
 };
 
-struct CidrRule {
+/* §5.43 (MVP-4.3) D-mvp-4.3-Q3: a constrained prefix on one LPM axis carrying
+ * the rule's bit (= 1ULL << rule_id). `cidr.addr` is network byte order (the
+ * LPM_TRIE key shape); `host_addr` is the host-order copy used for prefix
+ * masking in close_prefixes. */
+struct BitPrefix {
     xdpmf_cidr_v4 cidr;
-    std::uint32_t rule_id;
+    std::uint32_t host_addr;
+    std::uint64_t bit;
 };
+
+/* Host-order mask for a prefix length ([0,32]); len==0 → all-zero mask.
+ * Transcribed from the §5.42 spike (guard #9 — production-owned, NOT
+ * #include'd from tests/bitvec). */
+[[nodiscard]] std::uint32_t host_mask(std::uint32_t prefixlen) noexcept
+{
+    if (prefixlen == 0) {
+        return 0u;
+    }
+    return 0xFFFFFFFFu << (32u - prefixlen);
+}
+
+/* §5.43 FI-1 prefix-closure (the #1 bit-vector trap — guard #23). For each
+ * prefix P_i in `entries`, OR in bit_j of every P_j that COVERS P_i
+ * (P_j.prefixlen <= P_i.prefixlen AND P_j == P_i truncated to P_j.prefixlen),
+ * INCLUDING P_i itself. The cover direction is the trap: the LESS-specific
+ * (shorter) prefix's bit flows INTO the MORE-specific (longer) prefix's
+ * stored mask, so a longest-prefix LPM hit carries every covering rule — and
+ * first-match-by-id (ffsll) then picks the lowest covering id. Returns the
+ * closed mask aligned 1:1 with `entries`. Transcribed from the §5.42 spike's
+ * close_prefixes() into production types (guard #9 — Q3 A1). */
+[[nodiscard]] std::vector<std::uint64_t>
+close_prefixes(const std::vector<BitPrefix>& entries)
+{
+    std::vector<std::uint64_t> closed(entries.size(), 0u);
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        const BitPrefix& pi = entries[i];
+        for (const BitPrefix& pj : entries) {
+            if (pj.cidr.prefixlen > pi.cidr.prefixlen) {
+                continue;  // pj more specific than pi → cannot cover it
+            }
+            const std::uint32_t m = host_mask(pj.cidr.prefixlen);
+            if ((pi.host_addr & m) == (pj.host_addr & m)) {
+                closed[i] |= pj.bit;  // pj covers pi (incl. pi == pj)
+            }
+        }
+    }
+    return closed;
+}
+
+/* §5.43 per-LPM-axis lowering result: the constrained prefixes (rules that
+ * set this axis) + the wildcard mask (OR of bits for rules that do NOT
+ * constrain this axis — they survive the axis unconditionally via
+ * wildcard[active*2+axis], FI-2 mutual exclusion). */
+struct AxisLowering {
+    std::vector<BitPrefix> prefixes;
+    std::uint64_t          wildcard = 0u;
+};
+
+/* Lower one LPM axis (dst or src) from the validated Config: a rule that sets
+ * the axis contributes a BitPrefix at its bit position; a rule that does NOT
+ * set the axis contributes its bit to the wildcard mask. id range already
+ * validated to [0, XDPMF_ALLOWLIST_MAX-1] in config.cpp (bit shift safe). */
+[[nodiscard]] AxisLowering lower_axis(const Config& c, bool dst_axis)
+{
+    AxisLowering out;
+    out.prefixes.reserve(c.rules.size());
+    for (const Rule& r : c.rules) {
+        const std::optional<xdpmf_cidr_v4>& axis =
+            dst_axis ? r.match.dst_cidr : r.match.src_cidr;
+        const std::uint64_t bit = std::uint64_t{1} << r.id;
+        if (axis.has_value()) {
+            BitPrefix bp{};
+            bp.cidr      = *axis;
+            bp.host_addr = ::ntohl(axis->addr);
+            bp.bit       = bit;
+            out.prefixes.push_back(bp);
+        } else {
+            out.wildcard |= bit;  // unconstrained on this axis → wildcard survivor
+        }
+    }
+    return out;
+}
 
 /* §5.26 Q2 inner-slot population — §5.31 PI-13-3.4b: writes full
  * `struct allow_entry` per insert (offset 0 = present=1, offset 4 = rule_id
@@ -1217,10 +1308,14 @@ void populate_inner_slot(int inner_fd, const std::vector<MacRule>& pass_macs)
     }
 }
 
-/* §5.27 Q1 AS1 CIDR-inner population — §5.31 PI-13-3.4b CIDR symmetry:
- * parallel shape to populate_inner_slot writing full `struct allow_entry`
- * into the LPM_TRIE-typed inactive CIDR inner. */
-void populate_cidr_inner_slot(int inner_fd, const std::vector<CidrRule>& pass_cidrs)
+/* §5.43 (MVP-4.3) D-mvp-4.3-Q1/Q3: populate one LPM bit-vector axis inner
+ * (dst_bitmask_<a|b> OR cidr_allowlist_<a|b>) — value-reshaped to a __u64
+ * prefix-closed bitmask. Used for BOTH LPM axes (the src axis replaces the
+ * §5.31 allow_entry write; the dst axis is the new mirror). Bulk-clear-then-
+ * insert preserved. RESET-on-apply: the caller passes the INACTIVE inner fd
+ * and writes BEFORE the active_idx flip (D-mvp-4.3-RESET-VS-PRESERVE — match
+ * maps reflect only the current config; NO copy-forward). */
+void populate_bitvec_inner_slot(int inner_fd, const std::vector<BitPrefix>& prefixes)
 {
     xdpmf_cidr_v4 prev{};
     xdpmf_cidr_v4 cur{};
@@ -1232,28 +1327,56 @@ void populate_cidr_inner_slot(int inner_fd, const std::vector<CidrRule>& pass_ci
         if (rc != 0) {
             if (-rc == ENOENT) break;
             throw_loader(classify(rc, LoaderError::LoadFailed),
-                         std::format("bpf_map_get_next_key(cidr_inner): {}",
+                         std::format("bpf_map_get_next_key(bitvec_inner): {}",
                                      std::strerror(-rc)));
         }
         const int drc = bpf_map_delete_elem(inner_fd, &cur);
         if (drc != 0 && -drc != ENOENT) {
             throw_loader(classify(drc, LoaderError::LoadFailed),
-                         std::format("bpf_map_delete_elem(cidr_inner): {}",
+                         std::format("bpf_map_delete_elem(bitvec_inner): {}",
                                      std::strerror(-drc)));
         }
         prev      = cur;
         have_prev = true;
     }
-    for (const CidrRule& c : pass_cidrs) {
-        struct allow_entry entry{};
-        entry.present = 1;
-        entry.rule_id = c.rule_id;
-        const int rc = bpf_map_update_elem(inner_fd, &c.cidr, &entry, BPF_ANY);
+    // FI-1 cover-closure: each entry's stored __u64 = OR of every covering
+    // rule's bit (close_prefixes). Duplicate prefixes (two rules sharing an
+    // exact prefix) get IDENTICAL closed masks and collapse to one map entry.
+    const std::vector<std::uint64_t> closed = close_prefixes(prefixes);
+    for (std::size_t i = 0; i < prefixes.size(); ++i) {
+        const xdpmf_cidr_v4 key  = prefixes[i].cidr;  // addr already network order
+        const std::uint64_t mask = closed[i];
+        const int rc = bpf_map_update_elem(inner_fd, &key, &mask, BPF_ANY);
         if (rc < 0) {
             throw_loader(classify(rc, LoaderError::LoadFailed),
-                         std::format("bpf_map_update_elem(cidr_inner): {}",
+                         std::format("bpf_map_update_elem(bitvec_inner): {}",
                                      std::strerror(-rc)));
         }
+    }
+}
+
+/* §5.43 (MVP-4.3) D-mvp-4.3-Q2: write the INACTIVE half of the single
+ * combined `wildcard` ARRAY before the active_idx flip — slots
+ * [inactive*BITVEC_NUM_AXES + BV_AXIS_DST] and [... + BV_AXIS_SRC]. The
+ * RESET-write (no copy-forward) parallels populate_bitvec_inner_slot; the
+ * single active_idx u32 store commits the wildcard swap together with the
+ * dst/src/defaults/rules/rule_counters swap. */
+void write_wildcard_slots(int wildcard_fd, std::uint32_t inactive,
+                          std::uint64_t wc_dst, std::uint64_t wc_src)
+{
+    const std::uint32_t k_dst = inactive * BITVEC_NUM_AXES + BV_AXIS_DST;
+    const std::uint32_t k_src = inactive * BITVEC_NUM_AXES + BV_AXIS_SRC;
+    int rc = bpf_map_update_elem(wildcard_fd, &k_dst, &wc_dst, BPF_ANY);
+    if (rc < 0) {
+        throw_loader(classify(rc, LoaderError::LoadFailed),
+                     std::format("bpf_map_update_elem(wildcard[{}] dst): {}",
+                                 k_dst, std::strerror(-rc)));
+    }
+    rc = bpf_map_update_elem(wildcard_fd, &k_src, &wc_src, BPF_ANY);
+    if (rc < 0) {
+        throw_loader(classify(rc, LoaderError::LoadFailed),
+                     std::format("bpf_map_update_elem(wildcard[{}] src): {}",
+                                 k_src, std::strerror(-rc)));
     }
 }
 
@@ -1625,26 +1748,6 @@ namespace internal {
     return out;
 }
 
-/* §5.27 sibling of extract_pass_macs for the CIDR axis — same §5.34 L-3
- * schema-shift treatment (action filter REMOVED; drop rules populate
- * inner-allowlist with their rule_id). Dedup by (prefixlen, addr) tuple. */
-[[nodiscard]] std::vector<CidrRule> extract_pass_cidrs(const Config& c)
-{
-    std::vector<CidrRule> out;
-    out.reserve(c.rules.size());
-    for (const Rule& r : c.rules) {
-        if (!r.match.src_cidr.has_value()) continue;
-        const xdpmf_cidr_v4& c4 = *r.match.src_cidr;
-        const bool already = std::any_of(
-            out.begin(), out.end(),
-            [&](const CidrRule& e) {
-                return e.cidr.prefixlen == c4.prefixlen && e.cidr.addr == c4.addr;
-            });
-        if (!already) out.push_back(CidrRule{c4, r.id});
-    }
-    return out;
-}
-
 /* §5.26 + EDIT-1 atomic apply (single source of truth for the swap flow):
  * see design §5.26 attach() flow update + Phase B EDIT-1 internal-helper
  * contract. Both loader::attach() and apply::apply_config_inmemory() route
@@ -1652,19 +1755,29 @@ namespace internal {
  * lives in exactly ONE place. */
 std::uint32_t apply_request(const ApplyRequest& req)
 {
-    const std::vector<MacRule>   deduped        = extract_pass_macs(req.config);
-    const std::vector<CidrRule>  deduped_cidrs  = extract_pass_cidrs(req.config);
-    const DefaultAction          default_action = req.config.default_action;
+    // §5.43 (MVP-4.3): the MAC axis is FROZEN (mac rejected at parse under
+    // v2 → `deduped` is always empty here); the MAC inner is still populated
+    // (with nothing) so the frozen maps stay coherent. The two LPM axes are
+    // lowered to prefix+bit lists (constrained) + wildcard masks (unconstrained).
+    const std::vector<MacRule> deduped     = extract_pass_macs(req.config);
+    const AxisLowering         dst_low     = lower_axis(req.config, /*dst_axis=*/true);
+    const AxisLowering         src_low     = lower_axis(req.config, /*dst_axis=*/false);
+    const DefaultAction default_action     = req.config.default_action;
 
     if (deduped.size() > XDPMF_ALLOWLIST_MAX) {
         throw_loader(LoaderError::LoadFailed,
                      std::format("apply: pass-rule count {} exceeds XDPMF_ALLOWLIST_MAX={}",
                                  deduped.size(), XDPMF_ALLOWLIST_MAX));
     }
-    if (deduped_cidrs.size() > XDPMF_ALLOWLIST_MAX) {
+    if (dst_low.prefixes.size() > XDPMF_ALLOWLIST_MAX) {
         throw_loader(LoaderError::LoadFailed,
-                     std::format("apply: pass-cidr-rule count {} exceeds XDPMF_ALLOWLIST_MAX={}",
-                                 deduped_cidrs.size(), XDPMF_ALLOWLIST_MAX));
+                     std::format("apply: dst-cidr-rule count {} exceeds XDPMF_ALLOWLIST_MAX={}",
+                                 dst_low.prefixes.size(), XDPMF_ALLOWLIST_MAX));
+    }
+    if (src_low.prefixes.size() > XDPMF_ALLOWLIST_MAX) {
+        throw_loader(LoaderError::LoadFailed,
+                     std::format("apply: src-cidr-rule count {} exceeds XDPMF_ALLOWLIST_MAX={}",
+                                 src_low.prefixes.size(), XDPMF_ALLOWLIST_MAX));
     }
 
     // §5.24 Q3 Option B: kernel-version probe BEFORE any libbpf API call.
@@ -1859,18 +1972,40 @@ std::uint32_t apply_request(const ApplyRequest& req)
             }
             populate_inner_slot(inactive_inner_fd, deduped);
         }
-        // §5.27 Q1 AS1: populate the inactive CIDR inner BEFORE the active_idx
-        // flip so the single u32 store commits BOTH axes' new ruleset atomically.
+        // §5.43 (MVP-4.3) D-mvp-4.3-Q1/Q2: populate the INACTIVE dst + src LPM
+        // bit-vector inners AND the inactive wildcard half BEFORE the active_idx
+        // flip, so the single u32 store commits ALL axes' new ruleset atomically
+        // (D-mvp-4.3-RESET-VS-PRESERVE — match/wildcard maps RESET-on-apply).
         {
-            bpf_map* inactive_cidr_inner = (inactive == 0)
+            bpf_map* inactive_dst_inner = (inactive == 0)
+                                              ? skel->maps.dst_bitmask_a
+                                              : skel->maps.dst_bitmask_b;
+            const int inactive_dst_fd = bpf_map__fd(inactive_dst_inner);
+            if (inactive_dst_fd < 0) {
+                throw_loader(LoaderError::LoadFailed,
+                             "inactive dst inner fd unavailable (reattach)");
+            }
+            populate_bitvec_inner_slot(inactive_dst_fd, dst_low.prefixes);
+        }
+        {
+            bpf_map* inactive_src_inner = (inactive == 0)
                                               ? skel->maps.cidr_allowlist_a
                                               : skel->maps.cidr_allowlist_b;
-            const int inactive_cidr_fd = bpf_map__fd(inactive_cidr_inner);
-            if (inactive_cidr_fd < 0) {
+            const int inactive_src_fd = bpf_map__fd(inactive_src_inner);
+            if (inactive_src_fd < 0) {
                 throw_loader(LoaderError::LoadFailed,
-                             "inactive cidr inner fd unavailable (reattach)");
+                             "inactive src inner fd unavailable (reattach)");
             }
-            populate_cidr_inner_slot(inactive_cidr_fd, deduped_cidrs);
+            populate_bitvec_inner_slot(inactive_src_fd, src_low.prefixes);
+        }
+        {
+            const int wildcard_fd = bpf_map__fd(skel->maps.wildcard);
+            if (wildcard_fd < 0) {
+                throw_loader(LoaderError::LoadFailed,
+                             "wildcard fd unavailable (reattach)");
+            }
+            write_wildcard_slots(wildcard_fd, inactive,
+                                 dst_low.wildcard, src_low.wildcard);
         }
         {
             const int defaults_fd = bpf_map__fd(skel->maps.defaults);
@@ -2025,16 +2160,33 @@ std::uint32_t apply_request(const ApplyRequest& req)
         }
         populate_inner_slot(inner_fd, deduped);
     }
-    // §5.27 Q1 AS1: populate slot 0 of the CIDR axis alongside MAC slot 0.
-    // Both axes share the same active_idx (0 on fresh attach); single u32
-    // store at active_idx_fd is the atomic commit for BOTH below.
+    // §5.43 (MVP-4.3) D-mvp-4.3-Q1/Q2: fresh-attach populates slot 0 of BOTH
+    // LPM axes (dst + src bit-vector inners) + the slot-0 wildcard half
+    // alongside MAC slot 0. All axes share the same active_idx (0 on fresh
+    // attach); the single u32 store at active_idx_fd below is the atomic
+    // commit for ALL of them.
     {
-        bpf_map* cidr_inner_map = skel->maps.cidr_allowlist_a;
-        const int cidr_inner_fd = bpf_map__fd(cidr_inner_map);
-        if (cidr_inner_fd < 0) {
-            throw_loader(LoaderError::LoadFailed, "cidr inner-map fd unavailable");
+        bpf_map* dst_inner_map = skel->maps.dst_bitmask_a;
+        const int dst_inner_fd = bpf_map__fd(dst_inner_map);
+        if (dst_inner_fd < 0) {
+            throw_loader(LoaderError::LoadFailed, "dst inner-map fd unavailable");
         }
-        populate_cidr_inner_slot(cidr_inner_fd, deduped_cidrs);
+        populate_bitvec_inner_slot(dst_inner_fd, dst_low.prefixes);
+    }
+    {
+        bpf_map* src_inner_map = skel->maps.cidr_allowlist_a;
+        const int src_inner_fd = bpf_map__fd(src_inner_map);
+        if (src_inner_fd < 0) {
+            throw_loader(LoaderError::LoadFailed, "src inner-map fd unavailable");
+        }
+        populate_bitvec_inner_slot(src_inner_fd, src_low.prefixes);
+    }
+    {
+        const int wildcard_fd = bpf_map__fd(skel->maps.wildcard);
+        if (wildcard_fd < 0) {
+            throw_loader(LoaderError::LoadFailed, "wildcard map fd unavailable");
+        }
+        write_wildcard_slots(wildcard_fd, 0u, dst_low.wildcard, src_low.wildcard);
     }
     {
         const int defaults_fd = bpf_map__fd(skel->maps.defaults);

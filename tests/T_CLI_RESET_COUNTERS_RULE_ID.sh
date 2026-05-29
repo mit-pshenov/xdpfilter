@@ -43,6 +43,7 @@ FIXTURE="${TEST_DIR}/fixtures/config_per_rule_counters.yaml"
 [[ -f "${FIXTURE}" ]] || { echo "FAIL: missing fixture ${FIXTURE}" >&2; exit 1; }
 
 MAC_ID0="02:00:00:00:00:01"
+SRC_MAC="02:00:00:00:00:aa"  # 5.43: MAC deferred; src_mac irrelevant
 MAC_ID5="02:00:00:00:00:05"
 MAC_ID17="02:00:00:00:00:11"
 
@@ -96,11 +97,11 @@ if ! sudo -n test -e "${PIN_DIR}/rule_counters" \
 fi
 
 echo "=== inject baseline: 2 x id=0 + 5 x id=5 + 3 x id=17"
-read -r p0 d0 m0 < <(read_stats)
-for i in 1 2;         do inject_eth "${IFACE_B}" "${MAC_ID0}"  "${MAC_DST}"; done
-for i in 1 2 3 4 5;   do inject_eth "${IFACE_B}" "${MAC_ID5}"  "${MAC_DST}"; done
-for i in 1 2 3;       do inject_eth "${IFACE_B}" "${MAC_ID17}" "${MAC_DST}"; done
-wait_for_stats_sum "${IFACE_A}" $(( p0 + d0 + m0 + 10 )) || true
+read -r p0 d0 m0 p0_c < <(read_stats_with_cidr)
+for i in 1 2;         do ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "10.0.0.1"; done
+for i in 1 2 3 4 5;   do ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "10.5.0.1"; done
+for i in 1 2 3;       do ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "${SRC_MAC}" "${MAC_DST}" "10.17.0.1"; done
+wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p0 + d0 + m0 + p0_c + 10 )) || true
 
 c0_pre=$(read_rc_slot 0)
 c5_pre=$(read_rc_slot 5)

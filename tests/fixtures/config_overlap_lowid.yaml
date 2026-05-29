@@ -1,0 +1,38 @@
+# config_overlap_lowid.yaml — §5.43 MVP-4.3 guard #23 MANDATORY fixture.
+#
+# Used by §6.62 (T_AND_PREFIX_CLOSURE_OVERLAP) — THE #1-bug-class canary.
+#
+# Overlapping dst prefixes where a less-specific COVERING rule has a LOWER
+# id than the more-specific entry. This catches the #1 bit-vector trap:
+# backwards prefix-closure (cover-direction) or a most-specific-wins bug.
+#
+#   id 0 : dst 10.1.2.0/24    DROP  (less-specific COVER, LOWER id)
+#   id 1 : dst 10.1.0.0/16    PASS  (broader cover, mid id)
+#   id 3 : dst 10.1.2.128/25  PASS  (MORE-specific, HIGHER id)
+#
+# A packet to 10.1.2.130 is in all three prefixes (/24, /16, /25). The
+# correct verdict is DROP via id0 — the LOWEST matching id wins, NOT the
+# most-specific id3. This is producible ONLY if (a) prefix-closure stored
+# the covering /24's bit into the /25 LPM entry (cover-direction correct)
+# AND (b) ffsll picks the lowest set bit. A backwards closure or a
+# most-specific-wins bug FLIPS the verdict to PASS via id3.
+#
+# default_action: pass — so a non-matching packet PASSes, making the
+# id0-DROP verdict unambiguous (DROP can ONLY come from id0 here).
+#
+# All rules are dst-only (src is wildcard) → src_ip is irrelevant.
+schema_version: 2
+default_action: pass
+rules:
+  - id: 0
+    action: drop
+    match:
+      dst_cidr: "10.1.2.0/24"
+  - id: 1
+    action: pass
+    match:
+      dst_cidr: "10.1.0.0/16"
+  - id: 3
+    action: pass
+    match:
+      dst_cidr: "10.1.2.128/25"

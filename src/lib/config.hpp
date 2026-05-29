@@ -34,8 +34,9 @@ enum class DefaultAction : std::uint8_t { Drop = 0, Pass = 1 };
 enum class RuleAction    : std::uint8_t { Drop = 0, Pass = 1 };
 
 struct RuleMatch {
-    std::optional<xdpmf_mac>     mac;       // §5.26 MAC axis (cycle 1: required; cycle 2: optional)
-    std::optional<xdpmf_cidr_v4> src_cidr;  // §5.27 NEW (Q3 K2) — IPv4 CIDR axis
+    std::optional<xdpmf_mac>     mac;       // §5.26 MAC axis (DEFERRED in v2 — §5.43 HG-mvp-4.3-2; rejected at parse)
+    std::optional<xdpmf_cidr_v4> dst_cidr;  // §5.43 NEW (MVP-4.3) — IPv4 dst-CIDR axis (#1 selection gap)
+    std::optional<xdpmf_cidr_v4> src_cidr;  // §5.27 (Q3 K2) — IPv4 src-CIDR axis
 };
 
 struct Rule {

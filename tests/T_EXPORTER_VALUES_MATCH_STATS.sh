@@ -62,7 +62,11 @@ EXPORTER_BIN=$(find_exporter) || {
     echo "FAIL: xdpmf-exporter binary not found under ${BUILD_DIR}" >&2
     exit 1
 }
-FIXTURE="${TEST_DIR}/fixtures/config_valid_mac_or_cidr.yaml"
+# §5.43 MVP-4.3: config_valid_mac_or_cidr.yaml carries a `mac` key which v2
+# rejects (MAC deferred). Repoint to the v2 src_cidr fixture (10.0.0.0/8).
+# The exporter-vs-stats assertions below are dynamic (compare exporter to a
+# live read_stats snapshot), so they hold regardless of the per-verdict mix.
+FIXTURE="${TEST_DIR}/fixtures/config_valid_cidr.yaml"
 [[ -f "${FIXTURE}" ]] || { echo "FAIL: missing fixture ${FIXTURE}" >&2; exit 1; }
 
 PORT=$(( 9417 + ($$ % 1000) ))

@@ -28,6 +28,15 @@
 # Negation control: sub-case (c) — neither axis matches → DROP_DENY.
 set -euo pipefail
 source "${TEST_DIR}/lib/common.sh"
+
+# §5.43 MVP-4.3 (T-SKIP): MAC-axis matching is DEFERRED to mvp-4.5
+# (HG-mvp-4.3-2 / PI-mvp-4.3-MAC-DEFERRED). The v2 config grammar rejects
+# the `mac` match-key and the production datapath no longer consults the
+# MAC HASH maps, so this MAC-verdict test cannot pass until the MAC-axis
+# slice lands. Converted to SKIP (NOT silently dropped) — un-SKIP when the
+# MAC-axis returns as a bit-vector axis in mvp-4.5.
+echo "SKIP: MAC-axis deferred to mvp-4.5 per HG-mvp-4.3-2 / PI-mvp-4.3-MAC-DEFERRED" >&2
+exit 77
 require_passwordless_sudo
 
 LOADER_BIN=$(find_loader)

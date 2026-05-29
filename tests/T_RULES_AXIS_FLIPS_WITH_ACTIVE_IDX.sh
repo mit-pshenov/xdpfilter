@@ -64,17 +64,19 @@ FIX_A="${TEST_DIR}/fixtures/config_per_rule_counters.yaml"
 FIX_B=$(mktemp /tmp/xdpmf_rules_flip_B_XXXXXX.yaml)
 cat > "${FIX_B}" <<'YEOF'
 # §6.NN+2 config B — different rule_ids (10, 20) than config A (0, 5, 17, 42).
-# id=10 DROPS MAC_10; id=20 PASSES MAC_20.
+# §5.43 MVP-4.3: MAC deferred → src_cidr grammar; schema_version: 2.
+# id=10 DROPS src 10.10.0.0/16; id=20 PASSES src 10.20.0.0/16.
+schema_version: 2
 default_action: drop
 rules:
   - id: 10
     action: drop
     match:
-      mac: "02:00:00:00:00:10"
+      src_cidr: "10.10.0.0/16"
   - id: 20
     action: pass
     match:
-      mac: "02:00:00:00:00:20"
+      src_cidr: "10.20.0.0/16"
 YEOF
 
 stderr_apply_a=$(mktemp /tmp/xdpmf-rulesflip-apply-a.XXXXXX)
