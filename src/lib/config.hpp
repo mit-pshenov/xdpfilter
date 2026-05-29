@@ -33,10 +33,20 @@ namespace xdpmf {
 enum class DefaultAction : std::uint8_t { Drop = 0, Pass = 1 };
 enum class RuleAction    : std::uint8_t { Drop = 0, Pass = 1 };
 
+// §5.44 (MVP-4.4) D-mvp-4.4-PORT-GRAMMAR: an inclusive dst_port range
+// [lo,hi] (a single port is lo==hi). Both endpoints ∈ [0,65535], lo ≤ hi
+// (enforced at parse). One range per rule (multi = multiple rules — OOS).
+struct PortRange {
+    std::uint16_t lo = 0;
+    std::uint16_t hi = 0;
+};
+
 struct RuleMatch {
     std::optional<xdpmf_mac>     mac;       // §5.26 MAC axis (DEFERRED in v2 — §5.43 HG-mvp-4.3-2; rejected at parse)
     std::optional<xdpmf_cidr_v4> dst_cidr;  // §5.43 NEW (MVP-4.3) — IPv4 dst-CIDR axis (#1 selection gap)
     std::optional<xdpmf_cidr_v4> src_cidr;  // §5.27 (Q3 K2) — IPv4 src-CIDR axis
+    std::optional<std::uint8_t>  protocol;  // §5.44 NEW (MVP-4.4) — L4 proto axis (exact-match; tcp/udp/icmp/numeric)
+    std::optional<PortRange>     dst_port;  // §5.44 NEW (MVP-4.4) — L4 dst-port axis (inclusive range)
 };
 
 struct Rule {

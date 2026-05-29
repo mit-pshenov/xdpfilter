@@ -126,6 +126,27 @@ namespace {
         if (r.match.src_cidr.has_value()) {
             append_kind("src_cidr", format_cidr(*r.match.src_cidr));
         }
+        /* §5.44 (MVP-4.4) PI-mvp-4.4-SIDECAR: emit the proto axis as a name
+         * for the well-known protocols {tcp,udp,icmp} (matching the config
+         * grammar), else the numeric string. */
+        if (r.match.protocol.has_value()) {
+            const std::uint8_t p = *r.match.protocol;
+            const char* name = (p == 6)  ? "tcp"
+                             : (p == 17) ? "udp"
+                             : (p == 1)  ? "icmp"
+                             : nullptr;
+            append_kind("protocol",
+                        name ? std::string{name} : std::to_string(p));
+        }
+        /* §5.44 dst_port: a single port (lo==hi) emits "p"; a range emits
+         * "lo-hi" (matching the config grammar). */
+        if (r.match.dst_port.has_value()) {
+            const PortRange& pr = *r.match.dst_port;
+            append_kind("dst_port",
+                        (pr.lo == pr.hi)
+                            ? std::to_string(pr.lo)
+                            : std::format("{}-{}", pr.lo, pr.hi));
+        }
         const std::string match = std::format("{{{}}}", parts);
 
         body.append(std::format(

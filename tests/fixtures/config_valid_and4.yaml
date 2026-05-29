@@ -1,0 +1,64 @@
+# config_valid_and4.yaml — §5.44 MVP-4.4 v2 4-axis AND-compose fixture.
+#
+# Used by §6.64 (T_PROTO_AND_COMPOSE), §6.65 (T_PORT_RANGE_AND_COMPOSE), and
+# §6.66 (T_AND4_ORACLE_AGREEMENT).
+#
+# schema_version: 2 (ADDITIVE-within-v2 — `protocol` + `dst_port` are NEW
+# OPTIONAL match keys per HG-mvp-4.4-4; existing dst/src-only v2 configs parse
+# unchanged). Match grammar is {dst_cidr, src_cidr, protocol, dst_port}
+# (>=1 required). `protocol`: name {tcp,udp,icmp} or numeric [0,255].
+# `dst_port`: integer (single) or "lo-hi" string (inclusive range), [0,65535],
+# lo<=hi. Each rule constrains a different subset of the four axes.
+#
+# Rule layout (bit position == id; first-match by lowest id, ffsll):
+#   id 0 : dst 10.1.0.0/16 AND src 192.168.5.0/24 AND tcp AND port 1000-2000
+#          pass   (FULL 4-axis rule)
+#   id 1 : dst 10.3.0.0/16 AND udp                 pass   (dst + proto)
+#   id 2 : src 10.9.0.0/16                          drop   (src-only; dst/proto/port wildcard)
+#   id 3 : dst 10.7.0.0/16                          pass   (dst-only; port-wildcard → ICMP can survive)
+#   id 4 : dst_port 443                             pass   (port-only, single port; lo==hi)
+#   id 5 : dst_port 1000-2000                       pass   (port-only, inclusive range)
+#   default_action: drop
+#
+# The 4-axis AND proof (§6.66): a packet matching id0 only when ALL four axes
+# are satisfied. Flipping proto from tcp→udp on the id0 4-tuple drops id0's bit
+# from the accumulator → the packet routes to the port-only rule id5 (same
+# dport, proto-wildcard) — proving the proto axis intersects (AND), not unions.
+# An ICMP packet has no L4 port (has_port=0) so the port-constrained rules
+# (id0/id4/id5) cannot match it — only port-wildcard rules (id1/id2/id3) or
+# defaults survive.
+#
+# IMPORTANT: tests/bitvec/bitvec_oracle_prod.py transcribes these rules BY HAND
+# (table RULES_AND4). Any edit here MUST be mirrored there — data-independence
+# is intentional (divergence fails the §6.66 agreement test loudly).
+schema_version: 2
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      dst_cidr: "10.1.0.0/16"
+      src_cidr: "192.168.5.0/24"
+      protocol: tcp
+      dst_port: "1000-2000"
+  - id: 1
+    action: pass
+    match:
+      dst_cidr: "10.3.0.0/16"
+      protocol: udp
+  - id: 2
+    action: drop
+    match:
+      src_cidr: "10.9.0.0/16"
+  - id: 3
+    action: pass
+    match:
+      dst_cidr: "10.7.0.0/16"
+  - id: 4
+    action: pass
+    match:
+      dst_port: 443
+  - id: 5
+    action: pass
+    match:
+      dst_port: "1000-2000"

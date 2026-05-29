@@ -171,6 +171,19 @@ constexpr ManagedMapEntry kManagedMaps[] = {
     { &SkelMapsT::dst_bitmask_b,    XDPMF_MAP_DST_INNER_B_NAME,         false },
     { &SkelMapsT::dst_rulesets,     XDPMF_MAP_DST_RULESETS_OUTER_NAME,  false },
     { &SkelMapsT::wildcard,         XDPMF_MAP_WILDCARD_NAME,            false },
+    /* §5.44 (MVP-4.4) D-mvp-4.4-Q1/Q2 net +6 (21 → 27): the NEW proto axis
+     * ARRAY_OF_MAPS trio (proto_bitmask_a/_b + proto_rulesets, HASH inners)
+     * and the NEW dst_port axis ARRAY_OF_MAPS trio (port_ranges_a/_b +
+     * port_rulesets, ARRAY inners), each mirroring the §5.27/§5.43 AOM
+     * topology. The `wildcard` ARRAY is UNCHANGED here (its max_entries grows
+     * 4→8 via the BITVEC_NUM_AXES macro, not a new row). All three call-site
+     * loops (clear, pin, reuse) walk this single table — HK-9 again. */
+    { &SkelMapsT::proto_bitmask_a,  XDPMF_MAP_PROTO_INNER_A_NAME,       false },
+    { &SkelMapsT::proto_bitmask_b,  XDPMF_MAP_PROTO_INNER_B_NAME,       false },
+    { &SkelMapsT::proto_rulesets,   XDPMF_MAP_PROTO_RULESETS_OUTER_NAME, false },
+    { &SkelMapsT::port_ranges_a,    XDPMF_MAP_PORT_INNER_A_NAME,        false },
+    { &SkelMapsT::port_ranges_b,    XDPMF_MAP_PORT_INNER_B_NAME,        false },
+    { &SkelMapsT::port_rulesets,    XDPMF_MAP_PORT_RULESETS_OUTER_NAME, false },
     { &SkelMapsT::active_idx,       XDPMF_MAP_ACTIVE_IDX_NAME,          false },
     { &SkelMapsT::defaults,         XDPMF_MAP_DEFAULTS_NAME,            false },
     { &SkelMapsT::stats,            XDPMF_MAP_STATS_NAME,               false },
@@ -1259,6 +1272,76 @@ struct AxisLowering {
     return out;
 }
 
+/* §5.44 (MVP-4.4) per-proto-axis lowering result: per-proto aggregated rule
+ * bitmasks (entries[k] = {proto, OR of bits of every rule constraining that
+ * exact proto}) + the wildcard mask (rules NOT constraining proto). NO
+ * prefix-closure (exact-match HASH — D-mvp-4.4-NO-CLOSURE). */
+struct ProtoLowering {
+    std::vector<std::pair<std::uint32_t, std::uint64_t>> entries;
+    std::uint64_t                                        wildcard = 0u;
+};
+
+/* Lower the proto axis: a rule with `protocol` set ORs its bit into that
+ * proto's aggregate key; a rule WITHOUT `protocol` contributes its bit to the
+ * proto wildcard (FI-2 mutual exclusion). id range already validated in
+ * config.cpp (bit shift safe). */
+[[nodiscard]] ProtoLowering lower_proto_axis(const Config& c)
+{
+    ProtoLowering out;
+    for (const Rule& r : c.rules) {
+        const std::uint64_t bit = std::uint64_t{1} << r.id;
+        if (r.match.protocol.has_value()) {
+            const std::uint32_t proto = *r.match.protocol;
+            // Aggregate rules sharing the same exact proto into one key.
+            bool merged = false;
+            for (std::pair<std::uint32_t, std::uint64_t>& e : out.entries) {
+                if (e.first == proto) {
+                    e.second |= bit;
+                    merged = true;
+                    break;
+                }
+            }
+            if (!merged) {
+                out.entries.emplace_back(proto, bit);
+            }
+        } else {
+            out.wildcard |= bit;
+        }
+    }
+    return out;
+}
+
+/* §5.44 (MVP-4.4) per-port-axis lowering result: one xdpmf_port_range slot per
+ * port-constrained rule (single port ⇒ lo==hi) + the wildcard mask (rules NOT
+ * constraining dst_port). NO prefix-closure (explicit ranges — D-mvp-4.4-
+ * NO-CLOSURE). */
+struct PortLowering {
+    std::vector<xdpmf_port_range> ranges;
+    std::uint64_t                 wildcard = 0u;
+};
+
+/* Lower the dst_port axis: a rule with `dst_port` set contributes one
+ * {lo,hi,bit} slot; a rule WITHOUT `dst_port` contributes its bit to the port
+ * wildcard (FI-2). id range already validated in config.cpp. */
+[[nodiscard]] PortLowering lower_port_axis(const Config& c)
+{
+    PortLowering out;
+    out.ranges.reserve(c.rules.size());
+    for (const Rule& r : c.rules) {
+        const std::uint64_t bit = std::uint64_t{1} << r.id;
+        if (r.match.dst_port.has_value()) {
+            xdpmf_port_range slot{};
+            slot.lo  = r.match.dst_port->lo;
+            slot.hi  = r.match.dst_port->hi;
+            slot.bit = bit;
+            out.ranges.push_back(slot);
+        } else {
+            out.wildcard |= bit;
+        }
+    }
+    return out;
+}
+
 /* §5.26 Q2 inner-slot population — §5.31 PI-13-3.4b: writes full
  * `struct allow_entry` per insert (offset 0 = present=1, offset 4 = rule_id
  * from operator's YAML `id:`). Bulk-clear-then-insert preserved. Caller
@@ -1355,28 +1438,112 @@ void populate_bitvec_inner_slot(int inner_fd, const std::vector<BitPrefix>& pref
     }
 }
 
-/* §5.43 (MVP-4.3) D-mvp-4.3-Q2: write the INACTIVE half of the single
- * combined `wildcard` ARRAY before the active_idx flip — slots
- * [inactive*BITVEC_NUM_AXES + BV_AXIS_DST] and [... + BV_AXIS_SRC]. The
- * RESET-write (no copy-forward) parallels populate_bitvec_inner_slot; the
- * single active_idx u32 store commits the wildcard swap together with the
- * dst/src/defaults/rules/rule_counters swap. */
-void write_wildcard_slots(int wildcard_fd, std::uint32_t inactive,
-                          std::uint64_t wc_dst, std::uint64_t wc_src)
+/* §5.44 (MVP-4.4) D-mvp-4.4-Q1: populate one proto-axis HASH inner
+ * (proto_bitmask_<a|b>) — key __u32 IP-protocol, value __u64 aggregated
+ * rule-bitmask. Bulk-clear-then-insert (delete-then-insert precedent, same
+ * shape as populate_bitvec_inner_slot but with a __u32 key). NO prefix-closure
+ * (exact-match — D-mvp-4.4-NO-CLOSURE). RESET-on-apply: caller passes the
+ * INACTIVE inner fd and writes BEFORE the active_idx flip. */
+void populate_proto_inner_slot(
+    int inner_fd, const std::vector<std::pair<std::uint32_t, std::uint64_t>>& entries)
 {
-    const std::uint32_t k_dst = inactive * BITVEC_NUM_AXES + BV_AXIS_DST;
-    const std::uint32_t k_src = inactive * BITVEC_NUM_AXES + BV_AXIS_SRC;
-    int rc = bpf_map_update_elem(wildcard_fd, &k_dst, &wc_dst, BPF_ANY);
-    if (rc < 0) {
-        throw_loader(classify(rc, LoaderError::LoadFailed),
-                     std::format("bpf_map_update_elem(wildcard[{}] dst): {}",
-                                 k_dst, std::strerror(-rc)));
+    std::uint32_t prev = 0;
+    std::uint32_t cur  = 0;
+    bool          have_prev = false;
+    while (true) {
+        const int rc = bpf_map_get_next_key(inner_fd,
+                                            have_prev ? &prev : nullptr,
+                                            &cur);
+        if (rc != 0) {
+            if (-rc == ENOENT) break;
+            throw_loader(classify(rc, LoaderError::LoadFailed),
+                         std::format("bpf_map_get_next_key(proto_inner): {}",
+                                     std::strerror(-rc)));
+        }
+        const int drc = bpf_map_delete_elem(inner_fd, &cur);
+        if (drc != 0 && -drc != ENOENT) {
+            throw_loader(classify(drc, LoaderError::LoadFailed),
+                         std::format("bpf_map_delete_elem(proto_inner): {}",
+                                     std::strerror(-drc)));
+        }
+        prev      = cur;
+        have_prev = true;
     }
-    rc = bpf_map_update_elem(wildcard_fd, &k_src, &wc_src, BPF_ANY);
-    if (rc < 0) {
-        throw_loader(classify(rc, LoaderError::LoadFailed),
-                     std::format("bpf_map_update_elem(wildcard[{}] src): {}",
-                                 k_src, std::strerror(-rc)));
+    for (const std::pair<std::uint32_t, std::uint64_t>& e : entries) {
+        const std::uint32_t key  = e.first;
+        const std::uint64_t mask = e.second;
+        const int rc = bpf_map_update_elem(inner_fd, &key, &mask, BPF_ANY);
+        if (rc < 0) {
+            throw_loader(classify(rc, LoaderError::LoadFailed),
+                         std::format("bpf_map_update_elem(proto_inner[{}]): {}",
+                                     key, std::strerror(-rc)));
+        }
+    }
+}
+
+/* §5.44 (MVP-4.4) D-mvp-4.4-Q2 + D-mvp-4.4-PORT-ARRAY-CLEAR: populate one
+ * dst_port-axis ARRAY inner (port_ranges_<a|b>). BPF ARRAY maps have no
+ * delete, so clear by overwriting ALL XDPMF_ALLOWLIST_MAX slots with the
+ * UNUSED sentinel {lo=1, hi=0, bit=0} (lo>hi → datapath port_scan skips it),
+ * then write the used range slots (mirrors populate_rules_inner_slot's
+ * clear-all-slots-then-write precedent). RESET-on-apply: caller passes the
+ * INACTIVE inner fd and writes BEFORE the active_idx flip. */
+void populate_port_inner_slot(int inner_fd, const std::vector<xdpmf_port_range>& ranges)
+{
+    /* Clear all slots to the unused sentinel (lo>hi). */
+    xdpmf_port_range unused{};
+    unused.lo  = 1;
+    unused.hi  = 0;
+    unused.bit = 0;
+    for (std::uint32_t k = 0; k < static_cast<std::uint32_t>(XDPMF_ALLOWLIST_MAX); ++k) {
+        const int rc = bpf_map_update_elem(inner_fd, &k, &unused, BPF_ANY);
+        if (rc < 0) {
+            throw_loader(classify(rc, LoaderError::LoadFailed),
+                         std::format("bpf_map_update_elem(port_inner[{}] clear): {}",
+                                     k, std::strerror(-rc)));
+        }
+    }
+    /* Then write the used range slots. range count ≤ rule count ≤
+     * XDPMF_ALLOWLIST_MAX (bounded by apply_request's pre-check). */
+    for (std::uint32_t i = 0; i < ranges.size(); ++i) {
+        const xdpmf_port_range slot = ranges[i];
+        const int rc = bpf_map_update_elem(inner_fd, &i, &slot, BPF_ANY);
+        if (rc < 0) {
+            throw_loader(classify(rc, LoaderError::LoadFailed),
+                         std::format("bpf_map_update_elem(port_inner[{}]): {}",
+                                     i, std::strerror(-rc)));
+        }
+    }
+}
+
+/* §5.43 (MVP-4.3) D-mvp-4.3-Q2 + §5.44 (MVP-4.4) D-mvp-4.4-Q4: write the
+ * INACTIVE half of the single combined `wildcard` ARRAY before the active_idx
+ * flip — all FOUR axis slots [inactive*BITVEC_NUM_AXES + {DST,SRC,PROTO,PORT}].
+ * The RESET-write (no copy-forward) parallels populate_bitvec_inner_slot; the
+ * single active_idx u32 store commits the wildcard swap together with the
+ * dst/src/proto/port/defaults/rules/rule_counters swap. */
+void write_wildcard_slots(int wildcard_fd, std::uint32_t inactive,
+                          std::uint64_t wc_dst, std::uint64_t wc_src,
+                          std::uint64_t wc_proto, std::uint64_t wc_port)
+{
+    const struct {
+        std::uint32_t axis;
+        std::uint64_t value;
+        const char*   name;
+    } slots[] = {
+        { BV_AXIS_DST,   wc_dst,   "dst"   },
+        { BV_AXIS_SRC,   wc_src,   "src"   },
+        { BV_AXIS_PROTO, wc_proto, "proto" },
+        { BV_AXIS_PORT,  wc_port,  "port"  },
+    };
+    for (const auto& s : slots) {
+        const std::uint32_t key = inactive * BITVEC_NUM_AXES + s.axis;
+        const int rc = bpf_map_update_elem(wildcard_fd, &key, &s.value, BPF_ANY);
+        if (rc < 0) {
+            throw_loader(classify(rc, LoaderError::LoadFailed),
+                         std::format("bpf_map_update_elem(wildcard[{}] {}): {}",
+                                     key, s.name, std::strerror(-rc)));
+        }
     }
 }
 
@@ -1762,6 +1929,10 @@ std::uint32_t apply_request(const ApplyRequest& req)
     const std::vector<MacRule> deduped     = extract_pass_macs(req.config);
     const AxisLowering         dst_low     = lower_axis(req.config, /*dst_axis=*/true);
     const AxisLowering         src_low     = lower_axis(req.config, /*dst_axis=*/false);
+    // §5.44 (MVP-4.4): lower the two NEW axes (proto exact-HASH, dst_port
+    // range) alongside the §5.43 LPM axes. NO closure (D-mvp-4.4-NO-CLOSURE).
+    const ProtoLowering        proto_low   = lower_proto_axis(req.config);
+    const PortLowering         port_low    = lower_port_axis(req.config);
     const DefaultAction default_action     = req.config.default_action;
 
     if (deduped.size() > XDPMF_ALLOWLIST_MAX) {
@@ -1778,6 +1949,15 @@ std::uint32_t apply_request(const ApplyRequest& req)
         throw_loader(LoaderError::LoadFailed,
                      std::format("apply: src-cidr-rule count {} exceeds XDPMF_ALLOWLIST_MAX={}",
                                  src_low.prefixes.size(), XDPMF_ALLOWLIST_MAX));
+    }
+    // §5.44 (MVP-4.4): the port axis stores one ARRAY slot per port-constrained
+    // rule (bounded by XDPMF_ALLOWLIST_MAX inner slots). The proto axis
+    // aggregates per proto, so its entry count ≤ 256 (XDPMF_PROTO_HASH_MAX) by
+    // construction — no separate bound check needed beyond the per-rule id cap.
+    if (port_low.ranges.size() > XDPMF_ALLOWLIST_MAX) {
+        throw_loader(LoaderError::LoadFailed,
+                     std::format("apply: dst-port-rule count {} exceeds XDPMF_ALLOWLIST_MAX={}",
+                                 port_low.ranges.size(), XDPMF_ALLOWLIST_MAX));
     }
 
     // §5.24 Q3 Option B: kernel-version probe BEFORE any libbpf API call.
@@ -1998,6 +2178,31 @@ std::uint32_t apply_request(const ApplyRequest& req)
             }
             populate_bitvec_inner_slot(inactive_src_fd, src_low.prefixes);
         }
+        // §5.44 (MVP-4.4): populate the INACTIVE proto (HASH) + port (ARRAY)
+        // inners BEFORE the active_idx flip so the single u32 store commits
+        // all FOUR axes' new ruleset atomically (RESET-on-apply).
+        {
+            bpf_map* inactive_proto_inner = (inactive == 0)
+                                                ? skel->maps.proto_bitmask_a
+                                                : skel->maps.proto_bitmask_b;
+            const int inactive_proto_fd = bpf_map__fd(inactive_proto_inner);
+            if (inactive_proto_fd < 0) {
+                throw_loader(LoaderError::LoadFailed,
+                             "inactive proto inner fd unavailable (reattach)");
+            }
+            populate_proto_inner_slot(inactive_proto_fd, proto_low.entries);
+        }
+        {
+            bpf_map* inactive_port_inner = (inactive == 0)
+                                               ? skel->maps.port_ranges_a
+                                               : skel->maps.port_ranges_b;
+            const int inactive_port_fd = bpf_map__fd(inactive_port_inner);
+            if (inactive_port_fd < 0) {
+                throw_loader(LoaderError::LoadFailed,
+                             "inactive port inner fd unavailable (reattach)");
+            }
+            populate_port_inner_slot(inactive_port_fd, port_low.ranges);
+        }
         {
             const int wildcard_fd = bpf_map__fd(skel->maps.wildcard);
             if (wildcard_fd < 0) {
@@ -2005,7 +2210,8 @@ std::uint32_t apply_request(const ApplyRequest& req)
                              "wildcard fd unavailable (reattach)");
             }
             write_wildcard_slots(wildcard_fd, inactive,
-                                 dst_low.wildcard, src_low.wildcard);
+                                 dst_low.wildcard, src_low.wildcard,
+                                 proto_low.wildcard, port_low.wildcard);
         }
         {
             const int defaults_fd = bpf_map__fd(skel->maps.defaults);
@@ -2181,12 +2387,32 @@ std::uint32_t apply_request(const ApplyRequest& req)
         }
         populate_bitvec_inner_slot(src_inner_fd, src_low.prefixes);
     }
+    // §5.44 (MVP-4.4): fresh-attach populates slot 0 of the proto (HASH) +
+    // port (ARRAY) axes alongside the dst/src slot-0 inners; the active_idx
+    // u32 write below (= 0) is the atomic commit for ALL four axes.
+    {
+        bpf_map* proto_inner_map = skel->maps.proto_bitmask_a;
+        const int proto_inner_fd = bpf_map__fd(proto_inner_map);
+        if (proto_inner_fd < 0) {
+            throw_loader(LoaderError::LoadFailed, "proto inner-map fd unavailable");
+        }
+        populate_proto_inner_slot(proto_inner_fd, proto_low.entries);
+    }
+    {
+        bpf_map* port_inner_map = skel->maps.port_ranges_a;
+        const int port_inner_fd = bpf_map__fd(port_inner_map);
+        if (port_inner_fd < 0) {
+            throw_loader(LoaderError::LoadFailed, "port inner-map fd unavailable");
+        }
+        populate_port_inner_slot(port_inner_fd, port_low.ranges);
+    }
     {
         const int wildcard_fd = bpf_map__fd(skel->maps.wildcard);
         if (wildcard_fd < 0) {
             throw_loader(LoaderError::LoadFailed, "wildcard map fd unavailable");
         }
-        write_wildcard_slots(wildcard_fd, 0u, dst_low.wildcard, src_low.wildcard);
+        write_wildcard_slots(wildcard_fd, 0u, dst_low.wildcard, src_low.wildcard,
+                             proto_low.wildcard, port_low.wildcard);
     }
     {
         const int defaults_fd = bpf_map__fd(skel->maps.defaults);

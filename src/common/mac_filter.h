@@ -113,9 +113,50 @@ enum mac_filter_stat {
 #define XDPMF_MAP_DST_INNER_A_NAME         "dst_bitmask_a"  /* inner slot 0, LPM_TRIE of __u64 */
 #define XDPMF_MAP_DST_INNER_B_NAME         "dst_bitmask_b"  /* inner slot 1, LPM_TRIE of __u64 */
 #define XDPMF_MAP_WILDCARD_NAME            "wildcard"       /* ARRAY[XDPMF_RULESET_COUNT*BITVEC_NUM_AXES] of __u64 */
-#define BITVEC_NUM_AXES 2
+
+/* §5.44 (MVP-4.4) D-mvp-4.4-Q1/Q2/Q4: ADDITIVE +2 bit-vector axes — proto
+ * (exact-match HASH) + dst_port (bounded range-scan) — extending the §5.43
+ * two-LPM-axis (dst/src) AND classifier. BITVEC_NUM_AXES 2→4 (the ONE foreseen
+ * value flip) auto-grows the `wildcard` ARRAY's max_entries 4→8 via the
+ * XDPMF_RULESET_COUNT * BITVEC_NUM_AXES formula (no literal edit in the .bpf.c
+ * decl). New axis indices BV_AXIS_PROTO=2 / BV_AXIS_PORT=3.
+ *
+ *   proto: ARRAY_OF_MAPS[2] of HASH inners (proto_bitmask_a/_b + proto_rulesets),
+ *          key __u32 IP-protocol number, value __u64 rule-bitmask, NO closure.
+ *   port:  ARRAY_OF_MAPS[2] of ARRAY inners (port_ranges_a/_b + port_rulesets),
+ *          key __u32 slot index, value struct xdpmf_port_range, NO closure. */
+#define XDPMF_MAP_PROTO_RULESETS_OUTER_NAME "proto_rulesets"  /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] of HASH fds */
+#define XDPMF_MAP_PROTO_INNER_A_NAME        "proto_bitmask_a" /* inner slot 0, HASH of __u64 */
+#define XDPMF_MAP_PROTO_INNER_B_NAME        "proto_bitmask_b" /* inner slot 1, HASH of __u64 */
+#define XDPMF_MAP_PORT_RULESETS_OUTER_NAME  "port_rulesets"   /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] of ARRAY fds */
+#define XDPMF_MAP_PORT_INNER_A_NAME         "port_ranges_a"   /* inner slot 0, ARRAY of xdpmf_port_range */
+#define XDPMF_MAP_PORT_INNER_B_NAME         "port_ranges_b"   /* inner slot 1, ARRAY of xdpmf_port_range */
+
+/* Proto HASH inner capacity — sparse keyed lookup over IP-protocol numbers
+ * [0,255] (D-mvp-4.4-Q1). */
+#define XDPMF_PROTO_HASH_MAX 256
+
+#define BITVEC_NUM_AXES 4
 #define BV_AXIS_DST     0
 #define BV_AXIS_SRC     1
+#define BV_AXIS_PROTO   2
+#define BV_AXIS_PORT    3
+
+/* §5.44 (MVP-4.4) D-mvp-4.4-Q2: production-owned port-range slot — analog of
+ * the §5.42 spike's `bv_port_range`. One slot per port-constrained rule; a
+ * single port is encoded lo==hi. `lo > hi` marks an UNUSED slot (the datapath
+ * port_scan skips it). Types follow the xdpmf_cidr_v4/allow_entry convention:
+ * `unsigned int` (not `__u32`) + `unsigned long long` (not `__u64`) because
+ * this header is included from BOTH userspace C++ (where `__u32`/`__u64` are
+ * not libc types) AND BPF C (where these widths are binary-compatible with
+ * kernel `__u32`/`__u64` on every supported arch). The design §5.44 prose
+ * wrote `__u32`/`__u64` shorthand; the stated rationale ("per existing
+ * convention; BPF+C++ compatible") governs (see impl-notes). */
+struct xdpmf_port_range {
+    unsigned int       lo;   /* inclusive low  (host order; valid range [0,65535]) */
+    unsigned int       hi;   /* inclusive high (host order; valid range [0,65535]) */
+    unsigned long long bit;  /* rule bit = 1ULL << rule_id; binary-compat with __u64 */
+};
 
 /* §5.29 (MVP-3.4): rules + action_table skeleton — see design §5.29 HG-3.4-1 + Q3.
  *

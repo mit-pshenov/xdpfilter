@@ -118,6 +118,96 @@ namespace {
               "rule action must be 'pass' or 'drop'");
 }
 
+/* §5.44 (MVP-4.4) shared bounded base-10 parse of a non-negative integer
+ * scalar with an explicit inclusive upper bound. Used by the protocol +
+ * dst_port grammars (both reject signs, empty, non-digits, and overflow with
+ * a field-named ConfigError exit 9). Returns the parsed value. */
+[[nodiscard]] std::uint32_t parse_bounded_uint(std::string_view s,
+                                               std::uint32_t    max_inclusive,
+                                               std::string_view file,
+                                               std::uint32_t    line,
+                                               std::uint32_t    col,
+                                               std::string_view field)
+{
+    if (s.empty()) {
+        throw_cfg("invalid integer", file, line, col,
+                  std::format("{} is empty", field));
+    }
+    std::uint64_t v = 0;
+    for (const char ch : s) {
+        if (ch < '0' || ch > '9') {
+            throw_cfg("invalid integer", file, line, col,
+                      std::format("{} contains non-digit '{}'", field, ch));
+        }
+        v = v * 10u + static_cast<std::uint64_t>(ch - '0');
+        if (v > max_inclusive) {
+            throw_cfg("integer out of range", file, line, col,
+                      std::format("{} must be in [0,{}]", field, max_inclusive));
+        }
+    }
+    return static_cast<std::uint32_t>(v);
+}
+
+/* §5.44 (MVP-4.4) D-mvp-4.4-PROTO-GRAMMAR: parse a `protocol` scalar — a name
+ * {tcp→6, udp→17, icmp→1} OR a numeric IP-protocol number ∈ [0,255]. Unknown
+ * name / out-of-range → ConfigError exit 9. */
+[[nodiscard]] std::uint8_t parse_protocol(const yaml::Node& v, std::string_view file)
+{
+    if (v.kind != yaml::Node::Kind::Scalar || v.scalar.empty()) {
+        throw_cfg("rule match protocol", file, v.line, v.col,
+                  "protocol must be a name (tcp/udp/icmp) or a number in [0,255]");
+    }
+    if (v.scalar == "tcp")  return 6u;
+    if (v.scalar == "udp")  return 17u;
+    if (v.scalar == "icmp") return 1u;
+    // Numeric fallback. A leading non-digit (e.g. an unknown name) is reported
+    // as the proto-grammar error, not a bare integer diagnostic.
+    if (v.scalar[0] < '0' || v.scalar[0] > '9') {
+        throw_cfg("rule match protocol", file, v.line, v.col,
+                  std::format("unknown protocol '{}' (expected tcp/udp/icmp "
+                              "or a number in [0,255])", v.scalar));
+    }
+    const std::uint32_t n = parse_bounded_uint(v.scalar, 255u, file,
+                                               v.line, v.col, "protocol");
+    return static_cast<std::uint8_t>(n);
+}
+
+/* §5.44 (MVP-4.4) D-mvp-4.4-PORT-GRAMMAR: parse a `dst_port` scalar — an
+ * integer [0,65535] (→ {p,p}) OR a "lo-hi" string (inclusive range, both
+ * endpoints ∈ [0,65535], lo ≤ hi). Malformed / out-of-range / lo>hi → exit 9. */
+[[nodiscard]] PortRange parse_dst_port(const yaml::Node& v, std::string_view file)
+{
+    if (v.kind != yaml::Node::Kind::Scalar || v.scalar.empty()) {
+        throw_cfg("rule match dst_port", file, v.line, v.col,
+                  "dst_port must be an integer [0,65535] or a \"lo-hi\" range");
+    }
+    const std::string& s = v.scalar;
+    // A '-' anywhere but position 0 marks the lo-hi separator (negative
+    // endpoints are disallowed; parse_bounded_uint rejects the empty halves).
+    const std::size_t dash = s.find('-', 1);
+    PortRange out;
+    if (dash == std::string::npos) {
+        const std::uint32_t p = parse_bounded_uint(s, 65535u, file,
+                                                   v.line, v.col, "dst_port");
+        out.lo = static_cast<std::uint16_t>(p);
+        out.hi = static_cast<std::uint16_t>(p);
+    } else {
+        const std::string_view lo_s{s.data(), dash};
+        const std::string_view hi_s{s.data() + dash + 1, s.size() - dash - 1};
+        const std::uint32_t lo = parse_bounded_uint(lo_s, 65535u, file,
+                                                    v.line, v.col, "dst_port lo");
+        const std::uint32_t hi = parse_bounded_uint(hi_s, 65535u, file,
+                                                    v.line, v.col, "dst_port hi");
+        if (lo > hi) {
+            throw_cfg("rule match dst_port", file, v.line, v.col,
+                      std::format("dst_port range lo {} > hi {}", lo, hi));
+        }
+        out.lo = static_cast<std::uint16_t>(lo);
+        out.hi = static_cast<std::uint16_t>(hi);
+    }
+    return out;
+}
+
 }  // namespace
 
 Config validate(const yaml::Node& root, std::string_view file)
@@ -220,27 +310,38 @@ Config validate(const yaml::Node& root, std::string_view file)
                 // hard cutover should fail loud, not enforce a no-op MAC rule
                 // the operator believes is live (HG-mvp-4.3-2). Any other key
                 // (cidr, port, vlan, ...) → ConfigError exit 9.
+                // §5.44 (MVP-4.4) D-mvp-4.4-PROTO/PORT-GRAMMAR: the v2 accepted
+                // match-key set is ADDITIVELY extended to {dst_cidr, src_cidr,
+                // protocol, dst_port}. `mac` stays REJECTED (MAC-deferred). Any
+                // other key → ConfigError exit 9. Existing dst/src-only configs
+                // parse UNCHANGED (HG-mvp-4.4-4 additive-within-v2).
                 for (const std::pair<std::string, yaml::Node>& kv : match->mapping) {
                     if (kv.first == "mac") {
                         throw_cfg("unsupported match type", file,
                                   kv.second.line, kv.second.col,
                                   "MAC matching deferred; schema_version 2 supports "
-                                  "dst_cidr + src_cidr");
+                                  "dst_cidr + src_cidr + protocol + dst_port");
                     }
-                    if (kv.first != "dst_cidr" && kv.first != "src_cidr") {
+                    if (kv.first != "dst_cidr" && kv.first != "src_cidr"
+                        && kv.first != "protocol" && kv.first != "dst_port") {
                         throw_cfg("unsupported match type", file,
                                   kv.second.line, kv.second.col,
                                   std::format("match type '{}' not supported in schema_version 2",
                                               kv.first));
                     }
                 }
-                // §5.43 v2 match grammar: each rule's match MUST contain AT
-                // LEAST ONE of {dst_cidr, src_cidr}. Empty match: {} → exit 9.
+                // §5.44 v2 match grammar: each rule's match MUST contain AT
+                // LEAST ONE of {dst_cidr, src_cidr, protocol, dst_port}. Empty
+                // match: {} → exit 9.
                 const yaml::Node* dst_cidr_node = find_key(*match, "dst_cidr");
                 const yaml::Node* src_cidr_node = find_key(*match, "src_cidr");
-                if (dst_cidr_node == nullptr && src_cidr_node == nullptr) {
+                const yaml::Node* protocol_node = find_key(*match, "protocol");
+                const yaml::Node* dst_port_node = find_key(*match, "dst_port");
+                if (dst_cidr_node == nullptr && src_cidr_node == nullptr
+                    && protocol_node == nullptr && dst_port_node == nullptr) {
                     throw_cfg("rule match", file, match->line, match->col,
-                              "rule must specify 'dst_cidr' or 'src_cidr' (or both)");
+                              "rule must specify at least one of "
+                              "'dst_cidr', 'src_cidr', 'protocol', 'dst_port'");
                 }
                 if (dst_cidr_node != nullptr) {
                     if (dst_cidr_node->kind != yaml::Node::Kind::Scalar) {
@@ -269,6 +370,18 @@ Config validate(const yaml::Node& root, std::string_view file)
                     r.match.src_cidr = cidr::parse_cidr_v4(
                         src_cidr_node->scalar, file,
                         src_cidr_node->line, src_cidr_node->col);
+                }
+                // §5.44 (MVP-4.4) D-mvp-4.4-PROTO-GRAMMAR: `protocol` accepts a
+                // name {tcp→6, udp→17, icmp→1} OR a numeric IP-protocol number
+                // ∈ [0,255]; exact-match. Unknown name / out-of-range → exit 9.
+                if (protocol_node != nullptr) {
+                    r.match.protocol = parse_protocol(*protocol_node, file);
+                }
+                // §5.44 D-mvp-4.4-PORT-GRAMMAR: `dst_port` accepts an integer
+                // [0,65535] (→ {p,p}) OR a "lo-hi" string (inclusive range);
+                // both endpoints ∈ [0,65535], lo ≤ hi. → exit 9 otherwise.
+                if (dst_port_node != nullptr) {
+                    r.match.dst_port = parse_dst_port(*dst_port_node, file);
                 }
 
                 // Reject unknown sibling keys in the rule (forward-compat hinge).

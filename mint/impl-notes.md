@@ -578,3 +578,27 @@ NOT needed (the `#ifdef` alt is retained but inactive).
 ## Cross-check against tester §6.60–§6.63
 T_AND_COMPOSE_OK / T_AND_ORACLE_AGREEMENT / T_AND_PREFIX_CLOSURE_OVERLAP
 (guard #23) / T_SCHEMA_V2_CUTOVER → 4/4 PASS against this impl.
+
+---
+
+# MVP-4.4 impl notes (§5.44 — proto + dst_port axes)
+
+## Deviations / clarifications escalated to architect
+
+### D1 — `struct xdpmf_port_range` field types (internal inconsistency; peer-DM sent)
+- **Design prose** (EDITED `mac_filter.h` row): `struct xdpmf_port_range { __u32 lo; __u32 hi; __u64 bit; };`.
+- **Problem**: the struct is `#include`d from the C++ TUs (config/loader/sidecar). `__u32`/`__u64` are NOT libc types in C++ — clang errors "Unknown type name '__u32'" (verified). The SAME design row's rationale says "per existing convention; BPF+C++ compatible", and the existing `xdpmf_cidr_v4` comment is explicit that `unsigned int` is used (not `__u32`) precisely because the header is shared with C++.
+- **Resolution (impl default, following the cited convention)**: `struct xdpmf_port_range { unsigned int lo; unsigned int hi; unsigned long long bit; };` — binary-compatible with kernel `__u32`/`__u64` on every supported arch (same discipline as `allow_entry.rule_id` = `unsigned int`). Prose `__u32`/`__u64` is shorthand; the rationale governs. Peer-DM sent; no design change strictly required.
+
+## Implementation choices (sensible defaults; no architect ruling required)
+- **proto aggregation** (`lower_proto_axis`): rules sharing the same exact proto OR their bits into ONE HASH key. Matches D-mvp-4.4-Q1.
+- **port slot indexing** (`lower_port_axis`/`populate_port_inner_slot`): one ARRAY slot per port-constrained rule at consecutive indices `[0, ranges.size())`; other slots cleared to UNUSED sentinel `{lo=1,hi=0,bit=0}` (lo>hi) per D-mvp-4.4-PORT-ARRAY-CLEAR (ARRAY has no delete → clear-all-then-write, mirrors `populate_rules_inner_slot`).
+- **`write_wildcard_slots`**: extended to write all 4 axis slots via a small local table; keyed `inactive*BITVEC_NUM_AXES + axis`. RESET-on-apply (guard #15).
+- **L4 parse** (D-mvp-4.4-IHL): `l4 = (void*)ip + ip->ihl*4` with `ihl<5 → STAT_DROP_MALFORMED`, then per-L4-header bounds-check before `dest`. Fixed-20B FALLBACK activated ONLY if Phase 2.5 load rejects the variable offset.
+- **`dst_port` parse**: `'-'` searched from index 1 (negative endpoints disallowed); single int → `{p,p}`; `"lo-hi"` → range with `lo≤hi`. Shared `parse_bounded_uint` for proto (≤255) + port (≤65535).
+
+## NOT touched by impl (tester domain, task #3)
+- NEW fixtures (`config_valid_and4.yaml`), NEW tests (`T_PROTO_AND_COMPOSE.sh`, `T_PORT_RANGE_AND_COMPOSE.sh`, `T_AND4_ORACLE_AGREEMENT.sh`), `tests/bitvec/bitvec_oracle_prod.py` 4-axis extension, `tests/CMakeLists.txt` registration. Impl edited only the `T_EXPORTER_METRICS_FORMAT.sh` version-literal (guard #11, coupled to the VERSION bump).
+
+## Phase 2.5 result
+- See final SendMessage to team-lead (bpftool prog load rc + which IHL path loaded).

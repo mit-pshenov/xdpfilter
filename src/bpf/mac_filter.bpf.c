@@ -70,6 +70,17 @@
 #endif
 #define XDPMF_VLAN_MAX_DEPTH 2
 
+/* §5.44 (MVP-4.4) D-mvp-4.4-Q3: IP-protocol numbers for the L4 dport extract.
+ * Same rationale as ETH_P_IP / the VLAN TPIDs above — vmlinux.h is BTF-derived
+ * (types only, no CPP macros) and linux/in.h is unavailable in the BPF-target
+ * build. Values are byte-equivalent to the IANA-assigned IP protocol numbers. */
+#ifndef IPPROTO_TCP
+#define IPPROTO_TCP 6
+#endif
+#ifndef IPPROTO_UDP
+#define IPPROTO_UDP 17
+#endif
+
 /* Named inner-map type. Used by both concrete inner instances and the
  * outer MAP_OF_MAPS template (so &instance pointer types match exactly). */
 struct xdpmf_allowlist_inner {
@@ -189,6 +200,65 @@ struct {
     __uint(max_entries, XDPMF_RULESET_COUNT * BITVEC_NUM_AXES);
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } wildcard SEC(".maps");
+
+/*
+ * §5.44 (MVP-4.4) D-mvp-4.4-Q1: NEW proto axis — an ARRAY_OF_MAPS[2] of HASH
+ * inners (proto_bitmask_a/_b + proto_rulesets) mirroring the §5.27 allowlist/
+ * rulesets HASH-AOM topology (only key/value types differ: __u32 IP-protocol
+ * → __u64 rule-bitmask). Exact-match keyed lookup, NO prefix-closure. A rule
+ * constraining `protocol=p` ORs its bit into proto_bitmask[active][p]; the
+ * outer selects the active inner via the SHARED active_idx. The datapath ORs
+ * the looked-up mask into the proto-axis survivors before the cross-axis AND.
+ */
+struct xdpmf_proto_inner {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u32);
+    __type(value, __u64);
+    __uint(max_entries, XDPMF_PROTO_HASH_MAX);
+};
+
+struct xdpmf_proto_inner proto_bitmask_a SEC(".maps");
+struct xdpmf_proto_inner proto_bitmask_b SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
+    __uint(max_entries, XDPMF_RULESET_COUNT);
+    __uint(key_size, sizeof(__u32));
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+    __array(values, struct xdpmf_proto_inner);
+} proto_rulesets SEC(".maps") = {
+    .values = { &proto_bitmask_a, &proto_bitmask_b },
+};
+
+/*
+ * §5.44 (MVP-4.4) D-mvp-4.4-Q2: NEW dst_port axis — an ARRAY_OF_MAPS[2] of
+ * ARRAY inners (port_ranges_a/_b + port_rulesets) holding `struct
+ * xdpmf_port_range{lo,hi,bit}` slots (production analog of the §5.42 spike's
+ * `bv_port_range`). The datapath does a bounded `#pragma unroll` scan
+ * (port_scan) over XDPMF_ALLOWLIST_MAX slots, OR-ing `bit` of every USED slot
+ * (lo<=hi) whose inclusive [lo,hi] contains the dport. NO prefix-closure
+ * (explicit ranges, not LPM prefixes). Single shared active_idx commits the
+ * swap with the dst/src/proto/defaults/rules/rule_counters swap.
+ */
+struct xdpmf_port_inner {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __type(key, __u32);
+    __type(value, struct xdpmf_port_range);
+    __uint(max_entries, XDPMF_ALLOWLIST_MAX);
+};
+
+struct xdpmf_port_inner port_ranges_a SEC(".maps");
+struct xdpmf_port_inner port_ranges_b SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
+    __uint(max_entries, XDPMF_RULESET_COUNT);
+    __uint(key_size, sizeof(__u32));
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+    __array(values, struct xdpmf_port_inner);
+} port_rulesets SEC(".maps") = {
+    .values = { &port_ranges_a, &port_ranges_b },
+};
 
 /*
  * active_idx: single-slot ARRAY whose only entry is the index in {0,1}
@@ -386,6 +456,33 @@ static __always_inline __u32 first_set_u64(__u64 x)
 #endif
 }
 
+/* §5.44 (MVP-4.4) D-mvp-4.4-Q2 production-owned bounded port range-scan
+ * (transcribed from the §5.42 spike's `bitvec_port_scan`, guard #9 — NOT
+ * #include'd from tests/bitvec). OR `bit` of every USED slot whose inclusive
+ * [lo,hi] contains `dport`; `lo > hi` marks an unused slot (skipped). The
+ * `#pragma unroll` over XDPMF_ALLOWLIST_MAX has no back-edge, so the 5.15
+ * verifier sees straight-line code (mirrors l3_after_vlan / first_set_u64).
+ * `port_inner` is the active inner ARRAY fd from port_rulesets[active]. */
+static __always_inline __u64 port_scan(void *port_inner, __u32 dport)
+{
+    __u64 mask = 0;
+#pragma unroll
+    for (__u32 i = 0; i < XDPMF_ALLOWLIST_MAX; i++) {
+        __u32 k = i;
+        struct xdpmf_port_range *r = bpf_map_lookup_elem(port_inner, &k);
+        if (!r) {
+            continue;
+        }
+        if (r->lo > r->hi) {
+            continue;  /* unused slot */
+        }
+        if (dport >= r->lo && dport <= r->hi) {
+            mask |= r->bit;
+        }
+    }
+    return mask;
+}
+
 /* §5.41 (MVP-4.1) Q1.A2 single-consumer helper: walk up to
  * XDPMF_VLAN_MAX_DEPTH stacked VLAN tags (802.1Q C-TAG or 802.1AD S-TAG) and
  * return the inner EtherType + the first byte past the L2/VLAN headers (the
@@ -475,7 +572,47 @@ int mac_filter_prog(struct xdp_md *ctx)
         }
         struct iphdr *ip = (struct iphdr *)l3hdr;
 
-        /* Per-axis active inners (dst + src) via the shared `active` snapshot. */
+        /* §5.44 (MVP-4.4) D-mvp-4.4-Q3 proto axis: ip->protocol is offset-stable
+         * for every IPv4 frame (no L4 parse needed). */
+        __u8 proto = ip->protocol;
+
+        /* §5.44 D-mvp-4.4-IHL L4 offset: the L4 header sits ip->ihl*4 bytes
+         * past the IPv4 header start (variable for IPv4-options frames). Reject
+         * ihl<5 (illegal IPv4 — header shorter than the fixed 20B) as MALFORMED
+         * so ihl*4 ∈ [20,60] is bounded for the verifier. dport is read only
+         * for TCP/UDP after an explicit L4-header bounds-check (has_port);
+         * non-TCP/UDP frames keep has_port=0 → port_mask=0 (only port-wildcard
+         * rules survive the port axis), exactly the §5.42 spike's has_port
+         * logic. (FALLBACK: if the 5.15 verifier rejects the variable ihl*4
+         * offset, swap to the fixed-20B `(void*)(ip+1)` per D-mvp-4.4-IHL —
+         * Phase 2.5-gated, NO design change.) */
+        if (unlikely(ip->ihl < 5)) {
+            bump_stat(STAT_DROP_MALFORMED);
+            return XDP_DROP;
+        }
+        void *l4 = (void *)ip + ip->ihl * 4;
+        __u32 dport    = 0;
+        int   has_port = 0;
+        if (proto == IPPROTO_TCP) {
+            struct tcphdr *t = l4;
+            if (unlikely((void *)(t + 1) > data_end)) {
+                bump_stat(STAT_DROP_MALFORMED);
+                return XDP_DROP;
+            }
+            dport    = bpf_ntohs(t->dest);
+            has_port = 1;
+        } else if (proto == IPPROTO_UDP) {
+            struct udphdr *u = l4;
+            if (unlikely((void *)(u + 1) > data_end)) {
+                bump_stat(STAT_DROP_MALFORMED);
+                return XDP_DROP;
+            }
+            dport    = bpf_ntohs(u->dest);
+            has_port = 1;
+        }
+
+        /* Per-axis active inners (dst + src + proto + port) via the shared
+         * `active` snapshot (§5.27 Q1 AS1 extended to 4 axes). */
         void *dst_inner = bpf_map_lookup_elem(&dst_rulesets, &active);
         if (unlikely(!dst_inner)) {
             bump_stat(STAT_DROP_DENY);
@@ -486,15 +623,29 @@ int mac_filter_prog(struct xdp_md *ctx)
             bump_stat(STAT_DROP_DENY);
             return XDP_DROP;
         }
+        void *proto_inner = bpf_map_lookup_elem(&proto_rulesets, &active);
+        if (unlikely(!proto_inner)) {
+            bump_stat(STAT_DROP_DENY);
+            return XDP_DROP;
+        }
+        void *port_inner = bpf_map_lookup_elem(&port_rulesets, &active);
+        if (unlikely(!port_inner)) {
+            bump_stat(STAT_DROP_DENY);
+            return XDP_DROP;
+        }
 
         /* §5.43 D-mvp-4.3-Q2 wildcard halves: wildcard[active*BITVEC_NUM_AXES
          * + axis]. A rule unconstrained on an axis lives here (and is ABSENT
          * from that axis's LPM map — mutual exclusion). NULL → 0 (no wildcard
          * survivors on that axis). */
-        __u64 wc_dst = 0;
-        __u64 wc_src = 0;
-        __u32 wc_dst_key = active * BITVEC_NUM_AXES + BV_AXIS_DST;
-        __u32 wc_src_key = active * BITVEC_NUM_AXES + BV_AXIS_SRC;
+        __u64 wc_dst   = 0;
+        __u64 wc_src   = 0;
+        __u64 wc_proto = 0;
+        __u64 wc_port  = 0;
+        __u32 wc_dst_key   = active * BITVEC_NUM_AXES + BV_AXIS_DST;
+        __u32 wc_src_key   = active * BITVEC_NUM_AXES + BV_AXIS_SRC;
+        __u32 wc_proto_key = active * BITVEC_NUM_AXES + BV_AXIS_PROTO;
+        __u32 wc_port_key  = active * BITVEC_NUM_AXES + BV_AXIS_PORT;
         __u64 *wc_dst_p = bpf_map_lookup_elem(&wildcard, &wc_dst_key);
         if (wc_dst_p) {
             wc_dst = *wc_dst_p;
@@ -502,6 +653,14 @@ int mac_filter_prog(struct xdp_md *ctx)
         __u64 *wc_src_p = bpf_map_lookup_elem(&wildcard, &wc_src_key);
         if (wc_src_p) {
             wc_src = *wc_src_p;
+        }
+        __u64 *wc_proto_p = bpf_map_lookup_elem(&wildcard, &wc_proto_key);
+        if (wc_proto_p) {
+            wc_proto = *wc_proto_p;
+        }
+        __u64 *wc_port_p = bpf_map_lookup_elem(&wildcard, &wc_port_key);
+        if (wc_port_p) {
+            wc_port = *wc_port_p;
         }
 
         /* /32 host-route LPM keys (network byte order, matches LPM_TRIE key
@@ -527,11 +686,27 @@ int mac_filter_prog(struct xdp_md *ctx)
             smask = *sm;
         }
 
-        /* The OR→AND pivot (PI-mvp-4.3-AND): per axis, OR the LPM survivors
-         * with the axis wildcard half, then INTERSECT across axes. A rule
-         * survives iff EVERY axis it constrains matches; unconstrained axes
-         * contribute the always-true wildcard half. */
-        __u64 acc = (dmask | wc_dst) & (smask | wc_src);
+        /* §5.44 proto axis: exact-HASH lookup keyed by ip->protocol (NO
+         * closure). NULL → 0 (no proto survivors). port axis: bounded
+         * range-scan over the active port inner ARRAY, only when the frame
+         * carries an L4 port (TCP/UDP); non-port frames contribute 0 so only
+         * port-wildcard rules survive the port axis. */
+        __u32 proto_key = proto;
+        __u64 proto_mask = 0;
+        __u64 *pm = bpf_map_lookup_elem(proto_inner, &proto_key);
+        if (pm) {
+            proto_mask = *pm;
+        }
+        __u64 port_mask = has_port ? port_scan(port_inner, dport) : 0;
+
+        /* The OR→AND pivot (PI-mvp-4.3-AND / PI-mvp-4.4-AND4): per axis, OR the
+         * axis survivors with the axis wildcard half, then INTERSECT across all
+         * four axes. A rule survives iff EVERY axis it constrains matches;
+         * unconstrained axes contribute the always-true wildcard half. */
+        __u64 acc = (dmask      | wc_dst)   &
+                    (smask      | wc_src)   &
+                    (proto_mask | wc_proto) &
+                    (port_mask  | wc_port);
         if (acc != 0) {
             /* HG-mvp-4.3-4 first-match-by-id: the lowest set bit IS the lowest
              * matching rule id (bit position == id), so ffsll picks it for

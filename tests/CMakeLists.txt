@@ -1112,3 +1112,41 @@ foreach(T IN ITEMS
         SKIP_RETURN_CODE 77
     )
 endforeach()
+
+# ── §5.44 MVP-4.4 bit-vector axes 3-4: proto (exact HASH) + dst_port (range) ─
+# Three NEW ctests (§6.64..§6.66) for the 4-axis AND-compose datapath. They
+# reuse the production O(N) reference classifier tests/bitvec/bitvec_oracle_prod.py
+# (now dual-table: --ruleset and4 selects the 4-axis table transcribed from
+# config_valid_and4.yaml; the default 2-axis behaviour for §6.61 is unchanged)
+# and the existing L4 injector tests/inject/inject_l4.py (--proto/--dport). All
+# three touch the veth fixture (apply attaches + per-vector inject) →
+# RESOURCE_LOCK xdp_fixture (guard #12). SKIP_RETURN_CODE 77 for the
+# passwordless-sudo / jq preconditions.
+#
+# T_PROTO_AND_COMPOSE      (§6.64): proto exact-HASH AND-intersection (TCP hits,
+#                                   UDP does not → routes to port-only rule).
+# T_PORT_RANGE_AND_COMPOSE (§6.65): port range-membership (edges, out-of-range)
+#                                   + has_port (ICMP survives only port-wildcard).
+# T_AND4_ORACLE_AGREEMENT  (§6.66): table-driven 4-axis datapath-vs-oracle.
+set(TEST_ENV_AND4
+    ${TEST_ENV}
+    "AND_ORACLE_PROD=${CMAKE_SOURCE_DIR}/tests/bitvec/bitvec_oracle_prod.py"
+    "INJECT_L4=${CMAKE_SOURCE_DIR}/tests/inject/inject_l4.py"
+)
+foreach(T IN ITEMS
+    T_PROTO_AND_COMPOSE
+    T_PORT_RANGE_AND_COMPOSE
+    T_AND4_ORACLE_AGREEMENT
+)
+    add_test(
+        NAME ${T}
+        COMMAND bash ${TEST_DIR}/${T}.sh
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    set_tests_properties(${T} PROPERTIES
+        ENVIRONMENT "${TEST_ENV_AND4}"
+        RESOURCE_LOCK xdp_fixture
+        TIMEOUT 120
+        SKIP_RETURN_CODE 77
+    )
+endforeach()
