@@ -3,7 +3,7 @@
  * exporter's `/metrics` endpoint. See design §5.29 (MVP-3.4) +
  * §5.31 (MVP-3.4b) DataStructures.
  *
- * Output shape (two metric families post-§5.31):
+ * Output shape (three metric families post-§5.46):
  *   # HELP xdpfilter_packets_total Total packets processed by xdpfilter, per iface and verdict.
  *   # TYPE xdpfilter_packets_total counter
  *   xdpfilter_packets_total{iface="<I>",verdict="pass"} <N>
@@ -13,11 +13,17 @@
  *   # HELP xdpfilter_rule_match_total Total per-rule packet matches by iface and rule_id, labelled with action.
  *   # TYPE xdpfilter_rule_match_total counter
  *   xdpfilter_rule_match_total{iface="<I>",rule_id="<N>",action="(pass|drop|unknown)"} <N>
+ *   # HELP xdpfilter_rule_info Per-rule match constraints (5-axis) by iface and rule_id; constant gauge value 1.
+ *   # TYPE xdpfilter_rule_info gauge
+ *   xdpfilter_rule_info{iface="<I>",rule_id="<N>",dst_cidr="<v|>",src_cidr="<v|>",protocol="<v|>",dst_port="<v|>",vlan="<v|>"} 1
  *
  * Block ordering: existing `xdpfilter_packets_total` HELP+TYPE+samples
- * FIRST, then `xdpfilter_rule_match_total` HELP+TYPE+samples — preserves
- * byte-equivalence of the existing prefix for any operator scrapers that
- * pin head-of-output substring matches.
+ * FIRST, then `xdpfilter_rule_match_total` HELP+TYPE+samples, then the §5.46
+ * `xdpfilter_rule_info` family LAST — preserves byte-equivalence of the
+ * existing two-family prefix for any operator scrapers that pin
+ * head-of-output substring matches (D-mvp-4.6-BLOCK-ORDER). The info family
+ * carries a STABLE 7-label key set in fixed order; an unconstrained axis is
+ * emitted with an empty value (D-mvp-4.6-Q3).
  *
  * Empty case (no samples): output is just HELP+TYPE lines, no sample lines.
  * Prometheus tolerates this (scrapes "0 timeseries" cleanly) per PI-32.

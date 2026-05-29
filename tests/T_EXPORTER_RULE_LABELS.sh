@@ -75,6 +75,10 @@ EXPORTER_BIN=$(find_exporter) || {
 }
 FIXTURE="${TEST_DIR}/fixtures/config_per_rule_counters.yaml"
 [[ -f "${FIXTURE}" ]] || { echo "FAIL: missing fixture ${FIXTURE}" >&2; exit 1; }
+# §6.51-EXT (MVP-4.6 / §5.46): the 5-axis fixture drives the rule_info family
+# per-axis label assertions (config-derived; no traffic injection needed).
+AND5_FIXTURE="${TEST_DIR}/fixtures/config_valid_and5.yaml"
+[[ -f "${AND5_FIXTURE}" ]] || { echo "FAIL: missing fixture ${AND5_FIXTURE}" >&2; exit 1; }
 
 # Port derived from PID; exporter_port_9417 RESOURCE_LOCK serializes
 # against the other exporter-spawning tests.
@@ -86,6 +90,7 @@ metrics_hdrs=$(mktemp /tmp/xdpmf-rulelabel-hdrs.XXXXXX)
 exp_log=$(mktemp /tmp/xdpmf-rulelabel-explog.XXXXXX)
 stderr_file=$(mktemp /tmp/xdpmf-rulelabel-stderr.XXXXXX)
 metrics_body2=$(mktemp /tmp/xdpmf-rulelabel-body2.XXXXXX)
+metrics_body3=$(mktemp /tmp/xdpmf-rulelabel-body3.XXXXXX)
 EXPORTER_PID=""
 
 # §5.31 EDIT-1: sidecar path = /run/xdpmacfilter/<iface>/rule_index.json
@@ -104,7 +109,7 @@ cleanup_test() {
     cleanup_veth
     sudo -n rm -rf "${SIDECAR_DIR}" 2>/dev/null
     rm -f "${metrics_body}" "${metrics_hdrs}" "${metrics_body2}" \
-          "${exp_log}" "${stderr_file}"
+          "${metrics_body3}" "${exp_log}" "${stderr_file}"
     set -e
 }
 trap cleanup_test EXIT
@@ -312,6 +317,242 @@ for id in 0 5 42; do
         fail=1
     fi
 done
+
+# ══════════════════════════════════════════════════════════════════════════
+# §6.51-EXT (MVP-4.6 / §5.46): xdpfilter_rule_info per-axis label family.
+#
+# The new ADDITIVE info-metric surfaces each sidecar-known rule's 5-axis match
+# constraints as Prometheus labels:
+#   xdpfilter_rule_info{iface,rule_id,dst_cidr,src_cidr,protocol,dst_port,vlan} 1
+# Stable 7-key set in fixed order; unconstrained axis → empty sentinel "";
+# value always literal 1; emitted AFTER both counter families (block order).
+#
+# rule_info is CONFIG-derived (from rule_index.json), NOT packet-derived — no
+# traffic injection is needed. We re-setup the fixture on the SAME iface with
+# the rich 5-axis config_valid_and5.yaml so every axis is exercised:
+#   id 0 : FULL 5-axis  dst 10.1.0.0/16 + src 192.168.5.0/24 + tcp + 1000-2000 + vlan 100
+#   id 1 : vlan 200 + udp                (dst/src/dst_port unconstrained)
+#   id 2 : vlan 300 only                 (4 axes unconstrained)
+#   id 3 : dst 10.5.0.0/16 + vlan 100
+#   id 4 : dst 10.5.0.0/16 only          (vlan unconstrained)
+#   id 5 : dst_port 443 only             (4 axes unconstrained)
+#
+# Assertions: (a) HELP/TYPE-once; (b) stable-key sample ERE, value=1;
+# (c) POSITIVE per-axis (id0 carries all five fixture values verbatim);
+# (d) SENTINEL (id5 unconstrained axes show ="" );
+# (e) NEGATION (an unconstrained axis is NEVER a bogus value — only ""; a
+#     non-configured rule_id emits NO rule_info series);
+# (f) STABLE KEY SET (every series matches the 7-key ERE);
+# (g) COUNTER-CONTRACT — verified above (existing steps a-g on the original
+#     fixture remain byte-equivalent; this block is purely additive).
+echo
+echo "═══ §6.51-EXT: xdpfilter_rule_info per-axis labels (config_valid_and5.yaml) ═══"
+
+# Tear down scenario-1 exporter + veth; re-setup with the 5-axis fixture.
+if [[ -n "${EXPORTER_PID}" ]]; then
+    sudo -n kill "${EXPORTER_PID}" 2>/dev/null || true
+    sleep 0.2
+    sudo -n kill -9 "${EXPORTER_PID}" 2>/dev/null || true
+    wait "${EXPORTER_PID}" 2>/dev/null || true
+    EXPORTER_PID=""
+fi
+cleanup_veth
+sudo -n rm -rf "${SIDECAR_DIR}" 2>/dev/null || true
+
+setup_veth
+
+echo "=== apply ${AND5_FIXTURE} on ${IFACE_A}"
+set +e
+${NSEXEC} "${LOADER_BIN}" apply --iface "${IFACE_A}" -f "${AND5_FIXTURE}" 2>"${stderr_file}"
+rc=$?
+set -e
+echo "rc=${rc}"
+cat "${stderr_file}" >&2 || true
+if [[ "${rc}" -ne 0 ]]; then
+    echo "FAIL[ri.apply]: apply exit ${rc} for 5-axis fixture" >&2
+    exit 1
+fi
+
+# Distinct port from scenario-1 to dodge TIME_WAIT on the just-killed listener.
+PORT2=$(( 9417 + (($$ + 137) % 1000) ))
+echo "=== starting xdpmf-exporter on 127.0.0.1:${PORT2} (rule_info scenario)"
+sudo -n "${EXPORTER_BIN}" \
+    --port "${PORT2}" \
+    --bind 127.0.0.1 \
+    --bpffs-root "${PIN_ROOT}" \
+    >"${exp_log}" 2>&1 &
+EXPORTER_PID=$!
+echo "EXPORTER_PID=${EXPORTER_PID}"
+
+ready=0
+for i in $(seq 1 50); do
+    if curl -sf -m 1 "http://127.0.0.1:${PORT2}/healthz" -o /dev/null 2>/dev/null; then
+        ready=1
+        echo "exporter ready after ${i} polls"
+        break
+    fi
+    if ! kill -0 "${EXPORTER_PID}" 2>/dev/null; then
+        echo "FAIL[ri.startup]: exporter died during startup" >&2
+        cat "${exp_log}" >&2
+        exit 1
+    fi
+    sleep 0.1
+done
+if [[ "${ready}" != "1" ]]; then
+    echo "FAIL[ri.ready]: exporter not ready within 5s" >&2
+    cat "${exp_log}" >&2
+    exit 1
+fi
+
+echo "=== curl /metrics (rule_info scenario)"
+set +e
+http_code3=$(curl -s -o "${metrics_body3}" -w '%{http_code}' \
+    -m 5 "http://127.0.0.1:${PORT2}/metrics")
+curl3_rc=$?
+set -e
+echo "curl rc=${curl3_rc} http_code=${http_code3}"
+echo "--- response body (rule_info scenario) ---"
+cat "${metrics_body3}"
+echo "--- end ---"
+
+if [[ "${curl3_rc}" -ne 0 ]] || [[ "${http_code3}" != "200" ]]; then
+    echo "FAIL[ri.http]: curl rc=${curl3_rc} http=${http_code3} (expected 0 + 200)" >&2
+    fail=1
+fi
+
+# Helper: extract a single axis value from the rule_info line for a rule_id.
+#   axis_of <rule_id> <axis_key>  →  prints the captured value (may be empty).
+axis_of() {
+    local rid="$1" key="$2"
+    grep -E "^xdpfilter_rule_info\{iface=\"${IFACE_A}\",rule_id=\"${rid}\"," "${metrics_body3}" 2>/dev/null \
+        | head -n1 \
+        | sed -nE "s/.*[,{]${key}=\"([^\"]*)\".*/\1/p"
+}
+
+# (a) EXACTLY ONE HELP + ONE TYPE (gauge) for the rule_info family.
+ri_help=$(grep -cE '^# HELP xdpfilter_rule_info ' "${metrics_body3}" 2>/dev/null || true)
+ri_help=${ri_help:-0}
+ri_type=$(grep -cE '^# TYPE xdpfilter_rule_info gauge$' "${metrics_body3}" 2>/dev/null || true)
+ri_type=${ri_type:-0}
+echo "rule_info HELP=${ri_help} TYPE=${ri_type}"
+if [[ "${ri_help}" != "1" ]]; then
+    echo "FAIL[ri.a.help]: expected exactly 1 '# HELP xdpfilter_rule_info', got ${ri_help}" >&2
+    fail=1
+fi
+if [[ "${ri_type}" != "1" ]]; then
+    echo "FAIL[ri.a.type]: expected exactly 1 '# TYPE xdpfilter_rule_info gauge', got ${ri_type}" >&2
+    fail=1
+fi
+
+# (b)+(f) ≥1 sample matches the stable 7-key ERE in fixed order, value EXACTLY 1.
+ri_ere='^xdpfilter_rule_info\{iface="[^"]+",rule_id="[0-9]+",dst_cidr="[^"]*",src_cidr="[^"]*",protocol="[^"]*",dst_port="[^"]*",vlan="[^"]*"\} 1$'
+ri_stable=$(grep -cE "${ri_ere}" "${metrics_body3}" 2>/dev/null || true)
+ri_stable=${ri_stable:-0}
+# Total rule_info SAMPLE lines (exclude HELP/TYPE comment lines).
+ri_total=$(grep -cE '^xdpfilter_rule_info\{' "${metrics_body3}" 2>/dev/null || true)
+ri_total=${ri_total:-0}
+echo "rule_info sample lines: stable-key-matching=${ri_stable} total=${ri_total}"
+if (( ri_stable < 1 )); then
+    echo "FAIL[ri.b]: no rule_info sample line matches the stable 7-key ERE:" >&2
+    echo "            ${ri_ere}" >&2
+    fail=1
+fi
+# (f) EVERY sample line must carry the same 7 keys in the same order + value 1.
+if [[ "${ri_stable}" != "${ri_total}" ]]; then
+    echo "FAIL[ri.f]: key set unstable — ${ri_total} rule_info lines but only ${ri_stable} match the 7-key ERE" >&2
+    fail=1
+fi
+# We applied 6 rules (ids 0..5); expect a series per configured rule.
+if (( ri_total < 6 )); then
+    echo "FAIL[ri.count]: expected ≥6 rule_info series (ids 0..5), got ${ri_total}" >&2
+    fail=1
+fi
+
+# (c) POSITIVE per-axis — id0 is the FULL 5-axis rule; all five axis labels
+#     carry the fixture values verbatim (exporter passes the sidecar string
+#     through; no normalization per §7 OOS fence).
+declare -A ID0_EXPECT=(
+    [dst_cidr]="10.1.0.0/16"
+    [src_cidr]="192.168.5.0/24"
+    [protocol]="tcp"
+    [dst_port]="1000-2000"
+    [vlan]="100"
+)
+for key in dst_cidr src_cidr protocol dst_port vlan; do
+    got=$(axis_of 0 "${key}")
+    exp="${ID0_EXPECT[$key]}"
+    echo "  id0 ${key}='${got}' (expect '${exp}')"
+    if [[ "${got}" != "${exp}" ]]; then
+        echo "FAIL[ri.c.${key}]: id0 ${key}='${got}' (expected '${exp}')" >&2
+        fail=1
+    fi
+done
+
+# (d) SENTINEL — id5 constrains ONLY dst_port=443; the other four axes MUST be
+#     the empty sentinel "".
+got=$(axis_of 5 dst_port)
+echo "  id5 dst_port='${got}' (expect '443')"
+if [[ "${got}" != "443" ]]; then
+    echo "FAIL[ri.d.port]: id5 dst_port='${got}' (expected '443')" >&2
+    fail=1
+fi
+for key in dst_cidr src_cidr protocol vlan; do
+    got=$(axis_of 5 "${key}")
+    echo "  id5 ${key}='${got}' (expect empty sentinel)"
+    if [[ -n "${got}" ]]; then
+        echo "FAIL[ri.d.${key}]: id5 ${key}='${got}' (expected empty sentinel \"\")" >&2
+        fail=1
+    fi
+done
+
+# (e) NEGATION — id2 constrains ONLY vlan=300; the other four axes MUST be ""
+#     and NEVER a bogus/garbage value. (If impl fabricates a value for an
+#     unconstrained axis, this trips — the negation control for rule_info.)
+got=$(axis_of 2 vlan)
+echo "  id2 vlan='${got}' (expect '300')"
+if [[ "${got}" != "300" ]]; then
+    echo "FAIL[ri.e.vlan]: id2 vlan='${got}' (expected '300')" >&2
+    fail=1
+fi
+for key in dst_cidr src_cidr protocol dst_port; do
+    got=$(axis_of 2 "${key}")
+    echo "  id2 ${key}='${got}' (expect empty — never bogus)"
+    if [[ -n "${got}" ]]; then
+        echo "FAIL[ri.e.${key}]: id2 unconstrained ${key}='${got}' — bogus value (expected \"\")" >&2
+        fail=1
+    fi
+done
+
+# (e.2) NEGATION — a NON-configured rule_id (99 is absent from the fixture)
+#       MUST emit NO rule_info series (D-mvp-4.6-METRIC-SOURCE: no fabrication).
+bogus=$(grep -cE "^xdpfilter_rule_info\{iface=\"${IFACE_A}\",rule_id=\"99\"," "${metrics_body3}" 2>/dev/null || true)
+bogus=${bogus:-0}
+echo "  rule_id=99 (non-configured) rule_info series count=${bogus} (expect 0)"
+if (( bogus != 0 )); then
+    echo "FAIL[ri.e.orphan]: rule_id=99 not in config but emitted ${bogus} rule_info series" >&2
+    fail=1
+fi
+
+# (g) COUNTER-CONTRACT — the rule_info family is appended LAST; the existing
+#     counter families must still be present and precede it. Re-confirm here on
+#     the second scrape that both counter families are intact (block order).
+if ! grep -qE '^# HELP xdpfilter_packets_total ' "${metrics_body3}"; then
+    echo "FAIL[ri.g.pkts]: xdpfilter_packets_total family missing (COUNTER-CONTRACT)" >&2
+    fail=1
+fi
+if ! grep -qE '^# HELP xdpfilter_rule_match_total ' "${metrics_body3}"; then
+    echo "FAIL[ri.g.rmt]: xdpfilter_rule_match_total family missing (COUNTER-CONTRACT)" >&2
+    fail=1
+fi
+# Block order: the first rule_info line must come AFTER the last
+# rule_match_total line (rule_info appended LAST per D-mvp-4.6-BLOCK-ORDER).
+ri_first=$(grep -nE '^(# (HELP|TYPE) )?xdpfilter_rule_info' "${metrics_body3}" | head -n1 | cut -d: -f1)
+rmt_last=$(grep -nE '^xdpfilter_rule_match_total\{' "${metrics_body3}" | tail -n1 | cut -d: -f1)
+echo "  block order: first rule_info line=${ri_first:-none}, last rule_match_total line=${rmt_last:-none}"
+if [[ -n "${ri_first}" && -n "${rmt_last}" ]] && (( ri_first < rmt_last )); then
+    echo "FAIL[ri.g.order]: rule_info block (line ${ri_first}) precedes rule_match_total (line ${rmt_last}) — must be appended LAST" >&2
+    fail=1
+fi
 
 [[ "${fail}" == 0 ]] && echo "PASS: T_EXPORTER_RULE_LABELS"
 exit "${fail}"

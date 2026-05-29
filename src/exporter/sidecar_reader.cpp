@@ -46,6 +46,26 @@ const std::regex& rule_line_re()
     return "";
 }
 
+/* §5.46 (MVP-4.6) D-mvp-4.6-Q2: key-anchored extraction of a single axis
+ * value from the already-captured match-object body (regex group 2). The
+ * leading `"` + exact key + `"` anchor disambiguates overlapping keys —
+ * `dst_cidr` vs `src_cidr` (both contain "cidr") and
+ * `dst_port`/`protocol`/`vlan` resolve exactly. Returns the verbatim value
+ * the sidecar emitted, or "" when the axis is absent (D-3.4b-10: no JSON
+ * parser; the writer's `"<key>": "<value>"` shape is stable). */
+[[nodiscard]] std::string extract_axis(std::string_view body, std::string_view key)
+{
+    const std::regex re{
+        "\"" + std::string{key} + "\"\\s*:\\s*\"([^\"]*)\"",
+        std::regex::ECMAScript};
+    const std::string body_s{body};
+    std::smatch m;
+    if (std::regex_search(body_s, m, re)) {
+        return m[1].str();
+    }
+    return "";
+}
+
 }  // namespace
 
 std::vector<RuleMeta> parse_rule_index(std::string_view path) noexcept
@@ -69,7 +89,14 @@ std::vector<RuleMeta> parse_rule_index(std::string_view path) noexcept
                 continue;  // malformed integer; skip the line, keep going
             }
             rm.action     = m[3].str();
-            rm.match_kind = classify_match_kind(m[2].str());
+            const std::string body = m[2].str();
+            rm.match_kind = classify_match_kind(body);
+            /* §5.46: populate the 5 live axes verbatim (empty when absent). */
+            rm.dst_cidr = extract_axis(body, "dst_cidr");
+            rm.src_cidr = extract_axis(body, "src_cidr");
+            rm.protocol = extract_axis(body, "protocol");
+            rm.dst_port = extract_axis(body, "dst_port");
+            rm.vlan     = extract_axis(body, "vlan");
             out.push_back(std::move(rm));
         }
     } catch (...) {

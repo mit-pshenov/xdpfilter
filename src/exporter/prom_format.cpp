@@ -147,6 +147,51 @@ std::string emit_metrics(
         }
     }
 
+    /* §5.46 (MVP-4.6) PI-mvp-4.6-EXPORTER-AXIS-AWARE: a THIRD family carrying
+     * each sidecar-known rule's 5 match-axis values as labels (info-metric:
+     * constant gauge value 1, joined to the counter on (iface,rule_id) in
+     * PromQL). D-mvp-4.6-BLOCK-ORDER: appended LAST so the two counter blocks
+     * above stay byte-identical (PI-mvp-4.6-COUNTER-CONTRACT). The 7-label key
+     * set is STABLE and ordered; an unconstrained axis emits an empty value
+     * (D-mvp-4.6-Q3). Sourced from `rule_meta_by_iface` (config-known rules),
+     * NOT rule_counters — a counter-orphan rule_id has unknown axes and gets
+     * NO series (D-mvp-4.6-METRIC-SOURCE). HELP+TYPE fire once unconditionally
+     * (PI-32 empty-scrape). */
+    out.append("# HELP xdpfilter_rule_info Per-rule match constraints (5-axis) by iface and rule_id; constant gauge value 1.\n");
+    out.append("# TYPE xdpfilter_rule_info gauge\n");
+
+    for (const auto& [iface, metas] : rule_meta_by_iface) {
+        const std::string iface_escaped = escape_label_value(iface);
+
+        /* First-wins dedup on duplicate rule_id + ascending rule_id sort,
+         * mirroring the counter block (D-3.4i-4). Prometheus is
+         * order-insensitive; the sort makes emission deterministic. */
+        std::vector<const RuleMeta*> rules;
+        for (const RuleMeta& rm : metas) {
+            const bool already_present = std::any_of(
+                rules.begin(), rules.end(),
+                [&](const RuleMeta* e) { return e->rule_id == rm.rule_id; });
+            if (already_present) continue;  // first-wins dedup
+            rules.push_back(&rm);
+        }
+        std::sort(rules.begin(), rules.end(),
+                  [](const RuleMeta* a, const RuleMeta* b) {
+                      return a->rule_id < b->rule_id;
+                  });
+
+        for (const RuleMeta* rm : rules) {
+            std::format_to(std::back_inserter(out),
+                "xdpfilter_rule_info{{iface=\"{}\",rule_id=\"{}\",dst_cidr=\"{}\",src_cidr=\"{}\",protocol=\"{}\",dst_port=\"{}\",vlan=\"{}\"}} 1\n",
+                iface_escaped,
+                rm->rule_id,
+                escape_label_value(rm->dst_cidr),
+                escape_label_value(rm->src_cidr),
+                escape_label_value(rm->protocol),
+                escape_label_value(rm->dst_port),
+                escape_label_value(rm->vlan));
+        }
+    }
+
     return out;
 }
 

@@ -18,10 +18,13 @@
 #   (d) Body contains '^# TYPE xdpfilter_packets_total counter$' line.
 #   (e) Body contains ≥1 line matching the sample-line ERE
 #       '^xdpfilter_packets_total\{iface="[^"]+",verdict="(pass|drop_deny|drop_malformed|pass_cidr)"\} [0-9]+$'.
-#   (f) PI-33 smoke: `xdpmf-exporter --version` reports `xdpmf-exporter 0.13.0`
-#       (PI-mvp-4.5-VERSION bump per §5.45 — extends PI-33 to 0.13.0;
-#       literal updated via the §5.44 EDIT carve-out / guard #11;
-#       precedent: §5.31 EDIT-2 + §5.32 EDIT-2 + §5.34 EDIT + §5.35 PI-8-3.4d).
+#   (f) PI-33 smoke: `xdpmf-exporter --version` reports `xdpmf-exporter 0.14.0`
+#       (PI-mvp-4.6-VERSION bump per §5.46 — extends PI-33 to 0.14.0;
+#       literal updated via the EDIT carve-out / guard #11;
+#       precedent: §5.31 EDIT-2 + §5.32 EDIT-2 + §5.34 EDIT + §5.35 PI-8-3.4d + §5.45).
+#   (g) MVP-4.6 §6.37-EXT: body carries exactly one '# HELP xdpfilter_rule_info'
+#       + one '# TYPE xdpfilter_rule_info gauge' (the NEW additive info family,
+#       emitted unconditionally per PI-32 empty-scrape even with no rules).
 #
 # Sanity-floor smoke: step (a) + (f) — exporter starts AND --version works.
 # Negation control: none in this test by itself — the failure-path control
@@ -99,8 +102,8 @@ echo "=== xdpmf-exporter --version (PI-33 smoke)"
 ver=$(${EXPORTER_BIN} --version 2>&1 | head -n1 || true)
 echo "version line: '${ver}'"
 fail=0
-if [[ "${ver}" != "xdpmf-exporter 0.13.0" ]]; then
-    echo "FAIL[f]: expected --version output 'xdpmf-exporter 0.13.0', got '${ver}'" >&2
+if [[ "${ver}" != "xdpmf-exporter 0.14.0" ]]; then
+    echo "FAIL[f]: expected --version output 'xdpmf-exporter 0.14.0', got '${ver}'" >&2
     fail=1
 fi
 
@@ -225,6 +228,26 @@ if [[ "${type_count}" != "1" ]]; then
     echo "FAIL[d2]: expected exactly 1 TYPE line, got ${type_count}" >&2
     fail=1
 fi
+
+# ── (g) §6.37-EXT (MVP-4.6 / §5.46): the NEW xdpfilter_rule_info family ──────
+# Additive info-metric. HELP/TYPE fire EXACTLY ONCE per family, unconditionally
+# (PI-32 empty-scrape) — this test attaches in legacy MAC mode (no rule config
+# / no sidecar), so there may be zero rule_info SAMPLE lines, but the
+# HELP + TYPE(gauge) comment lines MUST still appear once each.
+ri_help=$(grep -cE '^# HELP xdpfilter_rule_info ' "${metrics_body}" 2>/dev/null || true)
+ri_help=${ri_help:-0}
+ri_type=$(grep -cE '^# TYPE xdpfilter_rule_info gauge$' "${metrics_body}" 2>/dev/null || true)
+ri_type=${ri_type:-0}
+echo "rule_info HELP=${ri_help} TYPE=${ri_type}"
+if [[ "${ri_help}" != "1" ]]; then
+    echo "FAIL[g.help]: expected exactly 1 '# HELP xdpfilter_rule_info', got ${ri_help}" >&2
+    fail=1
+fi
+if [[ "${ri_type}" != "1" ]]; then
+    echo "FAIL[g.type]: expected exactly 1 '# TYPE xdpfilter_rule_info gauge', got ${ri_type}" >&2
+    fail=1
+fi
+# Existing xdpfilter_packets_total assertions (c/d/e above) remain UNCHANGED.
 
 [[ "${fail}" == 0 ]] && echo "PASS: T_EXPORTER_METRICS_FORMAT"
 exit "${fail}"
