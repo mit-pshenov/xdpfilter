@@ -1,45 +1,48 @@
-# Review — MVP-4.6 exporter per-axis labels (§5.46) (mint triangulation)
+# Review — MVP-4.7 MAC-axis return (6th exact-HASH axis, src-MAC) (§5.47) (mint triangulation)
 
 ## Verdict
-`pass` (round 1, 0 findings, 0 OOT)
+`pass` (round 1, 0 findings, 0 OOT requiring disposition)
 
 ## Triangulation matrix
 
 | Framework point | Findings | Tags |
 |---|---|---|
 | 1. Spec ↔ Code | 0 | — |
-| 2. Spec ↔ Tests | 0 | — |
-| 3. Code ↔ Tests | 0 | — |
+| 2. Spec ↔ Tests | 0 | — (negation controls present) |
+| 3. Code ↔ Tests | 0 | 84 ran, 82 pass + 2 legit skip, 0 fail (serial) |
 | 4. Out-of-Scope Drift | 0 | — |
 | 5. Behaviour preserved (brownfield) | 0 | — |
 
-Baseline = `3f69d0a` (pre-§5.46). Prior shipped slice = `9d29fbf` (§5.45).
+Baseline (design git-diff) = `480e95b`. Prior shipped slice = `548d402` (§5.46).
 
 ## Assess-points (all confirmed independently)
-- **(a) COUNTER-CONTRACT byte-identical + rule_info LAST**: `git diff 3f69d0a -- prom_format.cpp` = only the additive 3rd block (`:150-193`) before `return out`; `packets_total` (`:67-82`) + `rule_match_total` (`:89-148`) byte-unchanged. Test asserts block order. PI-mvp-4.6-COUNTER-CONTRACT holds.
-- **(b) rule_info correctness**: all 7 keys `{iface,rule_id,dst_cidr,src_cidr,protocol,dst_port,vlan}` fixed-order, value `1` (`:184`); escape_label_value reused; sourced from `rule_meta_by_iface` only → counter-orphan rule_id gets NO series; HELP/TYPE-once gauge unconditional (PI-32). Unconstrained axis → `""`.
-- **(c) reader no-JSON + noexcept + read-only**: `extract_axis` (`sidecar_reader.cpp:56-67`) key-anchored regex over group-2, NO parser dep (`grep nlohmann|json.hpp`=ZERO); `parse_rule_index` noexcept (PI-32); read-only ifstream (PI-31); `classify_match_kind` untouched.
-- **(d) PI shift documented**: PI-mvp-4.3-EXPORTER-AGNOSTIC retirement recorded verbatim (D-mvp-4.6-EXPORTER-AXIS-AWARE-SHIFT + §6.5 row + §7 OOS); COUNTER half re-expressed as PI-mvp-4.6-COUNTER-CONTRACT. Not silently broken.
-- **(e) CONSUMER-ONLY fences**: `git diff 3f69d0a` EMPTY for sidecar.cpp, src/bpf/, loader.*, config.*, mac_filter.h, logger.*, cidr.*, + main/http/stats_reader/rule_counters_reader. Changed set = FileList exactly. No UNRELATED-EDIT.
-- **(f) VERSION**: CMakeLists 0.14.0; `grep 0.13.0 tests/ src/`=ZERO; T_EXPORTER_METRICS_FORMAT 4 sites updated; `--version`→0.14.0.
-- **(g) negation control present + non-circular**: 3 controls (id2/id5 unconstrained→"" never bogus; non-configured rule_id=99→ZERO series; pre-existing orphan→action=unknown), all config-derived (not impl-state). T_BPFFS_ROOT_SYMLINK B16 flake did not recur.
+- **(a) src-MAC**: `.bpf.c:797` `memcpy(mac_key.octets, eth->h_source, 6)` — h_source (NOT h_dest), v1 semantic; eth bounds-checked at :576; read once, VLAN-agnostic (base-eth offset).
+- **(b) IPv4-GATE (PO-accepted)**: MAC lookup (:790-802) + 6-way acc (:809-814) inside `if (inner_proto==ETH_P_IP)` (:617); non-IPv4 → defaults[active] (:844). T_MAC_NON_IP (#84) exercises it. OOS fence reframed DEFERRED-to-IPv6-slice (D-mvp-4.7-Q2-GATE-DEFER, design:15025), not dropped.
+- **(c) reshape**: `xdpmf_allowlist_inner` value `allow_entry`→`__u64` (:95); pin names + rulesets topology UNCHANGED; `kManagedMaps[]`=**30** (counted; no new row); BITVEC_NUM_AXES=6, BV_AXIS_MAC=5; index active*6+5 (:715); `lower_mac_axis` per-MAC aggregate, NO closure (loader.cpp:1392-1416).
+- **(d) MAC parser RE-ADDED** (FINDING-2): `hex_nibble`+`parse_mac` (config.cpp:229-269); 17-char + non-hex/bad-sep→exit9; reject removed; `mac` in whitelist + at-least-one-of; config.hpp diff EMPTY (RuleMatch.mac reused). T_SCHEMA_V2_CUTOVER c2 (malformed→exit9) passes.
+- **(e) PI-mvp-4.3-MAC-DEFERRED retirement** DOCUMENTED verbatim (D-mvp-4.7-MAC-RETURN-SHIFT, design:14962 + §6.5 row). MAC bitmask RESET-on-apply (bulk-clear+insert, inactive half before flip); close_prefixes + copy_rule_counters_forward git-diff UNTOUCHED (guard #23 not extended).
+- **(f) rule_info +mac** (8 keys, mac LAST, :189; HELP "(6-axis)"); the two COUNTER blocks BYTE-UNCHANGED (PI-mvp-4.6-COUNTER-CONTRACT). T_EXPORTER_RULE_LABELS ERE 7→8.
+- **(g) 5 un-SKIP'd tests** assert LIVE MAC verdicts (no still-skip/weaken; only legit env-SKIP residue: jq-missing, runner-rate). T_PASS_MAC_OR_CIDR genuinely RE-AUTHORED OR→AND (4-case truth table; M-only & C-only both DROP). T_SCHEMA_V2_CUTOVER (c) reject→accept. Non-MAC corpus green.
+- **(h) git-diff fences**: config.hpp / loader.hpp / sidecar.cpp EMPTY vs 480e95b. T_SCHEMA_V2_CUTOVER + config_v2_mac edits §5.47-FileList-mandated → NOT [UNRELATED-EDIT]. All source EDITs ⊆ FileList.
+
+## Point-5 brownfield
+No REGRESSION (full corpus green), no UNRELATED-EDIT (31-file `git diff --stat` maps to FileList), no INVARIANT-VIOLATED (PI-mvp-4.7-* + CONTINUES set hold; VERSION 0.15.0, `grep 0.14.0`=ZERO). close_prefixes/copy_rule_counters_forward untouched.
 
 ## Test execution
+`/tmp/mint-review-tests-1780064939.log` — ran SERIALLY with root (avoids B16 -j4 flake):
 ```
-1/4 T_EXPORTER_METRICS_FORMAT ... Passed 3.05s
-2/4 T_SIDECAR_JSON_SHAPE ........ Passed 1.82s
-3/4 T_EXPORTER_RULE_LABELS ...... Passed 3.97s
-4/4 T_AND5_ORACLE_AGREEMENT ..... Passed 9.63s
-100% passed, 0 failed of 4 (reviewer; --version 0.14.0)
+100% tests passed, 0 tests failed out of 84
+Total Test time (real) = 579.92 sec
+Did not run: #5 T_DROP_MALFORMED (Skipped, legit runt-pad), #37 T_ANSIBLE_PLAYBOOK_SYNTAX (Skipped, ansible absent)
 ```
-Tester full suite (test-run.log): 82 pass / 0 fail / 7 env-skip. No UNEXERCISED-EXPORT (parse_rule_index/emit_metrics exercised end-to-end via /metrics tests; extract_axis anon-namespace single-TU).
+T_BUILD (88.6s) + T_SANITIZER_BUILD (180.5s) PASS serially — NO flake (the -j4 timeouts in the tester's parallel run are backlog-B16 contention, not regressions). All MAC tests + T_AND6_ORACLE_AGREEMENT (#83) + T_MAC_NON_IP (#84) green.
+
+## UNEXERCISED-EXPORT
+None — new helpers (lower_mac_axis, parse_mac, populate_inner_slot reshape) anon-namespace/single-TU (guard #9), exercised via integration ctests; no public-API symbol added.
 
 ## Out-of-triangulation findings
-None.
-
-## Rework assignments
-None — ship it.
+None requiring disposition. (Informational: tester added MAC fixtures beyond the FileList NEW enumeration — within the §5.47 tester-fixture grant, NOT a finding.)
 
 — mint-dev-reviewer (round 1)
 
-**FINAL: pass on round 1, 0 findings, 0 OOT.** Test tally 82 pass / 0 fail / 7 skip.
+**FINAL: pass on round 1, 0 findings.** Effective tally 82/84 pass + 2 legit skip, 0 genuine fail (serial). 6-axis AND model (mac·dst·src·proto·port·vlan) live, observable, IPv4-gate boundary test-pinned.
