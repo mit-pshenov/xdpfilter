@@ -88,6 +88,16 @@ This backlog is **manual prose work** — explicitly separated from `/mint-dev` 
 ### B15 [OOS, NEW] — Committed `.pyc` artifact: `tests/lib/__pycache__/read_rule_counters.cpython-311.pyc`
 **Action**: pass to next /mint-dev housekeeping cycle; add `tests/lib/__pycache__/` to `.gitignore` + `git rm -r --cached tests/lib/__pycache__`. NOT a doc task.
 
+## Test-infra debt (code-side — surfaced during MVP-4.x cycles, parked here per user direction 2026-05-29)
+
+### B16 [MEDIUM, test-infra] — `T_SANITIZER_BUILD` times out under `-j4` → orphan-pin cascade
+**Surface**: full-suite `ctest -j4`. `T_SANITIZER_BUILD` does a whole-project sanitizer rebuild; under -j4 CPU starvation it can exceed its 240s `TIMEOUT`, ctest SIGKILLs it, its cleanup trap never runs → leaves an orphan pin `xdpmf_a_<pid>` under the production bpffs root `/sys/fs/bpf/xdpmacfilter/`, which **cascades** `T_BPFFS_ROOT_SYMLINK` to fail (its safety guard correctly refuses a non-empty root). Both PASS on serial re-run after orphan cleanup. Seen MVP-4.2 (2026-05-28). NOT a product regression (all-additive slices unaffected).
+**Action options**: (a) raise `T_SANITIZER_BUILD` TIMEOUT and/or give it a dedicated RESOURCE_LOCK so it doesn't contend; (b) cap suite parallelism; (c) make `T_BPFFS_ROOT_SYMLINK` self-heal stale `xdpmf_a_*` orphans in its precondition before asserting.
+
+### B17 [LOW, test-infra] — `T_EXPORTER_BIND_NON_LOOPBACK_WARN` (#70) hardcodes port 9524, no RESOURCE_LOCK
+**Surface**: the test's own case-(a) exporter can leak a listener on `0.0.0.0:9524`; under -j4 the parent mis-reads "died during startup" and sub-cases (b)-(e) hit EADDRINUSE. Passes 1/1 isolated from a clean port. Seen MVP-4.1 (2026-05-28).
+**Action**: add an `exporter_port` RESOURCE_LOCK (or per-test ephemeral port) + close the case-(a) cleanup gap.
+
 ## Mapping: CHANGELOG:245 5 categories → backlog items above
 
 | CHANGELOG category | Backlog items |
