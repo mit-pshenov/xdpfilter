@@ -15227,3 +15227,149 @@ Guards applied: **#5** (Phase A code-grep — re-anchored all 14 idiom-block lin
 > **HK-9 reviewer discipline:** the whole value of this refactor is that the `_a`/`_b`↔slot decision now lives in ONE place. Reviewer MUST read that ONE place for BOTH `slot=0`→`a` and `slot=1`→`b` — the green suite alone does NOT prove correctness if no test exercises the reattach `inactive=0`/`_a` selection (see TestStrategy targeted-regression note).
 
 Evidence: `mint/task-brief.md` MVP-4.8 brief (HG-1..3, Q1, B20-1/B20-2/B25-1, guards #9/#10/#11/#15/#16, HK-9 class, Phase-1 sub-check #5); independent Phase A reads of `src/lib/loader.cpp:155-220` (kManagedMaps), `:1240-1413` (lowering structs), `:1424-1813` (populate_* helpers + `copy_rule_counters_forward` + `populate_action_table`), `:2009-2026` (apply_request lowerings), `:2233-2381` (reattach branch), `:2461-2602` (fresh-attach branch); `src/lib/raii.hpp:28-62` (BpfSkeleton); `src/lib/config.hpp:1-62`, `src/lib/config.cpp:56-60,282-297,360-394`, `src/lib/apply_internal.hpp:15-39` (B25 sites); `tests/` glob (regression corpus existence + ZERO pins on the fd-unavailable strings); §5.43/§5.44/§5.45/§5.47 (the per-axis RESET-on-apply template + guard #15 lineage + the `write_wildcard_slots`/`kManagedMaps[]` blessed precedents).
+
+---
+
+### §5.49 MVP-4.9: cheap-wins — B18 `port_scan` early-`break` (datapath perf) + B19 `build_cpu` RESOURCE_LOCK (test-infra) (brownfield housekeeping, 2026-05-29)
+
+#### §5.49 Problem statement
+
+Two unrelated HIGH→cheap backlog items, PO-bundled as a "clear the cheap wins before the HLD-gated IPv6/S8 slice." Different files, different concerns, zero shared code surface:
+
+1. **B18 (datapath perf, behavior-preserving)** — `src/bpf/mac_filter.bpf.c` `port_scan()` (§5.44) runs a fixed `XDPMF_ALLOWLIST_MAX` (=64) `bpf_map_lookup_elem` per L4 packet even when only `N<64` port rules exist, because the unused-slot sentinel (`r->lo > r->hi`) uses `continue` (walks the whole 64-block) instead of `break`. Used slots are **dense-at-front** (`populate_port_inner_slot` clears all 64 to the `lo=1,hi=0` sentinel, then writes `ranges[0..N-1]` contiguously), and **every real range has `lo<=hi`** (config validation), so the FIRST `lo>hi` slot marks the end of all used slots → `continue`→`break` is correctness-preserving and saves `~(64-N)` lookups/packet (N=4 → ~−59). Same match result, guaranteed by the dense-pack + `lo<=hi` invariant pair.
+
+2. **B19 (test-infra, harness-only)** — `tests/CMakeLists.txt`: `T_BUILD` and `T_SANITIZER_BUILD` are both full clean compiles in `/tmp`. Under `ctest -j4` they co-run and oversubscribe CPU, causing SIGKILL/TIMEOUT flakes that cascade (orphan pin → downstream `T_BPFFS_ROOT_SYMLINK` etc). Add a shared named `RESOURCE_LOCK build_cpu` so the two compile-heavy tests serialize against each other regardless of `-jN`. Structural resolution of the recurring `-j4` contention flake (supersedes B16's option-a). Guard #12 domain.
+
+**Why now:** both are genuinely cheap and clear backlog noise before S8 (IPv6 `cidr6`). No `architecture-v2.md` row (debt-paydown). VERSION unchanged (HG-mvp-4.9-1).
+
+#### §5.49 Phase A grep verification report (architect-independent — 2026-05-29, per guard #5)
+
+Every literal in this amendment re-anchored against the live tree:
+
+- **B18 — TWO continues CONFIRMED** in `port_scan` (`src/bpf/mac_filter.bpf.c:498-516`): `:506` (`if (!r) { continue; }` — verifier-mandated null-check on the bounded-ARRAY lookup) and `:509` (`if (r->lo > r->hi) { continue; /* unused slot */ }` — the sentinel skip). **ONLY `:509` becomes `break`.** The `:506` `!r` continue STAYS (it is the verifier-required leaf-null-check; on a bounded ARRAY it never fires, and it CANNOT be a `break` — a transient null on slot `i` does not imply slots `>i` are absent; turning it into a `break` would be a verifier/semantics regression). The `#pragma unroll` over `XDPMF_ALLOWLIST_MAX` at `:501-502` STAYS 64-block (5.15-verifier straight-line code); only the runtime trip count drops via a forward jump.
+- **B18 dense-pack CONFIRMED** — `populate_port_inner_slot` (`src/lib/loader.cpp:1603-1629`): loop `:1610-1617` clears **all** `XDPMF_ALLOWLIST_MAX` slots to `unused{lo=1,hi=0,bit=0}` (the `lo>hi` sentinel, `:1606-1609`); loop `:1620-1628` then writes `ranges[i]` at index `i` for `i=0..ranges.size()-1` — contiguous, dense-at-front. `ranges.size() ≤ rule count ≤ XDPMF_ALLOWLIST_MAX` (bounded by apply_request pre-check, `:1618-1619`).
+- **B18 LOAD-BEARING precondition `lo<=hi` for real ranges — CONFIRMED ENFORCED.** `parse_dst_port` (`src/lib/config.cpp:176-205`): the `"lo-hi"` range form explicitly rejects inverted ranges — `:199-202` `if (lo > hi) { throw_cfg(... "dst_port range lo {} > hi {}" ...) }` → **exit 9**; the single-integer form sets `out.lo = out.hi = p` (`:190-191`) ⇒ `lo==hi`. **There is NO code path that constructs a real port slot with `lo>hi`.** `lower_port_axis` (`loader.cpp:1321-1338`) copies `r.match.dst_port->{lo,hi}` straight into the slot (`:1329-1331`) — no inversion. ⇒ The ONLY `lo>hi` slots in the inner map are the sentinels. **B18 `break` is SAFE.** (Architect verdict below.)
+- **B19 CONFIRMED** — `tests/CMakeLists.txt`: `T_BUILD` `set_tests_properties` (`:75-78`) has **ENVIRONMENT + TIMEOUT 300 only — NO RESOURCE_LOCK** (comment `:68-69` explicitly notes it "does NOT take the resource lock"). `T_SANITIZER_BUILD` `set_tests_properties` (`:133-137`) **ALREADY has `RESOURCE_LOCK xdp_fixture`** (`:135`) + TIMEOUT 240 + SKIP_RETURN_CODE 77. Multi-lock precedent CONFIRMED present in-file: `RESOURCE_LOCK "xdp_fixture;lo_iface"` (`:205`), `"xdp_fixture;systemd_unit_install"` (`:515,:527`), `"xdp_fixture;exporter_port_9417"` (`:671,:726,:849,:873`).
+- **B19 — NO OTHER full-compile ctest.** `grep -rlE 'cmake -S|cmake --build|XDPMF_SANITIZERS' tests/` returns exactly `{CMakeLists.txt, T_SANITIZER_BUILD.sh, T_BUILD.sh}`. `T_BUILD.sh` + `T_SANITIZER_BUILD.sh` are the only two ctests that perform an isolated `/tmp` rebuild; the `add_bpf_object(mac_filter_bad …)` (`:66`) compile is a cmake **config-time** artifact, NOT a ctest-time compile. ⇒ `build_cpu` belongs on EXACTLY those two entries.
+- **VERSION** = `0.15.0` (per §5.47). `XDPMF_ALLOWLIST_MAX` = 64 (port inner ARRAY `max_entries`). `kManagedMaps[]` = 30. All UNCHANGED this slice.
+
+#### §5.49 Architect verdict on the B18 `lo<=hi` precondition (load-bearing — explicit per team-lead request)
+
+**VERDICT: the `break` is SAFE. GREEN-LIT.** The early-`break` is correctness-preserving because BOTH legs of the dense-pack coupling hold and are enforced upstream:
+
+- **(a) Used slots are dense-at-front** — `populate_port_inner_slot` writes `ranges[0..N-1]` at indices `0..N-1` after bulk-clearing every slot to the sentinel. No used slot ever lands at an index `> N-1`.
+- **(b) No real range can masquerade as the sentinel** — the sentinel is `lo>hi` (specifically `lo=1,hi=0`); `config.cpp:199-202` rejects every real range with `lo>hi` at parse time (exit 9), and the single-port form forces `lo==hi`. So a real slot ALWAYS has `lo<=hi` and can NEVER trip the `r->lo > r->hi` test.
+
+⇒ The first index at which `r->lo > r->hi` is true is exactly index `N` (the first unused slot), and every index `>N` is also a sentinel. `break` therefore skips ONLY sentinel slots — it can never skip a legitimate `lo<=hi` range. The match mask `port_scan` returns is **bit-identical** to the pre-B18 full-walk for every input. (Were (b) NOT enforced — i.e. if config allowed `lo>hi` real ranges — a legit slot could sit *after* a sentinel and `break` would wrongly skip it; that hazard does not exist here.)
+
+#### §5.49 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+**NEW:** none. NEW ctests target = **0**.
+
+**EDITED:**
+
+| Path | Role (this slice) | Language | LOC est |
+|---|---|---|---|
+| `src/bpf/mac_filter.bpf.c` | B18: in `port_scan` (`:498-516`), change the **second** `continue` (the `r->lo > r->hi` unused-slot sentinel, `:509`) → `break`. The **first** `continue` (`!r` null-check, `:506`) UNTOUCHED. Update the `:493-494` block comment (and optionally `:508-510`) to document the early-`break` + the dense-pack/`lo<=hi` coupling it relies on. | C (eBPF) | 1 code line + ~3 comment |
+| `src/lib/loader.cpp` | B18 documentation-only: add a short comment at `populate_port_inner_slot` (`:1603-1629`, the dense-pack producer end of the invariant) noting that `port_scan`'s early-`break` DEPENDS on dense-at-front packing + the `lo<=hi`-for-real-ranges config guarantee. NO code change. | C++ (comment) | ~3 comment lines |
+| `tests/CMakeLists.txt` | B19: add `RESOURCE_LOCK build_cpu` to `T_BUILD`'s `set_tests_properties` (`:75-78`, currently lock-free); extend `T_SANITIZER_BUILD`'s existing `RESOURCE_LOCK xdp_fixture` (`:135`) → `RESOURCE_LOCK "xdp_fixture;build_cpu"`. Update the adjacent `:68-69` comment (T_BUILD "does NOT take the resource lock" → now takes `build_cpu`). | CMake | ~3 lines |
+
+**UNCHANGED-BUT-AFFECTED (must remain byte-identical; reviewer asserts zero git-diff):**
+
+| Path | Why touched-adjacent yet must not change | Check |
+|---|---|---|
+| `src/lib/config.cpp` (`parse_dst_port`, `:176-205`) | The `lo>hi` rejection (`:199-202`) is the load-bearing B18 precondition — it MUST stay enforced, but this slice does NOT edit it. | `git diff -- src/lib/config.cpp` EMPTY |
+| `src/common/mac_filter.h` (`XDPMF_ALLOWLIST_MAX`, `xdpmf_port_range` layout) | The 64 bound + `{lo,hi,bit}` layout are the contract the scan + sentinel rely on; unchanged. | `git diff` byte-equivalent |
+| The `#pragma unroll` + the loop bound `i < XDPMF_ALLOWLIST_MAX` in `port_scan` (`:501-502`) | Stays 64-block straight-line (5.15-verifier story unchanged); only the body's `continue`→`break` changes. | code-review: unroll + bound intact |
+| The `!r` null-check `continue` (`port_scan:505-507`) | Verifier-required; never fires on a bounded ARRAY; CANNOT be a `break`. | code-review: still `continue`, untouched |
+| `populate_port_inner_slot` CODE (`loader.cpp:1606-1628`) | Only a comment is added; the clear-then-dense-write CODE is the producer invariant — unchanged. | `git diff` shows comment-only |
+| `tests/T_BUILD.sh`, `tests/T_SANITIZER_BUILD.sh` | Lock is a ctest-property change, NOT a script change. | `git diff -- tests/T_BUILD.sh tests/T_SANITIZER_BUILD.sh` EMPTY |
+| `CMakeLists.txt` VERSION, all other `src/`, all other `tests/T_*` | No version/datapath/schema/map change; B18 touches one datapath file, B19 one cmake file. | `git diff` byte-equivalent |
+
+#### §5.49 DataStructures
+
+**None new, none changed.** B18 relies on the EXISTING `xdpmf_port_range{__u16 lo; __u16 hi; __u64 bit;}` (`src/common/mac_filter.h`, §5.44) + the EXISTING `XDPMF_ALLOWLIST_MAX`=64 port inner ARRAY. The sentinel value `{lo=1,hi=0,bit=0}` is set by `populate_port_inner_slot` and is unchanged. No map, schema, struct, or BPF layout change.
+
+#### §5.49 Interfaces
+
+**None changed.** B18 is a one-keyword body change inside the `static __always_inline __u64 port_scan(void *port_inner, __u32 dport)` helper — signature, return semantics (OR of matching slots' `bit`), and call site (`mac_filter_prog`, `:771`) all UNCHANGED. B19 changes only ctest harness properties — no CLI/env/IPC surface. No operator-observable change anywhere (HG-mvp-4.9-1: no VERSION bump).
+
+#### §5.49 Decisions (with rationale)
+
+- **D-mvp-4.9-B18-BREAK — change ONLY the `r->lo > r->hi` sentinel `continue` (`:509`) to `break`; leave the `!r` null-check `continue` (`:506`) as `continue`.** **Because** the sentinel marks the dense-pack boundary (proven (a)+(b) above) so `break` is the correct early-exit; the `!r` leaf-null-check is verifier-mandated and a transient null on slot `i` says NOTHING about slots `>i` — converting it to `break` would both regress the verifier story and be semantically wrong. Two continues, one flips, one stays.
+- **D-mvp-4.9-B18-UNROLL-STAYS — the `#pragma unroll` + `i < XDPMF_ALLOWLIST_MAX` loop bound remain the 64-block straight-line form.** **Because** the 5.15 verifier floor needs back-edge-free straight-line code (§5.44 / §5.42 spike verdict); `break` lowers to a forward jump out of the already-unrolled block (drops the *runtime* trip count), it does NOT reintroduce a back-edge. The 5.15 verifier story is unchanged (kernel 6.1 host; 5.15 untested but structurally unaffected).
+- **D-mvp-4.9-B18-DOC-BOTH-ENDS — document the early-`break` correctness coupling at BOTH ends of the invariant: the consumer (`port_scan` comment) AND the producer (`populate_port_inner_slot` comment).** **Because** the `break`'s safety is a *non-local* property — it depends on a producer guarantee (dense-pack) + a config guarantee (`lo<=hi`) enforced in two other files; a future editor touching only one end could silently break the coupling. The two-end comment is the forward-defense (see guard #26).
+- **D-mvp-4.9-B19-LOCK-MECH (Q1 → A1) — use a named `RESOURCE_LOCK build_cpu`, NOT ctest `PROCESSORS`.** **Because** a hard named mutex is the deterministic fix and matches the file's established RESOURCE_LOCK idiom (incl. the multi-lock `"xdp_fixture;lo_iface"` precedent); `PROCESSORS` is advisory cost-accounting that depends on `--parallel-level` and is easier to defeat. Architect declines to add `PROCESSORS` as a complement — single mechanism, less surface (impl MAY add it only if it judges it strictly additive; non-contractual).
+- **D-mvp-4.9-B19-TWO-TESTS-ONLY — `build_cpu` goes on EXACTLY `T_BUILD` + `T_SANITIZER_BUILD`; no third entry.** **Because** Phase A grep confirms those are the only two ctests doing a runtime full compile; `mac_filter_bad` is a cmake config-time artifact, not a ctest. Adding the lock anywhere else would needlessly serialize unrelated tests.
+- **D-mvp-4.9-B19-PRESERVE-XDP-FIXTURE — `T_SANITIZER_BUILD` keeps its existing `xdp_fixture` lock; `build_cpu` is APPENDED → `"xdp_fixture;build_cpu"` (a 2-lock list).** **Because** `T_SANITIZER_BUILD` genuinely touches `veth_a/veth_b` (it runs an end-to-end attach against the fixture, `:118-124`) so it still needs `xdp_fixture`; the new `build_cpu` lock is additive, not a replacement. `T_BUILD` does NOT touch the fixture so it gets `build_cpu` ONLY (not `xdp_fixture`).
+- **D-mvp-4.9-NO-BUMP (HG-1) — VERSION stays `0.15.0`; guard #11 N/A.** **Because** B18 is a behavior-preserving datapath micro-opt (same match result) and B19 is test-harness-only — zero operator-observable change. Mirrors the MVP-3.4e / MVP-4.8 internal-hardening precedent.
+- **D-mvp-4.9-NO-NEW-PI — B18 adds NO new behavioral PI; it is fenced by the EXISTING port-axis PIs (§5.44) + the oracle-agreement net.** **Because** a correct `break` produces byte-identical match output, so the existing `T_PORT_RANGE_AND_COMPOSE` + `T_AND{,4,5,6}_ORACLE_AGREEMENT` ARE the regression fence; an optional dense-pack-coupling PI is recorded in §6.5 as documentation, NOT a new behavior to certify. (Brief: "an optional B18 dense-pack-coupling PI is the architect's call" — recorded as `PI-mvp-4.9-DENSE-PACK` below, framed as a CONTINUES/documentation invariant.)
+- **D-mvp-4.9-PROSE-VS-INVARIANTS — resolution rule for THIS amendment:** if §5.49 prose conflicts with a §6.5 PI-mvp-4.9-* item or the verifiable-invariants list, the **§6.5 invariants-block WINS (prose loses)**. If impl deviates from a verifiable-invariants hint to satisfy a §6.5 PI or a load-bearing regression assertion, reviewer disposition is `inline-merge` on the hint, NOT `[UNRELATED-EDIT]`.
+
+#### §5.49 TestStrategy
+
+Tester writes against THIS section, not impl's code. **NEW ctests target = 0.** Both items are validated by the EXISTING suite + the `-j4` run itself.
+
+**B18 regression net (port-matching behavior preservation — a wrong `break` flips a port verdict):**
+- **`T_PORT_RANGE_AND_COMPOSE`** (§6.65) — port range-membership + `has_port` logic across the AND-compose; a `break` that skipped a legit slot would drop a port match → verdict flip.
+- **`T_AND4_ORACLE_AGREEMENT`** (§6.66), **`T_AND5_ORACLE_AGREEMENT`** (§6.69), **`T_AND6_ORACLE_AGREEMENT`**, **`T_AND_ORACLE_AGREEMENT`** (§6.61) — table-driven datapath-vs-independent-O(N)-oracle agreement; the oracle scans ALL slots (no early-break), so any divergence introduced by the `break` surfaces as an oracle disagreement (the canary for B18 correctness).
+- **Trigger / observable / assertion:** inject L4 frames whose `dport` hits port ranges at various slot indices; observe the matched `rule_id` (per-rule `rule_counters` delta) and the PASS/DROP verdict; assert `== bitvec_oracle_prod.py` prediction (full-walk oracle). Mechanism: the existing inject→counter-delta→oracle-compare harness.
+
+**B18 targeted canary — tester's call, justified-against-corpus (NOT symmetric).** The `break` is *only* distinguishable from `continue` when a **used port slot sits at index `>0` AND a sentinel-looking (or simply terminal) boundary precedes/follows it in a way the full-walk would traverse but the break truncates.** The break can only ever be WRONG if a legit slot were positioned after the first sentinel — which (b) forbids. The realistic regression to catch is: **a config with N≥2 port-constrained rules (so used slots occupy indices 0..N-1) where a frame matches the LAST used slot (index N-1).** If the existing AND-oracle corpus already includes a vector that (i) has ≥2 distinct port ranges AND (ii) matches a port range at a non-zero slot index, the net is sufficient — **add NOTHING.** If the corpus only ever exercises a single port range (slot 0), a **targeted B18 canary is justified**: a config with ≥2 port ranges + a frame matching the highest-index range, asserting the match still fires (proving `break` did not truncate before reaching it). Tester MUST verify against the corpus before deciding (per brief: justify, don't add for symmetry).
+
+**B19 validation (the `-j4` flake is structurally gone):**
+- **Trigger / observable / assertion:** run the FULL suite under `ctest -j4` (the contention regime that produced the SIGKILL/TIMEOUT flakes). Observable: `T_BUILD` and `T_SANITIZER_BUILD` NEVER co-run (serialized by the shared `build_cpu` lock) → neither hits its TIMEOUT under CPU oversubscription; no cascade to `T_BPFFS_ROOT_SYMLINK` or other downstream pins. Assertion mechanism: full-suite GREEN under `-j4`, AND `ctest --print-resource-spec`/scheduling shows the two never overlap (or simply: repeated `-j4` runs no longer flake on the two compiles). This is the structural confirmation, not a new ctest.
+- **Reviewer cross-check:** `build_cpu` lock present on BOTH `T_BUILD` and `T_SANITIZER_BUILD`; `T_SANITIZER_BUILD`'s `xdp_fixture` lock PRESERVED (now a 2-element `"xdp_fixture;build_cpu"` list); lock name spelled IDENTICALLY on both entries (a typo'd name = no mutual exclusion → silent non-fix; guard #12 + guard #26 name-consistency check).
+
+**OPS canary — N/A this slice (stated so reviewer does NOT demand one).** B18 introduces NO new invocation path / runtime environment — `port_scan` runs in the SAME XDP datapath the existing inject/oracle ctests already exercise (same caps, netns, uid, bpffs root). B19 is pure ctest scheduling metadata; no binary invocation context changes. No stripped-down/alternate-context path is added by either item.
+
+**(impl Phase 2.5 smoke):** build GREEN (no new warnings); `bpftool prog load`/attach of the rebuilt `.bpf.o` succeeds on the 6.1 host (B18 verifier-acceptance of the `break`-bearing unroll); full `ctest -j4` GREEN at the reconciled baseline (85 per MVP-4.8 DoD — reconcile via fresh `ctest -N`); `git diff` scoped to exactly the 3 EDITED files (+ the 2 doc comments); `grep -nE 'continue|break' src/bpf/mac_filter.bpf.c` in `port_scan` shows ONE `continue` (`!r`) + ONE `break` (sentinel); `grep -n 'build_cpu' tests/CMakeLists.txt` shows exactly 2 hits.
+
+#### §6.5 Preserved invariants (§5.49 MVP-4.9 brownfield)
+
+Reviewer's framework point 5 walks this list. Items are **MUST contracts**; `[INVARIANT-VIOLATED]` per failed check. **ALL prior PIs (PI-1 … PI-mvp-4.8-*) CONTINUE byte-equivalent** — this slice retires NO PI and adds NO new *behavioral* PI (B18 is behavior-preserving; B19 is harness-only). The items below are the new documentation/coupling invariants + the load-bearing precondition.
+
+| PI | Property | Check mechanism |
+|---|---|---|
+| **PI-mvp-4.9-PORT-MATCH-EQUIV (NEW, behavior-preserving)** | `port_scan` returns a bit-identical mask for every `(port_inner, dport)` after the `continue`→`break`; no port verdict changes anywhere. | `T_PORT_RANGE_AND_COMPOSE` + `T_AND{,4,5,6}_ORACLE_AGREEMENT` GREEN (oracle does full-walk; divergence = fail). |
+| **PI-mvp-4.9-DENSE-PACK (NEW, load-bearing coupling — the B18 safety contract)** | Used port slots are dense-at-front (`populate_port_inner_slot` clears all 64 to `lo=1,hi=0` then writes `ranges[0..N-1]` contiguously) AND every real range has `lo<=hi` (`config.cpp:199-202` rejects `lo>hi`; single-port ⇒ `lo==hi`). ⇒ the first `lo>hi` slot is the dense-pack boundary; `break` skips ONLY sentinels. | code-review `populate_port_inner_slot` clear-then-dense-write UNCHANGED + `parse_dst_port` `lo>hi` rejection UNCHANGED (`git diff -- src/lib/config.cpp` EMPTY); oracle net GREEN. |
+| **PI-mvp-4.9-NULL-CHECK-STAYS (NEW)** | The `!r` leaf-null-check in `port_scan` (`:506`) remains a `continue`, NOT converted to `break` (verifier-required; a transient null does not bound subsequent slots). | code-review: exactly ONE `continue` (`!r`) + ONE `break` (sentinel) in `port_scan`. |
+| **PI-mvp-4.9-UNROLL-STAYS (NEW)** | `#pragma unroll` + `i < XDPMF_ALLOWLIST_MAX` (64-block straight-line) UNCHANGED; only the loop body's sentinel `continue`→`break`. 5.15-verifier story unchanged. | code-review; `bpftool prog load`/attach GREEN on the 6.1 host. |
+| **PI-mvp-4.9-B19-LOCK (NEW, guard #12)** | `RESOURCE_LOCK build_cpu` present on BOTH `T_BUILD` and `T_SANITIZER_BUILD`; `T_SANITIZER_BUILD`'s pre-existing `xdp_fixture` lock PRESERVED (becomes `"xdp_fixture;build_cpu"`); lock name byte-identical on both. | `grep -n 'build_cpu' tests/CMakeLists.txt` → 2 hits; code-review both `set_tests_properties`; full `ctest -j4` GREEN (the two compiles serialize). |
+| **PI-mvp-4.9-NO-MAP-SCHEMA (CONTINUES, guard #10/#16)** | No map/schema/pin/axis change; `XDPMF_ALLOWLIST_MAX`=64, `xdpmf_port_range` layout, `kManagedMaps[]`=30 UNCHANGED; no `.bpf.c` change beyond the one `break` + comments. | `git diff -- src/common/ CMakeLists.txt` byte-equivalent; code-review. |
+| **PI-mvp-4.9-VERSION (CONTINUES)** | VERSION stays `0.15.0`; no literal propagation (guard #11 N/A). | `--version` ⇒ `0.15.0`; `grep -rn '0\.15\.0' tests/` unchanged. |
+| **PI-7-mvp-4.9-loader-hpp (CONTINUES)** | `src/lib/loader.hpp` byte-identical (B18 loader edit is a comment in `loader.cpp` only). | `git diff -- src/lib/loader.hpp` EMPTY. |
+
+#### §5.49 verifiable invariants for reviewer (MAY-default per architect-spec §6.5 discipline)
+
+Guidance for reviewer, NOT contracts for impl. **Resolution rule (per D-mvp-4.9-PROSE-VS-INVARIANTS): if any item conflicts with a §6.5 PI-mvp-4.9-* item, the §6.5 item wins; if impl deviates from a hint to satisfy a PI or load-bearing regression assertion, disposition is `inline-merge`, NOT `[UNRELATED-EDIT]`.**
+
+1. (MUST) `port_scan` has EXACTLY ONE `continue` (the `!r` null-check) + ONE `break` (the `r->lo > r->hi` sentinel) post-edit. The `!r` continue is UNTOUCHED.
+2. (MUST) the `#pragma unroll` + `i < XDPMF_ALLOWLIST_MAX` loop bound are unchanged (no back-edge reintroduced).
+3. (MUST) `populate_port_inner_slot` clear-then-dense-write CODE + `parse_dst_port` `lo>hi` rejection (`config.cpp:199-202`) are UNCHANGED — the dense-pack + `lo<=hi` coupling that makes the `break` safe still holds.
+4. (MUST) `build_cpu` lock on BOTH `T_BUILD` + `T_SANITIZER_BUILD`; `T_SANITIZER_BUILD`'s `xdp_fixture` lock PRESERVED (2-lock list); identical lock spelling.
+5. (MUST) port-matching oracle net GREEN (no verdict delta from B18); VERSION `0.15.0`.
+6. (MAY) the B18 coupling is documented at BOTH ends (`port_scan` + `populate_port_inner_slot` comments) — *guidance*; impl may phrase freely. Reviewer should see a comment naming the dense-pack/`lo<=hi` dependency at each end.
+7. (MAY) `git diff` is scoped to the 3 EDITED files only; `T_BUILD.sh`/`T_SANITIZER_BUILD.sh` script bodies UNCHANGED (lock is a ctest-property edit).
+8. (MAY) impl MAY decline to add ctest `PROCESSORS` (D-mvp-4.9-B19-LOCK-MECH chose the named lock alone); adding it is non-contractual.
+
+#### §7 OOS additions (§5.49 — new fences)
+
+- **IPv6 / S8 (`cidr6`, axis #7) + multi-ethertype gate-rework** — HLD-gated, deferred per PO; NOT this slice. (Carry-forward fence, restated.) NEW FENCE.
+- **Converting the `!r` null-check `continue` to `break`** — explicitly FENCED (verifier-required; semantically wrong — D-mvp-4.9-B18-BREAK). NEW FENCE.
+- **Any `port_scan` change beyond the single `continue`→`break`** (loop-bound rework, removing `#pragma unroll`, `bpf_loop` migration, dropping the `!r` check, dense-pack repacking) — out of scope; the 64-block unroll + leaf-null-check stay. NEW FENCE.
+- **B16's option-a** (per-test timeout bump / serialization hack) — SUPERSEDED by B19's structural `build_cpu` lock. NEW FENCE.
+- **Adding ctest `PROCESSORS` cost accounting** — declined (D-mvp-4.9-B19-LOCK-MECH); not in scope. NEW FENCE.
+- **Any new port-axis semantics, map/schema/VERSION change, or datapath change beyond the one `break`** — UNCHANGED (S8 territory / non-goals). NEW FENCE.
+- **B20/B25 (MVP-4.8, shipped), B28 (template HASH populates — follow-on)** — already paid / separate. NEW FENCE.
+- Carry-forward §5.41–§5.48 OOS items NOT superseded — UNCHANGED.
+
+#### §5.49 Anti-misdiagnosis institutional learning (per architect-spec §6.6)
+
+Guards applied: **#5** (Phase A code-grep — re-anchored the two `continue` line numbers, the dense-pack producer, the `lo>hi` config rejection, the two compile ctests + the no-third-compile check, and all the multi-lock precedents independently; the load-bearing `lo<=hi` precondition was verified by READING `parse_dst_port`, not by trusting the brief); **#9 N/A** (no helper extraction); **#10** (`kManagedMaps`=30 + `XDPMF_ALLOWLIST_MAX`=64 unchanged — no count churn); **#11 N/A** (no VERSION bump); **#12 DIRECTLY** (B19 is the canonical RESOURCE_LOCK-for-shared-host-state case — `build_cpu` is a logical CPU-contention resource, same mechanism as the existing `xdp_fixture`/`lo_iface`/`systemd_unit_install`/`exporter_port_9417` locks; lock-name consistency across both entries is the load-bearing detail).
+
+**Guard catalog grows 25 → 26.** NEW guard #26 (forward-defense for early-`break`/early-exit optimizations over sentinel-terminated dense arrays). [Numbering note: the catalog was at #25 (MVP-4.4 variable-L4-offset, design.md "grows 24 → 25"); guard #24 (MVP-4.3 config-surface-narrowing-breaks-verdict-corpus) is a DIFFERENT, pre-existing guard — this slice's sentinel-array guard is #26, not a collision. Per guard #10 catalog-arithmetic discipline.]:
+
+> **Guard #26 — sentinel-array early-`break` correctness coupling.** When a bounded scan over a dense-packed, sentinel-terminated array is optimized from full-walk-`continue` to early-`break` (or any early-exit), the `break` is correct ONLY IF a TWO-LEG invariant holds AND is documented at BOTH ends: **(a)** used entries are dense-at-front (the producer clears-to-sentinel then writes contiguously) AND **(b)** no real entry can masquerade as the sentinel (the value domain that triggers the `break` is *provably impossible* for a real entry — enforced upstream, e.g. by config validation). Leg (b) is the one most easily missed: it requires confirming the *upstream* constructor/validator forbids the sentinel pattern on real data (here: `config.cpp` rejects `lo>hi` port ranges at parse time). The forward-defense is a comment at BOTH the consumer (the scan) AND the producer (the populate) naming the cross-file dependency, because the `break`'s safety is a non-local property a single-end editor can silently break. Also distinguish a *boundary* sentinel skip (safe to `break`) from a *per-element guard* like a leaf-null-check (NOT safe to `break` — a transient miss on element `i` says nothing about elements `>i`; it stays `continue`). **Validated by §5.49 (this slice, 2026-05-29)**: B18 flipped the `r->lo > r->hi` sentinel `continue`→`break` (legs (a) dense-pack + (b) `config.cpp:199-202` `lo>hi`-rejection both confirmed) while the `!r` null-check `continue` correctly stayed.
+
+Evidence: `mint/task-brief.md` MVP-4.9 brief (HG-1/HG-2, Q1, B18-1/B19-1, guards #5/#12, dense-pack coupling); independent Phase A reads of `src/bpf/mac_filter.bpf.c:491-516` (`port_scan` two-continue body + unroll), `src/lib/loader.cpp:1603-1629` (`populate_port_inner_slot` clear-then-dense-write) + `:1321-1338` (`lower_port_axis` no-inversion), `src/lib/config.cpp:176-205` (`parse_dst_port` `lo>hi` rejection — the load-bearing B18 precondition), `tests/CMakeLists.txt:66-137` (`T_BUILD` lock-free + `T_SANITIZER_BUILD` `xdp_fixture`) + the in-file multi-lock precedents (`:205,:515,:527,:671,:726`), `grep -rlE 'cmake|XDPMF_SANITIZERS' tests/` (no third full-compile ctest); §5.44 (port-axis origin / `port_scan` / `populate_port_inner_slot` lineage), §5.33 (guard #12 RESOURCE_LOCK genesis), §6.65/§6.66/§6.69/§6.61 (the port + oracle-agreement regression net).
