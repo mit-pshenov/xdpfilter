@@ -1,109 +1,93 @@
-# Task brief — MVP-4.5: bit-vector axis 5 — VLAN match (exact HASH, APN selector) (rule-model S5, brownfield)
+# Task brief — MVP-4.6: exporter per-axis labels (make the 5-axis match model observable) (rule-model S6, brownfield)
 
 ## Goal
 
-Add **VLAN** as a 5th bit-vector match axis on the production AND classifier (axes 1-4 = dst_cidr/src_cidr/proto/dst_port, landed §5.43-§5.44). On the Gi link **VLAN is the APN carrier** — the real subscriber/APN selector for downstream DPI (per [[dpi-pre-filter-purpose]] + `mint/selection-scenarios.md` §3.A). PO picked this over MAC-axis-return (MAC is a weak selector on an L3 Gi link) for product value.
+Make the 5-axis match model (`dst_cidr/src_cidr/proto/dst_port/vlan`, landed §5.43-§5.45) **visible in Prometheus metrics**. The exporter has been deliberately axis-AGNOSTIC for several slices (`PI-mvp-4.3-EXPORTER-AGNOSTIC`), emitting only `xdpfilter_rule_match_total{iface,rule_id,action}` — an operator can see THAT rule N matched but not WHICH axes rule N selects on. This slice surfaces each rule's match constraints as Prometheus labels.
 
-The tagged-frame parse path already exists (§5.41 `l3_after_vlan` walks ≤2 802.1Q/QinQ tags to reach L3) — but it currently **discards the tag's TCI** (only follows `h_vlan_encapsulated_proto` to find L3). This slice extends the walk to **capture the outer tag's `vlan_id`** (`ntohs(h_vlan_TCI) & 0x0FFF`) and adds a `vlan` exact-match HASH axis (`vlan_id u32 → u64 bitmask`), **symmetric to the proto axis** (§5.44). `BITVEC_NUM_AXES` 4→5; `wildcard` ARRAY grows to `RULESET_COUNT*5=10`; `kManagedMaps[]` +3 (vlan trio). Additive within `schema_version 2` (new optional `vlan` key, NO cutover). Datapath: `acc &= (vlan_mask | wc_vlan)`; an **untagged** frame has no vlan_id → the vlan axis contributes 0, so only vlan-wildcard rules survive (exactly the `has_port=0` parallel from §5.44).
+The data already flows: the loader's sidecar (`src/lib/sidecar.cpp`) ALREADY emits per-rule match objects with all 5 axes (`{"rule_id":N,"match":{"dst_cidr":"…","protocol":"tcp","dst_port":"443","vlan":"100",…},"action":"…"}`, verified — 5 `append_kind` emitters). The **exporter-side reader** (`src/exporter/sidecar_reader.cpp`) regex already CAPTURES the whole match-object body but `classify_match_kind()` collapses it to `match_kind ∈ {mac,cidr,both}`, **discarding the axis values**. So this slice is **consumer-only**: extend the reader to parse the per-axis values + extend `prom_format` to emit them. **`sidecar.cpp` is UNCHANGED** (producer already complete). NO BPF / datapath / loader / config / schema / map change. Rule count ≤64 bounds label cardinality.
 
-Anchors: §5.44 (proto exact-HASH axis — the closest template, including the additive-within-v2 grammar + RESET-on-apply + wildcard-growth pattern), §5.41 (`l3_after_vlan` + the guard #22 VLAN-offload-disable test discipline), `mint/architecture-rule-model.md` (VLAN-match = catalog axis, APN proxy).
+Anchors: §5.43-§5.45 (the 5 axes the sidecar emits); the §5.31 sidecar/exporter split (`PI-31-3.4b` read-only reader, `D-3.4b-10` no-JSON-parser budget, `PI-32-3.4b` orphan-tolerance `action="unknown"`).
 
 ## Context: prior work
 
-- **All prior briefs**: archived in `mint/task-brief-*.md` (this supersedes `mint/task-brief-mvp-4.4.md`).
-- **Existing design**: `mint/design.md` §5.44 (MVP-4.4 — proto exact-HASH + dst_port range axes; the additive-within-v2 grammar extension, `wildcard` auto-grow via `RULESET_COUNT*BITVEC_NUM_AXES`, RESET-on-apply lowering, the `xdpmf_proto_inner` HASH-AOM topology this VLAN axis mirrors). §5.41 (MVP-4.1 — `l3_after_vlan` ≤2-tag walk; the depth-3 anti-vacuity fence + the `ethtool -K rxvlan/txvlan off` offload-disable test discipline = guard #22).
-- **Architecture doc**: `mint/architecture-rule-model.md` — VLAN-match is a planned axis; VLAN = APN proxy (selection-scenarios §3.A); the tagged parse path was split into S1 precisely so the VLAN-MATCH axis could land cleanly later (now).
-- **Phase A code-grep verification**: brief author ran the greps in the Phase-2 report below (BITVEC_NUM_AXES=4, BV_AXIS_PROTO/PORT=2/3, wildcard width=8, kManagedMaps=27, VERSION=0.12.0, RuleMatch shape, `l3_after_vlan` DISCARDS the TCI today, `vlan_hdr.h_vlan_TCI` exists in vmlinux.h, proto axis topology as template). See footer.
-- **PI continuity**: PI-mvp-4.3-AND / -WILDCARD / -SCHEMA-V2 extend (now 5 axes); PI-mvp-4.4-PROTO pattern is the template; PI-mvp-4.3-COUNTER-PRESERVE + EXPORTER-AGNOSTIC + close_prefixes-UNCHANGED CONTINUE; config.hpp gains one more optional field. New vlan maps RESET-on-apply (guard #15). **No schema_version cutover** (additive within v2) ⇒ existing v2 corpus stays green (the mvp-4.4 lesson: a clean additive cycle).
+- **All prior briefs**: archived in `mint/task-brief-*.md` (this supersedes `mint/task-brief-mvp-4.5.md`).
+- **Existing design**: `mint/design.md` §5.31 (MVP-3.4b — the sidecar `rule_index.json` + the exporter `sidecar_reader` + `prom_format` rule_id→action lookup; `PI-31/32-3.4b`), §5.43-§5.45 (the 5 axes now in the sidecar match objects).
+- **Architecture doc**: `mint/architecture-rule-model.md` — observability of the selection axes is operator value; exporter labels were explicitly deferred from each axis slice to "a later exporter slice" (now).
+- **Phase A code-grep verification** (brief author): `src/lib/sidecar.cpp` emits 5 axes (UNCHANGED this slice); `src/exporter/sidecar_reader.cpp` regex captures the match body (group 2) but `classify_match_kind` reduces it to a kind; `struct RuleMeta {rule_id, action, match_kind}` (sidecar_reader.hpp); `prom_format.cpp` emits `xdpfilter_rule_match_total{iface,rule_id,action}` from a rule_id→action vector; VERSION=0.13.0 (pinned only in `T_EXPORTER_METRICS_FORMAT.sh`); ctest baseline=82; T_EXPORTER_RULE_LABELS / T_EXPORTER_METRICS_FORMAT / T_SIDECAR_JSON_SHAPE exist.
+- **PI continuity — IMPORTANT SHIFT**: `PI-mvp-4.3-EXPORTER-AGNOSTIC` ("exporter is rule_id-keyed + axis-agnostic; zero exporter edits") is **intentionally RETIRED/superseded** this slice — the exporter becomes axis-AWARE by design. Document the shift as a new PI (mirror the §5.34 PRESERVE→shift precedent; cite the retired PI text verbatim per [[impl-role-discipline]]). The existing `xdpfilter_rule_match_total` + `xdpfilter_packets_total` label sets stay byte-identical (the COUNTER contract is preserved; the new info is additive — see Q1). `PI-31-3.4b` (reader READ-ONLY) + `PI-32-3.4b` (orphan tolerance) CONTINUE.
 
 ## Workflow rules (brownfield)
 
-- **Architect**: read `design.md` §5.44 (the axis-add template — grammar, HASH-AOM topology, wildcard-index formula, RESET-on-apply) + §5.41 (`l3_after_vlan` + guard #22) + the brief. EDIT `design.md` in place; append **§5.45**. Resolve Q1–Q3 + HG defaults with Phase A grep evidence. State explicitly that VLAN is exact-match (NO prefix-closure — guard #23 does NOT extend; the dst/src §6.62 closure canary + close_prefixes stay UNCHANGED).
-- **Impl**: brownfield FileList DIFF. **Extend `l3_after_vlan` in place** to thread out the outer `vlan_id` (it is a SINGLE-CONSUMER datapath helper — extend-in-place is correct, NOT a guard-#9 duplication case; confirm single call-site). Add the vlan HASH axis mirroring proto (`xdpmf_proto_inner`→`xdpmf_vlan_inner` analog). `BITVEC_NUM_AXES` 4→5 (the `wildcard` width auto-derives 8→10 via the formula — no literal edit in the .bpf.c decl). Re-run the bpftool-load smoke.
-- **Tester**: extend the independent O(N) oracle to 5 axes (vlan exact membership). NEW tests: vlan-AND compose, untagged→vlan-wildcard survival, vlan-miss negation, 5-axis oracle agreement. **Guard #22 MANDATORY**: VLAN tests inject tagged frames — disable NIC VLAN offload in setup (`ethtool -K ${IFACE} rxvlan off txvlan off`, best-effort) so the kernel does NOT strip the tag before XDP, else the assertion is vacuous (§5.41 precedent). Existing corpus stays GREEN (additive). Reconcile baseline via fresh `ctest -N` (was 79).
-- **Reviewer**: 5-point brownfield. Special attention: (a) `vlan_id` capture correctness — outer tag, `ntohs(TCI)&0x0FFF` (low 12 bits; the high 4 PCP/DEI bits MUST be masked off); (b) untagged-frame path → vlan_mask=0 → only vlan-wildcard rules survive (no spurious match); (c) guard #22 — VLAN tests actually disable offload (else vacuous); (d) vlan maps ride active_idx RESET-on-apply (no copy-forward); (e) wildcard 8→10 + index `active*5+axis` correct; (f) kManagedMaps 27→30 exact; (g) `l3_after_vlan` extension is single-consumer in-place (not a needless duplicate); existing v2 corpus green with zero conversions.
+- **Architect**: read `design.md` §5.31 (the sidecar/exporter split + reader regex + the D-3.4b-10 no-JSON-parser discipline + PI-31/32) + the brief. EDIT `design.md` in place; append **§5.46**. Resolve Q1–Q3 + HG defaults. Explicitly document the `PI-mvp-4.3-EXPORTER-AGNOSTIC` retirement + the new axis-aware PI.
+- **Impl**: brownfield FileList DIFF. This is the slice that EDITS the exporter (`prom_format.cpp` + `sidecar_reader.{hpp,cpp}`) — previously fenced UNCHANGED. Keep the reader's no-full-JSON-parser discipline (D-3.4b-10 — line/regex extraction, not a parser dep). `sidecar.cpp` is NOT touched (producer already emits the axes).
+- **Tester**: extend `T_EXPORTER_RULE_LABELS` to assert the per-axis labels/info-metric for a known 5-axis config; extend `T_EXPORTER_METRICS_FORMAT` (version literal + any new HELP/TYPE). Exporter tests bind a fixed port — `RESOURCE_LOCK` (guard #12) + be aware of the known port-9524 flake (backlog B17). Existing metric assertions must still hold (the counter contract is preserved per HG-2).
+- **Reviewer**: 5-point brownfield. Special attention: (a) the new metric is Prometheus-valid (HELP/TYPE once per family, label escaping, stable label-key set across series); (b) label cardinality bounded (≤64 rules/iface, no unbounded value); (c) the existing `xdpfilter_rule_match_total` / `xdpfilter_packets_total` label sets are byte-UNCHANGED (counter contract preserved); (d) reader stays READ-ONLY (PI-31) + no full-JSON-parser dep (D-3.4b-10) + orphan tolerance (PI-32) holds; (e) `sidecar.cpp` + datapath/loader/config git-diff fences empty (consumer-only slice); (f) the EXPORTER-AGNOSTIC PI retirement is documented, not silently broken.
 
 ## Human-gate decisions (defaults applied — architect overrides at Phase A with evidence)
 
-### HG-mvp-4.5-1: Axis → **VLAN exact-match HASH (axis 5)**
-`vlan_id u32 → u64 bitmask`, mirroring the proto axis (§5.44). `BITVEC_NUM_AXES` 4→5, `BV_AXIS_VLAN=4`. NO prefix-closure (exact).
+### HG-mvp-4.6-1: Scope → **exporter consumer-only** (prom_format + sidecar_reader)
+NO datapath/loader/config/schema/map/sidecar-producer change. The sidecar already emits all 5 axes; this slice only reads + emits them. `sidecar.cpp` UNCHANGED.
 
-### HG-mvp-4.5-2: Which tag on QinQ depth-2 → **OUTER (first/S-VLAN) tag**
-The outer tag is typically the APN/S-VLAN selector on a Gi link. Default: capture the FIRST tag's `vlan_id` during the `l3_after_vlan` walk. Inner-tag (C-VLAN) matching → OOS (later if a use-case needs it). Architect may override with evidence (e.g. if selection-scenarios says inner).
+### HG-mvp-4.6-2: Metric shape → **separate `xdpfilter_rule_info{iface,rule_id,<axis labels>} 1` gauge (Prometheus info-metric pattern)**
+Default: emit a NEW info-metric (constant gauge value `1`) carrying the axis labels, keyed by `iface`+`rule_id`; operators join it to `xdpfilter_rule_match_total` on `(iface,rule_id)`. This leaves the existing counter's label set **byte-unchanged** (preserves its contract + the existing tests + avoids per-axis cardinality on the counter) — the Prometheus-idiomatic way to attach metadata. Architect Q to weigh vs enriching the counter directly (which would break the counter's label contract + ripple T_EXPORTER_METRICS_FORMAT/RULE_LABELS assertions).
 
-### HG-mvp-4.5-3: `vlan` config grammar → **`vlan: <0-4095>` (single id), additive within schema_version 2**
-A rule's `match.vlan` is a single VLAN id in [0,4095]. Ranges/lists → OOS (multi = multiple rules, mirroring dst_port single-value default). New optional key in the existing v2 grammar; existing v2 configs (no `vlan`) parse unchanged. NO schema bump.
+### HG-mvp-4.6-3: Label encoding → **one label per axis carrying the constraint value; unconstrained axis → stable empty sentinel**
+Labels `dst_cidr`, `src_cidr`, `protocol`, `dst_port`, `vlan`; value = the rule's constraint (e.g. `dst_cidr="10.1.2.0/24"`, `protocol="tcp"`, `dst_port="443"` or `"1000-2000"`, `vlan="100"`). A rule that does NOT constrain an axis emits that label as a stable sentinel (`""` default — architect picks `""` vs `"*"`) so every `rule_info` series carries the SAME label-key set (Prometheus best practice — avoid sometimes-present keys). Bounded cardinality (≤64 rules/iface).
 
-### HG-mvp-4.5-4: Untagged-frame semantics → **vlan axis contributes 0 (only vlan-wildcard rules survive)**
-A frame with no VLAN tag has no vlan_id → `vlan_mask=0`; a rule that constrains `vlan` cannot match an untagged frame; a rule omitting `vlan` survives via `wildcard[active*5+VLAN]`. Exact parallel to §5.44 `has_port=0` for ICMP. (Document the sentinel/has_vlan mechanism — architect picks: a `has_vlan` flag or an out-of-range sentinel id.)
+### HG-mvp-4.6-4: VERSION → **bump 0.13.0 → 0.14.0 + DESCRIPTION** (new observability capability; propagate the literal per guard #11 — only `T_EXPORTER_METRICS_FORMAT` pins it).
 
-### HG-mvp-4.5-5: VERSION → **bump 0.12.0 → 0.13.0 + DESCRIPTION update**
-New match capability (VLAN/APN axis). Propagate the literal per guard #11 (mvp-4.4 left only `T_EXPORTER_METRICS_FORMAT` pinning it). Architect picks exact bump.
+### HG-mvp-4.6-5: Existing metrics → **UNCHANGED label sets** (`xdpfilter_rule_match_total`, `xdpfilter_packets_total` byte-identical). The new info is ADDITIVE. PI-31/32-3.4b continue.
 
-### HG-mvp-4.5-6: Exporter → **UNCHANGED** (rule_id-keyed, axis-agnostic; per-axis labels stay a later slice). PI-mvp-4.3-EXPORTER-AGNOSTIC continues.
+## Open mechanism questions (architect decides; document in §5.46)
 
-## Open mechanism questions (architect decides; document in §5.45)
+### Q1: info-metric vs enrich-the-counter
+- **A1**: NEW `xdpfilter_rule_info{iface,rule_id,dst_cidr,src_cidr,protocol,dst_port,vlan} 1` gauge; counter untouched (join on iface+rule_id). Additive → existing tests hold; idiomatic; stable counter cardinality.
+- **A2**: add the axis labels directly to `xdpfilter_rule_match_total`. Fewer series but CHANGES the counter's label contract (breaks existing format assertions + any operator query) + couples metadata to the counter's cardinality.
+- **Recommendation**: **A1** (info-metric) — preserves the counter contract, additive test ripple, Prometheus-idiomatic.
 
-### Q1: vlan axis map topology
-- **A1**: NEW `ARRAY_OF_MAPS[2]` of inner HASH (`vlan_bitmask_a/_b` + `vlan_rulesets`), key `__u32` vlan_id, value `__u64` bitmask, rides `active_idx`. Mirrors the proto axis (§5.44 D-mvp-4.4-Q1) exactly. +3 kManagedMaps. NO closure.
-- **Recommendation**: **A1** — proto is the proven template for an exact-match axis; copy its shape.
+### Q2: sidecar_reader per-axis extraction (keep D-3.4b-10 no-JSON-parser discipline)
+- **A1**: keep the existing line-regex (it already captures the match-object body as group 2); add a small per-axis key extractor over that body (e.g. find `"dst_cidr":"…"` substrings) populating new `RuleMeta` fields. No full JSON parser. `classify_match_kind` MAY stay or be superseded.
+- **Recommendation**: **A1** — minimal, respects D-3.4b-10; `RuleMeta` gains `dst_cidr/src_cidr/protocol/dst_port/vlan` string fields (empty when absent).
 
-### Q2: vlan_id capture in `l3_after_vlan`
-- **A1**: extend `l3_after_vlan` in place to thread out the outer vlan_id via an out-param (e.g. `__u16 *out_vlan_id` set from the FIRST tag's `ntohs(h_vlan_TCI)&0x0FFF`, + a `has_vlan` signal — out-of-range sentinel or bool). Single call-site → extend-in-place, NOT a guard-#9 duplicate.
-- **A2**: a separate parallel walk helper — rejected (re-walks the frame, wasteful + two sources of truth for the tag chain).
-- **Recommendation**: **A1** — one walk, one consumer; capture the outer TCI during the existing loop; mask the low 12 bits (drop PCP/DEI). Confirm the single call-site via grep.
+### Q3: wildcard-axis label sentinel
+- `""` (empty) vs `"*"` vs `"(any)"` — **Recommendation**: `""` (stable key, empty value); architect picks. Always emit ALL axis label keys per `rule_info` series for a uniform label set.
 
-### Q3: wildcard growth + axis index
-- `wildcard` max_entries `RULESET_COUNT*BITVEC_NUM_AXES` auto 8→10; `BV_AXIS_VLAN=4`; datapath `wildcard[active*5+4]`; loader writes the inactive half's 5 axis slots; RESET-on-apply (guard #15, no copy-forward). Architect confirms the `active*5+axis` formula holds for all 5 axes (same mechanism as §5.44 Q4, just N=5).
+## Scope (cycle S6 / mvp-4.6 — concrete items; estimates are UPPER BOUNDS)
 
-## Scope (cycle S5 / mvp-4.5 — concrete items; estimates are UPPER BOUNDS)
+### Item S6-1 — sidecar_reader: parse per-axis values
+**Where**: `src/exporter/sidecar_reader.{hpp,cpp}`
+- `struct RuleMeta` gains per-axis string fields (`dst_cidr/src_cidr/protocol/dst_port/vlan`); parse from the already-captured match body (Q2), no full-JSON dep (D-3.4b-10). READ-ONLY (PI-31).
 
-### Item S5-1 — config grammar + parse (vlan)
-**Where**: `src/lib/config.cpp`, `src/lib/config.hpp`
-- `RuleMatch` gains `std::optional<std::uint16_t> vlan;` (architect picks the exact width; vlan_id ≤4095 fits u16).
-- v2 grammar accepted-key set `{dst_cidr,src_cidr,protocol,dst_port}` → `+vlan`; parse + validate [0,4095]; at-least-one-of stays (now any of 5). Schema stays 2.
+### Item S6-2 — prom_format: emit axis labels
+**Where**: `src/exporter/prom_format.{cpp,hpp}`
+- Emit the `xdpfilter_rule_info` info-metric (Q1/A1) with HELP+TYPE once + one `… 1` line per (iface,rule_id) carrying the 5 axis labels (Q3 sentinel for unconstrained). Existing `xdpfilter_rule_match_total`/`xdpfilter_packets_total` emission UNCHANGED (HG-5). Label-value escaping per the existing escaper.
 
-### Item S5-2 — datapath: vlan_id capture + vlan axis + 5-axis acc
-**Where**: `src/bpf/mac_filter.bpf.c`
-- Extend `l3_after_vlan` to capture the outer vlan_id (+ has_vlan signal) per Q2.
-- ADD `vlan_bitmask_a/_b` + `vlan_rulesets` HASH-AOM decls (mirror proto); `BV_AXIS_VLAN=4`.
-- EXTEND acc: `&= (vlan_mask | wildcard[active*5+4])`; vlan_mask from `vlan_bitmask[active]` HASH lookup if has_vlan else 0. `first_set_u64`/dispatch/`bump_rule`/defaults/close_prefixes/dst+src+proto+port axes UNCHANGED.
+### Item S6-3 — VERSION bump + DESCRIPTION + literal propagation
+**Where**: `CMakeLists.txt` + `T_EXPORTER_METRICS_FORMAT` (guard #11).
 
-### Item S5-3 — loader: lower vlan axis
-**Where**: `src/lib/loader.cpp`, `src/common/mac_filter.h`
-- NEW `XDPMF_MAP_VLAN_*_NAME` constants (vlan trio); `BITVEC_NUM_AXES` 4→5 (mac_filter.h); `kManagedMaps[]` 27→30 (+3: vlan_bitmask_a/_b, vlan_rulesets).
-- Lower `Config::rules` → vlan HASH bitmask (exact, NO closure) + extend the wildcard-write to 5 axes; RESET-write inactive inners before the single `active_idx` flip. `close_prefixes`/`copy_rule_counters_forward` UNCHANGED.
-
-### Item S5-4 — VERSION bump + DESCRIPTION + literal propagation
-**Where**: `CMakeLists.txt` + `T_EXPORTER_METRICS_FORMAT` (the one version-pinning test, guard #11).
-
-### Item S5-5 — sidecar
-**Where**: `src/lib/sidecar.cpp` — emit `vlan` in the per-rule match object (mirrors the §5.44 protocol/dst_port emission). Verify via grep it enumerates match axes (it does per §5.44).
-
-### Item S5-6 — tests: vlan axis + 5-axis oracle
-**Where**: `tests/` (NEW T_VLAN_AND_COMPOSE + untagged-wildcard + vlan-miss negation; extend 5-axis oracle agreement), `tests/bitvec/bitvec_oracle_prod.py` (→5 axes), fixtures (NEW v2 config with `vlan`), `tests/CMakeLists.txt`. **Guard #22**: VLAN tests disable NIC offload (`ethtool -K rxvlan/txvlan off`) + a depth/strip anti-vacuity check (§5.41 precedent). `inject_l4.py` supports `--vlan` (verify). Existing corpus stays green. `RESOURCE_LOCK xdp_fixture` (guard #12).
+### Item S6-4 — tests
+**Where**: `tests/T_EXPORTER_RULE_LABELS.sh` (assert the new info-metric + axis labels for a known 5-axis config + unconstrained-axis sentinel + a negation: an axis NOT in the config does not appear with a bogus value), `tests/T_EXPORTER_METRICS_FORMAT.sh` (version literal + new HELP/TYPE), `tests/CMakeLists.txt` if a NEW test is added. `RESOURCE_LOCK` (guard #12); known port-9524 flake (B17) awareness. Existing exporter assertions must still pass (counter contract preserved).
 
 ## Out of scope (explicit)
-- **MAC-axis return; exporter per-axis labels** — later slices (the frozen MAC maps stay pinned-but-unconsulted since §5.43). NEW FENCE.
-- **Inner-VLAN (C-VLAN) matching; PCP/DEI bits; VLAN ranges/lists per rule** — outer single-id only this slice. NEW FENCE.
-- **IPv6 cidr6; feed-objects; N>64; most-specific-wins; sequential lowering** — later (carry §5.42-§5.44 fences). NEW FENCE.
-- **schema_version v2→v3** — additive within v2; no cutover. NEW FENCE.
-- **Non-eBPF datapath / 40 Gbps line-rate** — deferred per [[real-requirements-and-strategy]].
-- Carry-forward §5.41-§5.44 OOS items not superseded — UNCHANGED.
+- **`sidecar.cpp` (producer)** — already emits all 5 axes; UNCHANGED. NEW FENCE.
+- **Any datapath / loader / config / schema / BPF-map change** — consumer-only slice. NEW FENCE.
+- **MAC-axis return; IPv6 cidr6; feed-objects; N>64; most-specific-wins; sequential** — later slices. NEW FENCE.
+- **Per-axis MATCH counters** (a counter per axis-value) — this slice is metadata labels (info-metric), not new counters. NEW FENCE.
+- **Non-eBPF datapath / 40 Gbps** — deferred per [[real-requirements-and-strategy]].
+- Carry-forward §5.41-§5.45 OOS items not superseded — UNCHANGED.
 
 ## Definition of done
-- §5.45 amendment appended to `mint/design.md` (Phase A grep report + HG/Q resolutions + vlan lowering notes + new PIs).
-- **PIs**: NEW PI-mvp-4.5-VLAN (exact HASH axis, outer-tag, low-12-bit), PI-mvp-4.5-UNTAGGED (untagged→vlan-wildcard-only), PI-mvp-4.5-VLAN-CAPTURE (l3_after_vlan threads outer vlan_id, single-consumer); PI-mvp-4.3-AND/-WILDCARD/-SCHEMA-V2 extended to 5 axes; PI-mvp-4.4-* + COUNTER-PRESERVE + EXPORTER-AGNOSTIC + close_prefixes-UNCHANGED CONTINUE.
-- ctest baseline = **79** (mvp-4.4 left it here; tester reconciles) + NEW vlan/5-axis tests; existing corpus green (additive — confirm zero conversions).
-- VERSION 0.12.0 → 0.13.0, literal propagated.
-- impl Phase 2.5 bpftool-load smoke rc=0 (5-axis + vlan_id capture verifies on the floor).
+- §5.46 amendment appended to `mint/design.md` (Phase A grep report + HG/Q resolutions + the EXPORTER-AGNOSTIC PI retirement + new PIs).
+- **PIs**: NEW PI-mvp-4.6-EXPORTER-AXIS-AWARE (the new info-metric carries the 5 axis labels; unconstrained→sentinel); NEW PI-mvp-4.6-COUNTER-CONTRACT (existing counter/packets label sets byte-unchanged); `PI-mvp-4.3-EXPORTER-AGNOSTIC` RETIRED (cite verbatim); `PI-31-3.4b` (reader READ-ONLY) + `PI-32-3.4b` (orphan tolerance) CONTINUE.
+- ctest baseline = **82** (mvp-4.5 left it here; tester reconciles) + extended/NEW exporter-label tests; all existing exporter tests still green.
+- VERSION 0.13.0 → 0.14.0, literal propagated.
 - `mint/review.md` round-1 verdict = pass.
 - One git commit per phase boundary.
 
 ## Dependencies
-- Build: clang-19 / libbpf / CMake; `bpftool` for ctest map dumps; `inject_l4.py --vlan` for tagged-frame injection.
-- Runtime: `bpf()` HASH + ARRAY_OF_MAPS (all used); bounded VLAN walk (5.15-safe, exists §5.41).
-- Platform: passwordless sudo for XDP/veth/bpffs ctests; `ethtool -K` for offload-disable (guard #22).
+- Build: clang-19 / CMake; the exporter binary + its test harness.
+- Runtime: a fixed metrics port for the exporter ctests (guard #12; known B17 port-9524 flake).
+- No new third-party dep (D-3.4b-10 no-JSON-parser discipline).
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 ```yaml
@@ -118,32 +102,28 @@ packs:
 ---
 
 ## Pre-brief sanity check (per [[mint-hld-scope-discipline]])
-- **One-sentence goal**: add VLAN (outer tag, exact-match HASH) as bit-vector axis 5 on the production AND structure, additive within schema_version 2, capturing vlan_id in the existing l3_after_vlan walk.
-- **Multi-axis design space?** NO — structure resolved (bit-vector); the proto axis (§5.44) is a proven exact-match template; the only new mechanism is vlan_id capture in an existing walk. `/mint-hld` NOT needed.
-- **Mechanical?** YES — "copy the proto axis + extend l3_after_vlan to capture the outer tag." Single-architect via `/mint-dev`.
-- **Scope-size**: moderate, ONE coherent slice (smaller than mvp-4.4: one axis not two, no new L4 parse — the VLAN walk already exists). No split.
-- **Overconfidence check**: VERIFIED that `l3_after_vlan` currently DISCARDS the TCI (only follows the encapsulated proto) — the capture is genuinely NEW, flagged, not assumed-present. BITVEC_NUM_AXES=4 / wildcard=8 / kManagedMaps=27 / VERSION=0.12.0 grep-verified (not memory). Guard #22 (offload-disable) is a known vacuity trap from §5.41 — pre-listed.
+- **One-sentence goal**: surface each rule's 5 match-axis constraints as Prometheus labels via an additive `xdpfilter_rule_info` metric, consumer-side only (the sidecar already emits the data).
+- **Multi-axis design space?** BORDERLINE-NO. There is ONE real design fork (metric shape: info-metric vs enrich-counter, Q1) + a sub-choice (sentinel, Q3); both have clear Prometheus-idiomatic defaults (info-metric + stable-key labels). Not a sprawling ≥3-axis space; single-architect resolvable. Slightly expensive-to-undo (operator-facing metric contract) → mitigated by the info-metric default (additive, doesn't touch the existing contract). `/mint-hld` NOT needed; flagged as borderline.
+- **Mechanical?** Mostly — "parse the axis values the sidecar already emits + emit an info-metric." Single-architect via `/mint-dev`.
+- **Scope-size**: small, single-subsystem (exporter consumer-only). No split.
+- **Overconfidence check**: VERIFIED the producer (sidecar.cpp) already emits all 5 axes (so it's OOS, not an EDIT) and the consumer (sidecar_reader) captures-but-discards the body — the change is genuinely consumer-only, not assumed. The EXPORTER-AGNOSTIC PI retirement is a real semantic shift, flagged (not silently broken).
 
 ## Notes for architect Phase A code-grep discipline (per architect spec rules)
-Brief author ran these (Phase 2). Architect re-verifies independently + extends:
-- `grep -nE 'BITVEC_NUM_AXES|BV_AXIS_' src/common/mac_filter.h` (=4; DST/SRC/PROTO/PORT=0/1/2/3; add VLAN=4).
-- `sed -n '/l3_after_vlan/,/^}/p' src/bpf/mac_filter.bpf.c` (CONFIRM: reads `h_vlan_encapsulated_proto`, DISCARDS `h_vlan_TCI` — the capture is new; single call-site).
-- `grep -nE 'struct vlan_hdr|h_vlan_TCI' include/vmlinux.h` (TCI field exists at :57636; vlan_id = `bpf_ntohs(TCI)&0x0FFF`).
-- `sed -n '/kManagedMaps/,/};/p' src/lib/loader.cpp` (27 entries — confirm before/after delta = +3).
-- `grep -nE 'proto_bitmask|proto_rulesets|xdpmf_proto_inner|XDPMF_MAP_PROTO' src/common/mac_filter.h src/bpf/mac_filter.bpf.c` (the exact-HASH axis template to mirror for vlan).
-- `grep -nE 'dst_cidr|protocol|dst_port|not supported' src/lib/config.cpp` (v2 grammar accepted-key set to extend with `vlan`).
-- `grep -nE 'vlan|protocol|dst_port' src/lib/sidecar.cpp` (match-object emission to extend).
-- `grep -rn '0\.12\.0' CMakeLists.txt tests/ docs/ CHANGELOG.md` (VERSION propagation surface).
-- `grep -rn 'rxvlan\|txvlan\|ethtool -K' tests/` (the §5.41 guard #22 offload-disable pattern to reuse).
+Brief author ran these (Phase 2). Architect re-verifies + extends:
+- `grep -nE 'append_kind\("(dst_cidr|src_cidr|protocol|dst_port|vlan)"' src/lib/sidecar.cpp` (CONFIRM producer emits all 5 → sidecar.cpp is OOS/UNCHANGED).
+- `sed -n '/struct RuleMeta/,/};/p' src/exporter/sidecar_reader.hpp` + the regex in `sidecar_reader.cpp` (the match body is captured as group 2 today, reduced by `classify_match_kind`).
+- `grep -nE 'xdpfilter_rule_match_total|xdpfilter_packets_total|HELP|TYPE|action=' src/exporter/prom_format.cpp` (the emission to keep byte-unchanged + the family to add).
+- `grep -rn '0\.13\.0' CMakeLists.txt tests/` (VERSION propagation = only T_EXPORTER_METRICS_FORMAT).
+- `git diff` fences: confirm `src/lib/sidecar.cpp`, `src/bpf/`, `src/lib/loader.cpp`, `src/lib/config.*` stay EMPTY (consumer-only).
+- `grep -rn 'rule_match_total\|rule_info\|RULE_LABELS' tests/` (which tests assert the metric label schema → guard #13 ripple surface).
 
 ### Anti-misdiagnosis guards applicable to this slice (per Phase 3)
 - **Guard #5 (Phase A code-grep)** — always; architect repeats independently.
-- **Guard #9 (helper duplication-over-extraction)** — `l3_after_vlan` is SINGLE-CONSUMER → extend-in-place is correct (NOT a duplicate); confirm the single call-site. Do NOT `#include tests/bitvec/*` (transcribe any spike pattern).
-- **Guard #10 (catalog arithmetic)** — `kManagedMaps[]` 27→30 (+3); `wildcard` 8→10; `BITVEC_NUM_AXES` 4→5. State EXACT counts; load-bearing.
-- **Guard #11 (VERSION-bump test-literal propagation)** — applies (HG-5); grep every `0.12.0`.
-- **Guard #12 (RESOURCE_LOCK)** — new VLAN ctests take `RESOURCE_LOCK xdp_fixture` + cleanup trap.
-- **Guard #15 (PRESERVE-vs-RESET)** — NEW vlan maps + grown wildcard are RESET-on-apply (no copy-forward); rule_counters stays PRESERVE.
-- **Guard #22 (L2-mutation test vacuity)** — **DIRECTLY APPLIES**: VLAN-match tests inject tagged frames; MUST disable NIC VLAN offload (`ethtool -K rxvlan/txvlan off`) so the kernel doesn't strip the tag before XDP, else the vlan assertion is vacuous. Reuse the §5.41 pattern + a strip/depth anti-vacuity check.
-- **Guard #23 (prefix-closure)** — does NOT extend to vlan (exact-match, like proto). dst/src §6.62 closure canary + close_prefixes() UNCHANGED. State explicitly.
-- **Guard #25 (variable-length L4 offset)** — N/A (vlan_id captured at a fixed offset within the existing bounded VLAN walk; no new variable-offset surface).
-- **Operative-semantic discipline**: counts in §5.45 verifiable-invariants (kManagedMaps=30, wildcard=10, BITVEC_NUM_AXES=5 are load-bearing MUST; ctest delta, PI numbering SHOULD) — impl deviations mirroring precedent / structural-symmetry fixtures are `inline-merge`.
+- **Guard #8 (interactive-vs-log distinction)** — N/A-ish: this is metric OUTPUT not a log event; but the same discipline (don't conflate the operator-facing metric contract with internal state) applies to the EXPORTER-AGNOSTIC PI shift.
+- **Guard #9 (helper duplication-over-extraction)** — the per-axis extractor is exporter-internal single-consumer; do not over-share.
+- **Guard #10 (catalog arithmetic)** — a NEW metric family (HELP/TYPE pair) is added; state it; no array/table size literal.
+- **Guard #11 (VERSION-bump test-literal propagation)** — applies (HG-4); grep every `0.13.0`.
+- **Guard #12 (RESOURCE_LOCK for shared host state)** — exporter ctests bind a fixed port; keep RESOURCE_LOCK + note the known port-9524 flake (backlog B17).
+- **Guard #13 (retired/changed emit-site string ripple)** — the metric output format is asserted by `T_EXPORTER_METRICS_FORMAT` + `T_EXPORTER_RULE_LABELS`; the info-metric default is ADDITIVE (existing assertions hold + new ones added). If the architect picks Q1/A2 (enrich the counter) instead, the existing counter-format assertions RIPPLE — pre-list them. The EXPORTER-AGNOSTIC PI is the retired "string" here — document the retirement.
+- **Guard #15 (PRESERVE-vs-RESET)** — N/A (no map change; rule_counters PRESERVE continues, untouched).
+- **Operative-semantic discipline**: label-name/sentinel choices in §5.46 verifiable-invariants are SHOULD-level orientation; impl deviations mirroring the existing escaper / HELP-TYPE-once precedent are `inline-merge`.
