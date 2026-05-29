@@ -14589,3 +14589,194 @@ Guards applied: **#5** (Phase A code-grep — re-anchored every literal independ
 > **Forward-defense note (future cycles touching tag/L2-mutation match axes):** any axis that matches a field the NIC can offload/strip/insert (VLAN tag, checksum, GRO/GSO-affected fields) is a guard-#22 vacuity trap — the test infra inherits the runner's NIC config, and an offloaded strip makes the match assertion pass VACUOUSLY. ALWAYS pair such an axis's TestStrategy with (a) an explicit `ethtool -K` offload-disable in setup AND (b) an anti-vacuity control whose outcome DIFFERS iff the field reached XDP. Cite §5.41 (first VLAN parse) + §5.45 (first VLAN MATCH) as the audit trail. Catalog guard #22 reinforced (no new guard number — this is the same trap at the match layer).
 
 Evidence: `mint/task-brief.md` MVP-4.5 brief (HG-1..6, Q1-Q3, S5-1..6, guards #5/#9/#10/#11/#12/#15/#22/#23/#25); `mint/architecture-rule-model.md` (VLAN-match = catalog axis, APN proxy; `selection-scenarios.md` §3.A); §5.44 (the proto exact-HASH axis = the byte-for-byte template; additive-within-v2 grammar; wildcard auto-grow; RESET-on-apply; `write_wildcard_slots`), §5.41 (`l3_after_vlan` ≤2-tag walk + guard #22 offload-disable discipline), §5.43 (the production AND structure), §5.27 (CIDR ARRAY_OF_MAPS atomic-swap precedent); independent Phase A reads of `src/common/mac_filter.h:104-143`, `src/bpf/mac_filter.bpf.c:65-71,200-261,500-520,560-750`, `src/lib/loader.cpp:155-215,1288-1548,2180-2216,2390-2416`, `src/lib/config.cpp:305-390`, `src/lib/config.hpp:36-50`, `src/lib/sidecar.cpp:115-150`, `CMakeLists.txt:13-14`, `tests/T_EXPORTER_METRICS_FORMAT.sh:21-103`, `tests/inject/inject_l4.py:13-156`.
+
+---
+
+### §5.46 MVP-4.6: exporter per-axis labels — make the 5-axis match model observable (rule-model S6, brownfield, CONSUMER-ONLY, ADDITIVE metric family) (2026-05-29)
+
+#### §5.46 Problem statement
+
+The 5-axis match model (`dst_cidr / src_cidr / protocol / dst_port / vlan`, landed §5.43–§5.45) is invisible in Prometheus today. The exporter emits only `xdpfilter_rule_match_total{iface,rule_id,action}` — an operator sees THAT rule N matched but not WHICH axes rule N selects on. This slice surfaces each rule's match constraints as Prometheus labels on a NEW additive info-metric `xdpfilter_rule_info`, consumer-side only. The loader's sidecar (`src/lib/sidecar.cpp`) ALREADY emits all 5 axes per rule; the exporter-side reader (`src/exporter/sidecar_reader.cpp`) already CAPTURES the match-object body but `classify_match_kind()` collapses it to `match_kind ∈ {mac,cidr,both}`, discarding the values. So the change is purely: (1) extend the reader to parse per-axis values into new `RuleMeta` fields; (2) extend `prom_format` to emit a third metric family carrying those values as labels. NO BPF / datapath / loader / config / schema / map / sidecar-producer change.
+
+This slice intentionally RETIRES `PI-mvp-4.3-EXPORTER-AGNOSTIC` — the exporter becomes axis-AWARE by design (mirrors the §5.34 PRESERVE→shift precedent). The existing counter families' label sets stay byte-identical (the COUNTER contract is preserved; the new info is additive).
+
+Baseline commit for all `git diff` invariant checks: pre-§5.46 HEAD = `3f69d0a` ("mint-dev: prep — task-brief for mvp-4.6"). Reviewer substitutes the actual merge-base if different.
+
+#### §5.46 Phase A grep verification report (architect-independent — 2026-05-29, per guard #5)
+
+Architect independently re-ran the brief's Phase-2 greps and read each codepath in full. **All brief Phase-2 claims CONFIRMED — ZERO corrections this slice** (consumer-only, single-subsystem, additive metric). Findings:
+
+- **`src/lib/sidecar.cpp` (producer — OOS/UNCHANGED):** `append_kind(key, value)` lambda (`:115`) is called from SIX sites: `mac` (`:121`), `dst_cidr` (`:124`), `src_cidr` (`:127`), `protocol` (`:138`), `dst_port` (`:145`), `vlan` (`:153`). The brief's "5 `append_kind` emitters" = the 5 LIVE axes; `mac` is DEAD-under-v2 (config.cpp rejects `mac` at parse per HG-mvp-4.3-2, retained for the future MAC-axis slice). The emitted match-object shape is `{"<key>": "<value>"[, "<key2>": "<value2>"]}` with a SPACE after each colon (`std::format("\"{}\": \"{}\"", key, value)`, `:117`). Value encodings: `dst_cidr`/`src_cidr` → `A.B.C.D/N`; `protocol` → name `tcp`/`udp`/`icmp` else numeric string; `dst_port` → `"p"` (single) or `"lo-hi"` (range); `vlan` → numeric string. **`sidecar.cpp` is OOS this slice (ZERO diff).**
+- **`src/exporter/sidecar_reader.cpp` (the EDITED consumer):** the per-rule ERE is `\{"rule_id":\s*([0-9]+),\s*"match":\s*\{([^}]*)\},\s*"action":\s*"(pass|drop)"\s*\}\s*,?\s*$` — **group 2 (`[^}]*`) is the match-object body** (between the inner braces). `classify_match_kind(body)` substring-scans for `"mac"`/`"cidr"` → returns `mac`/`cidr`/`both`/`""` (NOTE: BOTH `dst_cidr` and `src_cidr` contain the substring `cidr`, so `classify_match_kind` returns `"cidr"` for either — informational-only, UNCHANGED). `parse_rule_index` is `noexcept`, swallows all exceptions → empty/partial vector (PI-32-3.4b). PI-31-3.4b: only `std::ifstream` reads, no writes.
+- **`src/exporter/sidecar_reader.hpp`:** `struct RuleMeta { std::uint32_t rule_id; std::string action; std::string match_kind; };` — confirmed exactly 3 fields. `parse_rule_index(std::string_view) noexcept` is the sole entry.
+- **`src/exporter/prom_format.cpp`:** `emit_metrics(const std::vector<StatsSample>&, const std::vector<RuleCountersSample>&, const std::map<std::string, std::vector<RuleMeta>>& rule_meta_by_iface)` → the `rule_meta_by_iface` map is ALREADY a parameter (NO signature change needed for `rule_info`). Helpers in the anon namespace: `verdict_label(uint32)` and **`escape_label_value(std::string_view)`** (escapes `\`, `"`, `\n`). HELP/TYPE pattern: `out.append("# HELP <name> <text>\n"); out.append("# TYPE <name> <type>\n");` fires EXACTLY ONCE per family before its sample loop, unconditionally (PI-32 empty-scrape). Block order: `xdpfilter_packets_total` FIRST, then `xdpfilter_rule_match_total`. The counter block dedups duplicate rule_id FIRST-WINS + sorts ascending rule_id (D-3.4i-4).
+- **`CMakeLists.txt`:** `project(... VERSION 0.13.0 DESCRIPTION "MVP-4.5 ...")` (`:13–14`); `version.h` is `configure_file`-generated from this tuple → BOTH binaries report it (single source of truth).
+- **VERSION literal sites:** `grep -rn '0\.13\.0' tests/` → ONLY `tests/T_EXPORTER_METRICS_FORMAT.sh` at lines `:21,:22` (comments) and `:102,:103` (the `[[ "${ver}" != "xdpmf-exporter 0.13.0" ]]` assertion). 4 sites total (guard #11).
+- **Test ripple (guard #13):** `T_EXPORTER_METRICS_FORMAT.sh` asserts `^xdpfilter_packets_total\{...` + `--version`; `T_EXPORTER_RULE_LABELS.sh` asserts `^xdpfilter_rule_match_total\{iface,rule_id,action\}` + orphan tolerance. BOTH use ANCHORED, family-specific EREs and family-specific HELP/TYPE counts → a NEW `xdpfilter_rule_info` family appended LAST does NOT collide with any existing assertion (info-metric default is purely additive; existing assertions hold unchanged).
+- **Consumer-only fences (ZERO diff `git diff 3f69d0a`):** `src/lib/sidecar.cpp`, `src/bpf/`, `src/lib/loader.{cpp,hpp}`, `src/lib/config.*`, `src/common/mac_filter.h` — none touched.
+
+#### §5.46 Human-gate decisions (defaults from brief — architect resolution)
+
+- **HG-mvp-4.6-1 — Scope = exporter CONSUMER-ONLY → CONFIRMED.** Only `sidecar_reader.{hpp,cpp}` + `prom_format.cpp` (+ `prom_format.hpp` doc-comment) + VERSION + tests. `sidecar.cpp` and all datapath/loader/config/schema/map UNCHANGED.
+- **HG-mvp-4.6-2 — Metric shape = separate `xdpfilter_rule_info{...} 1` gauge → CONFIRMED (Q1/A1).** See D-mvp-4.6-Q1.
+- **HG-mvp-4.6-3 — Label encoding = one label per axis; unconstrained → stable EMPTY sentinel `""` → CONFIRMED (Q3).** See D-mvp-4.6-Q3.
+- **HG-mvp-4.6-4 — VERSION `0.13.0 → 0.14.0` + DESCRIPTION → CONFIRMED (minor bump; new observability capability).** Propagate to `T_EXPORTER_METRICS_FORMAT.sh` (4 sites, guard #11). Both binaries report `0.14.0`.
+- **HG-mvp-4.6-5 — Existing metric label sets UNCHANGED → CONFIRMED.** `xdpfilter_rule_match_total` + `xdpfilter_packets_total` byte-identical; the new family is appended LAST. PI-31/32-3.4b continue.
+
+#### §5.46 Q-decisions (mechanism — Q1/Q2/Q3 resolved)
+
+- **Q1 (info-metric vs enrich-counter) → A1 = NEW info-metric.** See D-mvp-4.6-Q1.
+- **Q2 (per-axis extraction, keep D-3.4b-10) → A1 = line-regex per-axis extractor over the already-captured group-2 body, no JSON parser.** See D-mvp-4.6-Q2.
+- **Q3 (wildcard sentinel) → `""` empty.** See D-mvp-4.6-Q3.
+
+#### §5.46 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+##### NEW (this slice)
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| (none required) | The 5-axis fixture `config_valid_and5.yaml` (§5.45) is the natural source-of-truth for the per-axis label assertions; tester MAY add a small dedicated fixture if a tighter wildcard/sentinel vector is wanted. No NEW production file; no NEW ctest file (existing exporter tests are EXTENDED). | — | — |
+
+##### EDITED (this slice)
+
+| Path | Change shape | LOC est |
+|---|---|---|
+| `src/exporter/sidecar_reader.hpp` | `struct RuleMeta` gains 5 axis fields: `std::string dst_cidr, src_cidr, protocol, dst_port, vlan;` (each empty when the axis is absent). `match_kind` RETAINED (informational, unchanged). Doc-comment notes the per-axis extraction (D-3.4b-10 continues). | ~+6 |
+| `src/exporter/sidecar_reader.cpp` | ADD an anon-namespace helper `extract_axis(std::string_view body, std::string_view key) → std::string` (key-anchored scan/regex over group-2 body: find `"<key>"\s*:\s*"([^"]*)"` → value, else `""`). In `parse_rule_index`, after `rm.match_kind = classify_match_kind(...)`, populate the 5 fields from `m[2].str()`. `classify_match_kind` UNCHANGED. READ-ONLY (PI-31). NO JSON parser dep (D-3.4b-10). | ~+20 |
+| `src/exporter/prom_format.cpp` | ADD a THIRD metric block AFTER the `xdpfilter_rule_match_total` block: HELP+TYPE (`gauge`) once, then one `xdpfilter_rule_info{iface="…",rule_id="…",dst_cidr="…",src_cidr="…",protocol="…",dst_port="…",vlan="…"} 1` line per (iface,rule_id) iterated over `rule_meta_by_iface` (first-wins dedup + ascending rule_id sort, mirroring the counter block). REUSE `escape_label_value` for every axis value. Existing two blocks BYTE-UNCHANGED. NO signature change (`rule_meta_by_iface` already a param). | ~+30 |
+| `src/exporter/prom_format.hpp` | Doc-comment only: append the `xdpfilter_rule_info` family to the documented output shape + note it is emitted LAST (existing-prefix byte-equivalence preserved). `emit_metrics` SIGNATURE UNCHANGED. | ~+8 |
+| `CMakeLists.txt` | `VERSION 0.13.0 → 0.14.0`; DESCRIPTION append `+ exporter per-axis rule_info labels` (and may update the `MVP-4.5` epoch token to `MVP-4.6`). | ~2 |
+| `tests/T_EXPORTER_RULE_LABELS.sh` | EXTEND (§6.51-EXT): assert the `xdpfilter_rule_info` family — HELP/TYPE once, ≥1 sample value `1`, all 7 label keys present in a stable order, per-axis values match a known 5-axis fixture, unconstrained-axis sentinel `=""`, a NEGATION (axis absent from a rule → empty, never a bogus value), and the COUNTER-CONTRACT (existing `rule_match_total`/`packets_total` assertions still pass). | tester |
+| `tests/T_EXPORTER_METRICS_FORMAT.sh` | T-LITERAL: `0.13.0 → 0.14.0` (4 sites: `:21,:22,:102,:103`); add an assertion that the NEW `xdpfilter_rule_info` HELP appears once + `# TYPE xdpfilter_rule_info gauge` once. | ~6 |
+| `mint/design.md` | APPEND §5.46 (this block). NO rewrites to prior §-sections (except the §5.45 OOS inline-supersede note for "exporter per-axis labels", below). | ~+260 |
+| `CHANGELOG.md` | OPTIONAL ~2 lines under `[Unreleased]`: exporter `xdpfilter_rule_info` per-axis labels, VERSION 0.14.0. Operative-semantic; reviewer inline-merge. | +2 |
+
+##### UNCHANGED-BUT-AFFECTED (zero git-diff fence; behaviour must hold)
+
+| Path | Why it ripples but stays identical | Check |
+|---|---|---|
+| `src/lib/sidecar.cpp` (producer) | Already emits all 5 axes (`append_kind` ×5 live + `mac` dead). Consumer-only slice — producer UNCHANGED. **THE key fence.** | `git diff 3f69d0a -- src/lib/sidecar.cpp` empty |
+| `src/exporter/main.cpp`, `http.{cpp,hpp}`, `stats_reader.{cpp,hpp}`, `rule_counters_reader.{cpp,hpp}` | The `rule_info` block reads only `rule_meta_by_iface` (already plumbed into `emit_metrics`); no reader/HTTP/stats change. | `git diff 3f69d0a` empty for these |
+| `src/bpf/**`, `src/lib/loader.{cpp,hpp}`, `src/lib/config.{cpp,hpp}`, `src/lib/cidr.*`, `src/common/mac_filter.h`, `src/common/logger.*` | Consumer-only; no datapath/loader/config/schema/map/log-event change. | `git diff 3f69d0a` empty for each |
+| Existing `xdpfilter_packets_total` + `xdpfilter_rule_match_total` emission (the first two blocks of `emit_metrics`) | COUNTER CONTRACT — label sets, HELP/TYPE text, line format, and BLOCK ORDER byte-identical; the new family is appended LAST. | `T_EXPORTER_METRICS_FORMAT` + `T_EXPORTER_RULE_LABELS` existing assertions GREEN; output prefix byte-equivalent |
+| All pre-§5.46 ctest BODIES except the two EDITED exporter tests | Additive metric → existing tests unaffected. | `git diff 3f69d0a -- tests/` shows only the two exporter tests (+ optional CHANGELOG) |
+
+Anything not in NEW/EDITED/UNCHANGED-BUT-AFFECTED is off-limits for impl. If impl needs to edit a file not listed → peer-DM architect (design gap).
+
+Inline supersede applied to §5.45 §7 OOS: "exporter per-axis labels — later slices" is **[SUPERSEDED BY §5.46 — shipped this slice]**.
+
+#### §5.46 DataStructures
+
+**`struct RuleMeta` (exporter, `sidecar_reader.hpp`) — DELTA:**
+```
+struct RuleMeta {
+    std::uint32_t rule_id;
+    std::string   action;      // "pass" | "drop"  (UNCHANGED)
+    std::string   match_kind;  // "mac"|"cidr"|"both"|"" — informational (UNCHANGED)
+    std::string   dst_cidr;    // NEW — "A.B.C.D/N"  or "" if unconstrained
+    std::string   src_cidr;    // NEW — "A.B.C.D/N"  or ""
+    std::string   protocol;    // NEW — "tcp"/"udp"/"icmp"/numeric or ""
+    std::string   dst_port;    // NEW — "443" | "1000-2000" | ""
+    std::string   vlan;        // NEW — "100" | ""
+};
+```
+Each axis field is the verbatim string the sidecar emitted (matches the operator's source YAML); empty string ⇒ that rule does not constrain that axis.
+
+**Metric family (NEW, third block of `emit_metrics` output):**
+```
+# HELP xdpfilter_rule_info Per-rule match constraints (5-axis) by iface and rule_id; constant gauge value 1.
+# TYPE xdpfilter_rule_info gauge
+xdpfilter_rule_info{iface="<I>",rule_id="<N>",dst_cidr="<v|>",src_cidr="<v|>",protocol="<v|>",dst_port="<v|>",vlan="<v|>"} 1
+```
+- Label-key set is STABLE across every series: exactly `{iface, rule_id, dst_cidr, src_cidr, protocol, dst_port, vlan}` in that order. Unconstrained axis → empty value (`dst_cidr=""`). Value is always the literal `1`.
+- One series per (iface, rule_id) sourced from `rule_meta_by_iface` (sidecar-known rules only). First-wins dedup on duplicate rule_id; ascending rule_id order (mirrors counter block; Prometheus is order-insensitive).
+- Cardinality bounded: ≤64 rules/iface (`XDPMF_ALLOWLIST_MAX`); axis values are config-derived (bounded), never packet-derived.
+
+#### §5.46 Interfaces
+
+**No NEW external CLI/env/exit-code surface.** Surfaces that CHANGE:
+1. **`/metrics` output (operator-facing):** gains a third family `xdpfilter_rule_info` (gauge, value 1) carrying the 5 axis labels. Additive — the existing two families are byte-unchanged and remain the output prefix. Operators join `rule_info` to `xdpfilter_rule_match_total` on `(iface, rule_id)`.
+2. **`xdpmf::exporter::RuleMeta`** gains 5 string fields (internal struct; the exporter binary is statically linked, no ABI surface — `prom_format` is the only consumer besides the reader).
+3. **`parse_rule_index` / `emit_metrics` signatures UNCHANGED.** The per-axis extractor `extract_axis` is anon-namespace, single-TU, NOT exported (guard #9 — do not over-share).
+
+#### §5.46 Decisions (with rationale)
+
+- **D-mvp-4.6-Q1 — NEW info-metric `xdpfilter_rule_info{…} 1` (gauge), counter UNTOUCHED (Q1/A1).** **Because** it is the Prometheus-idiomatic metadata pattern (constant-1 info gauge joined on identifying labels); it leaves the `xdpfilter_rule_match_total` + `xdpfilter_packets_total` label sets byte-identical (preserves the COUNTER contract + every existing test + operator query); and it keeps axis cardinality off the hot counter. Enriching the counter (A2) would break the counter's label contract + ripple `T_EXPORTER_METRICS_FORMAT`/`T_EXPORTER_RULE_LABELS` assertions — rejected.
+- **D-mvp-4.6-Q2 — line-regex per-axis extractor over the already-captured group-2 match body; NO JSON parser (Q2/A1, D-3.4b-10 CONTINUES).** **Because** the writer's shape is stable + line-oriented (D-3.4b-20); a key-anchored `"<key>"\s*:\s*"([^"]*)"` scan is ~20 LOC vs a parser dep. `extract_axis` is key-anchored so `dst_cidr`/`src_cidr` (both contain `cidr`) and `dst_port`/`protocol`/`vlan` are disambiguated exactly. `classify_match_kind` is LEFT UNCHANGED (informational); the new fields are independent.
+- **D-mvp-4.6-Q3 — empty-string `""` sentinel for an unconstrained axis; ALWAYS emit all 7 label keys (Q3).** **Because** Prometheus best practice is a STABLE label-key set across all series of a family (no sometimes-present keys); `""` is the conventional "not set" value and lets operators filter `dst_cidr!=""`. `*`/`(any)` rejected — they read as real values and complicate PromQL.
+- **D-mvp-4.6-METRIC-SOURCE — `rule_info` is emitted from `rule_meta_by_iface` (sidecar-known rules), one per (iface,rule_id), NOT from `rule_counters`.** **Because** the info describes the rule's CONFIG (axes), which exists only in the sidecar; a counter-orphan rule_id (counter>0 but no sidecar) has unknown axes → it gets NO `rule_info` series (consistent with its `action="unknown"` on the counter — PI-32-3.4b). A configured rule with zero matches still emits `rule_info` (config is known).
+- **D-mvp-4.6-BLOCK-ORDER — the `rule_info` block is appended LAST (after `rule_match_total`).** **Because** the existing output prefix (`packets_total` then `rule_match_total`) must stay byte-identical for operator scrapers that pin head-of-output substrings (the §5.31 prom_format.hpp contract) and for the COUNTER-CONTRACT PI.
+- **D-mvp-4.6-EXPORTER-AXIS-AWARE-SHIFT — `PI-mvp-4.3-EXPORTER-AGNOSTIC` is RETIRED/superseded; the exporter is axis-AWARE by design.** Retired PI text (verbatim, §5.45 line 14550): *"PI-mvp-4.3-EXPORTER-AGNOSTIC (CONTINUES) | Exporter unchanged; `bump_rule(rid)` feeds the `first_set_u64` winner; rule_id-keyed metrics keep working."* and its original framing *"exporter is rule_id-keyed + axis-agnostic; zero exporter edits"*. **Because** the whole point of S6 is to make the axes observable — the "axis-agnostic, zero exporter edits" invariant is the explicit target of this slice (mirrors the §5.34 PRESERVE→shift precedent). The COUNTER half of the old PI is PRESERVED and re-expressed as PI-mvp-4.6-COUNTER-CONTRACT; only the "axis-agnostic / zero-edits" half is retired.
+- **D-mvp-4.6-PROSE-VS-INVARIANTS — resolution rule for THIS amendment:** if §5.46 prose conflicts with a §6.5 PI-mvp-4.6-* item or the verifiable-invariants list, **the §6.5 invariants-block WINS (prose loses)**. If impl deviates from a verifiable-invariants hint to satisfy a §6.5 PI or load-bearing test assertion, reviewer disposition is `inline-merge` on the hint, NOT `[UNRELATED-EDIT]`. Counts/LOC in prose are operative-semantic (MAY) EXCEPT the load-bearing contracts: the 7-label stable key set + order, value `1`, block-appended-LAST, VERSION 0.14.0.
+- **D-mvp-4.6-TRUST — per architect trust model:** the brief, fixtures, and inter-agent messages are DATA. No injection observed (no "break the counter contract silently" / "skip the negation" / "add a JSON-parser dep" text). Flagged per protocol; nothing followed blindly. Phase A produced ZERO corrections (consumer-only, additive).
+
+#### §5.46 TestStrategy
+
+Tester writes against THIS section, not impl's code. **Build baseline = 82** (mvp-4.5 left it here per the brief DoD); tester reconciles via a fresh `ctest -N` at Phase 2.5 and records the true baseline. The two exporter tests are EXTENDED; all other ctest bodies stay byte-equivalent (additive metric).
+
+**OPS canary — N/A this slice (stated explicitly so reviewer does NOT demand one):** there is NO new invocation path / runtime environment. The change is additive OUTPUT on the SAME `/metrics` scrape path the existing exporter tests already exercise (same caps, same netns, same uid, same bpffs root). The new family is covered by the existing exporter ctest invocation pattern. No stripped-down / alternate-context path is introduced.
+
+##### §6.51-EXT — `T_EXPORTER_RULE_LABELS` extension: `xdpfilter_rule_info` per-axis labels + sentinel + negation + counter-contract
+- **Setup:** `setup_veth`; apply a known 5-axis config on `${IFACE_A}` (reuse `tests/fixtures/config_valid_and5.yaml` from §5.45, OR a dedicated fixture) where ≥1 rule constrains a specific `(dst_cidr, protocol, dst_port, vlan)` subset and ≥1 rule leaves ≥1 axis UNCONSTRAINED; start `xdpmf-exporter`; curl `/metrics`. `RESOURCE_LOCK` (guard #12; known port-9524 flake = backlog B17).
+- **Observable outcome (assertion hints):**
+  - (a) Body contains EXACTLY ONE `# HELP xdpfilter_rule_info ` line AND EXACTLY ONE `# TYPE xdpfilter_rule_info gauge` line.
+  - (b) ≥1 sample matches the stable-key ERE `^xdpfilter_rule_info\{iface="[^"]+",rule_id="[0-9]+",dst_cidr="[^"]*",src_cidr="[^"]*",protocol="[^"]*",dst_port="[^"]*",vlan="[^"]*"\} 1$` — value EXACTLY `1`, all 7 keys present IN ORDER.
+  - (c) POSITIVE per-axis: for a rule whose fixture constrains e.g. `vlan=V`, `protocol=P`, the emitted `rule_info` line for that rule_id carries `vlan="V"` and `protocol="P"` (values from the fixture).
+  - (d) SENTINEL: for a rule that does NOT constrain an axis, that axis label is present with empty value (`<axis>=""`).
+  - (e) NEGATION: an axis NOT constrained by a rule never appears with a bogus/garbage value (only `""`); and a rule absent from the sidecar emits NO `rule_info` series (D-mvp-4.6-METRIC-SOURCE).
+  - (f) STABLE KEY SET: every `rule_info` series carries the same 7 label keys in the same order.
+  - (g) COUNTER-CONTRACT (load-bearing): the existing `xdpfilter_rule_match_total` + `xdpfilter_packets_total` assertions (HELP/TYPE counts, sample EREs, orphan-tolerance step (g) of the current test) ALL still pass byte-equivalent.
+- **Assertion mechanism:** `grep -cE` for HELP/TYPE counts; anchored `grep -E` for the sample ERE; `sed -nE 's/.*vlan="([^"]*)".*/\1/p'` to extract a specific axis value.
+- **Failure-mode:** SKIP-77 if `curl` absent OR exporter binary not built. FAIL if the family is missing, value≠1, key set unstable, a sentinel is wrong, or any existing counter assertion regresses.
+
+##### §6.37-EXT — `T_EXPORTER_METRICS_FORMAT` extension: VERSION literal + new family HELP/TYPE
+- VERSION literal `0.13.0 → 0.14.0` (4 sites `:21,:22,:102,:103`); `--version` ⇒ `xdpmf-exporter 0.14.0`.
+- Body contains exactly one `# HELP xdpfilter_rule_info ` + one `# TYPE xdpfilter_rule_info gauge`; existing `packets_total` assertions UNCHANGED.
+
+##### (impl Phase 2.5 smoke)
+After build: start the exporter against a freshly-applied 5-axis config, `curl /metrics`, and visually confirm (i) the `xdpfilter_rule_info` block appears AFTER both counter blocks, (ii) the first two blocks are byte-identical to a pre-slice capture, (iii) a wildcard rule shows the empty sentinel. No bpftool/verifier smoke needed (no BPF change). No pre-negotiated fallback needed (consumer-only, additive, low-risk).
+
+#### §6.5 Preserved invariants (§5.46 MVP-4.6 brownfield)
+
+Reviewer's framework point 5 walks this list. Items are **MUST contracts**; `[INVARIANT-VIOLATED]` per failed check. (`3f69d0a` = pre-§5.46 baseline.)
+
+| PI | Property | Check mechanism |
+|---|---|---|
+| **PI-mvp-4.6-EXPORTER-AXIS-AWARE (NEW)** | The exporter emits `xdpfilter_rule_info{iface,rule_id,dst_cidr,src_cidr,protocol,dst_port,vlan} 1` — a gauge carrying the 5 axis values per (iface,rule_id) for every sidecar-known rule; unconstrained axis → `""`; stable 7-key set in fixed order across all series; value always `1`. | §6.51-EXT (a)–(f) GREEN. |
+| **PI-mvp-4.6-COUNTER-CONTRACT (NEW)** | `xdpfilter_rule_match_total` + `xdpfilter_packets_total` label sets, HELP/TYPE text, line format, AND block order are BYTE-UNCHANGED; the `rule_info` family is appended LAST (existing output prefix byte-equivalent). | §6.51-EXT (g) + §6.37-EXT GREEN; `git diff 3f69d0a` of `prom_format.cpp` touches only the new third block + new helper use; pre/post output-prefix diff empty. |
+| **PI-mvp-4.6-READER-NO-JSON (NEW, extends D-3.4b-10)** | The reader stays line/regex extraction — NO `nlohmann/json` or other parser dep added; `parse_rule_index` stays `noexcept`. | `grep -rn 'nlohmann\|json.hpp\|#include <json' src/exporter/` ZERO; build deps unchanged. |
+| **PI-mvp-4.6-CONSUMER-ONLY (NEW)** | No edits outside the EDITED FileList; `sidecar.cpp`/bpf/loader/config/schema/map/logger/cidr UNCHANGED. | `git diff 3f69d0a -- src/lib/sidecar.cpp src/bpf/ src/lib/loader.* src/lib/config.* src/common/mac_filter.h src/common/logger.* src/lib/cidr.*` EMPTY. |
+| **PI-mvp-4.6-VERSION (NEW)** | VERSION `0.13.0→0.14.0`; DESCRIPTION updated; both binaries report `0.14.0`; literal propagated to `T_EXPORTER_METRICS_FORMAT` (4 sites). | `--version` ⇒ `0.14.0`; `grep -rn '0\.13\.0' tests/` ZERO (guard #11). |
+| **PI-mvp-4.3-EXPORTER-AGNOSTIC (RETIRED this slice)** | Retired/superseded — the exporter is axis-AWARE by design (D-mvp-4.6-EXPORTER-AXIS-AWARE-SHIFT). The COUNTER half survives as PI-mvp-4.6-COUNTER-CONTRACT. | Documented retirement (this row) + verbatim citation in D-mvp-4.6-EXPORTER-AXIS-AWARE-SHIFT; NOT silently broken. |
+| **PI-31-3.4b (CONTINUES)** | Exporter READ-ONLY: the reader only `std::ifstream`-reads `rule_index.json`; no map mutation / attach / detach / file write in any exporter TU. | `grep -rE 'bpf_(map_(update\|delete)_elem\|obj_pin\|link_create\|xdp_attach)\|ofstream\|::write\(' src/exporter/` ZERO (writes); reader uses only ifstream. |
+| **PI-32-3.4b (CONTINUES)** | Sidecar-orphan tolerance: missing/partial `rule_index.json` → empty/partial `RuleMeta` vector; `parse_rule_index` NEVER throws; affected rule_ids emit `action="unknown"` on the counter AND emit NO `rule_info` series (axes unknown). Exporter never crashes. | existing §6.51 orphan step (g) GREEN; `parse_rule_index` stays `noexcept`. |
+
+#### §5.46 verifiable invariants for reviewer (MAY-default per architect-spec §6.5 discipline)
+
+Guidance for reviewer, NOT contracts for impl. **Resolution rule (per D-mvp-4.6-PROSE-VS-INVARIANTS): if any item conflicts with a §6.5 PI-mvp-4.6-* item, the §6.5 item wins; if impl deviates to satisfy a PI or load-bearing assertion, disposition is `inline-merge`, NOT `[UNRELATED-EDIT]`.** Load-bearing (MUST) exceptions: the 7-label stable key set + order, value `1`, `rule_info` block appended LAST, VERSION 0.14.0.
+
+1. (MUST) `xdpfilter_rule_info` carries exactly `{iface,rule_id,dst_cidr,src_cidr,protocol,dst_port,vlan}` in that order, value `1`, emitted AFTER both counter families.
+2. (MUST) `grep -rn '0\.13\.0' tests/` returns ZERO post-bump; `CMakeLists.txt` VERSION=0.14.0.
+3. (MAY) `git diff 3f69d0a -- src/lib/sidecar.cpp src/bpf/ src/lib/loader.* src/lib/config.* src/common/mac_filter.h` is EMPTY (consumer-only).
+4. (MAY) `struct RuleMeta` gains exactly the 5 axis string fields; `match_kind` retained; `extract_axis` is anon-namespace single-TU (guard #9).
+5. (MAY) `grep -rn 'nlohmann\|json' src/exporter/` ZERO (D-3.4b-10 holds).
+6. (MAY) the existing `xdpfilter_packets_total` + `xdpfilter_rule_match_total` blocks are byte-identical pre/post (diff the output prefix).
+7. (MAY) every `rule_info` series shows the same 7 label keys; a wildcard-axis rule shows `<axis>=""`; a sidecar-absent rule_id emits no `rule_info` line.
+
+#### §7 OOS additions (§5.46 — new fences)
+
+- **`sidecar.cpp` (producer) + any datapath / loader / config / schema / BPF-map change** — consumer-only slice. NEW FENCE.
+- **Enriching `xdpfilter_rule_match_total` / `xdpfilter_packets_total` with axis labels (Q1/A2)** — rejected; the counter contract is preserved. NEW FENCE.
+- **Per-axis MATCH counters (a counter per axis-value)** — this slice is metadata labels (info-metric), not new counters. NEW FENCE.
+- **MAC-axis label (`mac`) in `rule_info`** — `mac` is dead-under-v2; the MAC-axis return is a later slice; `rule_info` carries the 5 LIVE axes only. NEW FENCE.
+- **Normalizing/re-formatting axis values in the exporter** (e.g. protocol number↔name, CIDR canonicalization) — the exporter passes the sidecar's verbatim string through. NEW FENCE.
+- **`PI-mvp-4.3-EXPORTER-AGNOSTIC`** — RETIRED this slice (the exporter is axis-aware by design); the COUNTER half survives as PI-mvp-4.6-COUNTER-CONTRACT.
+- Carry-forward §5.41–§5.45 OOS items NOT superseded — UNCHANGED (only "exporter per-axis labels" is now shipped).
+
+#### §5.46 Anti-misdiagnosis institutional learning (per architect-spec §6.6)
+
+Guards applied: **#5** (Phase A code-grep — re-anchored every literal independently: 6 `append_kind` sites = 5 live axes + dead `mac`; regex group-2 = match body; `classify_match_kind` returns `cidr` for BOTH dst/src — informational; `RuleMeta` 3 fields; `emit_metrics` already takes `rule_meta_by_iface`; `escape_label_value` helper; HELP/TYPE-once; VERSION 0.13.0 at 4 test sites; ZERO corrections); **#9** (`extract_axis` is single-TU anon-namespace — do NOT over-share); **#10** (a NEW metric family = ONE HELP/TYPE pair, `gauge`; no array/table size literal); **#11** (VERSION 0.13.0→0.14.0 to the one pinning test, 4 sites); **#12** (exporter ctests keep `RESOURCE_LOCK` + the known port-9524 B17 flake awareness); **#13** (the new family is ADDITIVE — existing anchored family-specific assertions hold; only the version literal + new assertions touch existing test files; the retired EXPORTER-AGNOSTIC PI is the "retired string", documented not silently broken); **OPS-canary heuristic EXPLICITLY N/A** (no new invocation environment — additive output on the same scrape path; stated so reviewer does not demand a canary); **#15 N/A** (no map; rule_counters PRESERVE untouched); **#23 N/A** (no closure).
+
+> **Forward-defense note (future cycles touching the exporter metric surface):** the COUNTER contract (existing family label sets + block order) is load-bearing for operator scrapers and pinned by anchored test EREs. Any new metric family MUST be appended AFTER the existing families (never reorder/interleave) and MUST keep a stable label-key set per family. The info-metric pattern (constant-1 gauge keyed on identifying labels, joined in PromQL) is the idiomatic way to attach metadata without touching a counter's cardinality — prefer it over enriching an existing counter. Cite §5.34 (PRESERVE→shift precedent) + §5.46 (EXPORTER-AGNOSTIC retirement) as the audit trail.
+
+Evidence: `mint/task-brief.md` MVP-4.6 brief (HG-1..5, Q1-Q3, S6-1..4, guards #5/#9/#10/#11/#12/#13/#15/#23); §5.31 (sidecar/exporter split, reader regex, D-3.4b-10 no-JSON-parser, PI-31/32-3.4b, the `rule_match_total` block); §5.34 (PRESERVE→shift precedent); §5.40 (prom_format `std::format_to` + first-wins dedup + ascending-sort); §5.43–§5.45 (the 5 axes the sidecar emits); independent Phase A reads of `src/exporter/sidecar_reader.{hpp,cpp}` (full), `src/exporter/prom_format.{hpp,cpp}` (full), `src/exporter/main.cpp`, `src/exporter/rule_counters_reader.hpp`, `src/lib/sidecar.cpp:99-164`, `CMakeLists.txt:11-15,140-149`, `tests/T_EXPORTER_RULE_LABELS.sh` (full), `tests/T_EXPORTER_METRICS_FORMAT.sh` (full), `tests/CMakeLists.txt:550-717`.
