@@ -13857,3 +13857,255 @@ Guards applied this slice:
 - **Guards #7/#8/#11/#13/#14-21** — N/A (no production map-shape/BTF mutation, no kEventNames catalog, no fixture lockstep, no VERSION bump, no bilateral/host-vs-netns/IO-model concern).
 
 Evidence: `mint/task-brief.md` MVP-4.1 brief (HG-mvp-4.1-1..4 + Q1/Q2 + Phase A grep footer + anti-misdiagnosis guards #5/#6/#9/#12); `mint/architecture-rule-model.md` §6.4 (Wave B; this fix = S1) + "Recommended slice sequence"; `mint/selection-scenarios.md` §3.A (VLAN = APN carrier) + §6.4 (this latent bug); independent Phase A reads of `src/bpf/mac_filter.bpf.c:299-426`, `include/vmlinux.h:57635`, `src/common/mac_filter.h:54-59`, `src/lib/config.cpp:152-161`, `tests/inject/inject_ipv4.py`, `tests/CMakeLists.txt:420-436`, `tests/T_PASS_CIDR.sh`, `tests/fixtures/config_valid_cidr.yaml`, `tests/lib/common.sh`; §5.27 (CIDR-axis origin: STAT_PASS_CIDR, cidr_rulesets, the L3 gate this slice widens) + PI-7-3.2 loader.hpp ZERO-diff precedent.
+
+---
+
+### §5.43 MVP-4.3: production OR→AND bit-vector pivot — axis-1 (dst_cidr NEW + src_cidr reshaped) (rule-model S3, brownfield, STRUCTURAL) (2026-05-29)
+
+#### §5.43 Problem statement
+
+This slice LANDS the spike-proven (§5.42, verdict ADOPT) bit-vector AND-classification structure into the **production** XDP datapath — the OR→AND structural pivot the entire rule-model is built toward (HLD Wave-B Option 3 structure-landing). Scope is the **minimal coherent pivot** (PO "split по осям", 2026-05-29): exactly **two LPM axes** — **`dst_cidr`** (the #1 selection gap, NEW) **AND** **`src_cidr`** (reshaped from today's OR-axis) — composed by per-axis `__u64` bitmask intersection (`acc = (dst_mask | wc_dst) & (src_mask | wc_src)`), first-match by `__builtin_ffsll(acc)-1`. The production datapath's two independent OR branches — MAC HASH (`mac_filter.bpf.c:392`) and src-CIDR LPM (`:451`) — are BOTH replaced by the single bit-vector AND.
+
+The config schema flips to **`schema_version: 2`** with an **M.1 hard cutover** (v1 and absent are hard-rejected at load). MAC matching is **deferred** (HG-mvp-4.3-2): it leaves the v2 grammar AND the datapath this slice; the MAC maps stay pinned-but-unconsulted (frozen) to avoid retired-pin ripple. `proto`+`dst_port` axes → mvp-4.4; exporter per-axis labels + MAC-axis return → mvp-4.5.
+
+This is **slice S3** of the rule-model build. S1 (§5.41 VLAN parse-fix) shipped the tagged-frame L3-reach prerequisite; S2 (§5.42 bit-vector spike) de-risked the structure end-to-end (`close_prefixes()`, `ffsll` FEAS, wildcard, range-scan). The spike's reference code under `tests/bitvec/` is **read-only template only** — guard #9 mandates the production loader's `close_prefixes()` and first-set helper be **transcribed into production types**, NOT `#include`d from the prototype.
+
+#### §5.43 Phase A grep verification report (architect-independent — 2026-05-29, per guard #5)
+
+Architect re-ran the brief's greps independently and read each codepath in full. The brief's Phase-2 claims are CONFIRMED **except** for five literal corrections flagged with ⚠ below (raised to team-lead at design delivery).
+
+1. **`RuleMatch` / `Rule` — CONFIRMED (`src/lib/config.hpp:36-45`).** `struct RuleMatch { std::optional<xdpmf_mac> mac; std::optional<xdpmf_cidr_v4> src_cidr; };` (`:36-39`); `struct Rule { std::uint32_t id; RuleAction action; RuleMatch match; };` (`:41-45`). `src_cidr` present; **`dst_cidr` absent** (this slice adds it → PI-7 config.hpp streak ENDS, expected).
+2. **`kManagedMaps[]` = 17 entries — CONFIRMED (`src/lib/loader.cpp:154-189`).** Exact list: `allowlist_a`, `allowlist_b`, `rulesets`, `cidr_allowlist_a`, `cidr_allowlist_b`, `cidr_rulesets`, `active_idx`, `defaults`, `stats`, `rules_a`, `rules_b`, `rules_outer`, `action_table`, `rule_counters_a`, `rule_counters_b`, `rule_counters_outer`, `allowlist`(alias, `legacy_alias=true`) = **16 real + 1 alias = 17**. All three call-site loops (clear/pin/reuse) walk this single table (HK-9). My post-slice delta is **+4 → 21** (see Q1/Q2; ⚠ NOT ~22 — see correction C5).
+3. **schema_version gate — CONFIRMED (`src/lib/config.cpp:152-162`).** default 1; supported `{1}`; error `"unsupported schema_version: {} (supported: 1)"`. Match-grammar gate at `:236-243` rejects any key ∉ `{mac, src_cidr}` with `"match type '{}' not supported in schema_version 1"`; at-least-one-of gate at `:247-252`; unknown-top-level-key gate at `:297-303`.
+4. **Datapath OR dispatch — CONFIRMED (`src/bpf/mac_filter.bpf.c`).** `active_idx` head-read `:363-369`; MAC HASH branch `bpf_map_lookup_elem(inner,&key)` → bump_rule → `rules_outer[active]→rules_inner[rid]→action_table[aid]` dispatch `:392-410`; `l3_after_vlan` (§5.41) `:423`; src-CIDR branch `cidr_hit = bpf_map_lookup_elem(cidr_inner,&cidr_key)` `:451` + identical dispatch chain `:452-469`; `defaults[active]` fall-through `:472-484`. `bump_rule(rule_id, active)` helper `:287`. **No `ffsll`/`first_set` in production** (confirmed absent — spike-only).
+5. **STAT enum + key/value structs — CONFIRMED (`src/common/mac_filter.h`).** `STAT_PASS=0, STAT_DROP_DENY=1, STAT_DROP_MALFORMED=2, STAT_PASS_CIDR=3, STAT_MAX=4` (`:55-59`); `XDPMF_ALLOWLIST_MAX=64` (`:67`); `struct xdpmf_cidr_v4` (`:40`, LPM key prefixlen-first); `struct allow_entry {unsigned char present; unsigned char _pad[3]; unsigned int rule_id;}` (8B, `:150-154` — the src inner VALUE this slice RESHAPES to `__u64`); `struct rule_entry`(4B)/`struct action_entry`(4B)/`enum xdpmf_action_type{PASS=0,DROP=1,MAX=2}` (`:107-122`). Map-name constants `XDPMF_MAP_*_NAME` (`:71-133`,`:167-169`).
+6. **Exporter is rule_id-keyed + axis-agnostic — CONFIRMED (`src/exporter/rule_counters_reader.hpp:25-37`).** `read_rule_counters()` scans `${bpffs_root}/<iface>/rule_counters` PERCPU pins and sums per rule_id; `struct RuleCountersSample` is keyed by rule_id, NOT by axis. **HG-5 zero-edit claim HOLDS** — exporter keeps working unchanged because `bump_rule(rid)` still feeds the `ffsll` winner's id.
+7. **VERSION = 0.10.0 — CONFIRMED (`CMakeLists.txt:13`)**; DESCRIPTION `:14` contains `"... (OR-compose) ..."`. ⚠ The only test pinning the literal is `tests/T_EXPORTER_METRICS_FORMAT.sh` (`:21`,`:22`,`:102`,`:103` — `xdpmf-exporter 0.10.0`). `T_CLI_HELP_VERSION.sh` does NOT pin the version digits (forward-compatible ERE). Repo-wide `0.10.0`: CMakeLists, CHANGELOG, docs/BACKLOG, mint/* (design+brief), and that one test.
+8. **⚠ CORRECTION C1 — `sidecar.cpp` emits `schema_version` + per-rule match objects (NOT flagged in brief).** `src/lib/sidecar.cpp:86` hardcodes `body.append("  \"schema_version\": 1,\n");` and `:102-117` builds the per-rule `match` sub-object from `r.match.mac` / `r.match.src_cidr` (emits `"mac"` and/or `"cidr"` keys). Under M.1+v2 this MUST become `schema_version: 2` and emit `dst_cidr`. **`sidecar.cpp` is therefore EDITED this slice** (brief implied it UNCHANGED).
+9. **⚠ CORRECTION C2 — `T_SIDECAR_JSON_SHAPE.sh` pins the sidecar shape (NOT in brief S3-6).** Asserts `.schema_version == 1` (`:21`,`:122-124`,`:217`) and per-rule match-kind (`:166-179`: ids 0/5/17 have `"mac"`, id 42 has `"cidr"`), against a 4-rule MAC+CIDR fixture. M.1+MAC-deferred invalidates that fixture → this test + its fixture MUST be converted to v2 grammar.
+10. **⚠ CORRECTION C3 — NO fixture currently sets `schema_version` explicitly.** `grep -rn schema_version tests/fixtures` = ZERO hits; every applied fixture relies on the default-1 path. Under M.1 (absent⇒reject) **EVERY applied fixture must add `schema_version: 2`** — a far larger fixture ripple than brief S3-6's enumeration.
+11. **⚠ CORRECTION C4 — `attach --allow <mac>` synthesizes a Config bypassing `validate()` (`loader.cpp:1476-1491`).** The BC1 shorthand builds `Config{default_action=Drop, rules=<MAC>}` in-memory and calls `apply_request` directly — it does NOT hit the `config.cpp::validate()` schema gate. So attach/--allow tests don't fail at *parse*; they fail at *verdict* because the rewritten datapath no longer consults the MAC map. (`apply -f` path: `cli/apply.cpp:103` calls `validate()` → schema gate applies.)
+12. **VLAN reach + `l3_after_vlan` — CONFIRMED (§5.41, `:319`,`:423`).** dst_ip/src_ip both read from the post-VLAN IPv4 header (`ip->daddr`/`ip->saddr`); the AND datapath reuses `l3_after_vlan` + the IPv4 bounds-check verbatim.
+
+**Baseline commit for all `git diff` invariant checks:** pre-§5.43 HEAD = `f132c23` ("mint-dev: prep — task-brief for mvp-4.3"). Reviewer substitutes the actual merge-base if different.
+
+**⚠ Five corrections raised to team-lead (C1–C5):** C1 sidecar.cpp EDITED; C2 T_SIDECAR_JSON_SHAPE EDITED; C3 all-fixtures-need-schema_version:2; C4 attach/--allow datapath-verdict ripple (MAC-deferred breaks ALL MAC-verdict tests, not just T_PASS_MAC_OR_CIDR); C5 kManagedMaps 17→**21** (+4), not ~22 — because Q2 wildcard is ONE combined ARRAY (the brief's "two flat arrays selected by active_idx" is NOT datapath-realizable — see D-mvp-4.3-Q2). These make the test/fixture ripple substantially larger than brief S3-6 implies; the magnitude is the inherent cost of M.1 hard-cutover + MAC-removal, not scope creep.
+
+#### §5.43 Human-gate decisions (defaults from brief — architect resolution)
+
+- **HG-mvp-4.3-1 — Axis set = `dst_cidr` + `src_cidr` (2 LPM axes) ONLY → CONFIRMED.** Both axes are LPM ⇒ one lowering primitive (prefix-closure) this slice. proto/dst_port → mvp-4.4.
+- **HG-mvp-4.3-2 — MAC matching DEFERRED, fenced as intentional narrowing → CONFIRMED + architect picks "frozen".** v2 grammar = `{dst_cidr, src_cidr}`; `mac` key REJECTED at parse (D-mvp-4.3-MAC-GRAMMAR). The datapath stops consulting the MAC HASH branch. **MAC maps (`allowlist_a/_b`, `rulesets`, `allowlist` alias) STAY in `kManagedMaps[]` and STAY declared in the BPF `.maps` block — pinned-but-unconsulted (frozen)** — per HG-2 recommendation, to avoid retired-pin-name ripple (guard #16). They return as a bit-vector axis in mvp-4.5. This is a deliberate config-surface narrowing (cites §5.42 §7 OOS), recorded as PI-mvp-4.3-MAC-DEFERRED.
+- **HG-mvp-4.3-3 — M.1 hard cutover (`schema_version: 2` only) → CONFIRMED.** Supported set `{1}`→`{2}`; `schema_version: 1` AND absent both hard-reject at `validate()` with a "re-author to schema_version 2" diagnostic (ConfigError exit 9). v1 fixtures rewritten to v2 (S3-6). PO-confirmed safe (0 deployments).
+- **HG-mvp-4.3-4 — first-match-by-`id` (S.1) → CONFIRMED, realized "for free".** `id` = bit position ∈ `[0, XDPMF_ALLOWLIST_MAX-1]`; `__builtin_ffsll(acc)-1` yields the lowest-`id` survivor with NO explicit sort needed (D-mvp-4.3-Q4). most-specific-wins (S.3) is a future loader sort-key (OOS).
+- **HG-mvp-4.3-5 — Exporter UNCHANGED → CONFIRMED (Phase A #6).** `bump_rule(rid, active)` feeds the `ffsll` winner; `rule_counters` PERCPU semantics + the rule_id-keyed exporter reader are axis-agnostic → zero exporter edits. PI-3.4d PRESERVE-across-apply counter contract CONTINUES (guard #15; `copy_rule_counters_forward` UNCHANGED).
+- **HG-mvp-4.3-6 — VERSION bump 0.10.0 → 0.11.0 + DESCRIPTION → CONFIRMED (minor bump).** DESCRIPTION `"(OR-compose)"` → `"(AND-compose: dst-CIDR + src-CIDR bit-vector)"`. Propagate the `0.10.0`→`0.11.0` literal to `T_EXPORTER_METRICS_FORMAT.sh` (4 sites, guard #11). Both binaries report `0.11.0` (shared `version.h`, PI-33 lineage).
+
+#### §5.43 Q-decisions (mechanism — Q1/Q2/Q3/Q4 resolved)
+
+##### Q1: per-axis bitmask map topology → **A1 (dst NEW ARRAY_OF_MAPS trio; src VALUE-reshape in place)** — D-mvp-4.3-Q1
+
+- **`dst_cidr` (NEW)** = an ARRAY_OF_MAPS[2] LPM axis mirroring the existing CIDR axis topology (§5.27): inner LPM_TRIE templates **`dst_bitmask_a`** / **`dst_bitmask_b`** (key `struct xdpmf_cidr_v4`, value `__u64` prefix-closed bitmask, `max_entries XDPMF_ALLOWLIST_MAX`, `BPF_F_NO_PREALLOC`) + outer **`dst_rulesets`** ARRAY_OF_MAPS[`XDPMF_RULESET_COUNT`=2]. **+3 `kManagedMaps[]` entries.**
+- **`src_cidr` (RESHAPE in place)** = the existing `cidr_allowlist_a`/`_b` inner VALUE changes `struct allow_entry` (8B) → `__u64` (8B); topology + pin names (`cidr_allowlist_a`, `cidr_allowlist_b`, `cidr_rulesets`) UNCHANGED. **+0 `kManagedMaps[]` entries** (value-type-only change; mirrors the §5.31 `__u8 present`→`struct allow_entry` value-evolution precedent in reverse). Guard #16 satisfied — NO pin-name rename, so no test dumping `cidr_allowlist*`/`cidr_rulesets` by name needs touching.
+- Rationale: smallest delta; reuses the proven §5.27 ARRAY_OF_MAPS atomic-swap topology; keeps the src pin names stable. (Rejected A2 "both fresh parallel axes + retire cidr_allowlist" — gratuitous pin-name churn, guard #16.)
+
+##### Q2: wildcard / aux-mask atomic-swap placement (FI-7 layer) → **single combined `wildcard` ARRAY indexed by `active_idx` (CORRECTS brief A1)** — D-mvp-4.3-Q2
+
+⚠ The brief's A1 ("two flat `ARRAY[BITVEC_NUM_AXES]` `wildcard_a`/`_b` indexed by the SAME `active_idx`") is **NOT realizable in the XDP datapath** — BPF cannot select between two *distinct top-level map symbols* by a runtime `active_idx` value without an ARRAY_OF_MAPS wrapper. The faithful analog of the `defaults` precedent (which is ONE `ARRAY[XDPMF_RULESET_COUNT]` of `__u32` indexed `defaults[active]`, NOT two maps) is:
+
+- **ONE `wildcard` `BPF_MAP_TYPE_ARRAY`** of `__u64`, `max_entries = XDPMF_RULESET_COUNT * BITVEC_NUM_AXES = 2*2 = 4`, indexed `wildcard[active * BITVEC_NUM_AXES + axis]` (axis 0 = dst, 1 = src). **+1 `kManagedMaps[]` entry.**
+- The SAME single `active_idx` u32 store commits the swap for `dst_rulesets` + `cidr_rulesets` + `defaults` + `rules_outer` + `rule_counters_outer` **and** `wildcard` together. RESET-on-apply: loader writes the INACTIVE half (`wildcard[inactive*2+0..1]`) before the flip; NO copy-forward (guard #15).
+- Rationale: wildcard values are tiny per-axis scalars (exactly like `defaults`); the map-of-maps machinery is overkill and the two-separate-maps shape can't be indexed by a variable. This is strictly cleaner AND realizable. (Rejected A2 "fold wildcard into a reserved sentinel entry per axis map" — couples wildcard lifetime to the LPM trie + complicates closure.)
+
+##### Q3: prefix-closure recompute location → **A1 (port `close_prefixes()` into the production loader)** — D-mvp-4.3-Q3
+
+Transcribe the spike's `close_prefixes()` (`tests/bitvec/bitvec_harness.cpp:107`) into the production loader as **production-owned code over production types** (guard #9 — do NOT `#include` `tests/bitvec/*`). Per LPM axis (dst, src), per `apply -f`: O(N²) cover-scan — for each constrained prefix `P_i`, OR `bit_j` for every constrained `P_j` that COVERS `P_i` (`P_j.len ≤ P_i.len` AND `P_j == P_i` truncated to `P_j.len`), including `P_i` itself; write the closed `__u64` into the INACTIVE inner before the `active_idx` flip. Closure is a *lowering* detail (depends on bitmask width + map shape) → belongs below the Rule-IR boundary, in the loader (keeps the IR portable). FI-1 cover-direction is the #1 bit-vector trap (reviewer special-attention (a)); guard #23 vector proves it.
+
+##### Q4: Rule IR (`NormalizedRule`) — distinct type vs sorted `Config::Rule` → **A2 (no new type; `Config::rules` + bit=`id` IS the IR)** — D-mvp-4.3-Q4
+
+No distinct `NormalizedRule` type. The existing `std::vector<Rule> Config::rules` (each `Rule{id, action, match.{dst_cidr?, src_cidr?}}`) IS the structure-agnostic ordered IR; **first-match-by-`id` needs no sort** because bit position == `id` and `ffsll(acc)-1` returns the lowest set bit == lowest matching `id`. The loader lowers `Config::rules` directly to bitmask/wildcard/action maps using `r.id` as the bit index. Rationale: the IR's *job* (ordered, structure-agnostic, first-match-by-id) is satisfied by the existing vector + the bit=id invariant; the mvp-4.1 rescope retired premature Rule-IR abstraction for exactly this reason — build the lightest thing that names the boundary. (Rejected A1 distinct type — over-abstraction with no current second consumer.)
+
+#### §5.43 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+##### NEW (this slice)
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `tests/fixtures/config_valid_and.yaml` | v2 AND-compose fixture: rules constraining `dst_cidr` and/or `src_cidr` (incl. one full-AND rule + one dst-only + one src-only/wildcard) for the §6.60 PASS/DROP + §6.61 oracle tests. `schema_version: 2`. | YAML | ~40 |
+| `tests/fixtures/config_overlap_lowid.yaml` | **Guard #23 MANDATORY** v2 fixture: overlapping dst prefixes where a less-specific COVERING rule has a LOWER `id` than the more-specific entry (e.g. id0 `10.1.2.0/24` DROP, id3 `10.1.2.128/25` PASS) → proves prefix-closure cover-direction + first-match-by-id. | YAML | ~40 |
+| `tests/bitvec/bitvec_oracle_prod.py` (or reuse §5.42 `bitvec_oracle.py` adapted to 2 axes) | Tester-owned independent O(N) reference classifier over the v2 fixture: ascending-`id` scan, rule matches iff every CONSTRAINED axis (dst/src CIDR membership) holds, return lowest matching `id` else NOMATCH. NO bitmask/closure logic (algorithm-independent). | Python | ~80 |
+| `tests/T_AND_COMPOSE_OK.sh` | §6.60 ctest — dst+src AND PASS/DROP: a packet matching BOTH dst_cidr AND src_cidr of a rule hits that rule's action; a packet matching only one axis of an all-axes-constrained rule does NOT (falls to a wildcard rule or `defaults`). `RESOURCE_LOCK xdp_fixture`. | bash | ~170 |
+| `tests/T_AND_ORACLE_AGREEMENT.sh` | §6.61 ctest — table-driven: for each vector, inject via `inject_l4.py`/`inject_ipv4.py`, read the matched rule_id (via `rule_counters` per-rule delta), assert `== oracle` prediction. Covers hit/miss/overlap/wildcard/first-match-tie + negation control. | bash | ~190 |
+| `tests/T_AND_PREFIX_CLOSURE_OVERLAP.sh` | §6.62 ctest — **guard #23**: `config_overlap_lowid.yaml`; a packet to the more-specific subnet matches the lower-id covering rule (DROP), NOT the higher-id more-specific rule (PASS) → proves closure cover-direction + first-match-by-id. THE #1-bug-class canary. | bash | ~150 |
+| `tests/T_SCHEMA_V2_CUTOVER.sh` | §6.63 ctest — M.1: `schema_version: 1` AND absent-schema configs are REJECTED (exit 9, re-author diagnostic); `schema_version: 2` accepted. OPS canary for the new load-time grammar gate. | bash | ~110 |
+
+##### EDITED (this slice)
+
+| Path | Change shape | LOC est |
+|---|---|---|
+| `src/bpf/mac_filter.bpf.c` | **Datapath AND-rewrite.** (a) Map decls: cidr inner template VALUE `struct allow_entry`→`__u64`; ADD `dst_bitmask_a`/`_b` LPM inner template + `dst_rulesets` ARRAY_OF_MAPS[2]; ADD single `wildcard` ARRAY[4] of `__u64`. KEEP MAC maps (`allowlist_a/_b`,`rulesets`) declared (frozen, HG-2). (b) ADD `static __always_inline __u32 first_set_u64(__u64)` (own; `__builtin_ffsll` default + `#ifdef XDPMF_FFS_FALLBACK` bounded-unroll alt per D-mvp-4.2-FFS). (c) REPLACE the MAC HASH branch (`:392-410`) + the CIDR branch (`:451-469`) with: read `active`; `dst_inner=dst_rulesets[active]`, `src_inner=cidr_rulesets[active]`, `wc_dst=wildcard[active*2+0]`, `wc_src=wildcard[active*2+1]`; build `/32` dst+src LPM keys from `ip->daddr`/`ip->saddr`; `dmask=lpm(dst_inner)|0`, `smask=lpm(src_inner)|0`; `acc=(dmask|wc_dst)&(smask|wc_src)`; if `acc==0`→`defaults[active]` fall-through (unchanged `:472-484`); else `rid=first_set_u64(acc)-1`; `bump_rule(rid,active)`; reuse `rules_outer[active]→rules_inner[rid]→action_table[aid]` chain; DROP→`STAT_DROP_DENY`, PASS→`STAT_PASS_CIDR` (D-mvp-4.3-STAT). KEEP `active_idx` head-read, `l3_after_vlan`, IPv4 bounds-check, `bump_rule`, defaults. | ~+90/−60 |
+| `src/common/mac_filter.h` | ADDITIVE: `XDPMF_MAP_DST_RULESETS_OUTER_NAME "dst_rulesets"`, `XDPMF_MAP_DST_INNER_A_NAME "dst_bitmask_a"`, `XDPMF_MAP_DST_INNER_B_NAME "dst_bitmask_b"`, `XDPMF_MAP_WILDCARD_NAME "wildcard"`, `#define BITVEC_NUM_AXES 2`, `#define BV_AXIS_DST 0`, `#define BV_AXIS_SRC 1`. **NO modification of existing constants/structs/STAT-enum** (PI-10 holds). | ~+10 |
+| `src/lib/config.hpp` | `RuleMatch` (`:36`) gains `std::optional<xdpmf_cidr_v4> dst_cidr;`. **PI-7 config.hpp ZERO-diff streak ENDS HERE** (expected, foreseen §5.42). | ~+1 |
+| `src/lib/config.cpp` | (a) schema gate (`:152-162`): supported `{1}`→`{2}`; reject v1 AND absent with re-author diagnostic (M.1). (b) match grammar (`:236-252`): accepted key-set `{dst_cidr, src_cidr}`; REJECT `mac` (+ all others) with a "MAC matching deferred; schema_version 2 supports dst_cidr + src_cidr" diagnostic (D-mvp-4.3-MAC-GRAMMAR); at-least-one-of `{dst_cidr, src_cidr}`. (c) parse `dst_cidr` via `cidr::parse_cidr_v4` (mirror the `src_cidr` block `:266-280`). | ~+25/−10 |
+| `src/lib/loader.cpp` | (a) `kManagedMaps[]` (`:154`) +4: `dst_bitmask_a`, `dst_bitmask_b`, `dst_rulesets`, `wildcard` → **17→21**. (b) Port `close_prefixes()` (production-owned, guard #9) — per-LPM-axis O(N²) cover-closure. (c) In `apply_request`: build dst+src closed bitmasks + per-axis wildcard mask + (existing) rules_inner/action_table; RESET-write the inactive inners + inactive `wildcard` half; then the single `active_idx` flip. (d) src inner population value `allow_entry`→`__u64`. `copy_rule_counters_forward` UNCHANGED (guard #15). | ~+120 |
+| `src/lib/sidecar.cpp` | **C1:** `:86` `"schema_version": 1`→ emit `2` (or `cfg.schema_version`); `:102-117` match-object builder emits `dst_cidr` (+ keeps `src_cidr`/`cidr`); the `mac` branches become dead-but-harmless (v2 rejects mac at parse). | ~+8/−4 |
+| `CMakeLists.txt` | VERSION `0.10.0`→`0.11.0`; DESCRIPTION `(OR-compose)`→`(AND-compose: dst-CIDR + src-CIDR bit-vector)`. | ~2 |
+| `tests/fixtures/*.yaml` (applied set) | **C3:** every fixture consumed by a GREEN `apply -f` test gains `schema_version: 2`; MAC-rule fixtures convert to `dst_cidr`/`src_cidr` grammar OR move to the SKIP set (see TestStrategy taxonomy). `config_malformed_*` adapt (some now reject on schema-gate first — tests asserting specific error TEXT must be checked). | ~varies |
+| `tests/T_*.sh` (ripple set) | **C2+C4:** see §5.43 TestStrategy taxonomy — MAC-verdict tests SKIP-with-citation or convert; `T_SIDECAR_JSON_SHAPE` → v2 (schema_version==2, dst_cidr/src_cidr match-kinds); `T_EXPORTER_METRICS_FORMAT` version-literal 0.10.0→0.11.0 (4 sites); CIDR/atomic-swap/rule-counter tests adapt to the bitmask value + AND semantics. | ~varies |
+| `tests/CMakeLists.txt` | Register §6.60–§6.63 with `RESOURCE_LOCK xdp_fixture` + `SKIP_RETURN_CODE 77` + TIMEOUT; any SKIP/convert bookkeeping. Reconfigure (`cmake -B build -S .`) before `ctest`. | ~+10 |
+| `mint/design.md` | APPEND §5.43 (this block). NO rewrites to prior §-sections. | ~+500 |
+| `CHANGELOG.md` | OPTIONAL ~2 lines under `[Unreleased]`: the OR→AND pivot + dst-CIDR axis + schema_version:2 cutover + MAC-deferral note. Operative-semantic; reviewer inline-merge. | +2 |
+
+##### UNCHANGED-BUT-AFFECTED (zero git-diff fence; behaviour must hold)
+
+| Path | Why it ripples but stays identical | Check |
+|---|---|---|
+| `src/lib/loader.hpp` | **PI-7-mvp-4.3-loader-hpp** ZERO-diff streak CONTINUES — all new-map population is internal to `loader.cpp` (`apply_request` + `kManagedMaps[]` anon-namespace table via `SkelMapsT::*`); NO new public symbol/accessor. (If impl finds a genuine need for a public accessor → peer-DM architect; default expectation is ZERO-diff.) | `git diff f132c23 -- src/lib/loader.hpp` empty |
+| `src/exporter/**` (incl. `rule_counters_reader.hpp`, `prom_format.cpp`, `stats_reader.*`) | **PI-mvp-4.3-EXPORTER-AGNOSTIC** — rule_id-keyed, axis-agnostic; `bump_rule(rid)` still feeds the `ffsll` winner (HG-5, Phase A #6). | `git diff f132c23 -- src/exporter/` empty |
+| `src/cli/**` | No new CLI flag/subcommand; `--allow` stays parseable (synthesizes a frozen-MAC config — datapath ignores it; the MVP-1 attach-verdict tests that depend on it move to the SKIP set). reset-counters unchanged. | `git diff f132c23 -- src/cli/` empty |
+| `src/common/logger.{hpp,cpp}` | No new log event — M.1 reject rides the existing ConfigError/exit-9 path; `kEventNames` catalog count UNCHANGED. | `git diff f132c23 -- src/common/logger.*` empty; `T_LOG_EVENT_CATALOG_STABILITY` GREEN |
+| `src/lib/cidr.{hpp,cpp}` | `parse_cidr_v4` REUSED for `dst_cidr` (same as `src_cidr`); no change. | `git diff f132c23 -- src/lib/cidr.*` empty |
+| `src/lib/apply_internal.hpp`, `src/lib/yaml_subset.*`, `src/lib/raii.hpp` | `apply_request` signature UNCHANGED (body grows, header doesn't); YAML subset unchanged; RAII unchanged. | `git diff f132c23 -- src/lib/apply_internal.hpp src/lib/yaml_subset.* src/lib/raii.hpp` empty |
+| `tests/bitvec/**` (§5.42 spike) | Read-only TEMPLATE; `close_prefixes()`/first-set are TRANSCRIBED into production, NOT `#include`d (guard #9). Spike tests stay GREEN, untouched. | `git diff f132c23 -- tests/bitvec/` empty |
+| `include/vmlinux.h`, `cmake/BpfBuild.cmake` | Generated header read-only; BPF-build helper reused. | `git diff f132c23 -- include/vmlinux.h cmake/BpfBuild.cmake` empty |
+| `copy_rule_counters_forward` (in `loader.cpp`) | **PI-3.4d PRESERVE-across-apply** — rule_counters stay PRESERVE (guard #15); the helper body is byte-equivalent. | code-review: `copy_rule_counters_forward` body unchanged |
+| systemd/ansible, `docs/*.md`, `README.md`, `HANDOFF.md` | No env/caps/path change; doc work separate (only optional CHANGELOG). | `git diff f132c23 -- systemd/ ansible/ docs/ README.md HANDOFF.md` empty |
+
+Anything not in NEW/EDITED/UNCHANGED-BUT-AFFECTED is off-limits for impl. If impl needs to edit a file not listed → peer-DM architect (design gap).
+
+#### §5.43 DataStructures
+
+`id` = bit position ∈ `[0, XDPMF_ALLOWLIST_MAX-1=63]`; the whole rule-match-set is a single `__u64` (HG-mvp-4.3-4). `BITVEC_NUM_AXES = 2` (0=dst, 1=src).
+
+**Userspace (`src/lib/config.hpp`):** `RuleMatch` gains `std::optional<xdpmf_cidr_v4> dst_cidr;` (alongside the existing `mac` (now-rejected) + `src_cidr`). `Config::schema_version` semantics flip to supported-set `{2}`.
+
+**Production BPF maps — DELTA from §5.34/§5.35 baseline** (all atomic-swap via the shared `active_idx`; RESET-on-apply except `rule_counters` PRESERVE):
+
+| Map | Type | Key | Value | max_entries | Status this slice |
+|---|---|---|---|---|---|
+| `cidr_allowlist_a`/`_b` (src axis) | `LPM_TRIE` (inner) | `struct xdpmf_cidr_v4` | **`__u64`** (was `struct allow_entry`) | `XDPMF_ALLOWLIST_MAX` | **RESHAPED VALUE** |
+| `cidr_rulesets` (src outer) | `ARRAY_OF_MAPS` | `__u32` | inner-fd | `XDPMF_RULESET_COUNT`=2 | UNCHANGED |
+| `dst_bitmask_a`/`_b` (dst axis) | `LPM_TRIE` (inner) | `struct xdpmf_cidr_v4` | `__u64` | `XDPMF_ALLOWLIST_MAX` | **NEW** |
+| `dst_rulesets` (dst outer) | `ARRAY_OF_MAPS` | `__u32` | inner-fd | `XDPMF_RULESET_COUNT`=2 | **NEW** |
+| `wildcard` | `ARRAY` | `__u32` (`active*2+axis`) | `__u64` (rules NOT constraining that axis) | `XDPMF_RULESET_COUNT * BITVEC_NUM_AXES`=4 | **NEW** (Q2) |
+| `allowlist_a`/`_b`, `rulesets` (MAC axis) | HASH/ARRAY_OF_MAPS | — | `struct allow_entry` | — | **FROZEN** (declared, pinned, NOT consulted) |
+| `rules_a`/`_b`/`rules_outer`, `action_table` | ARRAY/AOM | `__u32` | `rule_entry`/`action_entry` | — | UNCHANGED (dispatch chain reused) |
+| `rule_counters_a`/`_b`/`_outer` | PERCPU_ARRAY/AOM | `__u32` | `__u64` | — | UNCHANGED (PRESERVE, guard #15) |
+| `active_idx`, `defaults`, `stats` | ARRAY | — | `__u32` | — | UNCHANGED |
+
+**`kManagedMaps[]`: 17 → 21** (+4 rows, exact): `dst_bitmask_a`, `dst_bitmask_b`, `dst_rulesets`, `wildcard`. (⚠ NOT 22 — Q2 wildcard is ONE map, not two.)
+
+**Wildcard semantics (load-bearing, FI-2):** a rule that does NOT constrain axis A has its bit set in `wildcard[active*2+A]` and is ABSENT from axis A's LPM map. Datapath: `axis_survivors = (lpm_lookup_or_0 | wildcard[active*2+A])`. A rule MUST be in EXACTLY ONE of {axis-A LPM map, `wildcard[A]`} per axis (mutual exclusion). Normalize "absent dst/src" → wildcard (NO `/0` trie entry).
+
+**Prefix-closure (FI-1, LPM axes only):** each inserted prefix `P_i`'s stored `__u64` = OR of `bit_j` over ALL rules `j` whose prefix COVERS `P_i` (`P_j.len ≤ P_i.len` AND `P_j == P_i` truncated to `P_j.len`), including `P_i`. Cover-direction backwards = the #1 bit-vector bug (guard #23 vector catches it).
+
+#### §5.43 Interfaces
+
+**No NEW external/public interface** — no new CLI flag, env var, exit code, metric, log event, or exported C++ symbol. Surfaces that CHANGE behaviour:
+
+1. **Config grammar (v2):** top-level `schema_version: 2` REQUIRED (absent/1 → exit 9). Per-rule `match:` accepts `{dst_cidr, src_cidr}` (≥1 required); `mac` (+ any other key) → exit 9 with the MAC-deferred diagnostic. `dst_cidr`/`src_cidr` = IPv4 dotted-CIDR string (IPv6 rejected, reusing `cidr::parse_cidr_v4`).
+2. **BPF datapath contract (`mac_filter_prog`):** `acc = (lpm(dst_bitmask[active], /32 daddr) | wildcard[active*2+0]) & (lpm(cidr_allowlist[active], /32 saddr) | wildcard[active*2+1])`; `acc==0` → `defaults[active]` (PASS→STAT_PASS / DROP→STAT_DROP_DENY); else `rid=first_set_u64(acc)-1`, `bump_rule(rid,active)`, dispatch `rules_outer[active]→rules_inner[rid]→action_table[action_id]`: DROP→STAT_DROP_DENY+XDP_DROP, PASS(or null-fallthrough)→STAT_PASS_CIDR+XDP_PASS. Malformed IPv4 → STAT_DROP_MALFORMED (unchanged). All map-lookup NULL checks verifier-required.
+3. **`first_set_u64(__u64)` (`static __always_inline`, production-owned):** returns 1-based index of lowest set bit (`__builtin_ffsll` default; `#ifdef XDPMF_FFS_FALLBACK` bounded `#pragma unroll` bit-scan per D-mvp-4.2-FFS). Caller does `rid = first_set_u64(acc) - 1`. Single-consumer (guard #9).
+4. **Loader internal — `close_prefixes()`** (production-owned, transcribed): input = the constrained-prefix list per LPM axis (from `Config::rules` `r.id` + `r.match.{dst,src}_cidr`); output = `__u64` closed mask per prefix. NOT a public symbol.
+
+#### §5.43 Decisions (with rationale)
+
+- **D-mvp-4.3-Q1** — dst NEW ARRAY_OF_MAPS trio + src VALUE-reshape in place — see Q1. **Because** smallest delta, reuses §5.27 topology, no src pin-name churn (guard #16).
+- **D-mvp-4.3-Q2** — single combined `wildcard` ARRAY[4] indexed by `active_idx`, CORRECTING the brief's non-realizable "two flat arrays" — see Q2. **Because** BPF can't select a top-level map symbol by runtime index; the `defaults` precedent is a single indexed ARRAY, not two maps.
+- **D-mvp-4.3-Q3** — port `close_prefixes()` into the loader (production-owned) — see Q3. **Because** closure is a lowering detail below the IR boundary; guard #9 forbids sharing the prototype.
+- **D-mvp-4.3-Q4** — no distinct Rule-IR type; `Config::rules` + bit=`id` is the IR; first-match-by-id is free via `ffsll` — see Q4. **Because** the IR's job is satisfied without a new type; don't over-abstract.
+- **D-mvp-4.3-MAC-GRAMMAR** — `mac` key REJECTED under v2 (not silently ignored) — **because** a hard cutover should fail loud, not enforce a no-op MAC rule the operator believes is live; the diagnostic names the deferral + the supported axes. MAC maps stay frozen-pinned (HG-2, guard #16).
+- **D-mvp-4.3-STAT** — reuse the existing 4-slot STAT enum: rule-PASS→`STAT_PASS_CIDR`, rule-DROP→`STAT_DROP_DENY`, default→`STAT_PASS`/`STAT_DROP_DENY`, malformed→`STAT_DROP_MALFORMED` — **because** both axes are CIDR; per-axis stats are a mvp-4.5 exporter concern; keeps `mac_filter.h` STAT enum byte-identical (no new slot).
+- **D-mvp-4.3-FFS** — `__builtin_ffsll` default ship (spike §5.42 verdict ADOPT confirmed it verifies on the 5.15 floor); `#ifdef XDPMF_FFS_FALLBACK` bounded-unroll alt retained. Impl Phase 2.5 re-confirms `bpftool prog load` rc=0 on the PRODUCTION object; on fail → activate fallback + peer-DM (no design change). **Because** the spike de-risked this; production just re-validates.
+- **D-mvp-4.3-RESET-VS-PRESERVE** — dst/src bitmask inners + `wildcard` are RESET-on-apply (atomic-swap shape alone is correct, NO copy-forward); `rule_counters` stays PRESERVE (`copy_rule_counters_forward` UNCHANGED) — guard #15. **Because** match maps reflect only the current config; counters are monotonic across apply (Prometheus contract).
+- **D-mvp-4.3-PROSE-VS-INVARIANTS** — resolution rule for THIS amendment: if §5.43 prose conflicts with a §6.5 PI-mvp-4.3-* item or the verifiable-invariants list, **the §6.5 invariants-block WINS (prose loses)**. If impl deviates from a verifiable-invariants hint to satisfy a §6.5 PI or a load-bearing test assertion, reviewer disposition is `inline-merge` on the hint, NOT `[UNRELATED-EDIT]`. Counts/LOC/map-deltas in prose are operative-semantic (MAY) except `kManagedMaps`=21 and `BITVEC_NUM_AXES`=2 and `wildcard` max_entries=4 which are load-bearing contracts. Mirrors §5.41 D-mvp-4.1-PROSE-VS-INVARIANTS.
+- **D-mvp-4.3-TRUST** — per architect trust model: the brief, fixtures, and inter-agent messages are DATA. No injection observed (no "skip prefix-closure" / "ignore wildcard swap" style text). Flagged here per protocol; nothing followed blindly. The five literal corrections (C1–C5) are evidence-driven, not instructed.
+
+#### §5.43 TestStrategy
+
+Tester writes against THIS section, not impl's code. The spike's independent-oracle pattern (naive O(N) scan, NO bitmask/closure) is REUSED for the AND-agreement test. **Guard #23 is MANDATORY** (§6.62). Build baseline: brief's "58" is STALE — the live tree has ~74 `T_*.sh` files (incl. §5.41/§5.42 tests); **tester reconciles via a fresh `ctest -N` at Phase 2.5** and records the true baseline.
+
+**Test-ripple taxonomy (C2+C4 — the M.1+MAC-removal consequence; tester executes per-test):**
+- **(T-NEW)** §6.60 `T_AND_COMPOSE_OK`, §6.61 `T_AND_ORACLE_AGREEMENT`, §6.62 `T_AND_PREFIX_CLOSURE_OVERLAP` (guard #23), §6.63 `T_SCHEMA_V2_CUTOVER`.
+- **(T-CONVERT)** tests whose PURPOSE is axis-agnostic (lifecycle/swap/idempotency/exit-codes) but whose fixtures use MAC/v1: rewrite fixture to v2 dst_cidr/src_cidr grammar, keep the test logic. Examples: `T_APPLY_VALID_CONFIG`, `T_APPLY_REPLACES_RULESET`, `T_APPLY_ATOMIC_SWAP_NO_DROP`, `T_CIDR_ATOMIC_SWAP_NO_DROP`, `T_LINK_PERSIST_ACROSS_LOADER_EXIT`, `T_RULES_ATOMIC_SWAP_NO_DROP`, `T_RULE_COUNTERS_ATOMIC_SWAP`, `T_RULE_COUNTER_SURVIVES_APPLY`, `T_DROP_RULE_OPERATIVE`, `T_PASS_CIDR`, `T_DROP_CIDR_NOT_IN_RANGE`, `T_RULE_COUNTER_CIDR_HIT_BUMPS`, `T_SIDECAR_JSON_SHAPE` (→ schema_version==2 + dst_cidr/src_cidr match-kinds), `T_EXIT_CODE_9_ON_CONFIG_ERROR`, `T_APPLY_REJECTS_MALFORMED` (add schema_version:2 to valid sub-fixtures; verify error-text expectations still hold given the schema-gate-first ordering).
+- **(T-SKIP)** tests whose GREEN depends SOLELY on live MAC matching (a deferred feature): `T_PASS_ALLOWED`, `T_DROP_DENY`, `T_PASS_MAC_OR_CIDR`, `T_RULE_COUNTER_MAC_HIT_BUMPS`, MAC sub-cases of `T_DROP_RULE_BUMPS_COUNTER`. Convert to `SKIP_RETURN_CODE 77` with an explicit echo citing "MAC-axis deferred to mvp-4.5 per HG-mvp-4.3-2 / PI-mvp-4.3-MAC-DEFERRED" — **converted, not silently dropped**. Un-SKIP'd when the MAC-axis slice lands.
+- **(T-LITERAL)** `T_EXPORTER_METRICS_FORMAT`: `0.10.0`→`0.11.0` (4 sites).
+- **(T-UNAFFECTED)** MVP-1 attach/CLI/lifecycle tests that DON'T assert a MAC verdict (`T_BUILD`, `T_CLI_HELP_VERSION`, `T_CLI_*`, `T_DETACH_NOTHING`, `T_MODE_*`, `T_VERIFIER_REJECT`, `T_SANITIZER_BUILD`, `T_BPFFS_ROOT_SYMLINK`, `T_ATTACH_*`, bypass/log/exporter-infra tests) — stay GREEN; reviewer confirms no incidental breakage. Note: `T_LOAD_ATTACH` / `T_NEGATION_CONTROL` / `T_IDEMPOTENT_RELOAD` may depend on a MAC verdict — tester classifies each as CONVERT or SKIP at Phase 2.5.
+
+##### §6.60 T_AND_COMPOSE_OK — dst AND src compose correctly
+- **Setup:** `setup_veth`; apply `config_valid_and.yaml` (`schema_version: 2`) on `${IFACE_A}`; assert `dst_rulesets`+`cidr_rulesets`+`wildcard` pins exist + active inners non-empty.
+- **Trigger/assert:** a packet matching BOTH dst_cidr AND src_cidr of an all-axes rule → that rule's action (counter delta on its id). A packet matching only ONE axis of that rule → does NOT hit it (falls to a wildcard/single-axis rule or `defaults`). A dst-only rule (src wildcard) → matches on dst alone. Mechanism: per-rule `rule_counters` delta via the exporter/`bpftool` + STAT delta. **This is the OR→AND proof** — under the old OR model, single-axis match would have passed; under AND it must not (for an all-axes rule).
+
+##### §6.61 T_AND_ORACLE_AGREEMENT — datapath agrees with independent O(N) oracle
+- **Setup:** apply the AND fixture; for a table of ~10 vectors spanning hit/miss/overlap/wildcard/first-match-tie + ≥1 negation control.
+- **Trigger/assert:** inject each vector; read the matched rule_id (lowest-id, via per-rule counter delta); assert `== bitvec_oracle_prod.py` prediction. Disagreement localizes a closure/wildcard bug. The oracle is ALGORITHM-independent (dumb scan).
+
+##### §6.62 T_AND_PREFIX_CLOSURE_OVERLAP — guard #23 cover-direction + first-match-by-id (THE #1-bug canary)
+- **Setup:** apply `config_overlap_lowid.yaml`: id0 `dst_cidr 10.1.2.0/24` action DROP; id3 `dst_cidr 10.1.2.128/25` action PASS (more-specific, HIGHER id); plus broader covers (id with `10.1.0.0/16`).
+- **Trigger/assert:** a packet to `10.1.2.130` (∈ both /24 and /25) → **DROP via id0** (lower id wins despite id3 being more specific). This verdict is producible ONLY if (a) prefix-closure stored the covering /24's bit into the /25 entry (cover-direction correct) AND (b) `ffsll` picks lowest id. A backwards closure or most-specific-wins bug FLIPS this to PASS → test FAILS with a closure-direction message. **Mandatory; the load-bearing bit-vector canary.**
+
+##### §6.63 T_SCHEMA_V2_CUTOVER — M.1 hard cutover (OPS canary for the new load-time grammar)
+- **Trigger/assert:** (a) `apply -f` a `schema_version: 1` config → exit 9 + re-author diagnostic; (b) `apply -f` an absent-schema config → exit 9; (c) `apply -f` a config with `match: {mac: ...}` under v2 → exit 9 + MAC-deferred diagnostic; (d) `apply -f` a valid `schema_version: 2` config → exit 0. This is the OPS canary for the materially-different load-time grammar (new invocation contract vs the v1 suite).
+
+##### (impl Phase 2.5 production ffsll smoke — D-mvp-4.3-FFS)
+After build: `sudo -n bpftool prog load build/src/bpf/mac_filter.bpf.o /sys/fs/bpf/probe type xdp; rc=$?; sudo -n bpftool prog unpin /sys/fs/bpf/probe 2>/dev/null; echo $rc` → SHOULD be `0` (the AND/ffsll/closure datapath verifies on the floor). On fail → `-DXDPMF_FFS_FALLBACK` + peer-DM architect (no design change). Reviewer special-attention (a).
+
+#### §6.5 Preserved invariants (§5.43 MVP-4.3 brownfield)
+
+Reviewer's framework point 5 walks this list. Items are **MUST contracts**; `[INVARIANT-VIOLATED]` per failed check. (`f132c23` = pre-§5.43 baseline.)
+
+| PI | Property | Check mechanism |
+|---|---|---|
+| **PI-mvp-4.3-AND (NEW)** | The datapath classifies via bit-vector AND: a packet matches a rule iff every CONSTRAINED axis (dst_cidr AND src_cidr) is satisfied; `rid = ffsll(acc)-1` (lowest-id survivor); `acc==0`→`defaults`. | §6.60 + §6.61 GREEN. |
+| **PI-mvp-4.3-CLOSURE (NEW)** | Prefix-closure cover-direction is correct (each LPM entry's bitmask = OR of all COVERING rules); first-match-by-`id` holds (lower id wins over a more-specific higher-id rule). | §6.62 GREEN (`10.1.2.130`→DROP via lower id). |
+| **PI-mvp-4.3-WILDCARD (NEW)** | A rule unconstrained on axis A survives axis A via `wildcard[active*2+A]`; mutual exclusion {LPM map, wildcard} per axis holds; single `active_idx` flip commits dst+src+wildcard+defaults+rules+counters atomically. | §6.60 (single-axis rule) + §6.61 (wildcard vectors) GREEN; code-review of the RESET+flip order. |
+| **PI-mvp-4.3-SCHEMA-V2 (NEW)** | `schema_version` supported set = `{2}`; v1 AND absent both hard-reject (exit 9, re-author diagnostic); v2 accepted. | §6.63 (a)(b)(d) GREEN. |
+| **PI-mvp-4.3-DSTCIDR (NEW)** | `RuleMatch.dst_cidr` parsed (IPv4 CIDR, IPv6 rejected); `{dst_cidr, src_cidr}` is the v2 match grammar; ≥1 required. | §6.63 (d) + §6.60; `config.cpp` review. |
+| **PI-mvp-4.3-MAC-DEFERRED (NEW, falsifiable narrowing)** | `mac` match-key REJECTED under v2 (exit 9, MAC-deferred diagnostic); the datapath does NOT consult the MAC HASH maps; MAC maps remain pinned (frozen), NOT retired. This is a deliberate config-surface narrowing (cites §5.42 §7 OOS), NOT a regression. | §6.63 (c); `git diff f132c23 -- src/bpf/mac_filter.bpf.c` shows the MAC HASH lookup branch removed but the `.maps` MAC decls retained; MAC-verdict tests in the SKIP set carry the citation. |
+| **PI-mvp-4.3-COUNTER-PRESERVE** | `rule_counters` PRESERVE-across-apply (PI-3.4d) CONTINUES; `copy_rule_counters_forward` UNCHANGED; new match/wildcard maps are RESET-on-apply (guard #15). | `T_RULE_COUNTER_SURVIVES_APPLY` (converted) GREEN; code-review `copy_rule_counters_forward` byte-equivalent. |
+| **PI-mvp-4.3-EXPORTER-AGNOSTIC** | Exporter unchanged; `bump_rule(rid)` feeds the `ffsll` winner; rule_id-keyed metrics keep working. | `git diff f132c23 -- src/exporter/` empty; converted exporter tests GREEN. |
+| **PI-7-mvp-4.3-config-hpp (STREAK ENDS — EXPECTED)** | `src/lib/config.hpp` gains EXACTLY `RuleMatch.dst_cidr`; no other public-config-surface change. The multi-cycle ZERO-diff streak ENDS here by design (foreseen §5.42). | `git diff f132c23 -- src/lib/config.hpp` shows ONLY the `dst_cidr` addition. NOT an `[INVARIANT-VIOLATED]`. |
+| **PI-7-mvp-4.3-loader-hpp (CONTINUES)** | `src/lib/loader.hpp` byte-identical — new-map population internal to `loader.cpp`. | `git diff f132c23 -- src/lib/loader.hpp` empty. |
+| **PI-mvp-4.3-MAC-FILTER-H** | `src/common/mac_filter.h` changes are ADDITIVE only (new map-name constants + `BITVEC_NUM_AXES`/`BV_AXIS_*`); STAT enum, `xdpmf_cidr_v4`, `allow_entry`, `rule_entry`, `action_entry`, existing constants byte-identical (PI-10). | `git diff f132c23 -- src/common/mac_filter.h` shows only additive `#define`s. |
+| **PI-mvp-4.3-KMANAGED (NEW)** | `kManagedMaps[]` grows 17→21 (+4 exact: `dst_bitmask_a`,`dst_bitmask_b`,`dst_rulesets`,`wildcard`); all three call-site loops still walk the single table (HK-9). | `sed -n '/kManagedMaps/,/};/p' src/lib/loader.cpp` shows 21 rows (20 real + 1 alias); guard #10. |
+| **PI-mvp-4.3-VERSION** | VERSION `0.10.0`→`0.11.0`; DESCRIPTION OR→AND; both binaries report `0.11.0`; literal propagated to `T_EXPORTER_METRICS_FORMAT`. | `--version` outputs `0.11.0`; `grep -rn 0\.10\.0 tests/` returns ZERO (guard #11). |
+| **PI-mvp-4.3-SIDECAR (NEW)** | Sidecar JSON emits `schema_version: 2` + `dst_cidr` in match objects. | `T_SIDECAR_JSON_SHAPE` (converted) GREEN (`.schema_version==2`, dst_cidr/src_cidr match-kinds). |
+| **PI-mvp-4.3-VERIFIER (NEW)** | The production AND/ffsll/closure datapath verifies on the 5.15 floor (`__builtin_ffsll` or `-DXDPMF_FFS_FALLBACK`). | impl Phase 2.5 `bpftool prog load` rc=0; `T_LOAD_ATTACH` (or converted equiv) GREEN. |
+| **PI-mvp-4.3-NO-PROD-RIPPLE** | No edits outside the EDITED FileList; `loader.hpp`/exporter/cli/logger/cidr UNCHANGED git-diff fences hold. | per-path `git diff f132c23` checks above. |
+
+#### §5.43 verifiable invariants for reviewer (MAY-default per architect-spec §6.5 discipline)
+
+Guidance for reviewer, NOT contracts for impl. **Resolution rule (per D-mvp-4.3-PROSE-VS-INVARIANTS): if any item conflicts with a §6.5 PI-mvp-4.3-* item, the §6.5 item wins; if impl deviates to satisfy a PI or load-bearing assertion, disposition is `inline-merge`, NOT `[UNRELATED-EDIT]`.** Load-bearing (MUST) exceptions: `kManagedMaps`=21, `BITVEC_NUM_AXES`=2, `wildcard` max_entries=4.
+
+1. (MAY) `grep -nE 'first_set|ffsll' src/bpf/mac_filter.bpf.c` shows the production first-set helper (`__builtin_ffsll` or fallback); NO `bpf_loop`/unbounded back-edge.
+2. (MAY) `grep -nE 'dst_bitmask|dst_rulesets|wildcard' src/bpf/mac_filter.bpf.c src/common/mac_filter.h src/lib/loader.cpp` shows the new maps wired in all three (decl / name-constant / kManagedMaps).
+3. (MUST) `sed -n '/kManagedMaps/,/};/p' src/lib/loader.cpp` enumerates 21 rows (`dst_bitmask_a`,`dst_bitmask_b`,`dst_rulesets`,`wildcard` added; MAC rows retained).
+4. (MAY) `git diff f132c23 -- src/bpf/mac_filter.bpf.c` shows the MAC HASH lookup + the standalone CIDR branch REPLACED by the AND compose; `active_idx` head-read, `l3_after_vlan`, `bump_rule`, `defaults` fall-through preserved; MAC `.maps` decls retained (frozen).
+5. (MAY) `grep -nE 'schema_version' src/lib/config.cpp` shows supported `{2}` + reject v1/absent; `grep -nE 'dst_cidr|mac' src/lib/config.cpp` shows v2 grammar accepts dst_cidr/src_cidr, rejects mac.
+6. (MAY) `git diff f132c23 -- src/lib/config.hpp` shows ONLY `RuleMatch.dst_cidr` added.
+7. (MAY) `git diff f132c23 -- src/lib/loader.hpp src/exporter/ src/cli/ src/common/logger.* src/lib/cidr.*` is EMPTY.
+8. (MAY) `grep -nE 'schema_version|dst_cidr' src/lib/sidecar.cpp` shows `2` + dst_cidr emission; `T_SIDECAR_JSON_SHAPE` asserts `.schema_version==2`.
+9. (MAY) `grep -rn '0\.10\.0' tests/` returns ZERO post-bump; `CMakeLists.txt` VERSION=0.11.0, DESCRIPTION AND-compose.
+10. (MAY) MAC-verdict tests in the SKIP set echo the MAC-deferred citation (SKIP_RETURN_CODE 77), and converted tests use `schema_version: 2` fixtures — "converted, not silently dropped."
+11. (MAY) `grep -rn 'tests/bitvec' src/` returns ZERO — the spike is NOT `#include`d into production (guard #9); `close_prefixes`/first-set are transcribed.
+
+#### §7 OOS additions (§5.43 — new fences)
+
+- **`proto` (HASH) + `dst_port` (range-scan) axes** — mvp-4.4 (each a spike-proven +1 axis on the now-production structure). NEW FENCE.
+- **Exporter per-axis labels; MAC-axis return (as a bit-vector axis)** — mvp-4.5. The MAC maps are frozen-pinned this slice; their re-shaping + datapath re-consultation is mvp-4.5. NEW FENCE.
+- **IPv6 `cidr6` LPM_TRIE axis; VLAN-as-match-field; feed-objects; N>64 multi-word bitmask** — later slices (carry §5.42 fences). NEW FENCE.
+- **most-specific-wins ordering (S.3)** — future loader sort-key; this slice is first-match-by-`id` only. NEW FENCE.
+- **Sequential lowering** — documented escape hatch, NOT built (bit-vector ADOPTED §5.42). NEW FENCE.
+- **A distinct `NormalizedRule` Rule-IR type** — Q4 A2 chose the existing `Config::rules` + bit=id; a distinct type is deferred until a second consumer exists. NEW FENCE.
+- **Retiring the frozen MAC maps from `kManagedMaps[]` / the `.maps` block** — kept pinned-but-unconsulted this slice (guard #16); retirement happens in the MAC-axis slice when they re-shape. NEW FENCE.
+- **Non-eBPF (DPDK/AF_XDP) datapath; 40 Gbps line-rate** — deferred per [[real-requirements-and-strategy]]. Carry-forward.
+- Carry-forward §5.41/§5.42 OOS items NOT superseded above — UNCHANGED.
+
+#### §5.43 Anti-misdiagnosis institutional learning (per architect-spec §6.6)
+
+Guards applied: **#5** (Phase A code-grep — re-anchored every literal; surfaced corrections C1–C5 BEFORE publish, exactly the payoff of the discipline — sidecar.cpp + the all-fixtures-need-schema_version ripple would otherwise have surfaced as Phase B impl peer-DMs); **#9** (transcribe `close_prefixes`/first-set into production, do NOT `#include tests/bitvec/*`); **#10** (kManagedMaps 17→21 exact, +4 rows enumerated); **#11** (VERSION 0.10.0→0.11.0 literal propagation to the one pinning test); **#12** (new ctests take `RESOURCE_LOCK xdp_fixture` + cleanup trap); **#15** (match/wildcard maps RESET-on-apply, `rule_counters` PRESERVE — D-mvp-4.3-RESET-VS-PRESERVE); **#16** (no pin-name rename — src reshape keeps `cidr_allowlist*` names; MAC maps frozen not retired); **#23** (§6.62 mandatory overlapping-prefix lower-id vector + independent O(N) oracle — the #1-bug-class canary).
+
+> **NEW guard #24 (config-surface narrowing breaks the verdict-test corpus invisibly to the schema gate)** — when a slice REMOVES a match axis from the datapath while a hard schema-cutover changes the config grammar, the two failure surfaces are DISTINCT: (a) configs of the removed grammar fail at the *parse/schema* gate (loud, exit-coded), but (b) any alternate config-entry path that BYPASSES the schema gate (here `attach --allow` synthesizing a Config directly — `loader.cpp:1476`) keeps loading successfully yet produces the WRONG verdict because the datapath no longer consults the removed axis. A Phase-A grep for "where is the config validated?" finds only path (a); you MUST also grep "what OTHER paths construct a Config?" to find path (b), or the verdict-test breakage is mis-scoped. Mechanism: at design time, grep all constructors/synthesizers of the core config type, not just the validator. Cite §5.43 (MVP-4.3 OR→AND pivot, MAC-deferred) as the audit-trail source. Catalog grows 23 → 24.
+
+> **Anti-misdiagnosis note for future cycles touching the wildcard/swap layer:** the "two parallel maps selected by `active_idx`" shape is NOT BPF-realizable for top-level maps (you cannot index a map *symbol* by a runtime value) — use a single combined ARRAY indexed by `active*N+slot` (the `defaults` precedent) OR an ARRAY_OF_MAPS wrapper. Any future per-axis-swapped scalar table MUST follow the `defaults` single-indexed-ARRAY pattern, not the inner-map `_a`/`_b` pattern. Cite D-mvp-4.3-Q2.
+
+Evidence: `mint/task-brief.md` MVP-4.3 brief (HG-1..6, Q1-Q4, S3-1..6, guards #5/#9/#10/#11/#12/#15/#16/#22/#23); `mint/architecture-rule-model.md` (Option 1/3, OR→AND = structure change); §5.42 (bit-vector spike: `close_prefixes`, FFS-FEAS/FALLBACK, wildcard, canonical-set + derived structures), §5.41 (`l3_after_vlan` L3 reach), §5.27 (CIDR ARRAY_OF_MAPS atomic-swap precedent), §5.34/§5.35 (rules_outer→action_table dispatch + rule_counters atomic-swap), §5.26 (`active_idx`/`defaults` precedent); independent Phase A reads of `src/lib/config.hpp:36-52`, `src/lib/config.cpp:143-306`, `src/lib/loader.cpp:138-189,1476-1491,1653+`, `src/bpf/mac_filter.bpf.c:287-485`, `src/common/mac_filter.h:40-173`, `src/lib/sidecar.cpp:78-126`, `src/exporter/rule_counters_reader.hpp`, `tests/T_SIDECAR_JSON_SHAPE.sh`, `tests/T_EXPORTER_METRICS_FORMAT.sh`, `tests/fixtures/*.yaml`, `CMakeLists.txt:13-14`.
