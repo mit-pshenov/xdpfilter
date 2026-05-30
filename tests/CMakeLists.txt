@@ -1262,6 +1262,29 @@ set_tests_properties(T_IPV6_GATE_DEFAULT PROPERTIES
     SKIP_RETURN_CODE 77
 )
 
+# ── §5.52 MVP-4.12 / S2: inject_l6.py injector smoke + S4 harness scaffold ────
+# T_IPV6_INJECT_DEFAULT: the real-IPv6 analog of S1's §6.70 T_IPV6_GATE_DEFAULT.
+#   S1 proved 0x86DD → defaults with a ZERO-PAYLOAD Ether frame; S2 proves the
+#   SAME → defaults with a REAL well-formed IPv6 base-header frame emitted by the
+#   NEW tests/inject/inject_l6.py (scapy Ether/IPv6/L4 sent at L2). Per
+#   D-mvp-4.12-HONEST-SMOKE this is an INJECTOR SMOKE + HARNESS SCAFFOLD (the
+#   harness S4 reuses for cidr6 matching), NOT a new-datapath-behavior proof —
+#   the S1 arm doesn't deref, so the real v6 frame routes identically.
+#   step(1) IPv4 from MAC_RULE → DROP (positive control); step(2) real IPv6 from
+#   MAC_RULE → DROP_DENY delta 0 + DROP_MALFORMED delta 0 (S1 arm → defaults).
+#   Reuses config_mac_drop_default_pass fixture. RESOURCE_LOCK xdp_fixture (guard #12).
+add_test(
+    NAME T_IPV6_INJECT_DEFAULT
+    COMMAND bash ${TEST_DIR}/T_IPV6_INJECT_DEFAULT.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_IPV6_INJECT_DEFAULT PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 120
+    SKIP_RETURN_CODE 77
+)
+
 # ── §5.50 MVP-4.10 B28: mac-dedup MERGE canary ──────────────────────────────
 # T_MAC_MERGE_ORACLE_AGREEMENT: targeted canary for the rule-of-three refactor's
 #   #1 risk — the mac memcmp dedup MUST MERGE two rules sharing one src-MAC
