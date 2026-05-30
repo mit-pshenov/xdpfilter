@@ -56,6 +56,14 @@
 #define ETH_P_IP 0x0800
 #endif
 
+/* §5.51 (MVP-4.11 / S1) D-mvp-4.11-IPV6-DEFINE: ETH_P_IPV6 (0x86DD) inline —
+ * same rationale as ETH_P_IP above (vmlinux.h is BTF-derived, types only, no
+ * CPP macros; linux/if_ether.h is unavailable in the BPF-target build).
+ * Byte-equivalent to the IANA IPv6 EtherType. */
+#ifndef ETH_P_IPV6
+#define ETH_P_IPV6 0x86DD
+#endif
+
 /* §5.41 (MVP-4.1) D-mvp-4.1-MACROS: VLAN TPIDs + tag-walk depth cap. Same
  * rationale as ETH_P_IP above — vmlinux.h is BTF-derived (types only, no CPP
  * macros) and linux/if_ether.h is unavailable in the BPF-target build. Values
@@ -850,6 +858,13 @@ int mac_filter_prog(struct xdp_md *ctx)
             return XDP_PASS;
         }
         /* acc == 0 → no rule matched; fall through to defaults[active]. */
+    } else if (inner_proto == bpf_htons(ETH_P_IPV6)) {
+        /* §5.51 (MVP-4.11 / S1) D-mvp-4.11-IPV6-EMPTY (Q1=A1): EtherType-dispatch
+         * seam. Recognized family, NO classification this slice — no deref, no
+         * early return. Control falls through to defaults[active] below, exactly
+         * as a 0x86DD frame did before the reshape (PI-mvp-4.11-IPV6-DEFAULTS).
+         * S4 (cidr6) lands its IPv6 classification axes HERE — WITH the ipv6hdr
+         * bounds-check and its deref (forward-defense note §5.51). */
     }
 
     /* No match (non-IPv4, or IPv4 with acc==0) — consult defaults[active].

@@ -1240,6 +1240,28 @@ set_tests_properties(T_MAC_NON_IP PROPERTIES
     SKIP_RETURN_CODE 77
 )
 
+# ── §5.51 MVP-4.11 / S1: EtherType gate-scaffold negation control ────────────
+# T_IPV6_GATE_DEFAULT (§6.70): OPS canary for the NEW ETH_P_IPV6 dispatch arm.
+#   S1 reshapes the terminal `if (ETH_P_IP)` gate into an `if/else-if` with an
+#   empty `else if (ETH_P_IPV6)` seam that falls to defaults[active]. Only a
+#   0x86DD frame traverses the new arm (T_MAC_NON_IP's 0x88B5 matches neither).
+#   step(1) IPv4 from MAC_RULE → DROP (positive control); step(2) 0x86DD from
+#   MAC_RULE → DROP_DENY delta 0 + DROP_MALFORMED delta 0 (the new arm routes to
+#   defaults, never early-returns/derefs). Reuses config_mac_drop_default_pass
+#   fixture; calls inject_eth.py directly with the 4th 0x86DD arg
+#   (D-mvp-4.11-INJECT-DEFAULT). RESOURCE_LOCK xdp_fixture (guard #12).
+add_test(
+    NAME T_IPV6_GATE_DEFAULT
+    COMMAND bash ${TEST_DIR}/T_IPV6_GATE_DEFAULT.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_IPV6_GATE_DEFAULT PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 120
+    SKIP_RETURN_CODE 77
+)
+
 # ── §5.50 MVP-4.10 B28: mac-dedup MERGE canary ──────────────────────────────
 # T_MAC_MERGE_ORACLE_AGREEMENT: targeted canary for the rule-of-three refactor's
 #   #1 risk — the mac memcmp dedup MUST MERGE two rules sharing one src-MAC
