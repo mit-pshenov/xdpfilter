@@ -15563,3 +15563,184 @@ Guards applied: **#5** (Phase A code-grep — independently re-anchored all 6 fn
 > **Forward-defense note (future cycles adding an exact-HASH match axis, e.g. S8 IPv6 `cidr6` if modelled as exact-HASH, or B31 EtherType):** add ONE `aggregate_axis<Key>(c.rules, key_of, key_eq)` + ONE `populate_hash_inner_slot<Key>(fd, low.entries, "<axis>")` call — do NOT hand-roll a fourth near-dup lowering/populate body (that re-opens the rule-of-three the B28 templates just closed). Pick the comparator deliberately: scalar keys use `std::equal_to`; byte-array keys (like `xdpmf_mac`, or an IPv6 address) MUST use a `memcmp`-based `Eq` — silently defaulting to `==` on a byte-array key is the exact mis-merge hazard PI-mvp-4.10-MAC-EQ fences. Note: LPM/prefix-closure axes (dst/src CIDR, IPv6 `cidr6` if modelled as LPM) belong to the `populate_bitvec_inner_slot` family, NOT this HASH template. Audit trail: this slice (B28 paydown) + §5.48 (B20 — the `populate_all_axes` table these templates plug into).
 
 Evidence: `mint/task-brief.md` MVP-4.10 brief (HG-1/HG-2, Q1→A1, B28-1/B28-2, guards #5/#9/#10/#12, the §5.37/D-3.4f-1 rule-of-three override mandate); independent Phase A reads of `src/lib/loader.cpp:1270-1416` (the 3 lowering structs + 3 `lower_*_axis` fns + the out-of-scope `PortLowering`/`lower_port_axis`), `:1418-1594` (the 3 `populate_*_inner_slot` HASH fns + the out-of-scope `populate_bitvec_inner_slot`/`populate_port_inner_slot`), `:1869/1884/1894` (populate call sites in `populate_all_axes`), `:2120/2125/2129` (lowering call sites in `apply_request`); §5.37 / D-3.4f-1 (guard #9 EXPLICIT OVERRIDE rule-of-three precedent), §5.48 (B20 `populate_all_axes` table-driven host), §5.43/§5.44/§5.45/§5.47 (the per-axis lowering+populate lineage), §6.61/§6.66/§6.69 + `T_PROTO_AND_COMPOSE`/`T_VLAN_AND_COMPOSE` (the oracle + per-axis regression net).
+
+---
+
+### §5.51 MVP-4.11 / S1: EtherType gate-scaffold — reshape the IPv4-only datapath gate into an EtherType dispatch with a behavior-preserving IPv6 seam (rule-model L2/L3 gate-rework S1, brownfield, BEHAVIOR-PRESERVING structural cutover, 2026-05-30)
+
+#### §5.51 Problem statement
+
+First rung of the L2/L3 gate-rework ladder (`mint/architecture-l2l3-gate.md`, Option 1 "Five-Step Additive Ladder", S1; reviewer-passed synthesis `528a2cc`). The datapath today classifies the 6-axis rule-model **inside a single terminal `if (inner_proto == bpf_htons(ETH_P_IP)) {…}` gate** (`mac_filter.bpf.c:630`); every non-IPv4 frame (IPv6, ARP, truncated-tag, unknown EtherType) falls through to `defaults[active]` at `:855`. S4 (cidr6) will eventually need an IPv6 classification arm at the SAME structural site — but cutting the `if` into an `if/else-if` dispatch is the ONE unavoidable structural change in the ladder. S1 isolates that cutover into a **provably-no-op** reshape: the IPv4 verdict stays bit-identical, and every non-IPv4 frame still lands on `defaults[active]` exactly as today. The new `else if (inner_proto == bpf_htons(ETH_P_IPV6)) {…}` arm is a **named, reachable, empty seam** that does nothing but fall through to the same catch-all — establishing the structural attach-point S4 will fill, with zero observable behavior change this slice.
+
+**Why this is a true no-op (the load-bearing argument):** a 0x86DD frame today fails the `ETH_P_IP` test and falls to `defaults[active]`. After the reshape it ENTERS the new `else if (ETH_P_IPV6)` arm, the arm does nothing, and it falls to the SAME `defaults[active]` catch-all — identical outcome. A non-IPv4-non-IPv6 frame (ARP, 0x88B5) fails BOTH the `if` and the `else if` and falls to `defaults[active]` — identical to today. The IPv4 arm body (`:631-852`) is lifted byte-identical into the `if`-arm; the `:855-867` `defaults[active]` consult remains the unchanged catch-all for both arms.
+
+NO axis/map/schema/VERSION/config/loader change. Only `src/bpf/mac_filter.bpf.c` (+ the test scaffolding for the negation control) is touched.
+
+#### §5.51 Phase A grep verification report (architect-independent — 2026-05-30, per guard #5)
+
+Every load-bearing literal re-anchored against the live tree (independent reads, NOT brief-trust; FS-lag watched — all reads clean on first attempt):
+
+- **Gate CONFIRMED** at `mac_filter.bpf.c:630` — `if (inner_proto == bpf_htons(ETH_P_IP)) {`. The `ETH_P_IP` `#define` is the `#ifndef` block at `:55-57` (`#ifndef ETH_P_IP / #define ETH_P_IP 0x0800 / #endif`), with the §5.27 rationale comment at `:51-54` (vmlinux.h is BTF-derived — types only, no CPP macros — so the EtherType literal is defined inline).
+- **`ETH_P_IPV6` / `0x86dd` / `0x86DD` / `ipv6hdr` CONFIRMED ABSENT** from `mac_filter.bpf.c` (`grep -nE 'ETH_P_IPV6|0x86dd|0x86DD|ipv6hdr'` → 0 matches). This slice introduces the FIRST reference — a clean add of `#define ETH_P_IPV6 0x86DD` mirroring the `ETH_P_IP` `#ifndef` precedent.
+- **IPv4 body is a self-contained block CONFIRMED.** Read `:600-868`: `:623-629` compute `l3hdr`, `vlan_id`, `inner_proto` (via `l3_after_vlan`), and `has_vlan` — ALL **before** the gate at `:630`. The IPv4 body `:631-852` (the iphdr bounds-check → ihl check → L4 dport extract → 6 per-axis active-inner lookups → 6 wildcard halves → LPM dst/src masks → proto/port/vlan/mac masks → the `acc` 6-axis AND-compose at `:822-827` → `ffsll`/`first_set_u64` first-match-by-id dispatch at `:835` → `action_table` DROP/PASS verdict) is **fully enclosed** by the gate. `has_vlan` (computed at `:629`, used at `:796`) is the only gate-internal consumer of a pre-gate value — and it stays before BOTH arms, unchanged.
+- **`defaults[active]` catch-all CONFIRMED** at `:855-867` — the comment at `:855` reads *"No match (non-IPv4, or IPv4 with acc==0) — consult defaults[active]"*; `bpf_map_lookup_elem(&defaults, &active)` → `*default_p == 1u` ? `STAT_PASS`/`XDP_PASS` : `STAT_DROP_DENY`/`XDP_DROP`. This is WHY the empty IPv6 arm is a true no-op: non-IPv4 ALREADY lands here.
+- **`l3_after_vlan` CONFIRMED** at `:545-578` returns `inner_proto` (the post-VLAN ethertype) and sets `*l3hdr` to the post-VLAN cursor; the `:540-541` comment already documents *"the caller's ETH_P_IP test fails and the frame falls through to defaults — NEVER reclassified MALFORMED"* (the existing non-IPv4 contract this slice preserves verbatim).
+- **`BITVEC_NUM_AXES` CONFIRMED = 6** — the live `#define` is `mac_filter.h:161` (`#define BITVEC_NUM_AXES 6`); the `:104/:119/:141` references are stale evolution-history comments (2→4→5→6 narrative), NOT the live define. **Stays 6** this slice (no axis added — IPv6 is recognized, NOT classified).
+- **Negation-control template CONFIRMED.** `tests/T_MAC_NON_IP.sh` is the exact non-IPv4→defaults boundary-test (fixture `config_mac_drop_default_pass.yaml`: `default_action: pass` + `id0 mac=02:00:00:00:00:01 action DROP`; step (1) IPv4 from MAC_RULE → DROP delta 1 [positive/negation control]; step (2) `inject_eth` 0x88B5 from MAC_RULE → DROP_DENY delta 0 + DROP_MALFORMED delta 0 [boundary]). `tests/inject/inject_eth.py` builds a **60-byte Ether frame, EtherType HARDCODED 0x88B5**, 46-byte zero payload, `sendp(count=1)`; arg-guard `if len(sys.argv) != 4`. The `inject_eth` shell wrapper (`tests/lib/common.sh:249-252`) passes exactly `iface src dst` (3 args) to the script. `read_stats_with_cidr` / `wait_for_stats_sum_with_cidr` (`common.sh:190/225`) are the 4-counter (PASS / DROP_DENY / DROP_MALFORMED / PASS_CIDR) poll helpers.
+- **VERSION** = `0.15.0` (per §5.47). UNCHANGED this slice.
+
+#### §5.51 Human-gate decisions (defaults from brief — architect resolution)
+
+- **HG-mvp-4.11-1 — IPv6-arm body = empty/comment-only fall-through seam (NO early return). CONFIRMED → Q1=A1.** A bounds-check guards a deref that does NOT exist until S4; a bounds-check that DROPs a truncated v6 frame WOULD change behavior (today malformed/any v6 → defaults, not DROP). The minimal provably-behavior-preserving S1 arm is empty. (Resolved Q1 below.)
+- **HG-mvp-4.11-2 — negation tooling = parametrize `inject_eth.py` for 0x86DD; new ctest mirrors `T_MAC_NON_IP`. CONFIRMED → Q2=A1.** Only a 0x86DD frame traverses the NEW seam; this is S1-scope tooling, NOT S2's `inject_l6.py` (valid IPv6 L3/L4 construction for cidr6 — explicitly OOS, do NOT pull forward). (Resolved Q2 below.)
+
+#### §5.51 Q-decisions (mechanism)
+
+- **Q1 — IPv6-arm shape → A1 (empty/comment-only `else if (ETH_P_IPV6)` that falls through to `defaults[active]`); reject A2 (no-early-return ipv6hdr bounds-check arm).** **Because** A1 is the strongest behavior-preservation: it introduces ZERO new early-return path, the smallest possible diff, and the cleanest "true no-op" proof — the arm recognizes the family and does nothing. A2 (a no-early-return `ipv6hdr` bounds-check that ALSO falls to defaults) would exercise the v6-bounds verifier pattern early, but (a) it is DEAD code this slice (nothing dereferences the v6 header until S4), (b) it risks the exact behavior-changing trap the HG fenced — a bounds-check that DROPs on truncation would reclassify today's `defaults` v6 frames as `DROP_MALFORMED`. The bounds-check lands in S4 **with its deref**, where it is live and correct. **The S1 IPv6 arm MUST NOT early-return DROP/PASS under any input** — a botched arm that drops/passes IPv6 directly is `[INVARIANT-VIOLATED]` (PI-mvp-4.11-IPV6-DEFAULTS). Verifier note: an empty straight-line arm on the 5.15 floor is trivially safe (no `bpf_loop`, no back-edge, no deref).
+- **Q2 — negation-control frame + tooling → A1 (parametrize `inject_eth.py` to emit 0x86DD; NEW ctest `T_IPV6_GATE_DEFAULT.sh` mirroring `T_MAC_NON_IP`); reject A2 (reuse the existing 0x88B5 frame).** **Because** only a 0x86DD frame actually traverses the NEW `ETH_P_IPV6` arm — 0x88B5 matches NEITHER arm (it re-proves only the pre-existing generic-non-IP fallthrough, leaving the new seam unexercised by tests). The parametrization is a ~2-line change (an OPTIONAL 4th positional `ethertype` arg defaulting to `0x88B5`), distinct from S2's `inject_l6.py`. **Minimal-diff sub-decision (D-mvp-4.11-INJECT-DEFAULT):** the default stays `0x88B5` so the existing `inject_eth` shell wrapper (3-arg) and `T_MAC_NON_IP` (which calls it) are byte-equivalent — the new ctest calls the python script directly with the 4th arg, keeping `tests/lib/common.sh` UNCHANGED. (Impl MAY instead extend the `inject_eth` wrapper with an optional 4th arg — behavior-preserving for existing 3-arg callers — architect-flex; the direct-call path is the zero-ripple default.)
+
+#### §5.51 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+**NEW:**
+
+| Path | Role (this slice) | Language | LOC est |
+|---|---|---|---|
+| `tests/T_IPV6_GATE_DEFAULT.sh` | S1 negation control: inject a 0x86DD frame that ENTERS the new `ETH_P_IPV6` arm and assert it routes to `defaults[active]` (NOT dropped; DROP_DENY delta 0, DROP_MALFORMED delta 0). Mirrors `T_MAC_NON_IP.sh`'s mechanism (positive control + boundary assertion). `RESOURCE_LOCK xdp_fixture` (guard #12). | Bash | ~70 |
+
+**EDITED:**
+
+| Path | Role (this slice) | Language | LOC est |
+|---|---|---|---|
+| `src/bpf/mac_filter.bpf.c` | (1) Add `#define ETH_P_IPV6 0x86DD` inline near `:55` (mirror the `ETH_P_IP` `#ifndef` precedent). (2) Reshape `:630` from the terminal `if (inner_proto == bpf_htons(ETH_P_IP)) {…}` into `if (…ETH_P_IP) {…IPv4 body :631-852 BYTE-IDENTICAL…} else if (inner_proto == bpf_htons(ETH_P_IPV6)) {/* §5.51 S1 empty seam — recognized family, no classification; S4 cidr6 lands here */}`. The `:855-867` `defaults[active]` consult stays the UNCHANGED catch-all. Net ≈ +6 / structural-only (the IPv4 body is re-indented, not rewritten). | C (BPF) | ~+6 |
+| `tests/inject/inject_eth.py` | Parametrize: accept an OPTIONAL 4th positional `ethertype` (hex/int) defaulting to `0x88B5`; widen the arg-guard from `!= 4` to `not in (4, 5)`; pass the parsed value to `Ether(type=…)`. The 3-arg invocation stays byte-equivalent (0x88B5). | Python | ~+4 |
+| `tests/CMakeLists.txt` | Register `T_IPV6_GATE_DEFAULT` as a ctest with `RESOURCE_LOCK xdp_fixture` (guard #12 — shared veth/netns/bpffs host state), mirroring `T_MAC_NON_IP`'s registration. | CMake | ~+3 |
+
+**UNCHANGED-BUT-AFFECTED (must remain byte-identical; reviewer asserts zero git-diff):**
+
+| Path | Why touched-adjacent yet must not change | Check |
+|---|---|---|
+| The IPv4 arm body `mac_filter.bpf.c:631-852` | The entire 6-axis classification (active-inner lookups, wildcard halves, LPM dst/src, proto/port/vlan/mac masks, the `acc` AND-compose, `ffsll`/`first_set_u64` first-match-by-id, `action_table` dispatch) is LIFTED byte-identical into the `if`-arm — only re-indented one level. NO reorder, NO instruction change. | `git diff` shows ONLY the `if`→`if/else-if` wrapping + re-indent + the new empty arm + the `#define`; the `acc`/`ffsll`/dispatch/fallthrough lines are token-identical. |
+| `mac_filter.bpf.c:623-629` (pre-gate `l3_after_vlan`/`has_vlan` block) | `l3hdr`/`vlan_id`/`inner_proto`/`has_vlan` are computed BEFORE the gate and stay before BOTH arms — unchanged. | `git diff` shows no change to `:623-629`. |
+| `mac_filter.bpf.c:855-867` (`defaults[active]` catch-all) | Remains the unchanged catch-all for IPv4-acc==0, IPv6, and all other non-IPv4. | `git diff` shows no change. |
+| `l3_after_vlan` (`:545-578`) | Returns `inner_proto` for the dispatch; not modified. | `git diff` shows no change. |
+| `src/common/mac_filter.h` | NO axis/map/schema change — `BITVEC_NUM_AXES`=6 UNCHANGED; IPv6 is recognized, NOT classified on any axis. | `git diff -- src/common/` EMPTY. |
+| `src/lib/loader.{hpp,cpp}`, `src/lib/config.{hpp,cpp}`, `src/cli/` | No loader/config/CLI change — no new map/pin/`kManagedMaps[]` row/schema/exit-code. PI-7 loader.hpp zero-diff CONTINUES. | `git diff -- src/lib/ src/cli/` EMPTY. |
+| `CMakeLists.txt` (root, VERSION) | NO VERSION bump (no operator-observable change). | `--version` ⇒ `0.15.0`; root `git diff` shows no VERSION line. |
+| `tests/lib/common.sh` | The `inject_eth` wrapper stays 3-arg byte-identical (default-0x88B5 sub-decision); the new ctest calls the python script directly with the 4th arg. (Impl-flex: extending the wrapper is permitted — see Q2.) | `git diff -- tests/lib/common.sh` EMPTY (default path). |
+| `tests/T_MAC_NON_IP.sh` | The `inject_eth.py` default stays 0x88B5, so this test's behavior is byte-equivalent. | `git diff -- tests/T_MAC_NON_IP.sh` EMPTY. |
+
+#### §5.51 DataStructures
+
+**None introduced or changed.** No cross-boundary types touched: no new map, no new BPF struct, no `mac_filter.h`/`config.hpp` field. `inner_proto` (`__u16`, returned by `l3_after_vlan`) is the existing dispatch value; `ETH_P_IPV6` is a CPP macro (`0x86DD`), not a data structure. `BITVEC_NUM_AXES`=6 UNCHANGED. The `defaults` ARRAY, the 6 axis maps, the `wildcard` ARRAY, `action_table`, `rules_outer` — all UNCHANGED.
+
+#### §5.51 Interfaces
+
+No userspace/CLI/env/IPC surface changes. The single datapath-internal change is the gate-condition reshape inside the XDP program `xdp_mac_filter` (the `SEC("xdp")` entry). Pseudo-shape (impl owns the exact body; the IPv4 body is the existing `:631-852` lifted byte-identical):
+
+```
+/* near :55, mirroring the ETH_P_IP #ifndef precedent */
+#ifndef ETH_P_IPV6
+#define ETH_P_IPV6 0x86DD
+#endif
+
+/* at :630, replacing the terminal `if (ETH_P_IP) {…}` */
+if (inner_proto == bpf_htons(ETH_P_IP)) {
+    /* IPv4 body :631-852 — BYTE-IDENTICAL, re-indented one level:
+       iphdr bounds-check → ihl check → L4 dport → 6 active-inner lookups
+       → 6 wildcard halves → LPM dst/src → proto/port/vlan/mac masks
+       → acc 6-axis AND-compose → ffsll first-match-by-id → action dispatch
+       → acc==0 falls through to the defaults catch-all below. */
+} else if (inner_proto == bpf_htons(ETH_P_IPV6)) {
+    /* §5.51 (MVP-4.11 / S1) EtherType-dispatch seam. Q1=A1: recognized
+       family, NO classification this slice — no deref, no early return.
+       Falls through to defaults[active] (S4 cidr6 axes land HERE). */
+}
+/* :855 defaults[active] consult — UNCHANGED catch-all for IPv4-acc==0,
+   IPv6, and every other non-IPv4 frame. */
+```
+
+The negation-control injector interface (`inject_eth.py`):
+
+```
+usage: inject_eth.py <iface> <src_mac> <dst_mac> [ethertype]
+  ethertype: optional hex/int EtherType, default 0x88B5 (existing behavior).
+  The new ctest passes 0x86DD to traverse the ETH_P_IPV6 arm.
+```
+
+#### §5.51 Decisions (with rationale)
+
+- **D-mvp-4.11-DISPATCH — reshape the terminal `if (ETH_P_IP)` into an `if (ETH_P_IP) / else if (ETH_P_IPV6)` dispatch; the IPv4 body is lifted byte-identical and the `defaults[active]` consult stays the catch-all.** **Because** this is the ONE unavoidable structural cutover in the ladder (HLD Option 1 / S1), and isolating it as a provably-no-op now makes S2..S6 purely additive. The lift does NOT reorder the `acc` AND-compose, `ffsll`/`first_set_u64`, per-rule dispatch, or the `defaults` fallthrough — it only wraps the existing block in the first arm of the dispatch (verified §5.51 Phase A: the body `:631-852` is fully self-contained, `has_vlan` and friends are computed pre-gate at `:623-629`).
+- **D-mvp-4.11-IPV6-EMPTY (Q1=A1) — the `else if (ETH_P_IPV6)` arm is empty/comment-only and falls through to `defaults[active]`; it MUST NOT early-return DROP/PASS.** **Because** strongest behavior-preservation + smallest diff + cleanest no-op proof; the bounds-check/deref belongs to S4. See Q1.
+- **D-mvp-4.11-IPV6-DEFINE — add `#define ETH_P_IPV6 0x86DD` via an `#ifndef` block near `:55`, mirroring the `ETH_P_IP` precedent.** **Because** vmlinux.h is BTF-derived (types only, no CPP macros) and `linux/if_ether.h` is unavailable in the BPF-target build — the same §5.27/§5.41 rationale already documented inline for `ETH_P_IP` and the VLAN TPIDs. `0x86DD` is byte-equivalent to the IANA IPv6 EtherType.
+- **D-mvp-4.11-NEGATION (Q2=A1) — a NEW `T_IPV6_GATE_DEFAULT.sh` injects a 0x86DD frame (via a parametrized `inject_eth.py`) and asserts →defaults; mirror `T_MAC_NON_IP`'s positive-control + boundary structure.** **Because** only a 0x86DD frame traverses the new seam (0x88B5 matches neither arm). See Q2.
+- **D-mvp-4.11-INJECT-DEFAULT — `inject_eth.py`'s 4th `ethertype` arg defaults to `0x88B5`; `tests/lib/common.sh` + `T_MAC_NON_IP.sh` stay byte-identical.** **Because** the default-preserving parametrization keeps every existing 3-arg caller behavior-equivalent (minimal diff, PI continuity). The new ctest calls the script directly with `0x86DD`. (Impl-flex: extending the `inject_eth` wrapper is also acceptable — behavior-preserving for 3-arg callers.)
+- **D-mvp-4.11-NO-AXIS — IPv6 is RECOGNIZED, NOT CLASSIFIED; `BITVEC_NUM_AXES` stays 6, no new map/pin/schema, no `cidr6`/proto/port/etc. matching on v6.** **Because** S1 is the structural seam only; cidr6 axes are S4. The arm does not read the IPv6 header at all this slice.
+- **D-mvp-4.11-NO-BUMP — VERSION stays `0.15.0`; guard #11 N/A.** **Because** zero operator-observable change (the v6 verdict is identical: defaults). Mirrors the §5.48/§5.49/§5.50 internal-change precedent.
+- **D-mvp-4.11-PROSE-VS-INVARIANTS — resolution rule for THIS amendment:** if §5.51 prose conflicts with a §6.5 PI-mvp-4.11-* item or the verifiable-invariants list, the **§6.5 invariants-block WINS (prose loses)**. If impl deviates from a verifiable-invariants hint to satisfy a §6.5 PI or a load-bearing regression assertion, reviewer disposition is `inline-merge` on the hint, NOT `[UNRELATED-EDIT]`. Load-bearing (MUST): IPv4 verdict bit-identical; the IPv6 arm routes to `defaults[active]` and NEVER early-returns DROP/PASS; NO axis/map/schema/VERSION change; line-number anchors are SHOULD-level orientation, not literal-match contracts (per brief operative-semantic note — the arm landing at a slightly different line / an equivalent `#define` placement is `inline-merge`).
+
+#### §5.51 TestStrategy
+
+Tester writes against THIS section, not impl's code. Run with `-j4` (B19 `build_cpu` lock holds — §5.49). **Baseline GREEN reconciled via fresh `ctest -N` at Phase 2.5.**
+
+**Regression net (the bit-identical IPv4 proof — VA-1):** the entire existing v4 oracle corpus MUST stay GREEN, because the IPv4 verdict is byte-identical:
+- **`T_AND_ORACLE_AGREEMENT`** (§6.61), **`T_AND4_ORACLE_AGREEMENT`** (§6.66), **`T_AND5_ORACLE_AGREEMENT`** (§6.69), **`T_AND6_ORACLE_AGREEMENT`** — datapath-vs-independent-oracle across all 6 axes; any reorder/regression in the lifted IPv4 body surfaces as oracle disagreement.
+- **`T_PROTO_AND_COMPOSE`** (§6.64), **`T_PORT_RANGE_AND_COMPOSE`** (§6.65), **`T_VLAN_AND_COMPOSE`** (§6.67), **`T_VLAN_UNTAGGED_WILDCARD`** (§6.68), **`T_AND_COMPOSE_OK`** (§6.60), **`T_AND_PREFIX_CLOSURE_OVERLAP`** (§6.62) — per-axis + first-match-by-id composition.
+- **`T_MAC_NON_IP`** — the EXISTING non-IPv4→defaults boundary (0x88B5) MUST stay GREEN: a 0x88B5 frame still matches neither arm and falls to defaults. This is the regression canary that the reshape did not perturb the generic-non-IP path.
+- The atomic-swap / rule-counter net (`T_*_ATOMIC_SWAP_NO_DROP`, `T_RULE_COUNTER*`) — the populate→swap path is upstream of the datapath gate, untouched.
+
+**NEW negation control — §6.70 `T_IPV6_GATE_DEFAULT` (OPS canary for the new EtherType-dispatch path):** mirror `T_MAC_NON_IP`'s mechanism exactly. Fixture `config_mac_drop_default_pass.yaml` (REUSED — `default_action: pass` + `id0 mac=02:00:00:00:00:01 DROP`). `RESOURCE_LOCK xdp_fixture` (guard #12).
+- **Trigger:** apply the fixture on `IFACE_A`; smoke-floor = `apply` exit 0.
+- **Step (1) — positive/negation control (drop machinery is live):** inject an **IPv4** frame from `MAC_RULE` (`inject_ipv4.py`) → the MAC rule fires → `STAT_DROP_DENY` delta == 1. (A "must-drop" case that MUST register — proves the rule+drop path works, so step (2)'s "not dropped" is meaningful, not a silently-broken pass-everything.)
+- **Step (2) — THE boundary assertion (the new seam routes to defaults):** inject a **0x86DD** frame from `MAC_RULE` (`inject_eth.py <iface> <src> <dst> 0x86DD`) → the frame ENTERS the new `ETH_P_IPV6` arm → falls to `defaults[active]` (= pass) → **`STAT_DROP_DENY` delta == 0** AND **`STAT_DROP_MALFORMED` delta == 0**. A datapath whose IPv6 arm (wrongly) early-returned DROP would fail the deny-delta; one whose arm dereferenced the (zero-payload) "v6 header" and dropped on a bounds-miss would fail the malformed-delta.
+- **Assertion mechanism:** the existing `read_stats_with_cidr` / `wait_for_stats_sum_with_cidr` 4-counter poll-and-delta harness (PASS / DROP_DENY / DROP_MALFORMED / PASS_CIDR), identical to `T_MAC_NON_IP`.
+- **Why this is the OPS canary (per architect-spec load-bearing-OPS-canary heuristic):** S1 introduces a NEW datapath control-flow path (the `else if (ETH_P_IPV6)` arm) that NO existing test traverses — `T_MAC_NON_IP`'s 0x88B5 frame matches neither arm and only re-proves the generic fallthrough. Only a 0x86DD frame exercises the new seam; without §6.70 the new arm ships untested. (This is a datapath-path canary, not a runtime-environment canary — same caps/netns/uid as the rest of the suite; the "different invocation pattern" here is the EtherType that selects the new branch.)
+
+**Guard #22 (NIC VLAN-offload disable):** N/A — the 0x86DD negation frame is UNTAGGED. Mirror `T_MAC_NON_IP`'s fixture/veth setup faithfully (which does not tag).
+
+**(impl Phase 2.5 smoke):** the `.bpf.c` recompiles into the skeleton and **verifier-loads on the 5.15 floor** (the empty arm is straight-line — no `bpf_loop`, no back-edge, no deref; trivially satisfied); full `ctest -j4` GREEN at the reconciled baseline; `git diff -- src/common/ src/lib/ src/cli/ CMakeLists.txt` EMPTY (only `.bpf.c` + `tests/` touched); `git diff -- src/bpf/mac_filter.bpf.c` shows ONLY the `#define` + the `if`→`if/else-if` wrap + re-indent + empty arm (the `acc`/`ffsll`/dispatch/fallthrough lines token-identical); `grep -nE 'ETH_P_IPV6|0x86DD' src/bpf/mac_filter.bpf.c` shows the new `#define` + the new arm condition.
+
+#### §6.5 Preserved invariants (§5.51 MVP-4.11 brownfield)
+
+Reviewer's framework point 5 walks this list. Items are **MUST contracts**; `[INVARIANT-VIOLATED]` per failed check. **ALL prior PIs (PI-1 … PI-mvp-4.10-*) CONTINUE byte-equivalent** — this slice retires NO PI. The new PIs below are behavior-PRESERVING (no new behavior to certify — the slice is a no-op reshape).
+
+| PI | Property | Check mechanism |
+|---|---|---|
+| **PI-mvp-4.11-IPV4-BITIDENTICAL (NEW, behavior-preserving)** | The IPv4 verdict is bit-identical to pre-reshape — the lifted IPv4 body (`acc` 6-axis AND-compose, `ffsll`/`first_set_u64` first-match-by-id, per-rule `action_table` dispatch, `acc==0` defaults fallthrough) is byte-identical, only re-indented into the `if`-arm. | full v4 oracle net GREEN (`T_AND{,4,5,6}_ORACLE_AGREEMENT` + `T_PROTO/PORT/VLAN` compose + `T_AND_PREFIX_CLOSURE_OVERLAP`); `git diff -- src/bpf/mac_filter.bpf.c` shows only the wrap/indent + new arm + `#define`. |
+| **PI-mvp-4.11-IPV6-DEFAULTS (NEW, load-bearing)** | Every IPv6 (0x86DD) frame routes to `defaults[active]`; the `ETH_P_IPV6` arm NEVER early-returns DROP/PASS and NEVER reclassifies as MALFORMED. | `T_IPV6_GATE_DEFAULT` (§6.70): 0x86DD frame → DROP_DENY delta 0 + DROP_MALFORMED delta 0; reviewer READS the arm = no `return XDP_*` / no `bump_stat` inside it. |
+| **PI-mvp-4.11-NONIP-UNCHANGED (NEW, behavior-preserving)** | Generic non-IPv4-non-IPv6 frames (ARP, 0x88B5) still fall to `defaults[active]` — the reshape did not perturb the pre-existing fallthrough. | `T_MAC_NON_IP` GREEN (0x88B5 step (2): DROP_DENY delta 0). |
+| **PI-mvp-4.11-NO-AXIS-MAP (NEW)** | NO axis/map/pin/schema change — `BITVEC_NUM_AXES`=6, no new map, no `kManagedMaps[]` row, no schema bump; `src/common/`, `src/lib/`, `src/cli/` byte-identical. IPv6 recognized, NOT classified. | `git diff -- src/common/ src/lib/ src/cli/` EMPTY; `grep -n 'BITVEC_NUM_AXES' src/common/mac_filter.h` ⇒ live `:161` `6`. |
+| **PI-7-mvp-4.11-loader-hpp (CONTINUES)** | `src/lib/loader.hpp` byte-identical (loader untouched — no public symbol). | `git diff -- src/lib/loader.hpp` EMPTY. |
+| **PI-mvp-4.11-VERSION (CONTINUES)** | VERSION stays `0.15.0`; no literal propagation (guard #11 N/A). | `--version` ⇒ `0.15.0`; `grep -rn '0\.15\.0'` unchanged. |
+| **PI-mvp-4.11-5.15-FLOOR (NEW)** | The reshaped program verifier-loads on the kernel 5.15 floor (the new arm adds one straight-line branch, no `bpf_loop`/back-edge/deref). | impl Phase 2.5 load smoke; `T_LOAD_ATTACH` (§6.2) GREEN. |
+
+#### §5.51 verifiable invariants for reviewer (MAY-default per architect-spec §6.5 discipline)
+
+Guidance for reviewer, NOT contracts for impl. **Resolution rule (per D-mvp-4.11-PROSE-VS-INVARIANTS): if any item conflicts with a §6.5 PI-mvp-4.11-* item, the §6.5 item wins; if impl deviates from a hint to satisfy a PI or load-bearing regression assertion, disposition is `inline-merge`, NOT `[UNRELATED-EDIT]`.**
+
+1. (MUST) the IPv4 arm is byte-identical (the `acc` AND-compose, `ffsll`/`first_set_u64`, per-rule dispatch, and `defaults[active]` fallthrough are unchanged — `git diff` shows only the `if`→`if/else-if` wrapping + re-indent + the new arm + the `#define`). (PI-mvp-4.11-IPV4-BITIDENTICAL)
+2. (MUST) the IPv6 arm is behavior-preserving (falls to defaults, does NOT early-return DROP/PASS — a botched arm that drops/passes IPv6 directly is `[INVARIANT-VIOLATED]`). (PI-mvp-4.11-IPV6-DEFAULTS)
+3. (MUST) NO axis/map/schema/VERSION change (`git diff -- src/common/ src/lib/ src/cli/ CMakeLists.txt` empty except the inject tool is in `tests/`, not these trees). (PI-mvp-4.11-NO-AXIS-MAP / PI-mvp-4.11-VERSION)
+4. (MUST) the negation ctest genuinely ENTERS the new arm (0x86DD, not just generic non-IP 0x88B5) and asserts →defaults. (PI-mvp-4.11-IPV6-DEFAULTS via §6.70)
+5. (MUST) the full v4 oracle net is GREEN (bit-identical IPv4). (PI-mvp-4.11-IPV4-BITIDENTICAL)
+6. (MAY) `#define ETH_P_IPV6 0x86DD` placed near `:55` via `#ifndef` mirroring `ETH_P_IP` — impl MAY place it elsewhere in the macro block; equivalent placement is `inline-merge`.
+7. (MAY) line-number anchors (`:55`, `:630`, `:855`) are SHOULD-level orientation — the arm landing at a slightly different line as the body re-indents is `inline-merge`, NOT `[UNRELATED-EDIT]`.
+8. (MAY) `tests/lib/common.sh` stays UNCHANGED (default-0x88B5 path) — impl MAY instead extend the `inject_eth` wrapper with an optional 4th arg; either is acceptable (D-mvp-4.11-INJECT-DEFAULT).
+
+#### §7 OOS additions (§5.51 — new fences)
+
+- **S2 `inject_l6.py`** (valid IPv6 L3/L4 frame construction for cidr6 matching) — later ladder slice; the S1 0x86DD negation frame is a zero-payload Ether frame, NOT a valid IPv6 packet, and the empty arm never dereferences it. NEW FENCE (do NOT pull S2 forward).
+- **S3 LPM-template refactor, S4 cidr6 axes, S5 ethertype match-axis, S6 ext-header walk + family-coherence reject** — later ladder slices. The IPv6 arm recognizes the family and falls to defaults; it does NOT classify v6 on ANY axis (cidr6/proto/port/etc.). NEW FENCE.
+- **Any `ipv6hdr` bounds-check / deref in the S1 arm** — Q1=A1 rejects A2; the bounds-check lands in S4 with its deref. An S1 arm that DROPs/PASSes on a v6 bounds result is `[INVARIANT-VIOLATED]`. NEW FENCE.
+- **ANY `BITVEC_NUM_AXES` change, new map, `kManagedMaps[]` row, schema bump, VERSION bump, `config.*`/`loader.cpp`/`loader.hpp`/`mac_filter.h` change** — UNCHANGED this slice. NEW FENCE.
+- **PO forks deferred to their slices:** EtherType split-vs-co-ship (S5), ext-walk split (S6), `gate.d` hoist (Option 4), `ethertype:ipv4` accept/reject — all OOS here. NEW FENCE.
+- Carry-forward §5.41–§5.50 OOS items NOT superseded — UNCHANGED.
+
+#### §5.51 Anti-misdiagnosis institutional learning (per architect-spec §6.6)
+
+Guards applied: **#5** (Phase A code-grep — independently re-anchored the `:630` gate, the `:55-57` `ETH_P_IP` `#ifndef`, the ABSENCE of any `ETH_P_IPV6`/`0x86DD`/`ipv6hdr` reference, the `:623-629` pre-gate block, the `:631-852` self-contained IPv4 body, the `:855-867` defaults catch-all, `l3_after_vlan` `:545-578`, `BITVEC_NUM_AXES`=6 at `mac_filter.h:161`, and the `T_MAC_NON_IP` + `inject_eth.py` + `common.sh:249` negation template — all confirmed by READING the source, not brief-trust); **#12** (the new ctest sets up veth/netns + loads the BPF object → carries `RESOURCE_LOCK xdp_fixture`, mirroring `T_MAC_NON_IP`); **#9** (the IPv6 arm is empty — only ONE instance, well below the rule-of-three extraction threshold; NO shared parse helper extracted); **#11 N/A** (no VERSION bump); **#10 N/A** (no new constexpr table/array; `BITVEC_NUM_AXES`/`kManagedMaps[]` unchanged); **#22 N/A** (untagged negation frame — no NIC VLAN-offload concern, but the fixture/veth setup mirrors `T_MAC_NON_IP` faithfully).
+
+**Guard catalog UNCHANGED at 26** — this slice introduces no new misdiagnosis class (behavior-preserving structural reshape; the no-op argument is fully spec'd and the OPS-canary heuristic already mandated the §6.70 new-path test).
+
+> **Forward-defense note (future ladder cycles S2–S6 filling the IPv6 arm):** when S4 adds the `cidr6` deref into this arm, the ipv6hdr bounds-check MUST be added WITH the deref (NOT before) and MUST fall through to `defaults[active]` on a bounds-miss — NEVER DROP_MALFORMED for a truncated v6 frame (preserves the §5.41 D-mvp-4.1-MALFORMED non-IP-never-MALFORMED contract this slice extends to v6). When S5 adds an EtherType match-axis, recognize that the `if/else-if` dispatch ALREADY classifies the family — the axis reads it, it does not re-parse. The §6.70 `T_IPV6_GATE_DEFAULT` negation control becomes the regression anchor that each later v6 arm still routes correctly. Audit trail: this slice (S1 gate-scaffold) + §5.41 (the VLAN-walk non-IP-never-MALFORMED precedent) + `architecture-l2l3-gate.md` Option 1.
+
+Evidence: `mint/task-brief.md` MVP-4.11 brief (HG-mvp-4.11-1/-2, Q1→A1, Q2→A1, S1-1/S1-2, guards #5/#9/#12/#22, the operative-semantic line-anchor note); `mint/architecture-l2l3-gate.md` Option 1 / S1 + testability-lens VA-1; independent Phase A reads of `src/bpf/mac_filter.bpf.c:48-77` (the `ETH_P_IP`/VLAN/proto `#ifndef` macro block), `:535-578` (`l3_after_vlan`), `:600-868` (the pre-gate block, the `:630` gate, the `:631-852` IPv4 body, the `:855-867` defaults catch-all), `src/common/mac_filter.h:104-169` (the `BITVEC_NUM_AXES` evolution comments + the live `:161` define), `tests/T_MAC_NON_IP.sh` (the negation template), `tests/inject/inject_eth.py` (the 0x88B5 injector to parametrize), `tests/lib/common.sh:14/190/225/249` (`inject_eth`/`read_stats_with_cidr`/`wait_for_stats_sum_with_cidr`); §5.41 (D-mvp-4.1-MALFORMED non-IP-never-MALFORMED precedent), §5.43 (the OR→AND non-IP→defaults semantic at `:611-618`), §5.47 (D-mvp-4.7-Q2-GATE — the 6-axis-inside-the-IPv4-gate contract this slice reshapes), §6.61/§6.66/§6.69 + the per-axis compose tests (the v4 oracle regression net).
