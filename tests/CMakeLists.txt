@@ -1239,3 +1239,21 @@ set_tests_properties(T_MAC_NON_IP PROPERTIES
     TIMEOUT 120
     SKIP_RETURN_CODE 77
 )
+
+# ── §5.50 MVP-4.10 B28: mac-dedup MERGE canary ──────────────────────────────
+# T_MAC_MERGE_ORACLE_AGREEMENT: targeted canary for the rule-of-three refactor's
+#   #1 risk — the mac memcmp dedup MUST MERGE two rules sharing one src-MAC
+#   (config_valid_macmerge.yaml) into a single inner-HASH entry with both bits.
+#   The §6.70 (T_AND6) corpus has only DISTINCT macs, so this branch is uncovered
+#   there. Needs AND_ORACLE_PROD + INJECT_L4. RESOURCE_LOCK xdp_fixture (#12).
+add_test(
+    NAME T_MAC_MERGE_ORACLE_AGREEMENT
+    COMMAND bash ${TEST_DIR}/T_MAC_MERGE_ORACLE_AGREEMENT.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_MAC_MERGE_ORACLE_AGREEMENT PROPERTIES
+    ENVIRONMENT "${TEST_ENV_AND6}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 120
+    SKIP_RETURN_CODE 77
+)

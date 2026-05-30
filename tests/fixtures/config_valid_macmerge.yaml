@@ -1,0 +1,57 @@
+# config_valid_macmerge.yaml — §5.50 MVP-4.10 B28 targeted mac-dedup MERGE canary.
+#
+# Purpose: exercise the ONE mac-axis branch the §6.70 (T_AND6) corpus leaves
+# uncovered — TWO rules SHARING ONE src-MAC, which the lowering's memcmp dedup
+# scan MUST collapse into a SINGLE inner-HASH entry with BOTH rule bits OR'd.
+#
+# Why this matters for the B28 rule-of-three refactor: the mac axis is the #1
+# risk (the `memcmp`-over-6-octets equality functor must NOT be coerced to `==`
+# nor mis-wired). The T_AND6 corpus has THREE DISTINCT macs (ee:01/ee:02/ee:06)
+# and NO shared-MAC pair, so an always-false / too-strict comparator (which
+# fails to MERGE same-MAC rules) is INVISIBLE there: 3 distinct macs each land
+# in their own entry whether or not the comparator merges. A failed merge writes
+# TWO entries for the same key → the second `bpf_map_update_elem(BPF_ANY)`
+# OVERWRITES the first in the inner HASH → a LOST rule bit → a flipped verdict.
+# This fixture makes that branch observable.
+#
+# schema_version: 2. Match grammar {mac, dst_cidr, src_cidr, protocol, dst_port,
+# vlan}. `mac`: canonical 17-char src-MAC (h_source), EXACT (no closure). A
+# MAC-constrained rule matches IPv4 frames ONLY (D-mvp-4.7-Q2-GATE).
+#
+# Rule layout (bit position == id; first-match by lowest id, ffsll):
+#   id 0 : mac aa:bb:cc:dd:ee:01 AND tcp   pass  (SHARES mac ee:01 with id1)
+#   id 1 : mac aa:bb:cc:dd:ee:01 AND udp   pass  (SHARES mac ee:01 with id0)
+#   id 2 : mac aa:bb:cc:dd:ee:02            pass  (DISTINCT mac — must NOT merge)
+#   default_action: drop
+#
+# Merge proof: ids 0 and 1 share src-MAC ee:01 → the mac-axis inner HASH MUST
+# map key ee:01 → (1<<0)|(1<<1). The proto axis then intersects (AND): a tcp
+# frame from ee:01 selects id0 (lowest set bit after AND); a udp frame from
+# ee:01 selects id1. If the dedup MERGE fails, the inner HASH holds only ONE of
+# the two bits (whichever update_elem wrote last) → one of the two vectors flips
+# to NOMATCH or the wrong id → the independent oracle (naive first-match scan,
+# which models NO HASH/merge) disagrees and the §6.x agreement test fails loudly.
+#
+# id2 (DISTINCT mac ee:02) holds the "must-NOT-collide" direction (already
+# covered by T_AND6, restated here for a self-contained canary).
+#
+# IMPORTANT: tests/bitvec/bitvec_oracle_prod.py transcribes these rules BY HAND
+# (table RULES_MACMERGE). Any edit here MUST be mirrored there — data
+# independence is intentional (divergence fails the agreement test loudly).
+schema_version: 2
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      mac: "aa:bb:cc:dd:ee:01"
+      protocol: tcp
+  - id: 1
+    action: pass
+    match:
+      mac: "aa:bb:cc:dd:ee:01"
+      protocol: udp
+  - id: 2
+    action: pass
+    match:
+      mac: "aa:bb:cc:dd:ee:02"

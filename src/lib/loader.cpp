@@ -45,6 +45,8 @@
 #include <cstring>
 #include <format>
 #include <fstream>           // §5.24: read override BPF object from path
+#include <functional>        // §5.50 (MVP-4.10 B28-2): std::equal_to for aggregate_axis
+#include <optional>          // §5.50 (MVP-4.10 B28-2): std::optional projector return
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -1267,37 +1269,57 @@ struct AxisLowering {
     return out;
 }
 
-/* §5.44 (MVP-4.4) per-proto-axis lowering result: per-proto aggregated rule
- * bitmasks (entries[k] = {proto, OR of bits of every rule constraining that
- * exact proto}) + the wildcard mask (rules NOT constraining proto). NO
- * prefix-closure (exact-match HASH — D-mvp-4.4-NO-CLOSURE). */
-struct ProtoLowering {
-    std::vector<std::pair<std::uint32_t, std::uint64_t>> entries;
-    std::uint64_t                                        wildcard = 0u;
+/* §5.50 (MVP-4.10 B28-2) generic per-exact-HASH-axis lowering result — replaces
+ * the byte-identical ProtoLowering/VlanLowering structs and the key-only-
+ * different MacLowering (D-mvp-4.10-STRUCT). entries[k] = {key, OR of bits of
+ * every rule constraining that exact key}; wildcard = OR of bits of rules NOT
+ * constraining this axis. NO prefix-closure (exact-match HASH). PortLowering +
+ * the dst/src AxisLowering are NOT folded (different shape — D-mvp-4.10-
+ * BOUNDARY). */
+template<class Key>
+struct AxisAggregate {
+    std::vector<std::pair<Key, std::uint64_t>> entries;
+    std::uint64_t                              wildcard = 0u;
 };
+// Name-preserving aliases — Proto/Vlan are the SAME instantiation (legal); keep
+// populate_all_axes' signature + the apply_request locals textually stable.
+using ProtoLowering = AxisAggregate<std::uint32_t>;
+using VlanLowering  = AxisAggregate<std::uint32_t>;
+using MacLowering   = AxisAggregate<xdpmf_mac>;
 
-/* Lower the proto axis: a rule with `protocol` set ORs its bit into that
- * proto's aggregate key; a rule WITHOUT `protocol` contributes its bit to the
- * proto wildcard (FI-2 mutual exclusion). id range already validated in
- * config.cpp (bit shift safe). */
-[[nodiscard]] ProtoLowering lower_proto_axis(const Config& c)
+/* §5.50 (MVP-4.10 B28-2) unify lower_proto_axis / lower_vlan_axis /
+ * lower_mac_axis into ONE monomorphized template (rule-of-three OVERRIDES guard
+ * #9 per §5.37 / D-3.4f-1). They differed by THREE axes — key type, the
+ * projected source member (proto/vlan/mac are distinct std::optional<> types),
+ * and the dedup equality (== for proto/vlan, memcmp for the 6-octet mac). Per
+ * rule: bit = 1<<r.id; key_of(r) projects the axis key (std::nullopt => the rule
+ * does NOT constrain this axis, so its bit goes to `wildcard`, FI-2 mutual
+ * exclusion); on a key, a linear dedup-scan via key_eq (D-mvp-4.10-MAC-EQ keeps
+ * the mac memcmp, NOT ==) ORs the bit into the matching entry, else emplace_back
+ * a new entry. Insertion order preserved EXACTLY (D-mvp-4.10-ORDER) =>
+ * bit-identical entries/wildcard to the three originals. id range already
+ * validated in config.cpp (bit shift safe). Each lambda inlines per
+ * instantiation => zero indirect-call cost (Q1 -> A1). */
+template<class Key, class Project, class Eq>
+[[nodiscard]] AxisAggregate<Key> aggregate_axis(const std::vector<Rule>& rules,
+                                                Project key_of, Eq key_eq)
 {
-    ProtoLowering out;
-    for (const Rule& r : c.rules) {
-        const std::uint64_t bit = std::uint64_t{1} << r.id;
-        if (r.match.protocol.has_value()) {
-            const std::uint32_t proto = *r.match.protocol;
-            // Aggregate rules sharing the same exact proto into one key.
+    AxisAggregate<Key> out;
+    for (const Rule& r : rules) {
+        const std::uint64_t      bit = std::uint64_t{1} << r.id;
+        const std::optional<Key> key = key_of(r);
+        if (key.has_value()) {
+            // Aggregate rules sharing the same exact key into one entry.
             bool merged = false;
-            for (std::pair<std::uint32_t, std::uint64_t>& e : out.entries) {
-                if (e.first == proto) {
+            for (std::pair<Key, std::uint64_t>& e : out.entries) {
+                if (key_eq(e.first, *key)) {
                     e.second |= bit;
                     merged = true;
                     break;
                 }
             }
             if (!merged) {
-                out.entries.emplace_back(proto, bit);
+                out.entries.emplace_back(*key, bit);
             }
         } else {
             out.wildcard |= bit;
@@ -1337,98 +1359,39 @@ struct PortLowering {
     return out;
 }
 
-/* §5.45 (MVP-4.5) per-vlan-axis lowering result — byte-mirrors ProtoLowering:
- * one aggregate {vlan_id,bitmask} entry per distinct outer VID + the wildcard
- * mask (rules NOT constraining vlan). NO prefix-closure (exact-match). */
-struct VlanLowering {
-    std::vector<std::pair<std::uint32_t, std::uint64_t>> entries;
-    std::uint64_t                                        wildcard = 0u;
-};
+/* §5.50 (MVP-4.10 B28-2): the §5.45 vlan-axis lowering (former `lower_vlan_axis`
+ * + `VlanLowering`) and the §5.47 mac-axis lowering (former `lower_mac_axis` +
+ * `MacLowering`) are now folded into the generic `aggregate_axis` template +
+ * `AxisAggregate<Key>` above; their per-axis projector/equality lambdas live at
+ * the apply_request call sites. The u16->__u32 vlan VID widening (D-mvp-4.5-VLAN-
+ * VALUE-WIDTH) is done by the vlan projector lambda; the mac 6-octet memcmp
+ * equality (network order) is the mac Eq functor (D-mvp-4.10-MAC-EQ). */
 
-/* Lower the vlan axis: a rule with `vlan` set ORs its bit into that VID's
- * aggregate key (widening the config u16 → the BPF __u32 HASH key,
- * D-mvp-4.5-VLAN-VALUE-WIDTH); a rule WITHOUT `vlan` contributes its bit to the
- * vlan wildcard (FI-2 mutual exclusion). id range already validated in
- * config.cpp (bit shift safe). */
-[[nodiscard]] VlanLowering lower_vlan_axis(const Config& c)
-{
-    VlanLowering out;
-    for (const Rule& r : c.rules) {
-        const std::uint64_t bit = std::uint64_t{1} << r.id;
-        if (r.match.vlan.has_value()) {
-            const std::uint32_t vid = *r.match.vlan;
-            // Aggregate rules sharing the same exact VID into one key.
-            bool merged = false;
-            for (std::pair<std::uint32_t, std::uint64_t>& e : out.entries) {
-                if (e.first == vid) {
-                    e.second |= bit;
-                    merged = true;
-                    break;
-                }
-            }
-            if (!merged) {
-                out.entries.emplace_back(vid, bit);
-            }
-        } else {
-            out.wildcard |= bit;
-        }
-    }
-    return out;
-}
-
-/* §5.47 (MVP-4.7) per-mac-axis lowering result — byte-mirrors Proto/VlanLowering
- * (key is the 6-octet xdpmf_mac instead of a __u32): per-MAC aggregated rule
- * bitmasks + the wildcard mask (rules NOT constraining mac). EXACT match, NO
- * prefix-closure (D-mvp-4.7-NO-CLOSURE). */
-struct MacLowering {
-    std::vector<std::pair<xdpmf_mac, std::uint64_t>> entries;
-    std::uint64_t                                    wildcard = 0u;
-};
-
-/* Lower the mac axis: a rule with `mac` set ORs its bit into that src-MAC's
- * aggregate key; a rule WITHOUT `mac` contributes its bit to the mac wildcard
- * (FI-2 mutual exclusion). id range already validated in config.cpp (bit shift
- * safe). MAC equality is a byte compare over the 6 octets (network order). */
-[[nodiscard]] MacLowering lower_mac_axis(const Config& c)
-{
-    MacLowering out;
-    for (const Rule& r : c.rules) {
-        const std::uint64_t bit = std::uint64_t{1} << r.id;
-        if (r.match.mac.has_value()) {
-            const xdpmf_mac& mac = *r.match.mac;
-            // Aggregate rules sharing the same exact src-MAC into one key.
-            bool merged = false;
-            for (std::pair<xdpmf_mac, std::uint64_t>& e : out.entries) {
-                if (std::memcmp(e.first.octets, mac.octets, sizeof(mac.octets)) == 0) {
-                    e.second |= bit;
-                    merged = true;
-                    break;
-                }
-            }
-            if (!merged) {
-                out.entries.emplace_back(mac, bit);
-            }
-        } else {
-            out.wildcard |= bit;
-        }
-    }
-    return out;
-}
-
-/* §5.26 Q2 inner-slot population — §5.47 (MVP-4.7) D-mvp-4.7-Q1: the MAC inner
- * value is reshaped `struct allow_entry`→`__u64` (a per-MAC aggregated rule-
- * bitmask, bit k set iff rule k constrains this exact src-MAC). EXACT match,
- * NO prefix-closure (mirrors populate_proto/vlan_inner_slot). Bulk-clear-then-
- * insert preserved. RESET-on-apply: caller passes the INACTIVE inner fd
- * (allowlist_a or allowlist_b) and writes BEFORE the active_idx flip. */
-void populate_inner_slot(
-    int inner_fd, const std::vector<std::pair<xdpmf_mac, std::uint64_t>>& entries)
+/* §5.50 (MVP-4.10 B28-1) unify populate_inner_slot (mac, §5.47 D-mvp-4.7-Q1) /
+ * populate_proto_inner_slot (§5.44) / populate_vlan_inner_slot (§5.45) into ONE
+ * monomorphized template (rule-of-three OVERRIDES guard #9 per §5.37 /
+ * D-3.4f-1). The three were byte-shape-identical (the old populate_vlan comment
+ * already asserted "IDENTICAL shape to populate_proto_inner_slot") — differing
+ * ONLY by the inner-map HASH key type (xdpmf_mac / __u32) + a diagnostic label.
+ * Each inner value is a per-key aggregated rule-bitmask (bit k set iff rule k
+ * constrains this exact key). EXACT match, NO prefix-closure. Bulk-clear (get_
+ * next_key -> delete_elem, ENOENT-terminated) THEN insert (update_elem BPF_ANY);
+ * the map is small (<= XDPMF_ALLOWLIST_MAX entries) so the clear cost is
+ * bounded. `Key{}` value-init covers xdpmf_mac{} (zeroed) and __u32{} (=0),
+ * matching the originals' prev{}/cur{} vs prev=0/cur=0. `what` is the diagnostic
+ * label ("mac"/"proto"/"vlan"); error strings are key-agnostic — the old
+ * proto/vlan key-in-message embed is dropped (D-mvp-4.10-DIAG; error path only,
+ * not test-pinned). RESET-on-apply: caller passes the INACTIVE inner fd and
+ * writes BEFORE the active_idx flip. */
+template<class Key>
+void populate_hash_inner_slot(int inner_fd,
+                              const std::vector<std::pair<Key, std::uint64_t>>& entries,
+                              const char* what)
 {
     // Bulk-clear: iterate keys via bpf_map_get_next_key and delete each.
-    // The map is small (≤ 64 entries) so cost is bounded.
-    xdpmf_mac prev{};
-    xdpmf_mac cur{};
-    bool      have_prev = false;
+    Key  prev{};
+    Key  cur{};
+    bool have_prev = false;
     while (true) {
         const int rc = bpf_map_get_next_key(inner_fd,
                                             have_prev ? &prev : nullptr,
@@ -1436,26 +1399,26 @@ void populate_inner_slot(
         if (rc != 0) {
             if (-rc == ENOENT) break;
             throw_loader(classify(rc, LoaderError::LoadFailed),
-                         std::format("bpf_map_get_next_key(inner): {}",
-                                     std::strerror(-rc)));
+                         std::format("bpf_map_get_next_key({}_inner): {}",
+                                     what, std::strerror(-rc)));
         }
         const int drc = bpf_map_delete_elem(inner_fd, &cur);
         if (drc != 0 && -drc != ENOENT) {
             throw_loader(classify(drc, LoaderError::LoadFailed),
-                         std::format("bpf_map_delete_elem(inner): {}",
-                                     std::strerror(-drc)));
+                         std::format("bpf_map_delete_elem({}_inner): {}",
+                                     what, std::strerror(-drc)));
         }
         prev      = cur;
         have_prev = true;
     }
-    for (const std::pair<xdpmf_mac, std::uint64_t>& e : entries) {
-        const xdpmf_mac     key  = e.first;
+    for (const std::pair<Key, std::uint64_t>& e : entries) {
+        const Key           key  = e.first;
         const std::uint64_t mask = e.second;
         const int rc = bpf_map_update_elem(inner_fd, &key, &mask, BPF_ANY);
         if (rc < 0) {
             throw_loader(classify(rc, LoaderError::LoadFailed),
-                         std::format("bpf_map_update_elem(inner): {}",
-                                     std::strerror(-rc)));
+                         std::format("bpf_map_update_elem({}_inner): {}",
+                                     what, std::strerror(-rc)));
         }
     }
 }
@@ -1507,91 +1470,11 @@ void populate_bitvec_inner_slot(int inner_fd, const std::vector<BitPrefix>& pref
     }
 }
 
-/* §5.44 (MVP-4.4) D-mvp-4.4-Q1: populate one proto-axis HASH inner
- * (proto_bitmask_<a|b>) — key __u32 IP-protocol, value __u64 aggregated
- * rule-bitmask. Bulk-clear-then-insert (delete-then-insert precedent, same
- * shape as populate_bitvec_inner_slot but with a __u32 key). NO prefix-closure
- * (exact-match — D-mvp-4.4-NO-CLOSURE). RESET-on-apply: caller passes the
- * INACTIVE inner fd and writes BEFORE the active_idx flip. */
-void populate_proto_inner_slot(
-    int inner_fd, const std::vector<std::pair<std::uint32_t, std::uint64_t>>& entries)
-{
-    std::uint32_t prev = 0;
-    std::uint32_t cur  = 0;
-    bool          have_prev = false;
-    while (true) {
-        const int rc = bpf_map_get_next_key(inner_fd,
-                                            have_prev ? &prev : nullptr,
-                                            &cur);
-        if (rc != 0) {
-            if (-rc == ENOENT) break;
-            throw_loader(classify(rc, LoaderError::LoadFailed),
-                         std::format("bpf_map_get_next_key(proto_inner): {}",
-                                     std::strerror(-rc)));
-        }
-        const int drc = bpf_map_delete_elem(inner_fd, &cur);
-        if (drc != 0 && -drc != ENOENT) {
-            throw_loader(classify(drc, LoaderError::LoadFailed),
-                         std::format("bpf_map_delete_elem(proto_inner): {}",
-                                     std::strerror(-drc)));
-        }
-        prev      = cur;
-        have_prev = true;
-    }
-    for (const std::pair<std::uint32_t, std::uint64_t>& e : entries) {
-        const std::uint32_t key  = e.first;
-        const std::uint64_t mask = e.second;
-        const int rc = bpf_map_update_elem(inner_fd, &key, &mask, BPF_ANY);
-        if (rc < 0) {
-            throw_loader(classify(rc, LoaderError::LoadFailed),
-                         std::format("bpf_map_update_elem(proto_inner[{}]): {}",
-                                     key, std::strerror(-rc)));
-        }
-    }
-}
-
-/* §5.45 (MVP-4.5) D-mvp-4.5-Q1: populate one vlan-axis HASH inner
- * (vlan_bitmask_<a|b>) — key __u32 outer VID, value __u64 aggregated
- * rule-bitmask. IDENTICAL shape to populate_proto_inner_slot (bulk-clear-then-
- * insert; HASH key __u32). NO prefix-closure (exact-match — D-mvp-4.5-NO-
- * CLOSURE). RESET-on-apply: caller passes the INACTIVE inner fd and writes
- * BEFORE the active_idx flip. */
-void populate_vlan_inner_slot(
-    int inner_fd, const std::vector<std::pair<std::uint32_t, std::uint64_t>>& entries)
-{
-    std::uint32_t prev = 0;
-    std::uint32_t cur  = 0;
-    bool          have_prev = false;
-    while (true) {
-        const int rc = bpf_map_get_next_key(inner_fd,
-                                            have_prev ? &prev : nullptr,
-                                            &cur);
-        if (rc != 0) {
-            if (-rc == ENOENT) break;
-            throw_loader(classify(rc, LoaderError::LoadFailed),
-                         std::format("bpf_map_get_next_key(vlan_inner): {}",
-                                     std::strerror(-rc)));
-        }
-        const int drc = bpf_map_delete_elem(inner_fd, &cur);
-        if (drc != 0 && -drc != ENOENT) {
-            throw_loader(classify(drc, LoaderError::LoadFailed),
-                         std::format("bpf_map_delete_elem(vlan_inner): {}",
-                                     std::strerror(-drc)));
-        }
-        prev      = cur;
-        have_prev = true;
-    }
-    for (const std::pair<std::uint32_t, std::uint64_t>& e : entries) {
-        const std::uint32_t key  = e.first;
-        const std::uint64_t mask = e.second;
-        const int rc = bpf_map_update_elem(inner_fd, &key, &mask, BPF_ANY);
-        if (rc < 0) {
-            throw_loader(classify(rc, LoaderError::LoadFailed),
-                         std::format("bpf_map_update_elem(vlan_inner[{}]): {}",
-                                     key, std::strerror(-rc)));
-        }
-    }
-}
+/* §5.50 (MVP-4.10 B28-1): the §5.44 proto-axis populate (former
+ * `populate_proto_inner_slot`) and the §5.45 vlan-axis populate (former
+ * `populate_vlan_inner_slot`) are now folded into the generic
+ * `populate_hash_inner_slot<Key>` template above (both instantiate Key=__u32);
+ * call sites in populate_all_axes pass the "proto"/"vlan" diagnostic labels. */
 
 /* §5.44 (MVP-4.4) D-mvp-4.4-Q2 + D-mvp-4.4-PORT-ARRAY-CLEAR: populate one
  * dst_port-axis ARRAY inner (port_ranges_<a|b>). BPF ARRAY maps have no
@@ -1866,10 +1749,10 @@ void populate_all_axes(mac_filter_bpf* skel, std::uint32_t slot,
                        DefaultAction             default_action)
 {
     // 1 mac — paired allowlist_a/_b -> __u64 aggregated rule-bitmask
-    populate_inner_slot(
+    populate_hash_inner_slot(
         inactive_axis_fd(skel->maps.allowlist_a, skel->maps.allowlist_b, slot,
                          "inactive mac inner fd unavailable"),
-        mac_low.entries);
+        mac_low.entries, "mac");
     // 2 dst — paired dst_bitmask_a/_b LPM bit-vector
     populate_bitvec_inner_slot(
         inactive_axis_fd(skel->maps.dst_bitmask_a, skel->maps.dst_bitmask_b, slot,
@@ -1881,20 +1764,20 @@ void populate_all_axes(mac_filter_bpf* skel, std::uint32_t slot,
                          "inactive src inner fd unavailable"),
         src_low.prefixes);
     // 4 proto — paired proto_bitmask_a/_b exact-HASH
-    populate_proto_inner_slot(
+    populate_hash_inner_slot(
         inactive_axis_fd(skel->maps.proto_bitmask_a, skel->maps.proto_bitmask_b, slot,
                          "inactive proto inner fd unavailable"),
-        proto_low.entries);
+        proto_low.entries, "proto");
     // 5 port — paired port_ranges_a/_b range ARRAY
     populate_port_inner_slot(
         inactive_axis_fd(skel->maps.port_ranges_a, skel->maps.port_ranges_b, slot,
                          "inactive port inner fd unavailable"),
         port_low.ranges);
     // 6 vlan — paired vlan_bitmask_a/_b exact-HASH
-    populate_vlan_inner_slot(
+    populate_hash_inner_slot(
         inactive_axis_fd(skel->maps.vlan_bitmask_a, skel->maps.vlan_bitmask_b, slot,
                          "inactive vlan inner fd unavailable"),
-        vlan_low.entries);
+        vlan_low.entries, "vlan");
     // 7 wildcard — SINGLE map indexed by slot (D-mvp-4.8-FD-HELPER-SCOPE)
     {
         const int wildcard_fd = bpf_map__fd(skel->maps.wildcard);
@@ -2117,16 +2000,34 @@ std::uint32_t apply_request(const ApplyRequest& req)
     // (unconstrained), exactly like the proto/vlan exact-HASH axes. NO closure
     // (D-mvp-4.7-NO-CLOSURE). The two LPM axes are lowered to prefix+bit lists
     // (constrained) + wildcard masks (unconstrained).
-    const MacLowering          mac_low     = lower_mac_axis(req.config);
+    // §5.50 (MVP-4.10 B28-2): mac/proto/vlan exact-HASH lowering folded into the
+    // generic aggregate_axis template; per-axis projector + equality functors
+    // here. mac uses a 6-octet memcmp equality (NOT ==, D-mvp-4.10-MAC-EQ).
+    const MacLowering          mac_low     = aggregate_axis<xdpmf_mac>(
+        req.config.rules,
+        [](const Rule& r) { return r.match.mac; },
+        [](const xdpmf_mac& a, const xdpmf_mac& b) {
+            return std::memcmp(a.octets, b.octets, sizeof(a.octets)) == 0;
+        });
     const AxisLowering         dst_low     = lower_axis(req.config, /*dst_axis=*/true);
     const AxisLowering         src_low     = lower_axis(req.config, /*dst_axis=*/false);
     // §5.44 (MVP-4.4): lower the two NEW axes (proto exact-HASH, dst_port
     // range) alongside the §5.43 LPM axes. NO closure (D-mvp-4.4-NO-CLOSURE).
-    const ProtoLowering        proto_low   = lower_proto_axis(req.config);
+    const ProtoLowering        proto_low   = aggregate_axis<std::uint32_t>(
+        req.config.rules,
+        [](const Rule& r) -> std::optional<std::uint32_t> { return r.match.protocol; },
+        std::equal_to<std::uint32_t>{});
     const PortLowering         port_low    = lower_port_axis(req.config);
     // §5.45 (MVP-4.5): lower the NEW vlan axis (exact-HASH outer VID) alongside
-    // the §5.43/§5.44 axes. NO closure (D-mvp-4.5-NO-CLOSURE).
-    const VlanLowering         vlan_low    = lower_vlan_axis(req.config);
+    // the §5.43/§5.44 axes. NO closure (D-mvp-4.5-NO-CLOSURE). The vlan projector
+    // widens the config u16 VID -> the BPF __u32 HASH key (D-mvp-4.5-VLAN-VALUE-WIDTH).
+    const VlanLowering         vlan_low    = aggregate_axis<std::uint32_t>(
+        req.config.rules,
+        [](const Rule& r) -> std::optional<std::uint32_t> {
+            if (r.match.vlan) return std::uint32_t{*r.match.vlan};
+            return std::nullopt;
+        },
+        std::equal_to<std::uint32_t>{});
     const DefaultAction default_action     = req.config.default_action;
 
     if (mac_low.entries.size() > XDPMF_ALLOWLIST_MAX) {

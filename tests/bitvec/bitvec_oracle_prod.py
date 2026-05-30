@@ -148,6 +148,21 @@ RULES_AND6 = [
 ]
 
 
+# ── mac-MERGE canary table: by hand from config_valid_macmerge.yaml (§5.50) ──
+# Same 7-tuple shape as RULES_AND6. ids 0 & 1 SHARE src-MAC ee:01 (different
+# proto) → the datapath's mac-axis lowering must MERGE them into one inner-HASH
+# entry with both bits; this naive first-match oracle models NO merge (it just
+# scans ascending id), so it is the independent reference. id2 has a DISTINCT
+# mac (must NOT collide). Consumed by T_MAC_MERGE_ORACLE_AGREEMENT
+# (--ruleset macmerge --proto P --src-mac M).
+RULES_MACMERGE = [
+    # id  dst_cidr  src_cidr  proto port  vlan  mac                  action
+    (0,  W,        W,        6,    W,    W,    "aa:bb:cc:dd:ee:01", "pass"),  # mac ee:01 + tcp
+    (1,  W,        W,        17,   W,    W,    "aa:bb:cc:dd:ee:01", "pass"),  # mac ee:01 + udp (SHARES mac → merge)
+    (2,  W,        W,        W,    W,    W,    "aa:bb:cc:dd:ee:02", "pass"),  # mac ee:02 (distinct)
+]
+
+
 def _norm_mac(s):
     """Normalize a MAC to lowercase canonical for exact comparison."""
     return s.lower() if s is not None else None
@@ -256,7 +271,7 @@ def classify5(dst_ip, src_ip, proto, dport, vlan):
     return NOMATCH
 
 
-def classify6(dst_ip, src_ip, proto, dport, vlan, src_mac):
+def classify6(dst_ip, src_ip, proto, dport, vlan, src_mac, rules=RULES_AND6):
     """6-axis (dst+src+proto+port+vlan+mac) first-match (§5.47 §6.70).
 
     proto is an IP protocol number. dport is the L4 dest port, or None when the
@@ -265,6 +280,10 @@ def classify6(dst_ip, src_ip, proto, dport, vlan, src_mac):
     one → no "absent" sentinel); a mac-constrained rule matches iff the src_mac
     equals it EXACTLY (no closure). MAC is composed inside the IPv4 gate, so this
     classifier is only meaningful for IPv4 frames (D-mvp-4.7-Q2-GATE).
+
+    `rules` defaults to RULES_AND6; the mac-MERGE canary (§5.50) reuses this same
+    naive first-match scan over RULES_MACMERGE (the scan models NO inner-HASH
+    merge, so it is the independent reference for the dedup branch).
     """
     dst_i = _ip_to_int(dst_ip)
     src_i = _ip_to_int(src_ip)
@@ -272,7 +291,7 @@ def classify6(dst_ip, src_ip, proto, dport, vlan, src_mac):
     has_vlan = vlan is not None
     mac_n = _norm_mac(src_mac)
 
-    for (rid, dst_c, src_c, p, port, vl, mac, _action) in RULES_AND6:
+    for (rid, dst_c, src_c, p, port, vl, mac, _action) in rules:
         # dst axis
         if dst_c is not W and not _ip_in_cidr(dst_i, dst_c):
             continue
@@ -319,12 +338,15 @@ def main():
         prog="bitvec_oracle_prod.py",
         description="independent production AND first-match classifier "
                     "(§5.43 2-axis / §5.44 4-axis / §5.45 5-axis)")
-    ap.add_argument("--ruleset", choices=("and", "and4", "and5", "and6"),
+    ap.add_argument("--ruleset",
+                    choices=("and", "and4", "and5", "and6", "macmerge"),
                     default="and",
                     help="and = 2-axis (config_valid_and.yaml, §6.61); "
                          "and4 = 4-axis (config_valid_and4.yaml, §6.66); "
                          "and5 = 5-axis (config_valid_and5.yaml, §6.69); "
-                         "and6 = 6-axis (config_valid_and6.yaml, §6.70)")
+                         "and6 = 6-axis (config_valid_and6.yaml, §6.70); "
+                         "macmerge = mac-dedup MERGE canary "
+                         "(config_valid_macmerge.yaml, §5.50)")
     ap.add_argument("--dst-ip", required=True)
     ap.add_argument("--src-ip", required=True)
     ap.add_argument("--proto", type=_proto_arg,
@@ -338,7 +360,15 @@ def main():
                     help="source MAC (eth->h_source); and6 only (exact match)")
     args = ap.parse_args()
 
-    if args.ruleset == "and6":
+    if args.ruleset == "macmerge":
+        if args.proto is None:
+            ap.error("--ruleset macmerge requires --proto")
+        if args.src_mac is None:
+            ap.error("--ruleset macmerge requires --src-mac")
+        dport = None if args.proto == ICMP else args.dport
+        print(classify6(args.dst_ip, args.src_ip, args.proto, dport, args.vlan,
+                        args.src_mac, rules=RULES_MACMERGE))
+    elif args.ruleset == "and6":
         if args.proto is None:
             ap.error("--ruleset and6 requires --proto")
         if args.src_mac is None:
