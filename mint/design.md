@@ -15373,3 +15373,193 @@ Guards applied: **#5** (Phase A code-grep — re-anchored the two `continue` lin
 > **Guard #26 — sentinel-array early-`break` correctness coupling.** When a bounded scan over a dense-packed, sentinel-terminated array is optimized from full-walk-`continue` to early-`break` (or any early-exit), the `break` is correct ONLY IF a TWO-LEG invariant holds AND is documented at BOTH ends: **(a)** used entries are dense-at-front (the producer clears-to-sentinel then writes contiguously) AND **(b)** no real entry can masquerade as the sentinel (the value domain that triggers the `break` is *provably impossible* for a real entry — enforced upstream, e.g. by config validation). Leg (b) is the one most easily missed: it requires confirming the *upstream* constructor/validator forbids the sentinel pattern on real data (here: `config.cpp` rejects `lo>hi` port ranges at parse time). The forward-defense is a comment at BOTH the consumer (the scan) AND the producer (the populate) naming the cross-file dependency, because the `break`'s safety is a non-local property a single-end editor can silently break. Also distinguish a *boundary* sentinel skip (safe to `break`) from a *per-element guard* like a leaf-null-check (NOT safe to `break` — a transient miss on element `i` says nothing about elements `>i`; it stays `continue`). **Validated by §5.49 (this slice, 2026-05-29)**: B18 flipped the `r->lo > r->hi` sentinel `continue`→`break` (legs (a) dense-pack + (b) `config.cpp:199-202` `lo>hi`-rejection both confirmed) while the `!r` null-check `continue` correctly stayed.
 
 Evidence: `mint/task-brief.md` MVP-4.9 brief (HG-1/HG-2, Q1, B18-1/B19-1, guards #5/#12, dense-pack coupling); independent Phase A reads of `src/bpf/mac_filter.bpf.c:491-516` (`port_scan` two-continue body + unroll), `src/lib/loader.cpp:1603-1629` (`populate_port_inner_slot` clear-then-dense-write) + `:1321-1338` (`lower_port_axis` no-inversion), `src/lib/config.cpp:176-205` (`parse_dst_port` `lo>hi` rejection — the load-bearing B18 precondition), `tests/CMakeLists.txt:66-137` (`T_BUILD` lock-free + `T_SANITIZER_BUILD` `xdp_fixture`) + the in-file multi-lock precedents (`:205,:515,:527,:671,:726`), `grep -rlE 'cmake|XDPMF_SANITIZERS' tests/` (no third full-compile ctest); §5.44 (port-axis origin / `port_scan` / `populate_port_inner_slot` lineage), §5.33 (guard #12 RESOURCE_LOCK genesis), §6.65/§6.66/§6.69/§6.61 (the port + oracle-agreement regression net).
+
+---
+
+### §5.50 MVP-4.10: B28 — template the 3 near-dup HASH inner-slot populate fns + the 3 axis-merge lowering fns (brownfield, BEHAVIOR-PRESERVING refactor, 2026-05-30)
+
+#### §5.50 Problem statement
+
+Pure code-quality, behavior-preserving refactor — the explicit B28 follow-on to B20 (§5.48). `src/lib/loader.cpp` carries TWO rule-of-three near-duplications among the anon-namespace helpers introduced across §5.43–§5.47:
+
+1. **B28-1 — the HASH inner-slot populate trio.** `populate_inner_slot` (MAC, `:1424`), `populate_proto_inner_slot` (`:1516`), `populate_vlan_inner_slot` (`:1559`) are byte-shape-identical (`:1555` in-code comment: *"IDENTICAL shape to populate_proto_inner_slot (bulk-clear-then-insert; HASH key __u32)"*): the same `bpf_map_get_next_key`/`bpf_map_delete_elem` bulk-clear loop followed by the same `bpf_map_update_elem(BPF_ANY)` insert loop, differing ONLY by the inner-map **key type** (`xdpmf_mac` vs `std::uint32_t`) and the diagnostic-string label. Collapse to one `template<class Key> populate_hash_inner_slot`.
+
+2. **B28-2 — the axis-merge lowering trio.** `lower_proto_axis` (`:1283`), `lower_vlan_axis` (`:1353`), `lower_mac_axis` (`:1392`) are byte-shape-identical: the same per-rule loop (`bit = 1<<r.id`; constrained rules aggregate their bit into the matching key entry by linear dedup-scan + `emplace_back` on miss; unconstrained rules OR their bit into `wildcard`), differing ONLY by (a) the **key type** (`std::uint32_t` for proto/vlan, `xdpmf_mac` for mac), (b) the **equality predicate** (`==` for proto/vlan, `std::memcmp` over the 6 octets for mac), and (c) which `r.match.<field>` optional the key is projected from. Collapse to one `template<class Key, class Project, class Eq> aggregate_axis` (Q1 → A1: compile-time monomorphization).
+
+Rule-of-three is satisfied for each trio. Per the **guard #9 EXPLICIT OVERRIDE** precedent established in **§5.37 / D-3.4f-1** (the `escape_util` consolidation — guard #9's "prefer duplication over extraction" yields to the rule-of-three threshold), extraction is the sanctioned disposition, NOT a guard violation. **Pure behavior-preserving** — same populated inner-map contents, same lowering output (per-key aggregated bitmask + wildcard), same atomic-swap, same schema. No map/pin/axis/datapath change, no VERSION bump, no public-API/`loader.hpp` change. ~145 LOC deletable (orientation, not a contract).
+
+**Why now:** S8 (IPv6 `cidr6`, axis #7) and any future exact-HASH axis lands as one `aggregate_axis<Key>(…)` + one `populate_hash_inner_slot<Key>(…)` call rather than two more hand-rolled near-dup bodies — same forward-leverage rationale as B20.
+
+#### §5.50 Phase A grep verification report (architect-independent — 2026-05-30, per guard #5)
+
+Every literal re-anchored against the live tree (`src/lib/loader.cpp`), reads at `:1270-1620`, `:1869/1884/1894`, `:2120/2125/2129`:
+
+- **B28-1 trio CONFIRMED same-shape.** `populate_inner_slot(int, const std::vector<std::pair<xdpmf_mac,std::uint64_t>>&)` `:1424-1461`; `populate_proto_inner_slot(int, const std::vector<std::pair<std::uint32_t,std::uint64_t>>&)` `:1516-1551`; `populate_vlan_inner_slot(int, const std::vector<std::pair<std::uint32_t,std::uint64_t>>&)` `:1559-1594`. Each = bulk-clear (`get_next_key`→`delete_elem`, ENOENT-terminated) THEN insert (`update_elem(…BPF_ANY)`). **Divergences are EXACTLY:** (i) key type (`xdpmf_mac` `prev{}/cur{}` vs `std::uint32_t prev=0/cur=0`); (ii) diagnostic label substrings (`"inner"` vs `"proto_inner"` vs `"vlan_inner"`); (iii) the proto/vlan update-error format embeds the key (`"…(proto_inner[{}])"`, `key`) while the MAC one does NOT (xdpmf_mac is not `std::format`-able). NO prefix-closure in any of the three.
+- **NOT same-shape (correctly OUT of scope) CONFIRMED:** `populate_bitvec_inner_slot` (`:1470`, LPM key `xdpmf_cidr_v4`, calls `close_prefixes` — **prefix-closure**, the dst/src LPM path); `populate_port_inner_slot` (`:1611`, ARRAY, no `delete` — sentinel-clear-all-slots); `populate_rules_inner_slot` (clear-all-slots). Different shapes → NOT folded.
+- **B28-2 trio CONFIRMED same-shape.** `lower_proto_axis` `:1283-1307` (key `std::uint32_t`, `e.first == proto`); `lower_vlan_axis` `:1353-1377` (key `std::uint32_t`, `e.first == vid`, config-u16→u32 widening per D-mvp-4.5-VLAN-VALUE-WIDTH); `lower_mac_axis` `:1392-1416` (key `xdpmf_mac`, `std::memcmp(e.first.octets, mac.octets, 6)==0`). Same loop/dedup/wildcard skeleton; differ ONLY by key type + equality predicate + projected `r.match` field. **The three projected source members are THREE DIFFERENT `std::optional<>` TYPES** (`RuleMatch`, `config.hpp:44-50`): `std::optional<std::uint8_t> protocol` (`:48`), `std::optional<std::uint16_t> vlan` (`:50`), `std::optional<xdpmf_mac> mac` (`:45`). ⇒ the selector CANNOT be a runtime member-pointer (the three member-pointer types differ) — it MUST be a compile-time projector functor (see D-mvp-4.10-2). **NOT same-shape:** `lower_port_axis` `:1321-1338` (emits one `xdpmf_port_range` slot per rule, NO dedup) → OUT of scope.
+- **Return-struct trio CONFIRMED near-identical.** `ProtoLowering` `:1274-1277` and `VlanLowering` `:1343-1346` are **byte-identical** (`std::vector<std::pair<std::uint32_t,std::uint64_t>> entries; std::uint64_t wildcard = 0;`); `MacLowering` `:1383-1386` differs ONLY by key (`xdpmf_mac`). (`PortLowering` `:1313` + the dst/src `AxisLowering` differ — out of scope.) ⇒ unifying the 3 lowering FNS necessarily unifies their 3 return STRUCTS (a necessary consequence, see D-mvp-4.10-STRUCT).
+- **Call sites CONFIRMED (one each).** `populate_all_axes` body: `populate_inner_slot` `:1869`, `populate_proto_inner_slot` `:1884`, `populate_vlan_inner_slot` `:1894`. `apply_request` lowering: `lower_mac_axis` `:2120`, `lower_proto_axis` `:2125`, `lower_vlan_axis` `:2129`. No other callers (`populate_inner_slot` also appears in a comment at `:1701`, not a call).
+- **Targets ABSENT** (`grep -rn 'populate_hash_inner_slot\|aggregate_axis' src/` → 0). Generic-struct name `AxisAggregate` — impl MUST confirm no collision before introducing (not in the `:1270-1416` struct reads; collision unlikely — `AxisLowering`/`ProtoLowering`/`VlanLowering`/`MacLowering`/`PortLowering` are the existing names).
+- **ZERO test ripple** (`grep -rln '<the 6 fn names>' tests/` → 0; the 6 symbols are anon-namespace internals). Diagnostic strings NOT test-pinned (D-mvp-4.8-DIAG precedent: `grep 'inner' tests/` → 0 pins).
+- **VERSION** = `0.15.0` (per §5.47). `kManagedMaps[]`=30, `XDPMF_ALLOWLIST_MAX`=64, `BITVEC_NUM_AXES`=6 — all UNCHANGED this slice.
+
+#### §5.50 Human-gate decisions (defaults from brief — architect resolution)
+
+- **HG-mvp-4.10-1 — extract-via-template (NOT keep-duplicated). CONFIRMED.** Rule-of-three OVERRIDES guard #9 per §5.37 / D-3.4f-1. The templates do not hurt readability or verifier-friendliness (userspace loader code, not BPF; monomorphized).
+- **HG-mvp-4.10-2 — both trios in ONE slice. CONFIRMED.** Same rule-of-three class, behavior-preserving, ~145 LOC, no interlock. The two template ergonomics are similar enough for one §-amendment.
+
+#### §5.50 Q-decisions (mechanism)
+
+- **Q1 — lowering-trio template shape → A1 (`template<class Key, class Eq>` + projector), reject A2 (non-template table-driven).** **Because** A1 is compile-time monomorphization: the comparator + the `r.match.<field>` projector are passed as template-deduced functors, each instantiation inlines with ZERO indirect-call cost — matches the backlog proposal and is the lowest-cost option satisfying all PIs. A2 (function-pointer/struct table à la `kManagedMaps`) would force runtime indirect calls AND type-erasure over the heterogeneous key types — strictly worse for a hot-ish lowering path and no readability gain. (Mirrors the §5.48 Q1 reasoning: heterogeneous per-axis payload types favor monomorphized templates over a uniform data-table loop.)
+
+#### §5.50 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+**NEW:** none (templates added inside the existing TU). NEW ctests target = **0**.
+
+**EDITED:**
+
+| Path | Role (this slice) | Language | LOC est |
+|---|---|---|---|
+| `src/lib/loader.cpp` | B28-1: replace `populate_inner_slot`/`populate_proto_inner_slot`/`populate_vlan_inner_slot` (`:1424/:1516/:1559`) with ONE `template<class Key> populate_hash_inner_slot(int, const std::vector<std::pair<Key,std::uint64_t>>&, const char* what)`; update the 3 call sites in `populate_all_axes` (`:1869/:1884/:1894`). B28-2: replace `lower_proto_axis`/`lower_vlan_axis`/`lower_mac_axis` (`:1283/:1353/:1392`) with ONE `template<class Key, class Project, class Eq> aggregate_axis(const std::vector<Rule>&, Project, Eq)` returning `AxisAggregate<Key>`; collapse the `ProtoLowering`/`VlanLowering`/`MacLowering` structs (`:1274/:1343/:1383`) into one `template<class Key> struct AxisAggregate{…}` + 3 `using` aliases (name-preserving); update the 3 call sites in `apply_request` (`:2120/:2125/:2129`). All in the existing anon namespace. Net ≈ −145 / +55. | C++23 | ~−90 |
+
+**UNCHANGED-BUT-AFFECTED (must remain byte-identical; reviewer asserts zero git-diff):**
+
+| Path | Why touched-adjacent yet must not change | Check |
+|---|---|---|
+| `src/lib/loader.hpp` | Both templates + `AxisAggregate` are anon-namespace/single-TU (guard #9) — NOT hoisted to any header; no public symbol added. | `git diff -- src/lib/loader.hpp` EMPTY |
+| `populate_all_axes` SIGNATURE (`:~1858`) | The `MacLowering&`/`ProtoLowering&`/`VlanLowering&` params resolve via the name-preserving `using` aliases → signature textually UNCHANGED; only its BODY's 3 `populate_*` callee names change. | decl byte-equivalent; body shows 3 `populate_hash_inner_slot` calls |
+| `inactive_inner_fd` / `copy_rule_counters_forward` / `populate_action_table` / `write_wildcard_slots` / `write_default_slot` (§5.48) | Not in either trio; untouched. | `git diff` shows no change to these |
+| `populate_bitvec_inner_slot`, `populate_port_inner_slot`, `populate_rules_inner_slot`, `lower_port_axis`, the dst/src `AxisLowering`/`PortLowering` structs | Different shape (prefix-closure / ARRAY-sentinel / range) — explicitly NOT folded. | code-review: unchanged |
+| `src/bpf/mac_filter.bpf.c`, `src/common/mac_filter.h`, `src/lib/config.{hpp,cpp}`, all `tests/T_*`, `CMakeLists.txt` VERSION | No datapath/map/pin/schema/axis/version/config change. | `git diff` byte-equivalent |
+
+#### §5.50 DataStructures
+
+**One generic struct introduced; three byte-identical-or-near structs collapse into it (layout-preserving).** No cross-boundary/BPF-side type changes — `AxisAggregate<Key>` is an anon-namespace userspace type internal to `loader.cpp`.
+
+```
+// replaces ProtoLowering / VlanLowering / MacLowering (byte-identical layout)
+template<class Key>
+struct AxisAggregate {
+    std::vector<std::pair<Key, std::uint64_t>> entries;   // per-key OR-aggregated rule-bitmask
+    std::uint64_t                              wildcard = 0u;  // bits of rules NOT constraining this axis
+};
+using ProtoLowering = AxisAggregate<std::uint32_t>;   // name preserved at call sites
+using VlanLowering  = AxisAggregate<std::uint32_t>;   // (Proto/Vlan are the SAME instantiation — legal)
+using MacLowering   = AxisAggregate<xdpmf_mac>;
+```
+
+Memory layout is identical to the three original structs (same field order/types) → bit-identical lowering output. `PortLowering` and the dst/src `AxisLowering` are NOT touched. Impl MAY instead switch the call sites to `auto` and drop the aliases (architect-flex), but the alias path is the zero-ripple default (keeps `populate_all_axes`' signature textually unchanged).
+
+#### §5.50 Interfaces
+
+Both functions are **anon-namespace / single-TU** in `loader.cpp` (guard #9 — NOT exported, NOT in any header). Placement: alongside the existing `populate_*` / lowering helpers (`~:1283-1620`), defined BEFORE their use in `populate_all_axes` (`~:1858`) and `apply_request` (`~:2100`).
+
+```
+// B28-1 — replaces populate_inner_slot / populate_proto_inner_slot / populate_vlan_inner_slot.
+// Bulk-clear (get_next_key -> delete_elem, ENOENT-terminated) THEN insert (update_elem BPF_ANY).
+// `what` is the diagnostic label (e.g. "mac"/"proto"/"vlan"); error strings become key-agnostic
+// (D-mvp-4.10-DIAG) — the proto/vlan key-in-message embed is dropped (not test-pinned; error path only).
+template<class Key>
+void populate_hash_inner_slot(int inner_fd,
+                              const std::vector<std::pair<Key, std::uint64_t>>& entries,
+                              const char* what);
+
+// B28-2 — replaces lower_proto_axis / lower_vlan_axis / lower_mac_axis.
+//   key_of(const Rule&) -> std::optional<Key> : projected axis key, or nullopt => contributes to wildcard.
+//   key_eq(const Key&, const Key&) -> bool    : dedup equality (== for proto/vlan; memcmp for mac).
+// Per rule: bit = 1<<r.id; if key_of(r) -> linear dedup-scan via key_eq, OR-in bit (emplace_back on miss);
+// else wildcard |= bit. Insertion order preserved (identical to the originals).
+template<class Key, class Project, class Eq>
+[[nodiscard]] AxisAggregate<Key> aggregate_axis(const std::vector<Rule>& rules,
+                                                Project key_of, Eq key_eq);
+```
+
+**Collapsed call sites (success path byte-identical to current):**
+- `populate_all_axes` body: `populate_hash_inner_slot(fd, mac_low.entries, "mac")` / `(…, proto_low.entries, "proto")` / `(…, vlan_low.entries, "vlan")` (Key deduced from the pair type) — replacing `:1869/:1884/:1894`.
+- `apply_request` (replacing `:2120/:2125/:2129`):
+  - `mac_low   = aggregate_axis<xdpmf_mac>(c.rules, [](const Rule& r){ return r.match.mac; }, [](const xdpmf_mac& a, const xdpmf_mac& b){ return std::memcmp(a.octets, b.octets, sizeof(a.octets)) == 0; });`
+  - `proto_low = aggregate_axis<std::uint32_t>(c.rules, [](const Rule& r)->std::optional<std::uint32_t>{ return r.match.protocol; }, std::equal_to<std::uint32_t>{});`
+  - `vlan_low  = aggregate_axis<std::uint32_t>(c.rules, [](const Rule& r)->std::optional<std::uint32_t>{ if (r.match.vlan) return std::uint32_t{*r.match.vlan}; return std::nullopt; }, std::equal_to<std::uint32_t>{});`
+  (Explicit `optional<std::uint32_t>` return on the proto/vlan projectors handles the config-width→u32 widening; the exact lambda spelling is impl-flex as long as the projected key + widening + equality match the originals.)
+
+#### §5.50 Decisions (with rationale)
+
+- **D-mvp-4.10-1 (B28-1) — unify the 3 HASH populate fns into `template<class Key> populate_hash_inner_slot`.** **Because** they are byte-shape-identical (the `:1555` in-code comment already asserts it) and differ only by inner-map key type + diagnostic label; rule-of-three is met → extraction-over-duplication per the guard #9 EXPLICIT OVERRIDE precedent §5.37 / D-3.4f-1. `Key{}` value-init covers both `xdpmf_mac{}` (zeroed) and `std::uint32_t{}` (=0), matching the originals' `prev{}/cur{}` vs `prev=0/cur=0`.
+- **D-mvp-4.10-2 (B28-2) — unify the 3 lowering fns into `template<class Key, class Project, class Eq> aggregate_axis`.** **Because** they differ by THREE axes — (i) key type, (ii) equality predicate, AND (iii) the projected source member, which are three DIFFERENT `std::optional<>` types (`protocol`=`optional<uint8_t>`, `vlan`=`optional<uint16_t>`, `mac`=`optional<xdpmf_mac>`, `config.hpp:44-50`). A 2-param `<Key, Eq>` template is INSUFFICIENT — it has no way to express which member to read. A runtime member-pointer param ALSO fails (the three member-pointer types differ, so one param type cannot bind all three). The `Project` functor (a per-axis lambda `const Rule& → std::optional<Key>` that does the member access + the proto/vlan optional-value widening to `std::uint32_t`) is the ONLY shape that works; the `Eq` functor absorbs `==`-vs-`memcmp`. **This yields THREE distinct monomorphized instantiations (proto, vlan, mac) — NOT two** (the `Project` lambda type differs per axis even where `Key`+`Eq` coincide for proto/vlan; only the `AxisAggregate<std::uint32_t>` *return struct* is shared between proto and vlan — see D-mvp-4.10-STRUCT). Each lambda inlines → zero indirect-call cost (Q1 → A1). Reviewer's "ONLY the 3+3 fns unified" check should read three `aggregate_axis<…>` call sites. Same §5.37 / D-3.4f-1 override justification.
+- **D-mvp-4.10-STRUCT — unifying the lowering FNS necessarily unifies their RETURN STRUCTS; introduce `template<class Key> struct AxisAggregate` + name-preserving `using` aliases.** **Because** a single `aggregate_axis` cannot return three distinct named types; `ProtoLowering`/`VlanLowering` are already byte-identical and `MacLowering` differs only by key, so a `Key`-parameterized struct is layout-identical (behavior-preserving). The `using` aliases keep `ProtoLowering`/`VlanLowering`/`MacLowering` valid at the `populate_all_axes` signature and elsewhere → zero downstream-name ripple. (Impl MAY drop the aliases + use `auto` at call sites — architect-flex; alias path is the zero-ripple default.) This is in-scope as the unavoidable consequence of B28-2, NOT scope creep.
+- **D-mvp-4.10-DIAG — the per-axis fd-error diagnostic strings unify to a branch-agnostic `what`-labelled form; the proto/vlan key-in-message embed (`"proto_inner[{}]"`) is dropped.** **Because** these fire only on a `bpf_map_update_elem`/`get_next_key`/`delete_elem` failure (never in practice), `grep tests/` confirms ZERO pins (D-mvp-4.8-DIAG precedent), and `xdpmf_mac` is not `std::format`-able so a uniform message cannot embed the key — dropping it is behavior-equivalent for every passing and realistically-failing case. The success path is byte-identical.
+- **D-mvp-4.10-SINGLE-TU (guard #9) — both templates + `AxisAggregate` stay anon-namespace/single-TU; NOT hoisted to `loader.hpp` or any header.** **Because** the only consumers are `populate_all_axes` + `apply_request` in the same TU — internal de-duplication, not a cross-file API. Mirrors `write_wildcard_slots`/`inactive_inner_fd`/`kManagedMaps[]`.
+- **D-mvp-4.10-BOUNDARY — only the exact-HASH populate trio + the exact-match dedup lowering trio fold. The LPM (`populate_bitvec_inner_slot`/dst-src prefix-closure), ARRAY (`populate_port_inner_slot`), and range (`lower_port_axis`/`PortLowering`) paths are DIFFERENT shape and stay separate.** **Because** prefix-closure (`close_prefixes`), ARRAY sentinel-clear, and per-rule range-emit are genuinely different algorithms — folding them would require fighting their shape for no gain (and would re-open correctness risk on the closure path).
+- **D-mvp-4.10-ORDER — dedup linear-scan + `emplace_back`-on-miss insertion order is preserved exactly; the `1<<r.id` bit math, wildcard accumulation, and per-axis key projection are unchanged.** **Because** identical iteration ⇒ identical `entries`/`wildcard` ⇒ bit-identical populated inner-map contents ⇒ no verdict change anywhere.
+- **D-mvp-4.10-NO-BUMP (HG-1) — VERSION stays `0.15.0`; guard #11 N/A.** **Because** zero operator-observable change. Mirrors §5.48 / §5.49 internal-refactor precedent.
+- **D-mvp-4.10-NO-NEW-PI — adds NO new behavioral PI; fenced by the EXISTING per-axis PIs (§5.44/§5.45/§5.47) + the oracle-agreement net.** **Because** a correct refactor produces byte-identical lowering + populate output. The §6.5 items below are behavior-equivalence + structural (single-TU / `loader.hpp` byte-identical) invariants, not new behavior to certify.
+- **D-mvp-4.10-PROSE-VS-INVARIANTS — resolution rule for THIS amendment:** if §5.50 prose conflicts with a §6.5 PI-mvp-4.10-* item or the verifiable-invariants list, the **§6.5 invariants-block WINS (prose loses)**. If impl deviates from a verifiable-invariants hint to satisfy a §6.5 PI or a load-bearing regression assertion, reviewer disposition is `inline-merge` on the hint, NOT `[UNRELATED-EDIT]`. Load-bearing (MUST): behavior-equivalence of lowering + populate output; the mac `memcmp` equality NOT silently coerced to `==`; the LPM/ARRAY/range paths untouched; `loader.hpp` byte-identical; VERSION 0.15.0.
+
+#### §5.50 TestStrategy
+
+Tester writes against THIS section, not impl's code. **NEW ctests target = 0** — behavior-preserving refactor; the regression net is the *existing* suite. **Baseline GREEN unchanged (reconcile the exact count via fresh `ctest -N` at Phase 2.5).** Run with `-j4` (B19 `build_cpu` lock holds — §5.49).
+
+The refactor is correct **iff** every per-axis populated inner-map slot AND every lowering result (`entries` aggregation + `wildcard`) is bit-identical to pre-refactor for the MAC, proto, and vlan axes — most critically that the **mac `memcmp` dedup is NOT silently coerced to `==`** (a wrong comparator would mis-merge or fail to merge distinct MACs → a flipped mac verdict). Regression net:
+
+- **`T_AND_ORACLE_AGREEMENT`** (§6.61), **`T_AND4_ORACLE_AGREEMENT`** (§6.66), **`T_AND5_ORACLE_AGREEMENT`** (§6.69), **`T_AND6_ORACLE_AGREEMENT`** — table-driven datapath-vs-independent-O(N)-oracle agreement across all 6 axes; a wrong template instantiation (key type, comparator, projector, or insertion order) flips a proto/vlan/mac verdict → oracle disagreement. The 6th-axis (MAC) coverage in `T_AND6_ORACLE_AGREEMENT` is the primary canary for the `memcmp`-vs-`==` divergence.
+- **`T_PROTO_AND_COMPOSE`**, **`T_VLAN_AND_COMPOSE`** — per-axis exact-HASH aggregation + wildcard composition for proto and vlan.
+- **`T_*_ATOMIC_SWAP_NO_DROP`** / **`T_RULE_COUNTER*`** — confirm the populate→swap path still lands correct contents in the inactive slot across the flip (the populate trio runs inside `populate_all_axes`).
+- **Trigger / observable / assertion:** inject frames exercising MAC/proto/vlan constraints (incl. multiple distinct src-MACs that must dedup-merge correctly and multiple distinct MACs that must NOT merge); observe matched `rule_id` (`rule_counters` delta) + PASS/DROP verdict; assert `== bitvec_oracle_prod.py` (full independent oracle). Mechanism: the existing inject→counter-delta→oracle-compare harness.
+
+**Targeted canary — tester's call, justified-against-corpus (NOT symmetric).** The `memcmp`-vs-`==` divergence is only exercised if the corpus contains a config with **≥2 distinct src-MAC-constrained rules** (so the mac dedup-scan + `memcmp` equality actually runs over >1 entry). If `T_AND6_ORACLE_AGREEMENT`'s corpus already includes ≥2 distinct mac-constrained rules (and ideally two rules sharing one MAC, to exercise the merge branch), the net is sufficient — **add NOTHING.** If the corpus only ever has a single mac rule (the `entries` vector never exceeds length 1, so the comparator branch is never taken), a **targeted mac-dedup canary is justified**: a config with ≥2 mac rules on distinct MACs + one pair sharing a MAC, asserting per-MAC verdicts + that the shared-MAC pair merges (one entry, OR'd bits). Tester MUST verify against the corpus before deciding (per brief: justify, don't add for symmetry).
+
+**Reviewer load-bearing checks (brief §21):** (1) ONLY the 3+3 fns (+ the 3 structs) unified — populated-map contents + lowering output byte-identical; (2) mac's `memcmp`/`xdpmf_mac` divergence handled via the `Eq` comparator, NOT coerced to `==` — **verify by READING the mac call site's comparator**; (3) the dst/src LPM prefix-closure path is UNTOUCHED (different shape); (4) no VERSION bump, oracle GREEN; (5) guard #9 rule-of-three override cited (§5.37 / D-3.4f-1) — extraction is sanctioned.
+
+**OPS canary — N/A this slice (stated so reviewer does NOT demand one).** No new invocation path / runtime environment: the templates live inside the SAME `attach`/`apply` loader path the existing ctests already exercise (same caps, netns, uid, bpffs root). No stripped-down/alternate context introduced.
+
+**(impl Phase 2.5 smoke):** build GREEN (no new warnings — templates instantiate cleanly for all 3 keys); full `ctest -j4` GREEN at the reconciled baseline; `git diff -- src/lib/loader.hpp` EMPTY; `git diff -- src/bpf/ src/common/ src/lib/config.* CMakeLists.txt tests/` byte-equivalent; `grep -cn 'populate_hash_inner_slot' src/lib/loader.cpp` shows 1 def + 3 calls; `grep -cn 'aggregate_axis' src/lib/loader.cpp` shows 1 def + 3 calls; `grep -n 'populate_inner_slot\|populate_proto_inner_slot\|populate_vlan_inner_slot\|lower_proto_axis\|lower_vlan_axis\|lower_mac_axis' src/lib/loader.cpp` → only comment references, no defs/calls.
+
+#### §6.5 Preserved invariants (§5.50 MVP-4.10 brownfield)
+
+Reviewer's framework point 5 walks this list. Items are **MUST contracts**; `[INVARIANT-VIOLATED]` per failed check. **ALL prior PIs (PI-1 … PI-mvp-4.9-*) CONTINUE byte-equivalent** — this slice retires NO PI and adds NO new *behavioral* PI (behavior-preserving refactor). The items below are the behavior-equivalence + structural invariants.
+
+| PI | Property | Check mechanism |
+|---|---|---|
+| **PI-mvp-4.10-LOWER-EQUIV (NEW, behavior-preserving)** | `aggregate_axis` produces bit-identical `entries` (per-key OR-aggregated bitmask, same insertion order) + `wildcard` to the 3 original `lower_*_axis` fns for the proto, vlan, and mac axes — incl. the mac `memcmp` dedup (NOT coerced to `==`). | `T_AND{,4,5,6}_ORACLE_AGREEMENT` + `T_PROTO_AND_COMPOSE` + `T_VLAN_AND_COMPOSE` GREEN; reviewer READS the mac comparator. |
+| **PI-mvp-4.10-POPULATE-EQUIV (NEW, behavior-preserving)** | `populate_hash_inner_slot<Key>` writes bit-identical inner-map contents (same bulk-clear-then-insert, same key/mask) to the 3 original `populate_*_inner_slot` fns for MAC/proto/vlan. | oracle net + `T_*_ATOMIC_SWAP_NO_DROP` GREEN. |
+| **PI-mvp-4.10-MAC-EQ (NEW, load-bearing)** | The MAC axis uses a `std::memcmp`-over-6-octets equality functor; it is NOT silently replaced by `==`. | code-review of the mac `aggregate_axis<xdpmf_mac>` call-site comparator. |
+| **PI-mvp-4.10-BOUNDARY (NEW)** | The LPM prefix-closure (`populate_bitvec_inner_slot`/`close_prefixes`/dst-src `AxisLowering`), ARRAY (`populate_port_inner_slot`), and range (`lower_port_axis`/`PortLowering`) paths are UNCHANGED — only the exact-HASH trio + dedup-lowering trio fold. | `git diff` shows those fns/structs unchanged; code-review. |
+| **PI-mvp-4.10-SINGLE-TU (NEW, guard #9)** | `populate_hash_inner_slot`, `aggregate_axis`, and `AxisAggregate` are anon-namespace/single-TU in `loader.cpp`; NOT in `loader.hpp` or any header. | `git diff -- src/lib/loader.hpp` EMPTY; `grep -n 'populate_hash_inner_slot\|aggregate_axis\|AxisAggregate' src/lib/*.hpp` → none. |
+| **PI-7-mvp-4.10-loader-hpp (CONTINUES)** | `src/lib/loader.hpp` byte-identical (no public symbol added). | `git diff -- src/lib/loader.hpp` EMPTY. |
+| **PI-mvp-4.10-NO-MAP-SCHEMA (CONTINUES, guard #10/#16)** | No map/schema/pin/axis change; `kManagedMaps[]`=30, `XDPMF_ALLOWLIST_MAX`=64, `BITVEC_NUM_AXES`=6 UNCHANGED; no `.bpf.c`/`mac_filter.h`/`config.*` change. | `git diff -- src/bpf/ src/common/ src/lib/config.*` byte-equivalent; code-review. |
+| **PI-mvp-4.10-SWAP-SEMANTICS (CONTINUES)** | Atomic-swap semantics + `active_idx` flip timing UNCHANGED (the refactor is upstream of the flip). | `T_*_ATOMIC_SWAP_NO_DROP` GREEN. |
+| **PI-mvp-4.10-VERSION (CONTINUES)** | VERSION stays `0.15.0`; no literal propagation (guard #11 N/A). | `--version` ⇒ `0.15.0`; `grep -rn '0\.15\.0' tests/` unchanged. |
+
+#### §5.50 verifiable invariants for reviewer (MAY-default per architect-spec §6.5 discipline)
+
+Guidance for reviewer, NOT contracts for impl. **Resolution rule (per D-mvp-4.10-PROSE-VS-INVARIANTS): if any item conflicts with a §6.5 PI-mvp-4.10-* item, the §6.5 item wins; if impl deviates from a hint to satisfy a PI or load-bearing regression assertion, disposition is `inline-merge`, NOT `[UNRELATED-EDIT]`.**
+
+1. (MUST) the 3 HASH populate fns + the 3 dedup-lowering fns (+ the 3 lowering structs) are unified into `populate_hash_inner_slot` / `aggregate_axis` / `AxisAggregate`; the 6 old names survive only as comment references.
+2. (MUST) the mac axis uses a `memcmp` equality functor, NOT `==` (PI-mvp-4.10-MAC-EQ).
+3. (MUST) the LPM prefix-closure + ARRAY + range paths are UNCHANGED (PI-mvp-4.10-BOUNDARY).
+4. (MUST) oracle net + per-axis compose tests GREEN (behavior-equivalence); VERSION `0.15.0`.
+5. (MUST) guard #9 rule-of-three override cited (§5.37 / D-3.4f-1) — extraction is sanctioned, not a guard violation.
+6. (MAY) `git diff -- src/lib/loader.hpp` EMPTY; templates single-TU/anon-namespace (mirror `inactive_inner_fd`).
+7. (MAY) the ≈145-LOC reduction is *guidance, not a contract* — impl may land a different LOC if readability/order-preservation warrants. Reviewer should see 1 def + 3 calls for each template.
+8. (MAY) impl MAY keep the name-preserving `using` aliases OR switch call sites to `auto` and drop them (D-mvp-4.10-STRUCT) — either is acceptable; the diagnostic strings unify branch-agnostically (D-mvp-4.10-DIAG; no test pins them).
+
+#### §7 OOS additions (§5.50 — new fences)
+
+- **The dst/src LPM populate path (`populate_bitvec_inner_slot` / `close_prefixes` / prefix-closure) + the dst/src `AxisLowering`** — different shape (prefix-closure), NOT part of either rule-of-three. NOT unified. NEW FENCE.
+- **`populate_port_inner_slot` (ARRAY sentinel-clear) + `lower_port_axis` / `PortLowering` (range, no dedup)** — different shape, NOT folded. NEW FENCE.
+- **`populate_rules_inner_slot`** — different shape (clear-all-slots), NOT folded. NEW FENCE.
+- **Hoisting any of the new templates / `AxisAggregate` to `loader.hpp` or a header** — anon-namespace/single-TU only (guard #9 / D-mvp-4.10-SINGLE-TU). NEW FENCE.
+- **Any behavioral change to populated inner-map contents, lowering output, atomic-swap, schema, map set, or VERSION** — UNCHANGED (behavior-preserving). NEW FENCE.
+- **A2 non-template table-driven lowering with type-erasure / indirect calls** — rejected (Q1 / D-mvp-4.10-2). NEW FENCE.
+- **B30 (id/slot decouple), B31 (EtherType axis), IPv6 / S8 `cidr6`** — separate slices, HLD-gated / deferred per PO. NEW FENCE.
+- Carry-forward §5.41–§5.49 OOS items NOT superseded — UNCHANGED.
+
+#### §5.50 Anti-misdiagnosis institutional learning (per architect-spec §6.6)
+
+Guards applied: **#5** (Phase A code-grep — independently re-anchored all 6 fn anchors, both call-site triplets, the 3 lowering structs, the in-code `:1555` "IDENTICAL shape" assertion, and the divergences (key type, equality, projected field, diagnostic-label); confirmed the LPM/ARRAY/range paths are genuinely different-shape by READING `populate_bitvec_inner_slot`/`populate_port_inner_slot`/`lower_port_axis`, not by trusting the brief; **CORRECTION caught: the proto/vlan lowering keys are `std::uint32_t`, not the `__u8/__u16` config widths the brief implied** — the template `Key` is `std::uint32_t` for both); **#9 EXPLICIT OVERRIDE** (rule-of-three extraction sanctioned per §5.37 / D-3.4f-1 — cited so reviewer reads the extraction as legitimate, NOT a guard-#9 violation); **#10** (`kManagedMaps`=30 / `BITVEC_NUM_AXES`=6 unchanged — pure logic refactor, no count churn); **#11 N/A** (no VERSION bump); **#15 N/A** (no PRESERVE/RESET boundary touched — both trios are RESET-on-apply producers/lowerings already on the same side of guard #15).
+
+**Guard catalog UNCHANGED at 26** — this slice introduces no new misdiagnosis class (rule-of-three extraction is already covered by guard #9's override discipline + the §5.37 template). 
+
+> **Forward-defense note (future cycles adding an exact-HASH match axis, e.g. S8 IPv6 `cidr6` if modelled as exact-HASH, or B31 EtherType):** add ONE `aggregate_axis<Key>(c.rules, key_of, key_eq)` + ONE `populate_hash_inner_slot<Key>(fd, low.entries, "<axis>")` call — do NOT hand-roll a fourth near-dup lowering/populate body (that re-opens the rule-of-three the B28 templates just closed). Pick the comparator deliberately: scalar keys use `std::equal_to`; byte-array keys (like `xdpmf_mac`, or an IPv6 address) MUST use a `memcmp`-based `Eq` — silently defaulting to `==` on a byte-array key is the exact mis-merge hazard PI-mvp-4.10-MAC-EQ fences. Note: LPM/prefix-closure axes (dst/src CIDR, IPv6 `cidr6` if modelled as LPM) belong to the `populate_bitvec_inner_slot` family, NOT this HASH template. Audit trail: this slice (B28 paydown) + §5.48 (B20 — the `populate_all_axes` table these templates plug into).
+
+Evidence: `mint/task-brief.md` MVP-4.10 brief (HG-1/HG-2, Q1→A1, B28-1/B28-2, guards #5/#9/#10/#12, the §5.37/D-3.4f-1 rule-of-three override mandate); independent Phase A reads of `src/lib/loader.cpp:1270-1416` (the 3 lowering structs + 3 `lower_*_axis` fns + the out-of-scope `PortLowering`/`lower_port_axis`), `:1418-1594` (the 3 `populate_*_inner_slot` HASH fns + the out-of-scope `populate_bitvec_inner_slot`/`populate_port_inner_slot`), `:1869/1884/1894` (populate call sites in `populate_all_axes`), `:2120/2125/2129` (lowering call sites in `apply_request`); §5.37 / D-3.4f-1 (guard #9 EXPLICIT OVERRIDE rule-of-three precedent), §5.48 (B20 `populate_all_axes` table-driven host), §5.43/§5.44/§5.45/§5.47 (the per-axis lowering+populate lineage), §6.61/§6.66/§6.69 + `T_PROTO_AND_COMPOSE`/`T_VLAN_AND_COMPOSE` (the oracle + per-axis regression net).
