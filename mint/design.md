@@ -15744,3 +15744,194 @@ Guards applied: **#5** (Phase A code-grep — independently re-anchored the `:63
 > **Forward-defense note (future ladder cycles S2–S6 filling the IPv6 arm):** when S4 adds the `cidr6` deref into this arm, the ipv6hdr bounds-check MUST be added WITH the deref (NOT before) and MUST fall through to `defaults[active]` on a bounds-miss — NEVER DROP_MALFORMED for a truncated v6 frame (preserves the §5.41 D-mvp-4.1-MALFORMED non-IP-never-MALFORMED contract this slice extends to v6). When S5 adds an EtherType match-axis, recognize that the `if/else-if` dispatch ALREADY classifies the family — the axis reads it, it does not re-parse. The §6.70 `T_IPV6_GATE_DEFAULT` negation control becomes the regression anchor that each later v6 arm still routes correctly. Audit trail: this slice (S1 gate-scaffold) + §5.41 (the VLAN-walk non-IP-never-MALFORMED precedent) + `architecture-l2l3-gate.md` Option 1.
 
 Evidence: `mint/task-brief.md` MVP-4.11 brief (HG-mvp-4.11-1/-2, Q1→A1, Q2→A1, S1-1/S1-2, guards #5/#9/#12/#22, the operative-semantic line-anchor note); `mint/architecture-l2l3-gate.md` Option 1 / S1 + testability-lens VA-1; independent Phase A reads of `src/bpf/mac_filter.bpf.c:48-77` (the `ETH_P_IP`/VLAN/proto `#ifndef` macro block), `:535-578` (`l3_after_vlan`), `:600-868` (the pre-gate block, the `:630` gate, the `:631-852` IPv4 body, the `:855-867` defaults catch-all), `src/common/mac_filter.h:104-169` (the `BITVEC_NUM_AXES` evolution comments + the live `:161` define), `tests/T_MAC_NON_IP.sh` (the negation template), `tests/inject/inject_eth.py` (the 0x88B5 injector to parametrize), `tests/lib/common.sh:14/190/225/249` (`inject_eth`/`read_stats_with_cidr`/`wait_for_stats_sum_with_cidr`); §5.41 (D-mvp-4.1-MALFORMED non-IP-never-MALFORMED precedent), §5.43 (the OR→AND non-IP→defaults semantic at `:611-618`), §5.47 (D-mvp-4.7-Q2-GATE — the 6-axis-inside-the-IPv4-gate contract this slice reshapes), §6.61/§6.66/§6.69 + the per-axis compose tests (the v4 oracle regression net).
+
+---
+
+### §5.52 MVP-4.12 / S2: `inject_l6.py` IPv6 frame injector + verifying ctest — the testability-lens injector prerequisite (rule-model L2/L3 gate-rework S2, brownfield, PURE TEST-TOOLING — NO datapath/`src/` change, 2026-05-30)
+
+#### §5.52 Problem statement
+
+Second rung of the L2/L3 gate-rework ladder (`mint/architecture-l2l3-gate.md`, Option 1 "Five-Step Additive Ladder", S2; testability-lens VA-4). The `/mint-hld` testability lens surfaced a **load-bearing prerequisite**: `tests/inject/inject_l4.py` can ONLY emit IPv4 frames (EtherType `0x0800`, 20-byte IPv4 header) — there is **no way to put a real IPv6 frame on the wire**. Therefore EVERY future IPv6/cidr6 oracle test (S4) would be *vacuously green*: with no real IPv6 frame to inject, an "IPv6 matches `dst_cidr6`" assertion could never actually fire. S2 ships the injector NOW (plus a verifying ctest), so S4 can drop in cidr6 rules and **actually assert matches** against a frame whose 40-byte IPv6 base header carries the 128-bit src/dst addresses the cidr6 axes will read.
+
+**Pure test-tooling slice — NO datapath change.** S1 (`c6e6b8d`, §5.51) already added the empty `else if (inner_proto == bpf_htons(ETH_P_IPV6))` arm (live at `mac_filter.bpf.c:861`, confirmed Phase A) that recognizes the family and falls through to `defaults[active]` (`:870-872`) without dereferencing the frame. So a real IPv6 frame ALREADY routes to defaults today; S2 adds NO `.bpf.c`/`src/`/`mac_filter.h`/`config.*`/`loader.*`/VERSION change. The only NEW artifacts live under `tests/`. `git diff -- src/` MUST be EMPTY.
+
+**Honest scope (so the reviewer does NOT flag S1/S2 ctest similarity as redundancy):** S1's §6.70 `T_IPV6_GATE_DEFAULT` ALREADY proved `0x86DD → defaults` — but with a **zero-payload Ether frame** (46 bytes of zeros after the EtherType; NOT a valid IPv6 packet). S2's verifying ctest `T_IPV6_INJECT_DEFAULT` proves the SAME `→ defaults` outcome with a **real, well-formed IPv6 base-header frame** (version=6, payload_len, next-header, hop-limit, 128-bit src/dst + an L4 header). It does **NOT** prove any new datapath behavior (the S1 empty arm doesn't deref, so both frames route identically). Its genuine value is twofold: **(a)** an end-to-end smoke that `inject_l6.py` emits a frame the veth → XDP datapath ingests without choking (the NEW tool works), and **(b)** it establishes the exact `inject → counter-delta` harness S4 reuses to assert cidr6 matching. The ctest is an **injector smoke + harness scaffold**, a real-IPv6 analog of S1's ctest — NOT a redundant re-proof. `[OOS]` is N/A: it validates the NEW tool.
+
+#### §5.52 Phase A grep verification report (architect-independent — 2026-05-30, per guard #5)
+
+Every load-bearing literal re-anchored against the live tree (independent Read/Glob/Grep, NOT brief-trust; FS-lag watched — all reads clean on first attempt):
+
+- **`tests/inject/inject_l6.py` CONFIRMED ABSENT** (`Glob tests/inject/inject_l6.py` → "No files found"). This slice creates it NEW.
+- **Injector style precedents CONFIRMED (the two Q1 candidates):** `tests/inject/inject_l4.py` (read in full) = **raw `struct.pack` + raw `AF_PACKET` `socket.send()`** (`:28-35` imports `socket`/`struct`; `:73-91` hand-packs TCP/UDP/ICMP; `:106-112` hand-packs the 20-byte IPv4 header with a manual `checksum16`; `:158-161` `socket.socket(AF_PACKET, SOCK_RAW, htons(0x0800)).send(frame)`). `tests/inject/inject_ipv4.py` = also raw `struct.pack`/`AF_PACKET`. `tests/inject/inject_eth.py` (read in full) = **scapy** (`:17` `from scapy.all import Ether, Raw, sendp`; `:30` `Ether(src,dst,type)/Raw(...)`; `:32` `sendp(pkt, iface=, count=1, verbose=False)`). **Both styles coexist in-tree; scapy IS an available test dependency.**
+- **`inject_l4.py` CLI CONFIRMED** (`:137-151`): `iface` (positional) `--dst-ip` (required) `--src-ip` (required) `--proto {tcp,udp,icmp}` (required) `--dport` (`_port`, default 0) `--src-mac` (default `02:00:00:00:00:01`) `--dst-mac` (default `02:00:00:00:00:02`) `--vlan` (`action="append"`, first = outermost, QinQ on repeat). `inject_l6.py` mirrors this exactly (proto choices become `{tcp,udp,icmp6}`).
+- **S1 IPv6 arm CONFIRMED EMPTY** at `mac_filter.bpf.c:861-868` (read `:855-874`): `} else if (inner_proto == bpf_htons(ETH_P_IPV6)) { /* §5.51 empty seam — no deref, no early return */ }` → control falls to `:870` `defaults[active]` consult. So a real IPv6 frame routes to defaults TODAY; S2 touches NO `.bpf.c`.
+- **ctest template CONFIRMED.** `tests/T_IPV6_GATE_DEFAULT.sh` (read in full, 106 lines): `source ${TEST_DIR}/lib/common.sh`; `require_passwordless_sudo`; `find_loader`; fixture `config_mac_drop_default_pass.yaml`; `setup_veth`; `${NSEXEC} loader apply --iface ${IFACE_A} -f ${FIXTURE}`; step(1) `${NSEXEC} python3 ${TEST_DIR}/inject/inject_ipv4.py ${IFACE_B} ${MAC_RULE} ${MAC_DST} ${SRC_IP}` → assert `DROP_DENY delta == 1`; step(2) `${NSEXEC} python3 .../inject_eth.py ${IFACE_B} ${MAC_RULE} ${MAC_DST} 0x86DD` → assert `DROP_DENY delta == 0` AND `DROP_MALFORMED delta == 0`; poll via `read_stats_with_cidr` / `wait_for_stats_sum_with_cidr`. `T_IPV6_INJECT_DEFAULT.sh` mirrors this, swapping step(2)'s `inject_eth.py 0x86DD` for `inject_l6.py` (a REAL IPv6 frame).
+- **`common.sh` helpers CONFIRMED** (`tests/lib/common.sh`): `IFACE_A`/`IFACE_B` (`:29`), `MAC_DST="ff:ff:ff:ff:ff:ff"` (`:32`), `NSEXEC="sudo -n nsenter --net=..."` (`:51`), `setup_veth()` (`:106`), `read_stats_with_cidr()` (`:190`, 4-counter PASS/DROP_DENY/DROP_MALFORMED/PASS_CIDR), `wait_for_stats_sum_with_cidr()` (`:225`). **L3/L4 injectors are called DIRECTLY** (`${NSEXEC} python3 ${TEST_DIR}/inject/inject_*.py ...`) — there is NO `common.sh` wrapper for them (only `inject_eth`/`inject_runt` have wrappers at `:249/:255`). So `inject_l6.py` is called directly; NO `common.sh` edit needed.
+- **netns IPv6-disable is L2-injection-irrelevant CONFIRMED** (`common.sh:147-152`): `setup_veth` sets `disable_ipv6=1` + `addrgenmode none` + `arp off` on both veths. This suppresses the kernel's IPv6 *stack* (autoconf, link-local, neighbor) — it does NOT affect an L2-raw injected frame (scapy `sendp` / `AF_PACKET` `send()` bypass the kernel L3/IP stack entirely; the datapath receives exactly the bytes built). Injecting a raw IPv6 L2 frame works regardless of `disable_ipv6`.
+- **CMakeLists registration template CONFIRMED** (`tests/CMakeLists.txt:1253-1263`, the `T_IPV6_GATE_DEFAULT` block): `add_test(NAME … COMMAND bash ${TEST_DIR}/<name>.sh WORKING_DIRECTORY ${CMAKE_BINARY_DIR})` + `set_tests_properties(<name> PROPERTIES ENVIRONMENT "${TEST_ENV}" RESOURCE_LOCK xdp_fixture TIMEOUT 120 SKIP_RETURN_CODE 77)`. `T_IPV6_INJECT_DEFAULT` registers identically.
+- **Fixture CONFIRMED reusable:** `tests/fixtures/config_mac_drop_default_pass.yaml` (`default_action: pass` + `id0 mac=02:00:00:00:00:01 action DROP`) — reused as-is, NO new fixture.
+- **VERSION** = `0.15.0` (per §5.47/§5.51). UNCHANGED this slice.
+
+#### §5.52 Q-decisions (mechanism)
+
+- **Q1 — `inject_l6.py` implementation style → A1 (scapy: `Ether/Dot1Q?/IPv6/{TCP|UDP|ICMPv6EchoRequest}` sent via L2 `sendp`); reject A2 (raw `struct.pack`/`AF_PACKET`, mirror `inject_l4`).** **Because** IPv6 makes scapy strictly the lower-risk, correct-by-construction choice, for reasons that do NOT apply to the IPv4 injectors:
+  1. **IPv6 L4 checksums are MANDATORY and computed over a 128-bit pseudo-header** (src+dst+upper-layer-length+next-header). The IPv4 injectors (`inject_l4`/`inject_ipv4`) set the L4 checksum to `0` and the datapath ignores it — fine for IPv4. But hand-packing a correct IPv6 pseudo-header checksum (A2) is exactly the error-prone surface S4's cidr6 tests must NOT inherit; scapy computes `payload_len` + `nh` + all checksums automatically. (IPv6 has NO header checksum, so the v6 *base* header is simpler than v4 — but the L4 pseudo-header arithmetic is the trap.)
+  2. **scapy is already an in-tree test dependency** (`inject_eth.py` imports it) — A1 adds NO new dependency.
+  3. **`inject_eth.py` is the direct precedent**: L2 construction (`Ether(type=…)/…`) sent via `sendp(iface=, count=1, verbose=False)`. `inject_l6.py` follows the same shape, layering `IPv6()/L4` between the `Ether` and the send.
+  4. **S4-extensibility**: cidr6 test addresses drop in trivially as `IPv6(src=…, dst=…)` — no re-derivation of header-packing.
+  - **Critical realizability constraint (load-bearing):** the injector MUST send at **layer 2** via scapy `sendp` (NOT scapy's L3 `send()`), so the XDP datapath receives EXACTLY the bytes built and the kernel does NOT re-route/rewrite via its (disabled) IPv6 stack — identical guarantee to `inject_eth`'s `sendp` and the AF_PACKET `send()` of the raw injectors. An impl that used L3 `send()` would invoke kernel routing and is `[INVARIANT-VIOLATED]` against PI-mvp-4.12-INJECTOR. (Architect overrides the brief's "raw-style parity with inject_l4" alternative precisely because the v6 pseudo-header checksum makes A2's parity cost a correctness risk, not a stylistic wash.)
+- **Q2 — verifying ctest shape → A1 (NEW `tests/T_IPV6_INJECT_DEFAULT.sh` mirroring `T_IPV6_GATE_DEFAULT.sh`; do NOT edit S1's file); reject A2 (python-level injector self-test only).** **Because** a NEW file keeps S1's `T_IPV6_GATE_DEFAULT.sh` **byte-untouched** (avoids the editing-an-S1-file confusion prior cycles' reviews tripped on — `git diff -- tests/T_IPV6_GATE_DEFAULT.sh` EMPTY) AND the end-to-end ctest (frame traverses veth → XDP → counter) is the harness S4 reuses, which a pure python self-test (A2) cannot establish. A2 (assert the emitted bytes re-parse as a valid IPv6 frame) is a weaker, integration-free check; it MAY be added as a cheap extra inside `inject_l6.py`'s `__main__` self-guard or a separate assertion (architect-flex), but is NOT a substitute for A1.
+
+#### §5.52 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+**NEW:**
+
+| Path | Role (this slice) | Language | LOC est |
+|---|---|---|---|
+| `tests/inject/inject_l6.py` | IPv6 frame injector. CLI mirrors `inject_l4.py`: `iface --dst-ip --src-ip` (IPv6 literals) `--proto {tcp,udp,icmp6} --dport --src-mac --dst-mac --vlan`(append). Builds `Ether(type=0x86DD)` `[/Dot1Q(...)]*` `/IPv6(src,dst,nh)` `/{TCP|UDP|ICMPv6EchoRequest}` via scapy and sends ONE frame at L2 via `sendp(count=1)`. 40-byte IPv6 BASE header only — NO extension headers (ext-walk is S6); leave a clean seam/comment for S6. (Q1=A1.) | Python (scapy) | ~80 |
+| `tests/T_IPV6_INJECT_DEFAULT.sh` | Verifying ctest (injector smoke + harness scaffold). Mirrors `T_IPV6_GATE_DEFAULT.sh`. step(1) IPv4 from `MAC_RULE` (`inject_ipv4.py`) → `DROP_DENY delta == 1` (positive control: drop machinery is LIVE). step(2) a REAL IPv6 frame from `MAC_RULE` (`inject_l6.py`) → `DROP_DENY delta == 0` AND `DROP_MALFORMED delta == 0` (the real v6 frame routes to `defaults[active]`; the S1 empty arm neither drops nor derefs). Reuses fixture `config_mac_drop_default_pass.yaml`. `RESOURCE_LOCK xdp_fixture` (guard #12). (Q2=A1.) | Bash | ~75 |
+
+**EDITED:**
+
+| Path | Role (this slice) | Language | LOC est |
+|---|---|---|---|
+| `tests/CMakeLists.txt` | Register `T_IPV6_INJECT_DEFAULT` as a ctest, mirroring the `T_IPV6_GATE_DEFAULT` block (`:1253-1263`): `add_test(NAME T_IPV6_INJECT_DEFAULT COMMAND bash ${TEST_DIR}/T_IPV6_INJECT_DEFAULT.sh WORKING_DIRECTORY ${CMAKE_BINARY_DIR})` + `set_tests_properties(... ENVIRONMENT "${TEST_ENV}" RESOURCE_LOCK xdp_fixture TIMEOUT 120 SKIP_RETURN_CODE 77)`. Count 87 → 88. | CMake | ~+12 |
+
+**UNCHANGED-BUT-AFFECTED (must remain byte-identical; reviewer asserts zero git-diff):**
+
+| Path | Why touched-adjacent yet must not change | Check |
+|---|---|---|
+| `src/bpf/mac_filter.bpf.c` (the whole file; esp. the `:861` IPv6 arm + `:870` defaults catch-all) | NO datapath change — the S1 empty arm ALREADY routes a real IPv6 frame to defaults; S2 only builds the frame, nothing classifies it. | `git diff -- src/bpf/mac_filter.bpf.c` EMPTY. |
+| `src/common/mac_filter.h`, `src/lib/loader.{hpp,cpp}`, `src/lib/config.{hpp,cpp}`, `src/cli/` | NO axis/map/schema/pin/`kManagedMaps[]`/exit-code/CLI change — pure tests/ slice. PI-7 loader.hpp zero-diff CONTINUES. | `git diff -- src/` EMPTY. |
+| `CMakeLists.txt` (root, VERSION) | NO VERSION bump (no operator-observable change — the v6 verdict was already defaults since S1). | `--version` ⇒ `0.15.0`; root `git diff` shows no VERSION line. |
+| `tests/inject/inject_l4.py`, `tests/inject/inject_ipv4.py`, `tests/inject/inject_eth.py` | Guard #9: `inject_l6.py` is a self-contained NEW sibling (one-script-per-family precedent) — NO shared module extracted, NO edit to the existing injectors. | `git diff -- tests/inject/inject_l4.py tests/inject/inject_ipv4.py tests/inject/inject_eth.py` EMPTY. |
+| `tests/lib/common.sh` | L3/L4 injectors are called DIRECTLY (no wrapper) — `inject_l6.py` likewise; NO new helper added this slice. | `git diff -- tests/lib/common.sh` EMPTY. |
+| `tests/T_IPV6_GATE_DEFAULT.sh`, `tests/T_MAC_NON_IP.sh` | S1's files stay byte-untouched (Q2=A1 — new file, not extend). | `git diff -- tests/T_IPV6_GATE_DEFAULT.sh tests/T_MAC_NON_IP.sh` EMPTY. |
+| `tests/fixtures/config_mac_drop_default_pass.yaml` | Reused as-is; NO new fixture. | `git diff -- tests/fixtures/` EMPTY. |
+
+#### §5.52 DataStructures
+
+**None introduced or changed.** No cross-boundary types touched — no map, no BPF struct, no `mac_filter.h`/`config.hpp` field, no schema. The only "structure" is the **on-the-wire IPv6 frame layout** `inject_l6.py` emits (a contract the S4 cidr6 axes will later read), specified here for impl/tester:
+
+```
+Ethernet:    dst_mac(6) | src_mac(6) | [802.1Q tag(4)]* | EtherType=0x86DD(2)
+IPv6 base:   ver(4b)=6 | traffic_class(8b) | flow_label(20b)        ── word 0
+             payload_length(16) | next_header(8) | hop_limit(8)     ── word 1
+             src_addr(128b / 16 bytes)                              ── words 2-5
+             dst_addr(128b / 16 bytes)                              ── words 6-9
+             (40 bytes total — NO extension headers this slice)
+L4:          next_header ∈ { 6=TCP, 17=UDP, 58=ICMPv6 };
+             TCP/UDP: ≥ minimal header w/ dport (load-bearing for S4 port axis);
+             ICMPv6: EchoRequest (type=128); checksums computed by scapy.
+802.1Q:      TPID 0x8100 (C-TAG), first --vlan = outermost (QinQ on repeat) —
+             mirrors inject_l4/inject_ipv4's tag convention; scapy Dot1Q default.
+```
+
+scapy fills `version=6`, `payload_length`, `next_header` (`nh`), and all L4 checksums correctly-by-construction. The 40-byte base header is the seam: S6 inserts extension-header chains BEFORE the L4 here (explicitly OOS this slice).
+
+#### §5.52 Interfaces
+
+No userspace/CLI/env/IPC/datapath surface changes. The only NEW interface is the `inject_l6.py` command-line (mirrors `inject_l4.py`):
+
+```
+usage: inject_l6.py <iface> --dst-ip <v6> --src-ip <v6> --proto {tcp,udp,icmp6}
+                    [--dport N] [--src-mac M] [--dst-mac M] [--vlan VID]...
+
+  iface     : positional; the egress iface (L2 sendp target).
+  --dst-ip  : required; IPv6 destination literal (e.g. 2001:db8::1).
+  --src-ip  : required; IPv6 source literal (e.g. 2001:db8::7) — the
+              load-bearing field S4's dst_cidr6/src_cidr6 axes will read.
+  --proto   : required; {tcp,udp,icmp6}. nh = 6/17/58 respectively.
+  --dport   : optional (default 0); TCP/UDP dest port (S4 port axis); ignored
+              for icmp6 (no L4 port) — mirrors inject_l4's icmp handling.
+  --src-mac : optional (default 02:00:00:00:00:01, matching inject_l4).
+  --dst-mac : optional (default 02:00:00:00:00:02, matching inject_l4).
+  --vlan    : optional, repeatable; insert one 802.1Q C-TAG (TPID 0x8100) per
+              flag; first --vlan is OUTERMOST; repeat for QinQ.
+
+  Emits ONE Ether(type=0x86DD)[/Dot1Q]*/IPv6/L4 frame via scapy sendp(count=1)
+  at LAYER 2 (kernel IP stack bypassed; datapath receives exact bytes).
+  Base IPv6 header ONLY — NO extension headers (S6 seam).
+  Exit 0 on success.
+```
+
+The verifying ctest consumes the existing `read_stats_with_cidr` / `wait_for_stats_sum_with_cidr` 4-counter poll-and-delta harness (PASS / DROP_DENY / DROP_MALFORMED / PASS_CIDR) — identical to `T_IPV6_GATE_DEFAULT`.
+
+#### §5.52 Decisions (with rationale)
+
+- **D-mvp-4.12-NO-SRC — S2 touches NO `src/`/`.bpf.c`; the S1 empty IPv6 arm already routes real v6 frames to `defaults[active]`.** **Because** S2 is the injector + its smoke; classification of v6 (cidr6 axes) is S4. The injector builds frames; nothing reads them until S4. `git diff -- src/` EMPTY is a MUST.
+- **D-mvp-4.12-SCAPY (Q1=A1) — `inject_l6.py` uses scapy (`Ether/Dot1Q?/IPv6/L4`) sent at L2 via `sendp(count=1)`; reject raw `struct.pack`.** **Because** IPv6 mandates L4 checksums over a 128-bit pseudo-header (the error-prone surface A2 would hand-roll and S4 would inherit); scapy computes it correct-by-construction; scapy is already a test dep (`inject_eth`); `inject_eth` is the direct L2-sendp precedent; S4 cidr6 addresses extend trivially. See Q1. (Overrides the brief's raw-parity alternative — the v6 pseudo-header makes parity a correctness risk, not a stylistic wash.)
+- **D-mvp-4.12-L2-SENDP — the injector MUST send at LAYER 2 (`sendp`), NOT scapy L3 `send()`.** **Because** L3 `send()` invokes kernel routing/rewrite (and the veth has `disable_ipv6=1`); L2 `sendp` delivers the EXACT bytes built to the XDP datapath — the same guarantee `inject_eth`'s `sendp` and the raw injectors' `AF_PACKET send()` provide. An L3-send impl is `[INVARIANT-VIOLATED]` (PI-mvp-4.12-INJECTOR).
+- **D-mvp-4.12-BASE-ONLY — base 40-byte IPv6 header ONLY; NO extension headers, NO ICMPv6 beyond EchoRequest.** **Because** ext-header chains + family-coherence are S6 (`architecture-l2l3-gate.md` addr-axis split — the two sharp edges kept apart). Leave a documented seam where S6 inserts the ext-header chain (between IPv6 base and L4).
+- **D-mvp-4.12-NEW-CTEST (Q2=A1) — NEW `T_IPV6_INJECT_DEFAULT.sh`; do NOT edit S1's `T_IPV6_GATE_DEFAULT.sh`.** **Because** keeps S1's file byte-untouched (clean `git diff`) and the end-to-end ctest is the harness S4 reuses (a python self-test cannot establish it). See Q2.
+- **D-mvp-4.12-HONEST-SMOKE — the verifying ctest is an INJECTOR SMOKE + HARNESS SCAFFOLD, NOT a new-datapath-behavior proof.** **Because** S1 already proved `0x86DD → defaults`; the S1 arm doesn't deref, so a real IPv6 frame routes identically to S1's zero-payload frame. The ctest's value is (a) the NEW tool emits a frame the datapath ingests, (b) the inject→counter harness S4 reuses. Reviewer MUST NOT flag S1/S2 ctest similarity as redundancy — `[OOS]` N/A (it validates the NEW tool, and the frame is a real IPv6 packet vs S1's zero-payload Ether frame).
+- **D-mvp-4.12-SELF-CONTAINED (guard #9) — `inject_l6.py` is a self-contained NEW sibling; NO shared module extracted from `inject_l4`/`inject_ipv4`/`inject_eth`.** **Because** the in-tree precedent is one script per family (`inject_ipv4`/`inject_l4`/`inject_eth` are separate); duplication-over-extraction at the rule-of-two. NO edit to the existing injectors.
+- **D-mvp-4.12-NO-BUMP — VERSION stays `0.15.0`; guard #11 N/A.** **Because** zero operator-observable change (pure test tooling; the v6 verdict was already defaults since S1).
+- **D-mvp-4.12-PROSE-VS-INVARIANTS — resolution rule for THIS amendment:** if §5.52 prose conflicts with a §6.5 PI-mvp-4.12-* item or the §5.52 verifiable-invariants list, the **§6.5 invariants-block WINS (prose loses)**. If impl deviates from a verifiable-invariants hint to satisfy a §6.5 PI or a load-bearing assertion, reviewer disposition is `inline-merge` on the hint, NOT `[UNRELATED-EDIT]`. Load-bearing (MUST): `git diff -- src/` EMPTY; the injector emits a well-formed base-header IPv6 frame sent at L2; the verifying ctest asserts real-IPv6 → defaults with a live IPv4 positive control; NO axis/map/schema/VERSION change. Line/count anchors (`:861`, `:1253-1263`, 87→88) are SHOULD-level orientation, not literal-match contracts (per brief operative-semantic note — a differently-shaped but valid injector, the ctest landing at a different line, are `inline-merge`).
+
+#### §5.52 TestStrategy
+
+Tester writes against THIS section, not impl's code. Run with `-j4` (B19 `build_cpu` lock holds — §5.49). **Baseline GREEN reconciled via fresh `ctest -N` at Phase 2.5** (expect 87 → 88).
+
+**Regression net (nothing should move — pure tooling slice):** the ENTIRE existing suite MUST stay GREEN unchanged. No datapath/src change ⇒ no verdict can move. Spot anchors: the full v4 oracle net (`T_AND{,4,5,6}_ORACLE_AGREEMENT`, the per-axis compose tests), `T_MAC_NON_IP` (0x88B5 → defaults), and **`T_IPV6_GATE_DEFAULT`** (§6.70, S1) — the latter is the regression canary that the S1 IPv6 arm still routes `0x86DD → defaults`. Any movement in the existing suite is a `[REGRESSION]` (this slice cannot legitimately change a verdict).
+
+**NEW verifying ctest — `T_IPV6_INJECT_DEFAULT` (injector smoke + harness scaffold; the real-IPv6 analog of S1's §6.70):** mirror `T_IPV6_GATE_DEFAULT`'s mechanism exactly. Fixture `config_mac_drop_default_pass.yaml` (REUSED — `default_action: pass` + `id0 mac=02:00:00:00:00:01 DROP`). `RESOURCE_LOCK xdp_fixture` (guard #12). `SKIP_RETURN_CODE 77` env-guard mirroring the template.
+- **Trigger:** apply the fixture on `IFACE_A`; smoke-floor = `apply` exit 0.
+- **Step (1) — positive control (drop machinery is LIVE):** inject an **IPv4** frame from `MAC_RULE` (`inject_ipv4.py ${IFACE_B} ${MAC_RULE} ${MAC_DST} <src_ip>`) → the MAC rule fires → `STAT_DROP_DENY` delta == 1. (A "must-drop" case that MUST register — so step (2)'s "not dropped" is meaningful, not a silently-broken pass-everything. This is the control that makes the smoke non-vacuous.)
+- **Step (2) — THE injector smoke (real IPv6 frame → defaults):** inject a **real, well-formed IPv6 base-header frame** from `MAC_RULE` via `inject_l6.py ${IFACE_B} --src-mac ${MAC_RULE} --dst-mac ${MAC_DST} --src-ip <v6> --dst-ip <v6> --proto {tcp|udp|icmp6} [--dport N]` → the frame enters the S1 `ETH_P_IPV6` arm → falls to `defaults[active]` (= pass) → **`STAT_DROP_DENY` delta == 0** AND **`STAT_DROP_MALFORMED` delta == 0**. This asserts: (a) `inject_l6.py` emitted a frame the veth → XDP datapath ingested without choking (the NEW tool works end-to-end), (b) a real IPv6 packet routes to defaults exactly as S1's zero-payload frame did. It does NOT assert new datapath behavior (the S1 arm doesn't deref).
+- **Assertion mechanism:** the existing `read_stats_with_cidr` / `wait_for_stats_sum_with_cidr` 4-counter poll-and-delta harness (PASS / DROP_DENY / DROP_MALFORMED / PASS_CIDR), identical to `T_IPV6_GATE_DEFAULT`. (Counter-delta, NOT exit-code/probe.)
+- **Why NOT an OPS canary (honest framing):** S1's §6.70 ALREADY established the new-datapath-path canary (the `ETH_P_IPV6` arm). S2 adds NO new datapath path — same arm, same caps/netns/uid. `T_IPV6_INJECT_DEFAULT` is a TOOL smoke (does the injector emit an ingestible real-v6 frame?) + the harness S4 reuses, NOT a behavior canary. Per the load-bearing-OPS-canary heuristic: no NEW invocation/runtime path is introduced this slice, so no additional OPS canary is mandated.
+
+**Optional injector self-test (architect-flex, Q2-A2 as a cheap extra — NOT a substitute):** impl MAY add a python-level assertion (e.g. the emitted bytes re-parse as a valid `IPv6` frame with `version==6`, correct `nh`, 128-bit addrs) inside `inject_l6.py` or a tiny separate check. This is encouraged but not required; the end-to-end ctest is the contract.
+
+**Guard #22 (NIC VLAN-offload disable):** N/A — the default injected frame is UNTAGGED (no `--vlan`). Mirror `T_IPV6_GATE_DEFAULT`'s fixture/veth setup faithfully (which does not tag).
+
+**(impl Phase 2.5 smoke):** `inject_l6.py` emits a frame that (a) re-parses under scapy as a valid base-header IPv6 packet (`version==6`, `nh` ∈ {6,17,58}, 16-byte src/dst), (b) `T_IPV6_INJECT_DEFAULT` GREEN at the reconciled baseline; `ctest -j4` no flake (B19 lock); `git diff -- src/ CMakeLists.txt` (root) EMPTY (only `tests/` touched); `ctest -N` count 87 → 88; `grep -nE 'send\b|send\(' tests/inject/inject_l6.py` shows `sendp` (L2), NOT scapy L3 `send`.
+
+#### §6.5 Preserved invariants (§5.52 MVP-4.12 brownfield)
+
+Reviewer's framework point 5 walks this list. Items are **MUST contracts**; `[INVARIANT-VIOLATED]` per failed check. **ALL prior PIs (PI-1 … PI-mvp-4.11-*) CONTINUE byte-equivalent** — this slice retires/extends NO PI. Because S2 is pure test-tooling (no datapath/src change), the new PIs certify "nothing in the product moved" + "the new tool is well-formed".
+
+| PI | Property | Check mechanism |
+|---|---|---|
+| **PI-mvp-4.12-NO-SRC-CHANGE (NEW, load-bearing)** | NO `src/`/`.bpf.c`/`mac_filter.h`/`config.*`/`loader.*`/CLI change — pure `tests/` slice. The S1 IPv6 arm is untouched; it already routes real v6 → defaults. | `git diff -- src/` EMPTY. |
+| **PI-mvp-4.12-INJECTOR (NEW, load-bearing)** | `inject_l6.py` emits a WELL-FORMED base-header IPv6 frame (EtherType 0x86DD; 40-byte base header: version=6, payload_len, next-header ∈ {6,17,58}, hop-limit, 128-bit src/dst; optional 802.1Q) with NO extension headers, sent at LAYER 2 (`sendp`, not L3 `send`). | `T_IPV6_INJECT_DEFAULT` step(2) GREEN (real v6 → DROP_DENY delta 0 + DROP_MALFORMED delta 0); reviewer reads `inject_l6.py` = `Ether(type=0x86DD)/…/IPv6/…` via `sendp`, no ext-headers, no L3 `send()`. |
+| **PI-mvp-4.12-NO-AXIS-MAP (NEW)** | NO axis/map/pin/schema change — `BITVEC_NUM_AXES`=6, no new map, no `kManagedMaps[]` row, no schema bump. IPv6 still recognized-not-classified (S1 unchanged). | `git diff -- src/` EMPTY; `grep -n 'BITVEC_NUM_AXES' src/common/mac_filter.h` ⇒ live `6`. |
+| **PI-mvp-4.12-REGRESSION-GREEN (NEW)** | The entire pre-existing suite stays GREEN unchanged (no verdict moved — no datapath change); `T_IPV6_GATE_DEFAULT` (S1) still routes 0x86DD → defaults. | full `ctest -j4` GREEN; diff against prior baseline shows only the +1 NEW test (87 → 88). |
+| **PI-7-mvp-4.12-loader-hpp (CONTINUES)** | `src/lib/loader.hpp` byte-identical (loader untouched). | `git diff -- src/lib/loader.hpp` EMPTY. |
+| **PI-mvp-4.12-VERSION (CONTINUES)** | VERSION stays `0.15.0`; no literal propagation (guard #11 N/A). | `--version` ⇒ `0.15.0`; `grep -rn '0\.15\.0'` unchanged. |
+
+#### §5.52 verifiable invariants for reviewer (MAY-default per architect-spec §6.5 discipline)
+
+Guidance for reviewer, NOT contracts for impl. **Resolution rule (per D-mvp-4.12-PROSE-VS-INVARIANTS): if any item conflicts with a §6.5 PI-mvp-4.12-* item, the §6.5 item wins; if impl deviates from a hint to satisfy a PI or load-bearing assertion, disposition is `inline-merge`, NOT `[UNRELATED-EDIT]`.**
+
+1. (MUST) `git diff -- src/` is EMPTY — pure `tests/` slice, NO datapath change (the S1 IPv6 arm is untouched). (PI-mvp-4.12-NO-SRC-CHANGE)
+2. (MUST) `inject_l6.py` emits a well-formed base-header IPv6 frame (40-byte base header; EtherType 0x86DD; optional 802.1Q) with NO extension headers, sent at L2 (`sendp`). (PI-mvp-4.12-INJECTOR)
+3. (MUST) the verifying ctest genuinely injects a REAL IPv6 frame via `inject_l6.py` (not a raw 0x86DD zero-payload Ether frame like S1) and asserts → defaults (DROP_DENY + DROP_MALFORMED deltas 0), with a live IPv4 positive control (→ DROP). (PI-mvp-4.12-INJECTOR)
+4. (MUST) NO axis/map/schema/VERSION change. (PI-mvp-4.12-NO-AXIS-MAP / PI-mvp-4.12-VERSION)
+5. (MUST) the existing suite stays GREEN (behaviour preserved — nothing moved). (PI-mvp-4.12-REGRESSION-GREEN)
+6. (HONEST-SCOPE) the S1/S2 ctest similarity is NOT redundancy — `T_IPV6_INJECT_DEFAULT` validates the NEW `inject_l6.py` tool (real IPv6 packet) + scaffolds the S4 harness; do NOT flag `[OOS]`/redundant. (D-mvp-4.12-HONEST-SMOKE)
+7. (MAY) the injector uses scapy `Ether/Dot1Q?/IPv6/L4` (Q1=A1) — an equivalent raw-`struct.pack` impl that still produces a correct base-header v6 frame with correct L4 pseudo-header checksum AND sends at L2 is `inline-merge` (architect chose scapy for checksum-correctness, but a correct raw impl satisfies the contract).
+8. (MAY) line/count anchors (`:861`, CMake `:1253-1263`, 87→88) are SHOULD-level orientation — the injector/ctest landing at a different line, or a count delta absorbing other in-flight slices, is `inline-merge`, NOT `[UNRELATED-EDIT]`.
+9. (MAY) the optional python-level injector self-test (Q2-A2) MAY be present or absent — either is acceptable; the end-to-end ctest is the contract.
+
+#### §7 OOS additions (§5.52 — new fences)
+
+- **IPv6 *matching* of any kind** — S2 frames only ever hit `defaults[active]` (the S1 arm is empty). The injector builds frames; nothing classifies them until S4. NEW FENCE.
+- **S4 cidr6 axes + 128-bit `close_prefixes6` + `bitvec_oracle_prod.py` v6 extension, S5 ethertype match-axis, S6 ext-header walk + family-coherence reject** — later ladder slices. NEW FENCE.
+- **IPv6 extension headers** — `inject_l6.py` emits BASE header only; the ext-header chain is S6. A leftover seam/comment marks where S6 inserts it. NEW FENCE.
+- **ICMPv6 beyond a basic EchoRequest** — `icmp6` (if included) is a single EchoRequest (type=128); richer ICMPv6 is OOS. NEW FENCE.
+- **ANY `src/`/`.bpf.c`/`mac_filter.h`/`config.*`/`loader.{hpp,cpp}` change; ANY axis/map/schema/VERSION change** — UNCHANGED this slice (`git diff -- src/` EMPTY). NEW FENCE.
+- **Editing S1's `T_IPV6_GATE_DEFAULT.sh` / `inject_eth.py` / `common.sh` / existing injectors** — Q2=A1 ships a NEW ctest; guard #9 keeps `inject_l6.py` a self-contained sibling. NEW FENCE.
+- **The PO forks deferred to their slices** (EtherType split-vs-co-ship, schema bump, `gate.d` hoist, `ethertype:ipv4`) — OOS here. NEW FENCE.
+- Carry-forward §5.41–§5.51 OOS items NOT superseded — UNCHANGED.
+
+#### §5.52 Anti-misdiagnosis institutional learning (per architect-spec §6.6)
+
+Guards applied: **#5** (Phase A code-grep — independently re-anchored: `inject_l6.py` ABSENT via Glob; `inject_l4.py`=raw/`inject_ipv4.py`=raw/`inject_eth.py`=scapy by reading each; `inject_l4` CLI `:137-151`; the S1 `:861` empty IPv6 arm + `:870` defaults catch-all; `T_IPV6_GATE_DEFAULT.sh` full template; `common.sh` `read_stats_with_cidr`/`wait_for_stats_sum_with_cidr`/`NSEXEC`/`setup_veth`/`MAC_DST`/the L3-injectors-called-directly fact + the `disable_ipv6` L2-irrelevance; CMakeLists `:1253-1263` registration block; the reused fixture — all by READING source, not brief-trust); **#12** (the new ctest sets up veth/netns + loads the BPF object → carries `RESOURCE_LOCK xdp_fixture`, mirroring `T_IPV6_GATE_DEFAULT`); **#9** (`inject_l6.py` is a self-contained sibling — one-script-per-family precedent; NO shared module extracted, NO edit to existing injectors); **#11 N/A** (no VERSION bump); **#10 N/A** (no new constexpr table/array; `BITVEC_NUM_AXES`/`kManagedMaps[]` unchanged); **#22 N/A** (untagged injected frame — no NIC VLAN-offload concern).
+
+**Guard catalog UNCHANGED at 26** — this slice introduces no new misdiagnosis class (pure test-tooling; the honest-smoke framing pre-empts the only plausible misdiagnosis = "S1/S2 ctest redundancy", which D-mvp-4.12-HONEST-SMOKE + verifiable-invariant #6 explicitly fence as a NON-finding).
+
+> **Forward-defense note (S4 cidr6 reuses this injector + harness):** S4 will (a) make `inject_l6.py`'s `--src-ip`/`--dst-ip` load-bearing — the cidr6 axes deref the IPv6 base header and LPM-match the 128-bit addresses, so the base header MUST be byte-correct NOW (this slice's PI-mvp-4.12-INJECTOR), and (b) reuse the `inject → read_stats_with_cidr → delta` harness `T_IPV6_INJECT_DEFAULT` establishes, swapping the "→ defaults" assertion for "→ matched cidr6 verdict". When S4 lands, the ipv6hdr bounds-check is added WITH the deref in the (currently empty) S1 arm — NEVER before, NEVER DROP_MALFORMED on a truncated v6 frame (the §5.41/§5.51 non-IP-never-MALFORMED contract extended to v6). When S6 adds ext-headers, `inject_l6.py` grows an `--ext` option inserting the chain at the documented base→L4 seam. Audit trail: this slice (S2 injector) + §5.51 (S1 gate-scaffold + the §6.70 negation anchor) + `architecture-l2l3-gate.md` Option 1 / testability-lens VA-4.
+
+Evidence: `mint/task-brief.md` MVP-4.12 brief (HG-mvp-4.12-1/-2, Q1→scapy, Q2→new ctest, S2-1/S2-2, guards #5/#9/#12/#22, the operative-semantic line/count-anchor note); `mint/architecture-l2l3-gate.md` Option 1 / S2 + testability-lens VA-4 (the injector-prerequisite finding) + the addr-axis E/A ext-walk split (S6); independent Phase A reads of `tests/inject/inject_l4.py` (full — raw `struct.pack`/`AF_PACKET`, CLI `:137-151`), `tests/inject/inject_ipv4.py` (full — raw), `tests/inject/inject_eth.py` (full — scapy `Ether/Raw/sendp`), `tests/T_IPV6_GATE_DEFAULT.sh` (full — the ctest template), `tests/lib/common.sh:5/29/32/51/106/147-152/190/225/248-251` (`IFACE_*`/`MAC_DST`/`NSEXEC`/`setup_veth`/`disable_ipv6`/the stats helpers/the L3-injectors-direct fact), `tests/CMakeLists.txt:1244-1263` (the `T_IPV6_GATE_DEFAULT` registration block), `src/bpf/mac_filter.bpf.c:855-874` (the live `:861` empty IPv6 arm + `:870` defaults catch-all), `Glob tests/inject/inject_l6.py` → ABSENT; §5.51 (S1 gate-scaffold + §6.70 + the non-IP-never-MALFORMED forward-defense note), §5.41 (D-mvp-4.1-MALFORMED + the `inject_ipv4` `--vlan` precedent), §5.42 (`inject_l4` raw-injector precedent).
