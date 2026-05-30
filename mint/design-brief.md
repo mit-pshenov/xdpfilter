@@ -52,12 +52,16 @@ Appendix B.1) — NONE pre-selected; diversify by trade-off:
   dispatch; rule cardinality bound (`XDPMF_ALLOWLIST_MAX`) and its effect on the choice; the
   VLAN-tagged parse-path fix; IPv6 second-LPM shape (when, not full design); the eBPF-verifier
   feasibility of each candidate; the portability boundary (separable rule semantics) WITHOUT
-  designing AF_XDP/DPDK; a recommended `/mint-dev` slice sequence consistent with the choice.
+  designing AF_XDP/DPDK; the per-packet cost-envelope (instruction/lookup count) of each
+  candidate as a **relative structural selection criterion** + performance **non-foreclosure**
+  (see Amendment 2026-05-30); a recommended `/mint-dev` slice sequence consistent with the choice.
 - **Out of scope**: the action model beyond pass/drop (mirror/RL/tag/redirect — deferred);
   L7/stateful match; dynamic feed-backed objects + their refresh (object-lifecycle — note as an
   open question only, it's orthogonal); the YAML config-grammar surface details (Wave A §7
   already sketched the direction; this round is the DATAPATH/structure, not the parser); perf
-  optimization / benchmarking; DPDK/AF_XDP datapath design.
+  optimization / benchmarking / absolute throughput numbers / µ-tuning of shipped code (NOTE:
+  per-packet cost-envelope as a *relative structural selection axis* is now IN scope — see
+  Amendment 2026-05-30); DPDK/AF_XDP datapath design.
 
 ## Current datapath (read before designing)
 
@@ -99,11 +103,25 @@ architects:
         - "mint/selection-scenarios.md (§6.3 per-field XDP cost, §6.4 VLAN gap, Appendix B.2 feed-object cardinality)"
         - "Linux BPF verifier docs; XDP VLAN/802.1Q parsing (xdp-tutorial); bpf map-in-map limits (web)"
         - "mint/design.md §5.27/§5.34/§5.35 (axis-map + atomic-swap + dispatch brownfield history)"
+    - name: testability
+      lens: "Verification & test-oracle architect. You own ONE question per candidate structure: how is its correctness PROVEN, and what MUST be tested? Per candidate: (a) differential-oracle friendliness — can a simple reference impl (SCAN) run side-by-side and be asserted bit-identical on every fixture (the existing T_AND*_ORACLE_AGREEMENT / T_BITVEC_ORACLE_AGREEMENT pattern); (b) the test surface for load-bearing invariants — prefix-closure correctness, the wildcard-half mutual-exclusion invariant (rule in axis-map XOR wildcard-half), first-match-by-id, AND-compose-as-intersection; (c) negation-correctness verification (how to test a negated /16 is NOT cover-closed like a positive one); (d) verifier-load gating of the PRODUCTION object on the kernel floor; (e) fuzzability of the YAML->per-axis-mask lowering. Recommend WHAT to test and HOW per structure; name who owns prefix-closure/mask correctness + its oracle."
+      scope: "Verification strategy + oracle design + invariant test surface + negation test difficulty + verifier-load gating. Do NOT pick the structure or design the datapath. Viability filter: every check expressible as a ctest against the current harness (shell T_*.sh, bpftool prog load, fixture-driven oracle agreement)."
+      sources:
+        - "tests/T_AND*_ORACLE_AGREEMENT.sh + T_BITVEC_ORACLE_AGREEMENT.sh (differential-oracle pattern)"
+        - "tests/T_BITVEC_VERIFIER_LOAD.sh (verifier-load gate); tests/fixtures/* (corpus)"
+        - "mint/selection-scenarios.md §6; src/lib/loader.cpp (mask lowering / prefix-closure callsites)"
+    - name: perf-envelope
+      lens: "Per-packet cost-envelope & performance-foreclosure architect (Amendment 2026-05-30). For EACH candidate structure score the per-packet INSTRUCTION/LOOKUP-count envelope and whether the choice FORECLOSES good performance later. Flag structural anti-patterns (e.g. re-reading packet-invariant data every packet; O(N) scans where O(1) is structurally available; redundant map lookups). RELATIVE comparison only — no absolute numbers."
+      scope: "Non-foreclosure + relative structural cost-envelope. Do NOT benchmark, produce absolute throughput numbers, µ-optimize shipped code, or design AF_XDP/DPDK. Feasibility is realizability's call — assume it, score ONLY the cost-envelope. Viability filter: every claim must be a per-packet instruction/lookup count or a named structural anti-pattern."
+      sources:
+        - "src/bpf/mac_filter.bpf.c (per-packet datapath: axis lookups, wildcard reads, port_scan, AND-compose)"
+        - "mint/selection-scenarios.md §6.3 (per-field XDP cost)"
+        - "Gupta & McKeown survey (per-structure query-cost framing); BV vs decision-tree vs scan per-packet cost (web)"
   sequential:
     - name: contrarian
       lens: "Skeptical engineer / integrator. Read classifier + semantics + realizability. Poke holes: is the recommended structure the MINIMUM that proves the AND match-model on the eBPF vehicle, or is it over-engineered (decision-tree-class complexity for a model-validation stage)? Does it serve the NARROW Gi-DPI pass/drop path while not foreclosing the expansion-door items? Does the slice sequence (dst-IP → proto+port → AND-architecture → VLAN → objects) still hold under the choice? Is the OR→AND migration honest about what breaks? Flag any place the design quietly enforces a seen external approach."
       scope: "Critique + integrate into a single coherent recommendation-with-caveats. Do NOT introduce a brand-new structure unless the three parallels missed an obviously-superior one. Viability filter: complexity must be justified by the narrow path's actual needs, not the expansion vision."
-      inputs: [classifier, semantics, realizability]
+      inputs: [classifier, semantics, realizability, testability, perf-envelope]
       sources:
         - "mint/selection-scenarios.md (esp. framing + Appendix B 'do not enforce seen approach')"
 
@@ -115,6 +133,25 @@ options:
   skip_design_reviewer: false
   max_rework_rounds: 2
 ```
+
+## Amendment — 2026-05-30 (perf-envelope + added lenses)
+
+- **Performance posture relaxed from "out of scope" to "non-foreclosure + structural cost as a
+  selection axis".** Rationale: eBPF is the model-validation vehicle and will NOT meet the full
+  throughput requirements (a future AF_XDP/DPDK datapath is the production target) — but within
+  what the technology allows, the structure choice should still not be perf-hostile. We do NOT
+  optimize, benchmark, or produce absolute numbers this round; we DO score each candidate's
+  per-packet instruction/lookup-count envelope and refuse structures that foreclose good perf —
+  exactly mirroring the brief's existing "narrow now, door open later" non-foreclosure principle.
+  Concrete motivation: a prior code review found the shipped BV datapath re-reads 6 packet-invariant
+  wildcard masks per packet and does up to 64 port lookups per L4 packet — structural costs a
+  design-time perf-envelope lens would have flagged before they shipped.
+- **Two lenses added to the parallel roster**: `testability` (verification/oracle — owns "how is
+  correctness PROVEN per structure", incl. the prefix-closure oracle that open-Q #3 flagged as
+  load-bearing) and `perf-envelope` (above). Both are independent Phase-1 lenses (no sibling reads).
+- **Provenance**: lens-roster expansion driven by the Workflow-port A/B of this round (runs/hld-*).
+  Each added lens is on empirical trial — kept only if its synthesis delta surfaces signal the
+  original three lenses missed; dropped as noise otherwise.
 
 ## Notes for architects
 

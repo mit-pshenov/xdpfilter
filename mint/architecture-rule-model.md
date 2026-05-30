@@ -115,3 +115,40 @@ Product-owner resolutions to the human-gate open questions:
 - **semantics** (ordering / migration): selected **S.1 first-match-by-id (coupled)**, **S.3 most-specific-wins (FlowSpec)**, **S.7 tiered (outlier)**. Pivotal finding: most-specific-wins reduces to *sort-at-load + first-match-at-runtime* — only the loader's sort key changes, so ordering decouples from structure and the datapath stays ordering-agnostic. Recommends **M.1 hard cutover** via the `schema_version` gate; flags the `id` triple/quadruple-role stress with a **decouple knob** (sparse operator `id` vs dense loader `slot`) deferred until bit-vector or N>64 makes it real. (Did not address IPv6 — out of this lens.)
 - **realizability** (feasibility / portability): selected **R.2 bit-vector** (minimal-topology, best-verifier, best-atomic-swap), **R.1 sequential** (max primitive-flexibility, best portability), **R.5 layered-pipeline (outlier — exposes cliffs)**. Decisive verdicts: R.5 fails the atomic-swap filter (`PROG_ARRAY` ∉ `ARRAY_OF_MAPS` inner); feed-object cardinality is a set-membership map (C.3, orthogonal to structure); the **portability boundary C.4** (Rule IR above, lowering below) makes the choice reversible; the §6.4 VLAN fix (C.1) and the **IPv6 second-LPM shape (C.2 — 20-byte `cidr6` LPM axis, +3 `kManagedMaps[]` rows, rides `active_idx`, deferred to a post-AND slice)** are structure-agnostic; verify-time of R.1 at full field-set is the one unmeasured risk (open Q#5).
 - **contrarian** (skeptical integrator): selected stances **.2 sequential-primary (lead)**, **.3 bit-vector caveated (defensible override)**, **.4 defer+spike (outlier)**. Recommends **sequential-scan, spike-validated, bit-vector pre-committed as Wave-C perf-lowering + fallback** — re-testing the (partly catalog-anchored) convergence toward bit-vector and finding its cost lands in *valued* dimensions while its win lands in the *deferred* one. Three cracks carried into synthesis: (1) bit-vector does NOT foreclose the feed-object door (rule-COUNT vs set-CARDINALITY); (2) the §6.4 VLAN parse fix must land with/before the dst-IP slice, split from the VLAN-match axis; (3) IPv6 non-foreclosure confirmed for both finalists (`:108`). Notes the brownfield delta is smaller than credited (the `rules` axis already exists).
+
+## Addendum — 2026-05-30 (Workflow re-run ratification)
+
+This round was independently re-run via the dynamic-Workflow port of mint-hld (5 lenses: the
+original three + added `testability` + `perf-envelope`; see
+`/home/user/agent-teams-review/runs/hld-mint-l2-mac-filter-20260530084033/` and
+`WORKFLOW-TRANSITION.md`). The re-run confirms this document's decisions and adds the following.
+This is a ratification addendum — it does NOT supersede the 2026-05-28 PO decision above.
+
+- **Structure ratified (not re-opened).** All five lenses independently confirm the 6-axis
+  bit-vector AND classifier is already shipped (`mac_filter.bpf.c:822-851`, MVP-4.3..4.7) — the
+  materialization of the prior PO Option-3 spike outcome (perf-optimal endpoint won). The honest
+  framing is ratify-and-name, not select.
+- **EtherType = a real L2 match (PO decision 2026-05-30).** The brief's EtherType field is neither
+  an axis nor matchable today (datapath IP-gated at `mac_filter.bpf.c:630`); all original lenses
+  silently substituted L4 "proto". It is a genuine L2 match (e.g. "drop ARP") → needs its own
+  EtherType HASH axis, landing **with** the IPv6 axis slice (same ethertype-gate touch). Tracked as
+  **BACKLOG B31**; **B20** table-driven refactor is its prerequisite.
+- **Negation deferred (PO decision 2026-05-30).** Negation is the one of the six encoding
+  primitives not yet built. Decision: out of near-term Gi vocab. Recorded honestly — the structure
+  currently meets **5 of 6** primitives; "all six" is NOT met this wave. Revisit on demand; the
+  cheap path is single-axis inverse-mask, the full path needs the R.6 bounded set-bit tail + care
+  with negated-prefix vs prefix-closure.
+- **id/slot decouple planned.** The `id` triple-coupling (priority AND bit-position AND
+  `rule_counters[]` index) makes rule reorder/insert break Prometheus counter continuity. Scheduled
+  as its own slice — **BACKLOG B30** — not pulled forward unless reordering becomes a near-term
+  operator workflow.
+- **Performance posture (brief Amendment 2026-05-30).** The added `perf-envelope` lens corroborates
+  the prior PO perf-priority and introduced *foreclosure* (per-packet cost growing with rule-count
+  vs axis-count) as the structural selection axis — reinforcing bit-vector over decision-tree. It
+  surfaced two shipped per-packet anti-patterns at design time: ~12 packet-invariant lookups
+  re-fetched per frame (`mac_filter.bpf.c:680-752`) and the O(N) `port_scan` (already **B18**).
+  These are **perf-slice TODOs, NOT architecture changes** — recorded so they are deliberate, not
+  accidental.
+- **Portability seam ratified.** The per-axis-lookup interface is the agreed portability boundary
+  (rule MEANING above the line is datapath-agnostic; map/verifier/parser realization below) —
+  consistent with C.4. AF_XDP/DPDK remain do-not-design.
