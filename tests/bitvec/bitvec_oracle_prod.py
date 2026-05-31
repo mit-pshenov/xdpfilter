@@ -79,9 +79,11 @@ import sys
 NOMATCH = 64
 
 # proto name → IP protocol number (§5.44 D-mvp-4.4-PROTO-GRAMMAR: tcp=6,
-# udp=17, icmp=1).
-PROTO_NUM = {"tcp": 6, "udp": 17, "icmp": 1}
+# udp=17, icmp=1). §5.53 (MVP-4.13): icmp6=58 (IPv6 ICMP nexthdr) — like
+# icmp(v4) it carries NO L4 port (has_port=0).
+PROTO_NUM = {"tcp": 6, "udp": 17, "icmp": 1, "icmp6": 58}
 ICMP = 1
+ICMP6 = 58
 
 # Wildcard sentinel for an axis the rule does not constrain.
 W = None
@@ -93,6 +95,40 @@ def _cidr(s):
     length = int(length)
     net = struct.unpack("!I", socket.inet_aton(addr))[0]
     return (net, length)
+
+
+# ── §5.53 (MVP-4.13) IPv6 128-bit helpers (defined here so the RULES_ANDV6
+# table below can call _cidr6 at module-load, mirroring _cidr) ─────────────
+# GUARD #23 masking discipline: the oracle masks in the **128-bit Python
+# arbitrary-precision integer domain** (NOT per-byte / per-limb) so that
+# non-byte-aligned prefixes (/40, /68, /127) are exercised BY CONSTRUCTION and
+# the oracle is algorithmically DIFFERENT from the kernel LPM_TRIE (which walks
+# the network-order addr6[16] byte array MSB-first). A datapath byte-order or
+# limb-boundary bug surfaces as an oracle disagreement.
+_V6_FULL = (1 << 128) - 1
+
+
+def _ip6_to_int(s):
+    """Parse an IPv6 literal → 128-bit big-endian (network-order) integer."""
+    return int.from_bytes(socket.inet_pton(socket.AF_INET6, s), "big")
+
+
+def _cidr6(s):
+    """Parse '2001:db8::/len' → (network_int_128, prefixlen)."""
+    addr, length = s.rsplit("/", 1)
+    length = int(length)
+    if not 0 <= length <= 128:
+        raise ValueError(f"IPv6 prefixlen out of range [0,128]: {length}")
+    return (_ip6_to_int(addr), length)
+
+
+def _ip6_in_cidr6(ip_int, cidr6):
+    """128-bit-domain membership test (guard #23 — NOT per-byte)."""
+    net, length = cidr6
+    if length == 0:
+        return True
+    mask = (_V6_FULL << (128 - length)) & _V6_FULL
+    return (ip_int & mask) == (net & mask)
 
 
 # ── 2-axis table: transcribed by hand from config_valid_and.yaml (§5.43) ──
@@ -160,6 +196,31 @@ RULES_MACMERGE = [
     (0,  W,        W,        6,    W,    W,    "aa:bb:cc:dd:ee:01", "pass"),  # mac ee:01 + tcp
     (1,  W,        W,        17,   W,    W,    "aa:bb:cc:dd:ee:01", "pass"),  # mac ee:01 + udp (SHARES mac → merge)
     (2,  W,        W,        W,    W,    W,    "aa:bb:cc:dd:ee:02", "pass"),  # mac ee:02 (distinct)
+]
+
+
+# ── 8-axis v6 table: by hand from config_valid_andv6.yaml (§5.53 §6.71) ────
+# Each rule: (id, dst_cidr|W, src_cidr|W, proto|W, port(lo,hi)|W, vlan|W,
+#            mac|W, dst_cidr6|W, src_cidr6|W, action). The two NEW axes are the
+# v6 sibling LPM axes dst_cidr6 (BV_AXIS_DST6=6, matches ip6->daddr) and
+# src_cidr6 (BV_AXIS_SRC6=7, matches ip6->saddr). SYMMETRIC 8-term AND
+# (D-mvp-4.13-Q2): a v4 frame carries NO v6 address (the dst6/src6 axes are
+# unsatisfiable for any rule that CONSTRAINS them) and vice-versa — this models
+# the cross-family exclusion exactly (a v4-only rule cannot match a v6 frame and
+# a v6-only rule cannot match a v4 frame).
+#
+# Consumed by §6.71 (T_ANDV6_ORACLE_AGREEMENT), invoked
+#   --ruleset andv6 --dst-ip6 D --src-ip6 S --proto P [--dport N] [--vlan V]
+# for v6 frames (and --dst-ip/--src-ip for the v4-frame cross-family probe).
+#
+# IMPORTANT: tests/fixtures/config_valid_andv6.yaml transcribes the SAME rules.
+# Any edit here MUST be mirrored there — data-independence is intentional.
+RULES_ANDV6 = [
+    # id dst_cidr            src_cidr proto port          vlan mac dst_cidr6                  src_cidr6                  action
+    (0, W,                   W,       6,    (1000, 2000), 100, W,  _cidr6("2001:db8:1::/48"), _cidr6("2001:db8:5::/48"), "pass"),  # FULL v6 AND
+    (1, W,                   W,       W,    W,            W,   W,  _cidr6("2001:db8:2::/48"), W,                         "pass"),  # dst6-only
+    (2, _cidr("10.1.0.0/16"), W,      W,    W,            W,   W,  W,                         W,                         "drop"),  # v4-only (cross-family; §6.73 DROP)
+    (3, W,                   W,       17,   W,            W,   W,  W,                         W,                         "pass"),  # proto-only (addr-wildcard)
 ]
 
 
@@ -322,6 +383,69 @@ def classify6(dst_ip, src_ip, proto, dport, vlan, src_mac, rules=RULES_AND6):
     return NOMATCH
 
 
+def classify_andv6(dst_ip, src_ip, dst_ip6, src_ip6, proto, dport, vlan,
+                   src_mac, rules=RULES_ANDV6):
+    """8-axis (dst+src+proto+port+vlan+mac+dst6+src6) first-match (§5.53 §6.71).
+
+    SYMMETRIC cross-family model (D-mvp-4.13-Q2): the frame is EITHER IPv4
+    (dst_ip/src_ip set, dst_ip6/src_ip6 None) OR IPv6 (the reverse) — exactly
+    one family. A rule that CONSTRAINS a v4 address axis can NEVER match a v6
+    frame (the frame has no v4 address — the v6 arm's `& wc_dst` term zeroes it);
+    symmetrically a v6-constrained rule can never match a v4 frame. This is the
+    naive, algorithm-independent reference for the datapath's 8-term AND + the
+    cross-family wildcard halves.
+
+    The v6 masking is 128-bit-domain (guard #23) via _ip6_in_cidr6.
+    """
+    has_v4 = dst_ip is not None and src_ip is not None
+    has_v6 = dst_ip6 is not None and src_ip6 is not None
+    dst_i = _ip_to_int(dst_ip) if has_v4 else None
+    src_i = _ip_to_int(src_ip) if has_v4 else None
+    dst6_i = _ip6_to_int(dst_ip6) if has_v6 else None
+    src6_i = _ip6_to_int(src_ip6) if has_v6 else None
+    has_port = dport is not None and proto not in (ICMP, ICMP6)
+    has_vlan = vlan is not None
+    mac_n = _norm_mac(src_mac)
+
+    for (rid, dst_c, src_c, p, port, vl, mac, dst_c6, src_c6, _action) in rules:
+        # dst axis (IPv4) — a constrained v4 rule cannot match a v6 frame.
+        if dst_c is not W:
+            if not has_v4 or not _ip_in_cidr(dst_i, dst_c):
+                continue
+        # src axis (IPv4)
+        if src_c is not W:
+            if not has_v4 or not _ip_in_cidr(src_i, src_c):
+                continue
+        # proto axis (exact); for v6 frames proto == ip6->nexthdr
+        if p is not W and proto != p:
+            continue
+        # port axis (inclusive range; icmp/icmp6 have no L4 port)
+        if port is not W:
+            if not has_port:
+                continue
+            lo, hi = port
+            if not (lo <= dport <= hi):
+                continue
+        # vlan axis (exact membership; untagged cannot match a vlan rule)
+        if vl is not W:
+            if not has_vlan or vlan != vl:
+                continue
+        # mac axis (exact membership; src-MAC h_source)
+        if mac is not W and mac_n != _norm_mac(mac):
+            continue
+        # dst6 axis (IPv6) — a constrained v6 rule cannot match a v4 frame.
+        if dst_c6 is not W:
+            if not has_v6 or not _ip6_in_cidr6(dst6_i, dst_c6):
+                continue
+        # src6 axis (IPv6)
+        if src_c6 is not W:
+            if not has_v6 or not _ip6_in_cidr6(src6_i, src_c6):
+                continue
+        # all constrained axes satisfied → first match wins (ascending id)
+        return rid
+    return NOMATCH
+
+
 def _proto_arg(s):
     s = s.lower()
     if s in PROTO_NUM:
@@ -339,28 +463,53 @@ def main():
         description="independent production AND first-match classifier "
                     "(§5.43 2-axis / §5.44 4-axis / §5.45 5-axis)")
     ap.add_argument("--ruleset",
-                    choices=("and", "and4", "and5", "and6", "macmerge"),
+                    choices=("and", "and4", "and5", "and6", "andv6", "macmerge"),
                     default="and",
                     help="and = 2-axis (config_valid_and.yaml, §6.61); "
                          "and4 = 4-axis (config_valid_and4.yaml, §6.66); "
                          "and5 = 5-axis (config_valid_and5.yaml, §6.69); "
                          "and6 = 6-axis (config_valid_and6.yaml, §6.70); "
+                         "andv6 = 8-axis +dst6/src6 (config_valid_andv6.yaml, §6.71); "
                          "macmerge = mac-dedup MERGE canary "
                          "(config_valid_macmerge.yaml, §5.50)")
-    ap.add_argument("--dst-ip", required=True)
-    ap.add_argument("--src-ip", required=True)
+    # §5.53: --dst-ip/--src-ip are now OPTIONAL (a v6 frame carries no v4
+    # address); the v4-only rulesets re-require them below.
+    ap.add_argument("--dst-ip", default=None)
+    ap.add_argument("--src-ip", default=None)
+    ap.add_argument("--dst-ip6", default=None,
+                    help="IPv6 destination literal; andv6 only (ip6->daddr)")
+    ap.add_argument("--src-ip6", default=None,
+                    help="IPv6 source literal; andv6 only (ip6->saddr)")
     ap.add_argument("--proto", type=_proto_arg,
-                    help="IP protocol (tcp/udp/icmp or number); and4/and5/and6 only")
+                    help="IP protocol (tcp/udp/icmp/icmp6 or number); "
+                         "and4/and5/and6/andv6 only")
     ap.add_argument("--dport", type=int, default=0,
-                    help="L4 dest port; and4/and5/and6 only (ignored for icmp)")
+                    help="L4 dest port; and4/and5/and6/andv6 only (ignored for icmp)")
     ap.add_argument("--vlan", type=int, default=None,
-                    help="outer 802.1Q VID; and5/and6 only (omit ⇒ untagged frame, "
-                         "has_vlan=0)")
+                    help="outer 802.1Q VID; and5/and6/andv6 only (omit ⇒ untagged "
+                         "frame, has_vlan=0)")
     ap.add_argument("--src-mac", default=None,
-                    help="source MAC (eth->h_source); and6 only (exact match)")
+                    help="source MAC (eth->h_source); and6/andv6 only (exact match)")
     args = ap.parse_args()
 
-    if args.ruleset == "macmerge":
+    # The v4-only rulesets require an IPv4 dst+src (the v6 axes don't exist).
+    if args.ruleset in ("and", "and4", "and5", "and6", "macmerge"):
+        if args.dst_ip is None or args.src_ip is None:
+            ap.error(f"--ruleset {args.ruleset} requires --dst-ip and --src-ip")
+
+    if args.ruleset == "andv6":
+        if args.proto is None:
+            ap.error("--ruleset andv6 requires --proto")
+        v4 = args.dst_ip is not None and args.src_ip is not None
+        v6 = args.dst_ip6 is not None and args.src_ip6 is not None
+        if v4 == v6:
+            ap.error("--ruleset andv6 requires EXACTLY ONE family: either "
+                     "--dst-ip+--src-ip (v4 frame) OR --dst-ip6+--src-ip6 (v6 frame)")
+        dport = None if args.proto in (ICMP, ICMP6) else args.dport
+        print(classify_andv6(args.dst_ip, args.src_ip,
+                             args.dst_ip6, args.src_ip6,
+                             args.proto, dport, args.vlan, args.src_mac))
+    elif args.ruleset == "macmerge":
         if args.proto is None:
             ap.error("--ruleset macmerge requires --proto")
         if args.src_mac is None:

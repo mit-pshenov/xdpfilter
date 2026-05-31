@@ -3,6 +3,44 @@
 Notes for team-lead/architect/tester about implementation decisions and
 deviations made during impl phase.
 
+## §5.53 MVP-4.13 / S4 cidr6 — impl notes (2026-05-31)
+
+Implemented per §5.53 with NO silent deviations. Q1=`unsigned __int128` closure
+(A1, NOT the A2 byte-array fallback — `__int128` compiled/loaded clean). Q2 =
+symmetric 8-term AND in both arms. Files: mac_filter.h (+xdpmf_cidr_v6, +dst6/
+src6 map-name consts, BITVEC_NUM_AXES 6→8, BV_AXIS_DST6/SRC6), mac_filter.bpf.c
+(+dst6/src6 LPM trios, v4 arm +`& wc_dst6 & wc_src6`, full v6 arm at the S1
+seam), loader.cpp (kManagedMaps 30→36, BitPrefix6/host_mask6/host_addr6_of/
+close_prefixes6/lower_axis6/populate_bitvec6_inner_slot, write_wildcard_slots +2
+params/+2 rows, populate_all_axes +2 params/+2 calls, apply_request +2 lowerings/
++2 guards), cidr.{hpp,cpp} (+parse_cidr_v6, byte-wise 128-bit host-bits check),
+config.hpp (+dst_cidr6/src_cidr6 optionals), config.cpp (8-key grammar + 2 parse
+blocks). loader.hpp byte-identical (PI-7 continues). NO VERSION bump.
+
+Smoke: clean build, zero warnings (-Wall -Wextra); production mac_filter.bpf.o
+verifier-loads on 6.1 (xlated 34376B/jited 19075B; wildcard max_entries=16;
+dst6/src6 lpm_trie + array_of_maps present). Full ctest 84/88 pass + 2
+pre-existing env skips (T_DROP_MALFORMED, T_ANSIBLE_PLAYBOOK_SYNTAX).
+
+### Cross-family MAC/proto/port/vlan semantic (escalated to architect)
+
+The symmetric 8-term model makes the L2/L4 axes (mac/proto/port/vlan) **family-
+blind**: a MAC-only (or proto/port/vlan-only) rule now matches BOTH v4 AND v6
+frames carrying that key — because those axes are ANDed in BOTH arms and a rule
+unconstrained on the address axes lands in their wildcard halves. This is the
+correct, designed Q2 behavior, but it SUPERSEDES the S1/S2-era assumption baked
+into `config_mac_drop_default_pass.yaml` ("a MAC rule matches IPv4 frames ONLY")
+and into the step-(2) assertions of T_IPV6_GATE_DEFAULT (#86) and
+T_IPV6_INJECT_DEFAULT (#87). Both now fail correctly:
+- #87: real v6 frame from the rule's MAC ⇒ the MAC DROP rule fires (deny+1).
+- #86: bare 0x86DD ether frame (no v6 header) ⇒ now genuinely MALFORMED via the
+  40B base-header bounds-check (D-mvp-4.13-NO-MALFORMED-NONV6).
+These two tests are NOT in the §5.53 FileList; the §5.53 regression net listing
+them as must-stay-green is an internal inconsistency (it didn't account for the
+family-blind MAC axis + the reused MAC-rule fixture). Escalated to architect for
+a regression-net amendment; flagged the test-side rewrite to the tester. Impl
+held as-is (conforms to the literal Q2 spec).
+
 ## Forced deviation 1 — `struct mac_addr` → `struct xdpmf_mac`
 
 Design §3.1 specifies the allow-list key type as `struct mac_addr`. At BPF

@@ -43,6 +43,24 @@ struct xdpmf_cidr_v4 {
 } __attribute__((packed));
 
 /*
+ * §5.53 (MVP-4.13): L3 IPv6 dst/src-CIDR axes — see design §5.53 HG-1 + Q1.
+ *
+ * LPM_TRIE key for IPv6 CIDR matching. As with xdpmf_cidr_v4 the key begins
+ * with `unsigned int prefixlen`; `addr6` holds the 16 address bytes in
+ * NETWORK byte order (addr6[0] is the MSB / first byte on the wire — matches
+ * `ipv6hdr.daddr/saddr`, no swap needed). The kernel LPM_TRIE walks the key
+ * MSB-first byte-by-byte, so the byte array (NOT host-order limbs) is the
+ * contract. Total size = 20 bytes.
+ *
+ * `unsigned int`/`unsigned char` (not `__u32`/`__u8`) for the same shared-
+ * header reason as xdpmf_cidr_v4.
+ */
+struct xdpmf_cidr_v6 {
+    unsigned int  prefixlen;   /* bits in network mask, range [0, 128] */
+    unsigned char addr6[16];   /* IPv6 address, NETWORK byte order (addr6[0]=MSB) */
+} __attribute__((packed));
+
+/*
  * Index into the `stats` BPF_MAP_TYPE_PERCPU_ARRAY. Each invocation of
  * the XDP program bumps exactly one slot. STAT_MAX is the array
  * max_entries (sentinel; bumped 3 → 4 in §5.27 alongside STAT_PASS_CIDR).
@@ -158,16 +176,34 @@ enum mac_filter_stat {
  * distinct key, so 0 cannot mean "no tag" (D-mvp-4.5-Q2). */
 #define XDPMF_VLAN_NONE 0xFFFF
 
-#define BITVEC_NUM_AXES 6
+/* §5.53 (MVP-4.13) D-mvp-4.13-Q1/Q2: ADDITIVE +2 bit-vector axes — dst6 + src6
+ * (IPv6 CIDR LPM_TRIE, mirroring the §5.43 dst/src v4 LPM trios). BITVEC_NUM_AXES
+ * 6→8 auto-grows the `wildcard` ARRAY's max_entries 12→16 via the
+ * XDPMF_RULESET_COUNT * BITVEC_NUM_AXES formula (no literal edit in the .bpf.c
+ * decl). New axis indices BV_AXIS_DST6=6 / BV_AXIS_SRC6=7. Fresh ARRAY_OF_MAPS
+ * trios (dst6_ and src6_ prefixes) of LPM_TRIE inners keyed by struct
+ * xdpmf_cidr_v6, value __u64 rule-bitmask, WITH closure (close_prefixes6). Both
+ * datapath arms AND all 8 axis terms; the other address family contributes
+ * 0|wildcard (Q2). */
+#define XDPMF_MAP_DST6_RULESETS_OUTER_NAME "dst6_rulesets"  /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] of LPM_TRIE fds */
+#define XDPMF_MAP_DST6_INNER_A_NAME        "dst6_bitmask_a" /* inner slot 0, LPM_TRIE of __u64 */
+#define XDPMF_MAP_DST6_INNER_B_NAME        "dst6_bitmask_b" /* inner slot 1, LPM_TRIE of __u64 */
+#define XDPMF_MAP_SRC6_RULESETS_OUTER_NAME "src6_rulesets"  /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] of LPM_TRIE fds */
+#define XDPMF_MAP_SRC6_INNER_A_NAME        "src6_bitmask_a" /* inner slot 0, LPM_TRIE of __u64 */
+#define XDPMF_MAP_SRC6_INNER_B_NAME        "src6_bitmask_b" /* inner slot 1, LPM_TRIE of __u64 */
+
+#define BITVEC_NUM_AXES 8
 #define BV_AXIS_DST     0
 #define BV_AXIS_SRC     1
 #define BV_AXIS_PROTO   2
 #define BV_AXIS_PORT    3
 #define BV_AXIS_VLAN    4
 /* §5.47 (MVP-4.7): axis 5 = src-MAC (eth->h_source) exact-match HASH; the v1
- * MAC allowlist un-frozen as the 6th AND-composed bit-vector axis. wildcard
- * max_entries (XDPMF_RULESET_COUNT * BITVEC_NUM_AXES) auto-grows 10→12. */
+ * MAC allowlist un-frozen as the 6th AND-composed bit-vector axis. */
 #define BV_AXIS_MAC     5
+/* §5.53 (MVP-4.13): axes 6/7 = IPv6 dst/src CIDR LPM. */
+#define BV_AXIS_DST6    6
+#define BV_AXIS_SRC6    7
 
 /* §5.44 (MVP-4.4) D-mvp-4.4-Q2: production-owned port-range slot — analog of
  * the §5.42 spike's `bv_port_range`. One slot per port-constrained rule; a

@@ -35,4 +35,20 @@ namespace xdpmf::cidr {
                                           std::uint32_t    line,
                                           std::uint32_t    col);
 
+/* §5.53 (MVP-4.13): parse `s` into an xdpmf_cidr_v6{prefixlen, addr6[16]}.
+ *
+ * Accepts IPv6 CIDR notation "addr6/N" where 0 ≤ N ≤ 128. `addr6` is returned
+ * in NETWORK BYTE ORDER (addr6[0]=MSB, matches ipv6hdr.daddr/saddr on the wire
+ * — no swap needed on the BPF side). The validator enforces that all bits
+ * below `prefixlen` are zero (host-bits-set → ConfigError with a canonical-
+ * form hint). Routed to ONLY from the v6 match keys (dst_cidr6/src_cidr6);
+ * v6 strings under the v4 keys still correctly reject via parse_cidr_v4.
+ *
+ * Throws std::system_error{LoaderError::ConfigError, ...} on malformed input
+ * per the same stderr message catalogue style as parse_cidr_v4. */
+[[nodiscard]] xdpmf_cidr_v6 parse_cidr_v6(std::string_view s,
+                                          std::string_view file_path_for_diagnostics,
+                                          std::uint32_t    line,
+                                          std::uint32_t    col);
+
 }  // namespace xdpmf::cidr

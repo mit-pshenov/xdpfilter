@@ -1,0 +1,56 @@
+# config_overlap_lowid6.yaml — §5.53 MVP-4.13 / S4 guard #23 MANDATORY fixture
+# (the IPv6 / 128-bit analog of config_overlap_lowid.yaml).
+#
+# Used by §6.72 (T_ANDV6_PREFIX_CLOSURE_OVERLAP) — THE #1-bug-class canary at
+# 128 bits: prefix-closure cover-direction + first-match-by-id across NON-byte-
+# aligned and 64-bit-LIMB-crossing prefix lengths.
+#
+# Overlapping IPv6 prefixes where a less-specific COVERING rule has a LOWER id
+# than the more-specific entry. Prefix lengths are chosen at NON-ALIGNED
+# boundaries that the v4 (/8,/16,/24,/25) corpus never exercised:
+#   /40  — 5 bytes (the closure must mask the high 40 bits)
+#   /68  — mid-LIMB: 68 > 64 crosses the first 64-bit limb boundary AND is not
+#          byte-aligned (68/8 = 8.5) — the limb-boundary trap
+#   /127 — the penultimate bit; the shift-by-1 edge
+#
+#   id 0 : dst_cidr6 2001:db8:0:100::/68    DROP  (covering /68, LOWER id — wins)
+#   id 1 : dst_cidr6 2001:db8::/40          PASS  (BROADEST cover, mid id)
+#   id 3 : dst_cidr6 2001:db8:0:100::/127   PASS  (MOST-specific, HIGHER id)
+#
+# A packet to 2001:db8:0:100::1 is inside ALL THREE prefixes (/40, /68, /127).
+# The correct verdict is DROP via id0 — the LOWEST matching id wins, NOT the
+# most-specific id3. This is producible ONLY if:
+#   (a) close_prefixes6 stored the covering bits (id0 /68 AND id1 /40) INTO the
+#       /127 LPM entry — cover-direction CORRECT at 128 bits incl. the mid-limb
+#       /68 boundary, and
+#   (b) ffsll(acc) picks the lowest set bit (first-match-by-id).
+# A backwards closure (covered-into-covering) OR a most-specific-wins bug OR a
+# byte-order / limb-boundary mask error FLIPS the verdict to PASS via id3.
+#
+# A packet to 2001:db8:5::1 is in /40 (id1) ONLY — NOT in /68 (byte 5 differs).
+# It must PASS via id1 (broader cover), proving the closure does NOT OVER-
+# propagate the more-specific bits backwards into the broad entry.
+#
+# default_action: pass — so a non-matching packet PASSes, making the id0-DROP
+# verdict unambiguous (a DROP_DENY can ONLY come from id0 here).
+#
+# All rules are dst6-only (src6 + every other axis is wildcard). id2 is
+# intentionally absent (sparse id space, mirrors the v4 fixture).
+#
+# IMPORTANT: §6.72 hardcodes the expected verdict (no oracle table) — like the
+# v4 §6.62 — so this fixture has NO bitvec_oracle_prod.py mirror.
+schema_version: 2
+default_action: pass
+rules:
+  - id: 0
+    action: drop
+    match:
+      dst_cidr6: "2001:db8:0:100::/68"
+  - id: 1
+    action: pass
+    match:
+      dst_cidr6: "2001:db8::/40"
+  - id: 3
+    action: pass
+    match:
+      dst_cidr6: "2001:db8:0:100::/127"

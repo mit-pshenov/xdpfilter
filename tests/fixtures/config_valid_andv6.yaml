@@ -1,0 +1,67 @@
+# config_valid_andv6.yaml — §5.53 MVP-4.13 / S4 v2 8-axis AND-compose fixture
+# (adds the two NEW v6 sibling LPM axes dst_cidr6 / src_cidr6).
+#
+# Used by §6.71 (T_ANDV6_ORACLE_AGREEMENT) — the OPS canary for the now-LIVE
+# ETH_P_IPV6 datapath arm.
+#
+# schema_version: 2 (ADDITIVE-within-v2 — dst_cidr6/src_cidr6 are the RE-ENABLED
+# IPv6 CIDR match keys per HG-mvp-4.13-1; existing v2 configs parse unchanged).
+# Match grammar is now {mac, dst_cidr, src_cidr, protocol, dst_port, vlan,
+#   dst_cidr6, src_cidr6} (>=1 required). A v6 CIDR string is an IPv6 literal +
+# prefix, e.g. "2001:db8::/48"; omitted ⇒ that v6 axis is wildcard.
+#
+# SYMMETRIC 8-term AND (D-mvp-4.13-Q2): a v4 frame carries NO v6 address, so a
+# rule that CONSTRAINS dst_cidr6/src_cidr6 can never match a v4 frame; a v6
+# frame carries no v4 address, so a v4-only rule (id2) can never match a v6
+# frame. This is the cross-family exclusion proven by §6.73.
+#
+# Rule layout (bit position == id; first-match by lowest id, ffsll):
+#   id 0 : dst_cidr6 2001:db8:1::/48 AND src_cidr6 2001:db8:5::/48 AND tcp
+#          AND dst_port 1000-2000 AND vlan 100        pass  (FULL v6 AND)
+#   id 1 : dst_cidr6 2001:db8:2::/48                  pass  (dst6-only)
+#   id 2 : dst_cidr 10.1.0.0/16                       DROP  (v4-only; cross-family)
+#   id 3 : protocol udp                               pass  (proto-only; addr-wildcard)
+#   default_action: drop
+#
+# DUAL-USE: this fixture also drives §6.73 (T_ANDV6_CROSS_FAMILY) — id2 is the
+# v4-only DROP rule (fires on a v4 frame, MUST NOT fire on a v6 frame) and id1
+# is the v6-only PASS rule (fires on a v6 frame, MUST NOT be reached by a v4
+# frame). id2's `drop` action is irrelevant to §6.71 (which injects ONLY v6
+# frames, so id2 never matches there) and lets §6.73(a) assert STAT_DROP_DENY.
+#
+# The 8-axis v6 AND proof (§6.71): a v6 packet matches id0 only when ALL of its
+# constrained axes (dst6, src6, proto, port, vlan) are satisfied. Drop any one
+# (e.g. wrong vlan) → id0's bit clears from the accumulator and the packet routes
+# elsewhere or to defaults — proving the v6 axes intersect (AND), not union.
+# id1 (dst6-only) proves a v6 rule survives with the other 7 axes wildcard.
+# id2 (v4-only) proves cross-family exclusion (a v6 frame never hits it).
+# id3 (proto-only) is the address-wildcard rule — any v6 (or v4) udp frame hits
+# it via the wildcard halves; a udp frame to 2001:db8:2::/48 ties id1 vs id3 and
+# the LOWER id (1) wins.
+#
+# IMPORTANT: tests/bitvec/bitvec_oracle_prod.py transcribes these rules BY HAND
+# (table RULES_ANDV6). Any edit here MUST be mirrored there — data-independence
+# is intentional (divergence fails the §6.71 agreement test loudly).
+schema_version: 2
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      dst_cidr6: "2001:db8:1::/48"
+      src_cidr6: "2001:db8:5::/48"
+      protocol: tcp
+      dst_port: "1000-2000"
+      vlan: 100
+  - id: 1
+    action: pass
+    match:
+      dst_cidr6: "2001:db8:2::/48"
+  - id: 2
+    action: drop
+    match:
+      dst_cidr: "10.1.0.0/16"
+  - id: 3
+    action: pass
+    match:
+      protocol: udp

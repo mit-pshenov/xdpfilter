@@ -195,6 +195,19 @@ constexpr ManagedMapEntry kManagedMaps[] = {
     { &SkelMapsT::vlan_bitmask_a,   XDPMF_MAP_VLAN_INNER_A_NAME,        false },
     { &SkelMapsT::vlan_bitmask_b,   XDPMF_MAP_VLAN_INNER_B_NAME,        false },
     { &SkelMapsT::vlan_rulesets,    XDPMF_MAP_VLAN_RULESETS_OUTER_NAME, false },
+    /* §5.53 (MVP-4.13) D-mvp-4.13-Q1/MAP-NAMES net +6 (30 → 36): the NEW
+     * IPv6 dst6 + src6 axis ARRAY_OF_MAPS trios (dst6_bitmask_a/_b +
+     * dst6_rulesets, src6_bitmask_a/_b + src6_rulesets, LPM_TRIE inners keyed
+     * by struct xdpmf_cidr_v6) FORKED from the §5.43 dst-CIDR trio. The
+     * `wildcard` ARRAY is UNCHANGED here (its max_entries grows 12→16 via the
+     * BITVEC_NUM_AXES macro, not a new row). All three call-site loops (clear,
+     * pin, reuse) walk this single table — HK-9 dividend collected again. */
+    { &SkelMapsT::dst6_bitmask_a,   XDPMF_MAP_DST6_INNER_A_NAME,        false },
+    { &SkelMapsT::dst6_bitmask_b,   XDPMF_MAP_DST6_INNER_B_NAME,        false },
+    { &SkelMapsT::dst6_rulesets,    XDPMF_MAP_DST6_RULESETS_OUTER_NAME, false },
+    { &SkelMapsT::src6_bitmask_a,   XDPMF_MAP_SRC6_INNER_A_NAME,        false },
+    { &SkelMapsT::src6_bitmask_b,   XDPMF_MAP_SRC6_INNER_B_NAME,        false },
+    { &SkelMapsT::src6_rulesets,    XDPMF_MAP_SRC6_RULESETS_OUTER_NAME, false },
     { &SkelMapsT::active_idx,       XDPMF_MAP_ACTIVE_IDX_NAME,          false },
     { &SkelMapsT::defaults,         XDPMF_MAP_DEFAULTS_NAME,            false },
     { &SkelMapsT::stats,            XDPMF_MAP_STATS_NAME,               false },
@@ -1269,6 +1282,96 @@ struct AxisLowering {
     return out;
 }
 
+/* §5.53 (MVP-4.13) D-mvp-4.13-FORK: the IPv6 sibling of BitPrefix — a v6
+ * constrained prefix carrying the rule's bit. `cidr.addr6` is network byte
+ * order (the LPM_TRIE key shape); `host_addr6` is the host-order `unsigned
+ * __int128` copy used for 128-bit prefix masking in close_prefixes6 (Q1=A1 —
+ * mirrors the v4 cover-direction body so the #1-bug-class invariant is
+ * eyeball-auditable). */
+struct BitPrefix6 {
+    xdpmf_cidr_v6     cidr;
+    unsigned __int128 host_addr6;
+    std::uint64_t     bit;
+};
+
+/* Load the 16 network-order bytes (addr6[0]=MSB) into a host-order __int128. */
+[[nodiscard]] unsigned __int128 host_addr6_of(const xdpmf_cidr_v6& c) noexcept
+{
+    unsigned __int128 v = 0;
+    for (int i = 0; i < 16; ++i) {
+        v = (v << 8) | static_cast<unsigned __int128>(c.addr6[i]);
+    }
+    return v;
+}
+
+/* Host-order 128-bit mask for a v6 prefix length ([0,128]); len==0 → all-zero.
+ * The `/0` shift-by-128 UB site is special-cased (len==0 returns 0); for
+ * len ∈ [1,128] the shift amount (128-len) ∈ [0,127], never 128 (Q1). */
+[[nodiscard]] unsigned __int128 host_mask6(unsigned int prefixlen) noexcept
+{
+    if (prefixlen == 0) {
+        return 0;
+    }
+    return (~static_cast<unsigned __int128>(0)) << (128u - prefixlen);
+}
+
+/* §5.53 FI-1 prefix-closure at 128 bits (guard #23 — the #1 bit-vector trap).
+ * FORKED from close_prefixes: for each P_i, OR in bit_j of every P_j that
+ * COVERS P_i (P_j.prefixlen <= P_i.prefixlen AND P_j == P_i truncated to
+ * P_j.prefixlen), INCLUDING P_i. The LESS-specific (lower-id) covering prefix's
+ * bit flows INTO the MORE-specific entry's stored mask, so a longest-prefix LPM
+ * hit carries every covering rule and ffsll picks the lowest covering id. */
+[[nodiscard]] std::vector<std::uint64_t>
+close_prefixes6(const std::vector<BitPrefix6>& entries)
+{
+    std::vector<std::uint64_t> closed(entries.size(), 0u);
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        const BitPrefix6& pi = entries[i];
+        for (const BitPrefix6& pj : entries) {
+            if (pj.cidr.prefixlen > pi.cidr.prefixlen) {
+                continue;  // pj more specific than pi → cannot cover it
+            }
+            const unsigned __int128 m = host_mask6(pj.cidr.prefixlen);
+            if ((pi.host_addr6 & m) == (pj.host_addr6 & m)) {
+                closed[i] |= pj.bit;  // pj covers pi (incl. pi == pj)
+            }
+        }
+    }
+    return closed;
+}
+
+/* §5.53 per-v6-LPM-axis lowering result — FORK of AxisLowering. */
+struct AxisLowering6 {
+    std::vector<BitPrefix6> prefixes;
+    std::uint64_t           wildcard = 0u;
+};
+
+/* Lower one v6 LPM axis (dst6 or src6). FORK of lower_axis: a rule that sets
+ * the axis contributes a BitPrefix6 at its bit; a rule that does NOT set the
+ * axis contributes its bit to the wildcard mask (family-blind lowering — a
+ * v4-only rule lands in wc_dst6/wc_src6 by this SAME mechanism, the load-
+ * bearing Q2 cross-family fill). id range already validated in config.cpp. */
+[[nodiscard]] AxisLowering6 lower_axis6(const Config& c, bool dst6_axis)
+{
+    AxisLowering6 out;
+    out.prefixes.reserve(c.rules.size());
+    for (const Rule& r : c.rules) {
+        const std::optional<xdpmf_cidr_v6>& axis =
+            dst6_axis ? r.match.dst_cidr6 : r.match.src_cidr6;
+        const std::uint64_t bit = std::uint64_t{1} << r.id;
+        if (axis.has_value()) {
+            BitPrefix6 bp{};
+            bp.cidr       = *axis;
+            bp.host_addr6 = host_addr6_of(*axis);
+            bp.bit        = bit;
+            out.prefixes.push_back(bp);
+        } else {
+            out.wildcard |= bit;  // unconstrained on this axis → wildcard survivor
+        }
+    }
+    return out;
+}
+
 /* §5.50 (MVP-4.10 B28-2) generic per-exact-HASH-axis lowering result — replaces
  * the byte-identical ProtoLowering/VlanLowering structs and the key-only-
  * different MacLowering (D-mvp-4.10-STRUCT). entries[k] = {key, OR of bits of
@@ -1470,6 +1573,48 @@ void populate_bitvec_inner_slot(int inner_fd, const std::vector<BitPrefix>& pref
     }
 }
 
+/* §5.53 (MVP-4.13) D-mvp-4.13-FORK: populate one v6 LPM bit-vector axis inner
+ * (dst6_bitmask_<a|b> OR src6_bitmask_<a|b>) — value = __u64 prefix-closed
+ * bitmask (close_prefixes6). FORK of populate_bitvec_inner_slot with the
+ * xdpmf_cidr_v6 key. Bulk-clear-then-insert; RESET-on-apply (caller passes the
+ * INACTIVE inner fd, writes BEFORE the active_idx flip — NO copy-forward). */
+void populate_bitvec6_inner_slot(int inner_fd, const std::vector<BitPrefix6>& prefixes)
+{
+    xdpmf_cidr_v6 prev{};
+    xdpmf_cidr_v6 cur{};
+    bool          have_prev = false;
+    while (true) {
+        const int rc = bpf_map_get_next_key(inner_fd,
+                                            have_prev ? &prev : nullptr,
+                                            &cur);
+        if (rc != 0) {
+            if (-rc == ENOENT) break;
+            throw_loader(classify(rc, LoaderError::LoadFailed),
+                         std::format("bpf_map_get_next_key(bitvec6_inner): {}",
+                                     std::strerror(-rc)));
+        }
+        const int drc = bpf_map_delete_elem(inner_fd, &cur);
+        if (drc != 0 && -drc != ENOENT) {
+            throw_loader(classify(drc, LoaderError::LoadFailed),
+                         std::format("bpf_map_delete_elem(bitvec6_inner): {}",
+                                     std::strerror(-drc)));
+        }
+        prev      = cur;
+        have_prev = true;
+    }
+    const std::vector<std::uint64_t> closed = close_prefixes6(prefixes);
+    for (std::size_t i = 0; i < prefixes.size(); ++i) {
+        const xdpmf_cidr_v6 key  = prefixes[i].cidr;  // addr6 already network order
+        const std::uint64_t mask = closed[i];
+        const int rc = bpf_map_update_elem(inner_fd, &key, &mask, BPF_ANY);
+        if (rc < 0) {
+            throw_loader(classify(rc, LoaderError::LoadFailed),
+                         std::format("bpf_map_update_elem(bitvec6_inner): {}",
+                                     std::strerror(-rc)));
+        }
+    }
+}
+
 /* §5.50 (MVP-4.10 B28-1): the §5.44 proto-axis populate (former
  * `populate_proto_inner_slot`) and the §5.45 vlan-axis populate (former
  * `populate_vlan_inner_slot`) are now folded into the generic
@@ -1520,16 +1665,18 @@ void populate_port_inner_slot(int inner_fd, const std::vector<xdpmf_port_range>&
 }
 
 /* §5.43 (MVP-4.3) D-mvp-4.3-Q2 + §5.44 (MVP-4.4) D-mvp-4.4-Q4 + §5.45 (MVP-4.5)
- * D-mvp-4.5-Q3 + §5.47 (MVP-4.7) D-mvp-4.7-Q4: write the INACTIVE half of the
- * single combined `wildcard` ARRAY before the active_idx flip — all SIX axis
- * slots [inactive*BITVEC_NUM_AXES + {DST,SRC,PROTO,PORT,VLAN,MAC}]. The RESET-
- * write (no copy-forward) parallels populate_bitvec_inner_slot; the single
- * active_idx u32 store commits the wildcard swap together with the
- * dst/src/proto/port/vlan/mac/defaults/rules/rule_counters swap. */
+ * D-mvp-4.5-Q3 + §5.47 (MVP-4.7) D-mvp-4.7-Q4 + §5.53 (MVP-4.13) D-mvp-4.13-Q2:
+ * write the INACTIVE half of the single combined `wildcard` ARRAY before the
+ * active_idx flip — all EIGHT axis slots [inactive*BITVEC_NUM_AXES +
+ * {DST,SRC,PROTO,PORT,VLAN,MAC,DST6,SRC6}]. The RESET-write (no copy-forward)
+ * parallels populate_bitvec_inner_slot; the single active_idx u32 store commits
+ * the wildcard swap together with the dst/src/proto/port/vlan/mac/dst6/src6/
+ * defaults/rules/rule_counters swap. */
 void write_wildcard_slots(int wildcard_fd, std::uint32_t inactive,
                           std::uint64_t wc_dst, std::uint64_t wc_src,
                           std::uint64_t wc_proto, std::uint64_t wc_port,
-                          std::uint64_t wc_vlan, std::uint64_t wc_mac)
+                          std::uint64_t wc_vlan, std::uint64_t wc_mac,
+                          std::uint64_t wc_dst6, std::uint64_t wc_src6)
 {
     const struct {
         std::uint32_t axis;
@@ -1542,6 +1689,8 @@ void write_wildcard_slots(int wildcard_fd, std::uint32_t inactive,
         { BV_AXIS_PORT,  wc_port,  "port"  },
         { BV_AXIS_VLAN,  wc_vlan,  "vlan"  },
         { BV_AXIS_MAC,   wc_mac,   "mac"   },
+        { BV_AXIS_DST6,  wc_dst6,  "dst6"  },
+        { BV_AXIS_SRC6,  wc_src6,  "src6"  },
     };
     for (const auto& s : slots) {
         const std::uint32_t key = inactive * BITVEC_NUM_AXES + s.axis;
@@ -1745,6 +1894,8 @@ void populate_all_axes(mac_filter_bpf* skel, std::uint32_t slot,
                        const ProtoLowering&      proto_low,
                        const PortLowering&       port_low,
                        const VlanLowering&       vlan_low,
+                       const AxisLowering6&      dst6_low,
+                       const AxisLowering6&      src6_low,
                        const std::vector<Rule>&  rules,
                        DefaultAction             default_action)
 {
@@ -1778,6 +1929,16 @@ void populate_all_axes(mac_filter_bpf* skel, std::uint32_t slot,
         inactive_axis_fd(skel->maps.vlan_bitmask_a, skel->maps.vlan_bitmask_b, slot,
                          "inactive vlan inner fd unavailable"),
         vlan_low.entries, "vlan");
+    // §5.53 dst6 — paired dst6_bitmask_a/_b LPM bit-vector (v6 key)
+    populate_bitvec6_inner_slot(
+        inactive_axis_fd(skel->maps.dst6_bitmask_a, skel->maps.dst6_bitmask_b, slot,
+                         "inactive dst6 inner fd unavailable"),
+        dst6_low.prefixes);
+    // §5.53 src6 — paired src6_bitmask_a/_b LPM bit-vector (v6 key)
+    populate_bitvec6_inner_slot(
+        inactive_axis_fd(skel->maps.src6_bitmask_a, skel->maps.src6_bitmask_b, slot,
+                         "inactive src6 inner fd unavailable"),
+        src6_low.prefixes);
     // 7 wildcard — SINGLE map indexed by slot (D-mvp-4.8-FD-HELPER-SCOPE)
     {
         const int wildcard_fd = bpf_map__fd(skel->maps.wildcard);
@@ -1787,7 +1948,8 @@ void populate_all_axes(mac_filter_bpf* skel, std::uint32_t slot,
         write_wildcard_slots(wildcard_fd, slot,
                              dst_low.wildcard, src_low.wildcard,
                              proto_low.wildcard, port_low.wildcard,
-                             vlan_low.wildcard, mac_low.wildcard);
+                             vlan_low.wildcard, mac_low.wildcard,
+                             dst6_low.wildcard, src6_low.wildcard);
     }
     // 8 defaults — SINGLE map indexed by slot
     {
@@ -2011,6 +2173,11 @@ std::uint32_t apply_request(const ApplyRequest& req)
         });
     const AxisLowering         dst_low     = lower_axis(req.config, /*dst_axis=*/true);
     const AxisLowering         src_low     = lower_axis(req.config, /*dst_axis=*/false);
+    // §5.53 (MVP-4.13): lower the two NEW IPv6 LPM axes (dst6/src6). FORKED
+    // siblings of the v4 dst/src lowering; family-blind (a v4-only rule lands
+    // in wc_dst6/wc_src6, the load-bearing Q2 cross-family fill).
+    const AxisLowering6        dst6_low    = lower_axis6(req.config, /*dst6_axis=*/true);
+    const AxisLowering6        src6_low    = lower_axis6(req.config, /*dst6_axis=*/false);
     // §5.44 (MVP-4.4): lower the two NEW axes (proto exact-HASH, dst_port
     // range) alongside the §5.43 LPM axes. NO closure (D-mvp-4.4-NO-CLOSURE).
     const ProtoLowering        proto_low   = aggregate_axis<std::uint32_t>(
@@ -2044,6 +2211,16 @@ std::uint32_t apply_request(const ApplyRequest& req)
         throw_loader(LoaderError::LoadFailed,
                      std::format("apply: src-cidr-rule count {} exceeds XDPMF_ALLOWLIST_MAX={}",
                                  src_low.prefixes.size(), XDPMF_ALLOWLIST_MAX));
+    }
+    if (dst6_low.prefixes.size() > XDPMF_ALLOWLIST_MAX) {
+        throw_loader(LoaderError::LoadFailed,
+                     std::format("apply: dst-cidr6-rule count {} exceeds XDPMF_ALLOWLIST_MAX={}",
+                                 dst6_low.prefixes.size(), XDPMF_ALLOWLIST_MAX));
+    }
+    if (src6_low.prefixes.size() > XDPMF_ALLOWLIST_MAX) {
+        throw_loader(LoaderError::LoadFailed,
+                     std::format("apply: src-cidr6-rule count {} exceeds XDPMF_ALLOWLIST_MAX={}",
+                                 src6_low.prefixes.size(), XDPMF_ALLOWLIST_MAX));
     }
     // §5.44 (MVP-4.4): the port axis stores one ARRAY slot per port-constrained
     // rule (bounded by XDPMF_ALLOWLIST_MAX inner slots). The proto axis
@@ -2245,8 +2422,8 @@ std::uint32_t apply_request(const ApplyRequest& req)
         // static) + copy_rule_counters_forward (PRESERVE) stay EXPLICIT below
         // (guard #15 / D-mvp-4.8-BOUNDARY).
         populate_all_axes(skel.get(), inactive, mac_low, dst_low, src_low,
-                          proto_low, port_low, vlan_low, req.config.rules,
-                          default_action);
+                          proto_low, port_low, vlan_low, dst6_low, src6_low,
+                          req.config.rules, default_action);
         // §5.29 (MVP-3.4) step 8.5: `action_table` STAYS SHARED per
         // §5.34 HG-3.4b-c2-3 / D-3.4b-c2-6 — values are static
         // {PASS=0, DROP=1}, never mutate at runtime; atomic-swap meaningless.
@@ -2372,7 +2549,8 @@ std::uint32_t apply_request(const ApplyRequest& req)
     // the `_a` inners (inactive_axis_fd). populate_action_table + the self-copy
     // copy_rule_counters_forward stay EXPLICIT below (guard #15).
     populate_all_axes(skel.get(), 0u, mac_low, dst_low, src_low, proto_low,
-                      port_low, vlan_low, req.config.rules, default_action);
+                      port_low, vlan_low, dst6_low, src6_low, req.config.rules,
+                      default_action);
     // §5.29 (MVP-3.4) step 8.5: `action_table` STAYS SHARED per §5.34
     // HG-3.4b-c2-3 / D-3.4b-c2-6 — static {PASS=0, DROP=1} mapping.
     {

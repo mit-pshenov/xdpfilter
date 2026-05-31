@@ -362,36 +362,41 @@ Config validate(const yaml::Node& root, std::string_view file)
                     throw_cfg("rule match", file, match->line, match->col,
                               "rule.match must be a mapping");
                 }
-                // §5.47 (MVP-4.7) v2 match grammar: the accepted match-key set
-                // is the 6 axes {mac, dst_cidr, src_cidr, protocol, dst_port,
-                // vlan}. Any other key → ConfigError exit 9 (fail loud, not a
-                // silent no-op the operator believes is live). (Per-axis grammar
-                // lineage §5.43–§5.47 lives in git/RETROSPECTIVES.)
+                // §5.53 (MVP-4.13) v2 match grammar: the accepted match-key set
+                // is the 8 axes {mac, dst_cidr, src_cidr, protocol, dst_port,
+                // vlan, dst_cidr6, src_cidr6}. Any other key → ConfigError exit 9
+                // (fail loud, not a silent no-op the operator believes is live).
+                // (Per-axis grammar lineage §5.43–§5.53 lives in git/RETROSPECTIVES.)
                 for (const std::pair<std::string, yaml::Node>& kv : match->mapping) {
                     if (kv.first != "mac" && kv.first != "dst_cidr"
                         && kv.first != "src_cidr" && kv.first != "protocol"
-                        && kv.first != "dst_port" && kv.first != "vlan") {
+                        && kv.first != "dst_port" && kv.first != "vlan"
+                        && kv.first != "dst_cidr6" && kv.first != "src_cidr6") {
                         throw_cfg("unsupported match type", file,
                                   kv.second.line, kv.second.col,
                                   std::format("match type '{}' not supported in schema_version 2",
                                               kv.first));
                     }
                 }
-                // §5.47 v2 match grammar: each rule's match MUST contain AT
+                // §5.53 v2 match grammar: each rule's match MUST contain AT
                 // LEAST ONE of {mac, dst_cidr, src_cidr, protocol, dst_port,
-                // vlan}. Empty match: {} → exit 9.
-                const yaml::Node* mac_node      = find_key(*match, "mac");
-                const yaml::Node* dst_cidr_node = find_key(*match, "dst_cidr");
-                const yaml::Node* src_cidr_node = find_key(*match, "src_cidr");
-                const yaml::Node* protocol_node = find_key(*match, "protocol");
-                const yaml::Node* dst_port_node = find_key(*match, "dst_port");
-                const yaml::Node* vlan_node     = find_key(*match, "vlan");
+                // vlan, dst_cidr6, src_cidr6}. Empty match: {} → exit 9.
+                const yaml::Node* mac_node       = find_key(*match, "mac");
+                const yaml::Node* dst_cidr_node  = find_key(*match, "dst_cidr");
+                const yaml::Node* src_cidr_node  = find_key(*match, "src_cidr");
+                const yaml::Node* protocol_node  = find_key(*match, "protocol");
+                const yaml::Node* dst_port_node  = find_key(*match, "dst_port");
+                const yaml::Node* vlan_node      = find_key(*match, "vlan");
+                const yaml::Node* dst_cidr6_node = find_key(*match, "dst_cidr6");
+                const yaml::Node* src_cidr6_node = find_key(*match, "src_cidr6");
                 if (mac_node == nullptr && dst_cidr_node == nullptr
                     && src_cidr_node == nullptr && protocol_node == nullptr
-                    && dst_port_node == nullptr && vlan_node == nullptr) {
+                    && dst_port_node == nullptr && vlan_node == nullptr
+                    && dst_cidr6_node == nullptr && src_cidr6_node == nullptr) {
                     throw_cfg("rule match", file, match->line, match->col,
                               "rule must specify at least one of "
-                              "'mac', 'dst_cidr', 'src_cidr', 'protocol', 'dst_port', 'vlan'");
+                              "'mac', 'dst_cidr', 'src_cidr', 'protocol', 'dst_port', "
+                              "'vlan', 'dst_cidr6', 'src_cidr6'");
                 }
                 // §5.47 D-mvp-4.7-MAC-PARSER: canonical 17-char src-MAC → exact axis.
                 if (mac_node != nullptr) {
@@ -441,6 +446,29 @@ Config validate(const yaml::Node& root, std::string_view file)
                 // outer VID ∈ [0,4095]; exact-match. Out-of-range → exit 9.
                 if (vlan_node != nullptr) {
                     r.match.vlan = parse_vlan(*vlan_node, file);
+                }
+                // §5.53 (MVP-4.13) D-mvp-4.13-Q1: `dst_cidr6`/`src_cidr6` parse
+                // via cidr::parse_cidr_v6 (IPv6 CIDR; prefix [0,128]; host-bits-
+                // zero enforced). Mirrors the v4 dst_cidr/src_cidr blocks.
+                if (dst_cidr6_node != nullptr) {
+                    if (dst_cidr6_node->kind != yaml::Node::Kind::Scalar) {
+                        throw_cfg("rule match dst_cidr6", file,
+                                  dst_cidr6_node->line, dst_cidr6_node->col,
+                                  "rule.match.dst_cidr6 must be a string");
+                    }
+                    r.match.dst_cidr6 = cidr::parse_cidr_v6(
+                        dst_cidr6_node->scalar, file,
+                        dst_cidr6_node->line, dst_cidr6_node->col);
+                }
+                if (src_cidr6_node != nullptr) {
+                    if (src_cidr6_node->kind != yaml::Node::Kind::Scalar) {
+                        throw_cfg("rule match src_cidr6", file,
+                                  src_cidr6_node->line, src_cidr6_node->col,
+                                  "rule.match.src_cidr6 must be a string");
+                    }
+                    r.match.src_cidr6 = cidr::parse_cidr_v6(
+                        src_cidr6_node->scalar, file,
+                        src_cidr6_node->line, src_cidr6_node->col);
                 }
 
                 // Reject unknown sibling keys in the rule (forward-compat hinge).

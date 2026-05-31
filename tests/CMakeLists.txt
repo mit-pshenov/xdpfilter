@@ -1302,3 +1302,57 @@ set_tests_properties(T_MAC_MERGE_ORACLE_AGREEMENT PROPERTIES
     TIMEOUT 120
     SKIP_RETURN_CODE 77
 )
+
+# ── §5.53 MVP-4.13 / S4: IPv6 CIDR matching axes (dst6/src6 sibling LPM) ─────
+# Three NEW datapath ctests for the now-LIVE ETH_P_IPV6 arm (guard #12: all
+# touch veth/netns/bpffs → RESOURCE_LOCK xdp_fixture; SKIP_RETURN_CODE 77).
+# They drive REAL IPv6 frames via tests/inject/inject_l6.py (S2, §5.52) and the
+# v4-frame cross-family probe via tests/inject/inject_ipv4.py.
+#   T_ANDV6_ORACLE_AGREEMENT (§6.71): table-driven 8-axis datapath-vs-oracle —
+#     the OPS canary for the v6 classification path. Needs AND_ORACLE_PROD
+#     (--ruleset andv6, 128-bit-domain v6 masking) + INJECT_L6.
+#   T_ANDV6_PREFIX_CLOSURE_OVERLAP (§6.72): guard #23 #1-bug-class canary at 128
+#     bits — v6 cover-direction + first-match-by-id across /40,/68,/127 (mid-limb).
+#     Hardcoded verdict (no oracle table). Needs INJECT_L6.
+#   T_ANDV6_CROSS_FAMILY (§6.73): the D-mvp-4.13-Q2 symmetric-wildcard proof —
+#     a v4-only rule fires on v4 (not zeroed by the new v6 terms) and is excluded
+#     from v6 frames; a v6-only rule fires on v6. Needs INJECT_IPV4 + INJECT_L6.
+set(TEST_ENV_ANDV6
+    ${TEST_ENV}
+    "AND_ORACLE_PROD=${CMAKE_SOURCE_DIR}/tests/bitvec/bitvec_oracle_prod.py"
+    "INJECT_L6=${CMAKE_SOURCE_DIR}/tests/inject/inject_l6.py"
+    "INJECT_IPV4=${CMAKE_SOURCE_DIR}/tests/inject/inject_ipv4.py"
+)
+add_test(
+    NAME T_ANDV6_ORACLE_AGREEMENT
+    COMMAND bash ${TEST_DIR}/T_ANDV6_ORACLE_AGREEMENT.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_ANDV6_ORACLE_AGREEMENT PROPERTIES
+    ENVIRONMENT "${TEST_ENV_ANDV6}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 120
+    SKIP_RETURN_CODE 77
+)
+add_test(
+    NAME T_ANDV6_PREFIX_CLOSURE_OVERLAP
+    COMMAND bash ${TEST_DIR}/T_ANDV6_PREFIX_CLOSURE_OVERLAP.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_ANDV6_PREFIX_CLOSURE_OVERLAP PROPERTIES
+    ENVIRONMENT "${TEST_ENV_ANDV6}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 120
+    SKIP_RETURN_CODE 77
+)
+add_test(
+    NAME T_ANDV6_CROSS_FAMILY
+    COMMAND bash ${TEST_DIR}/T_ANDV6_CROSS_FAMILY.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_ANDV6_CROSS_FAMILY PROPERTIES
+    ENVIRONMENT "${TEST_ENV_ANDV6}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 120
+    SKIP_RETURN_CODE 77
+)

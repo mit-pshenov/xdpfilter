@@ -212,6 +212,48 @@ struct {
 } wildcard SEC(".maps");
 
 /*
+ * §5.53 (MVP-4.13) D-mvp-4.13-Q1: NEW IPv6 dst/src-CIDR axes — two fresh
+ * ARRAY_OF_MAPS[2] LPM trios (dst6 + src6) FORKED from the §5.43 v4 dst trio.
+ * Inner LPM_TRIE templates keyed by `struct xdpmf_cidr_v6` (prefixlen-first,
+ * addr6[16] in network byte order) hold `__u64` prefix-closed bitmasks
+ * (close_prefixes6). The outers select the active inner via the SAME shared
+ * active_idx; a single u32 store commits dst6/src6 with the other axes' swap.
+ */
+struct xdpmf_dst6_inner {
+    __uint(type, BPF_MAP_TYPE_LPM_TRIE);
+    __type(key, struct xdpmf_cidr_v6);
+    __type(value, __u64);
+    __uint(max_entries, XDPMF_ALLOWLIST_MAX);
+    __uint(map_flags, BPF_F_NO_PREALLOC);
+};
+
+struct xdpmf_dst6_inner dst6_bitmask_a SEC(".maps");
+struct xdpmf_dst6_inner dst6_bitmask_b SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
+    __uint(max_entries, XDPMF_RULESET_COUNT);
+    __uint(key_size, sizeof(__u32));
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+    __array(values, struct xdpmf_dst6_inner);
+} dst6_rulesets SEC(".maps") = {
+    .values = { &dst6_bitmask_a, &dst6_bitmask_b },
+};
+
+struct xdpmf_dst6_inner src6_bitmask_a SEC(".maps");
+struct xdpmf_dst6_inner src6_bitmask_b SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
+    __uint(max_entries, XDPMF_RULESET_COUNT);
+    __uint(key_size, sizeof(__u32));
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+    __array(values, struct xdpmf_dst6_inner);
+} src6_rulesets SEC(".maps") = {
+    .values = { &src6_bitmask_a, &src6_bitmask_b },
+};
+
+/*
  * §5.44 (MVP-4.4) D-mvp-4.4-Q1: NEW proto axis — an ARRAY_OF_MAPS[2] of HASH
  * inners (proto_bitmask_a/_b + proto_rulesets) mirroring the §5.27 allowlist/
  * rulesets HASH-AOM topology (only key/value types differ: __u32 IP-protocol
@@ -758,6 +800,25 @@ int mac_filter_prog(struct xdp_md *ctx)
         if (wc_mac_p) {
             wc_mac = *wc_mac_p;
         }
+        /* §5.53 (MVP-4.13) C1: the v6 address axes' wildcard halves. A v4
+         * frame has NO v6 address ⇒ the dst6/src6 LPM survivors are 0 ⇒ those
+         * two AND-terms reduce to `& wc_dst6 & wc_src6`. A v4-only rule lives
+         * in wc_dst6/wc_src6 (family-blind lowering) so these terms are
+         * all-ones no-ops for v4-only configs (PI-mvp-4.13-IPV4-VERDICT); a
+         * v6-only rule is ABSENT from wc_dst6/wc_src6 ⇒ excluded from v4
+         * traffic (PI-mvp-4.13-CROSS-FAMILY). */
+        __u64 wc_dst6 = 0;
+        __u64 wc_src6 = 0;
+        __u32 wc_dst6_key = active * BITVEC_NUM_AXES + BV_AXIS_DST6;
+        __u32 wc_src6_key = active * BITVEC_NUM_AXES + BV_AXIS_SRC6;
+        __u64 *wc_dst6_p = bpf_map_lookup_elem(&wildcard, &wc_dst6_key);
+        if (wc_dst6_p) {
+            wc_dst6 = *wc_dst6_p;
+        }
+        __u64 *wc_src6_p = bpf_map_lookup_elem(&wildcard, &wc_src6_key);
+        if (wc_src6_p) {
+            wc_src6 = *wc_src6_p;
+        }
 
         /* /32 host-route LPM keys (network byte order, matches LPM_TRIE key
          * shape). LPM_TRIE returns the longest matching prefix's value — the
@@ -832,7 +893,9 @@ int mac_filter_prog(struct xdp_md *ctx)
                     (proto_mask | wc_proto) &
                     (port_mask  | wc_port)  &
                     (vlan_mask  | wc_vlan)  &
-                    (mac_mask   | wc_mac);
+                    (mac_mask   | wc_mac)   &
+                    wc_dst6                 &
+                    wc_src6;
         if (acc != 0) {
             /* HG-mvp-4.3-4 first-match-by-id: the lowest set bit IS the lowest
              * matching rule id (bit position == id), so ffsll picks it for
@@ -859,12 +922,213 @@ int mac_filter_prog(struct xdp_md *ctx)
         }
         /* acc == 0 → no rule matched; fall through to defaults[active]. */
     } else if (inner_proto == bpf_htons(ETH_P_IPV6)) {
-        /* §5.51 (MVP-4.11 / S1) D-mvp-4.11-IPV6-EMPTY (Q1=A1): EtherType-dispatch
-         * seam. Recognized family, NO classification this slice — no deref, no
-         * early return. Control falls through to defaults[active] below, exactly
-         * as a 0x86DD frame did before the reshape (PI-mvp-4.11-IPV6-DEFAULTS).
-         * S4 (cidr6) lands its IPv6 classification axes HERE — WITH the ipv6hdr
-         * bounds-check and its deref (forward-defense note §5.51). */
+        /* §5.53 (MVP-4.13 / S4) D-mvp-4.13-Q2: the IPv6 classification arm.
+         * Symmetric 8-term AND mirroring the v4 arm; the v4 address axes
+         * contribute wildcard-only halves (no v4 address in a v6 frame), and
+         * dst6/src6 carry the IPv6 LPM survivors. Base-header only — proto sees
+         * ip6->nexthdr (first nexthdr), port reads the L4 header at the fixed
+         * 40B base offset; extension-header chains are NOT walked (S6 boundary,
+         * PI-mvp-4.13-BASE-HEADER). */
+
+        /* Verifier-required IPv6 base-header bounds check before nexthdr/addr
+         * deref — the ONLY MALFORMED path for a 0x86DD frame
+         * (D-mvp-4.13-NO-MALFORMED-NONV6). */
+        if (unlikely(l3hdr + sizeof(struct ipv6hdr) > data_end)) {
+            bump_stat(STAT_DROP_MALFORMED);
+            return XDP_DROP;
+        }
+        struct ipv6hdr *ip6 = (struct ipv6hdr *)l3hdr;
+
+        /* Base nexthdr only (no ext-header walk). */
+        __u8 proto = ip6->nexthdr;
+
+        /* L4 sits at the fixed 40B base-header offset. dport read only for
+         * TCP/UDP after an explicit L4-header bounds-check (has_port); other
+         * frames keep has_port=0 → port_mask=0 (only port-wildcard rules
+         * survive), mirroring the v4 arm's has_port logic. */
+        void *l4 = (void *)(ip6 + 1);
+        __u32 dport    = 0;
+        int   has_port = 0;
+        if (proto == IPPROTO_TCP) {
+            struct tcphdr *t = l4;
+            if (unlikely((void *)(t + 1) > data_end)) {
+                bump_stat(STAT_DROP_MALFORMED);
+                return XDP_DROP;
+            }
+            dport    = bpf_ntohs(t->dest);
+            has_port = 1;
+        } else if (proto == IPPROTO_UDP) {
+            struct udphdr *u = l4;
+            if (unlikely((void *)(u + 1) > data_end)) {
+                bump_stat(STAT_DROP_MALFORMED);
+                return XDP_DROP;
+            }
+            dport    = bpf_ntohs(u->dest);
+            has_port = 1;
+        }
+
+        /* Per-axis active inners via the shared `active` snapshot. */
+        void *dst6_inner = bpf_map_lookup_elem(&dst6_rulesets, &active);
+        if (unlikely(!dst6_inner)) {
+            bump_stat(STAT_DROP_DENY);
+            return XDP_DROP;
+        }
+        void *src6_inner = bpf_map_lookup_elem(&src6_rulesets, &active);
+        if (unlikely(!src6_inner)) {
+            bump_stat(STAT_DROP_DENY);
+            return XDP_DROP;
+        }
+        void *proto_inner = bpf_map_lookup_elem(&proto_rulesets, &active);
+        if (unlikely(!proto_inner)) {
+            bump_stat(STAT_DROP_DENY);
+            return XDP_DROP;
+        }
+        void *port_inner = bpf_map_lookup_elem(&port_rulesets, &active);
+        if (unlikely(!port_inner)) {
+            bump_stat(STAT_DROP_DENY);
+            return XDP_DROP;
+        }
+        void *vlan_inner = bpf_map_lookup_elem(&vlan_rulesets, &active);
+        if (unlikely(!vlan_inner)) {
+            bump_stat(STAT_DROP_DENY);
+            return XDP_DROP;
+        }
+        void *mac_inner = bpf_map_lookup_elem(&rulesets, &active);
+        if (unlikely(!mac_inner)) {
+            bump_stat(STAT_DROP_DENY);
+            return XDP_DROP;
+        }
+
+        /* All 8 wildcard halves. The v4 address axes (dst/src) contribute
+         * wildcard-only here: a v6 frame has NO v4 address ⇒ dst/src LPM
+         * survivors are 0 ⇒ `& (0|wc_dst) & (0|wc_src)` = `& wc_dst & wc_src`.
+         * A v4-only rule is ABSENT from wc_dst/wc_src ⇒ excluded from v6
+         * traffic (PI-mvp-4.13-CROSS-FAMILY). */
+        __u64 wc_dst   = 0;
+        __u64 wc_src   = 0;
+        __u64 wc_proto = 0;
+        __u64 wc_port  = 0;
+        __u64 wc_vlan  = 0;
+        __u64 wc_mac   = 0;
+        __u64 wc_dst6  = 0;
+        __u64 wc_src6  = 0;
+        __u32 wc_dst_key   = active * BITVEC_NUM_AXES + BV_AXIS_DST;
+        __u32 wc_src_key   = active * BITVEC_NUM_AXES + BV_AXIS_SRC;
+        __u32 wc_proto_key = active * BITVEC_NUM_AXES + BV_AXIS_PROTO;
+        __u32 wc_port_key  = active * BITVEC_NUM_AXES + BV_AXIS_PORT;
+        __u32 wc_vlan_key  = active * BITVEC_NUM_AXES + BV_AXIS_VLAN;
+        __u32 wc_mac_key   = active * BITVEC_NUM_AXES + BV_AXIS_MAC;
+        __u32 wc_dst6_key  = active * BITVEC_NUM_AXES + BV_AXIS_DST6;
+        __u32 wc_src6_key  = active * BITVEC_NUM_AXES + BV_AXIS_SRC6;
+        __u64 *wc_dst_p = bpf_map_lookup_elem(&wildcard, &wc_dst_key);
+        if (wc_dst_p) {
+            wc_dst = *wc_dst_p;
+        }
+        __u64 *wc_src_p = bpf_map_lookup_elem(&wildcard, &wc_src_key);
+        if (wc_src_p) {
+            wc_src = *wc_src_p;
+        }
+        __u64 *wc_proto_p = bpf_map_lookup_elem(&wildcard, &wc_proto_key);
+        if (wc_proto_p) {
+            wc_proto = *wc_proto_p;
+        }
+        __u64 *wc_port_p = bpf_map_lookup_elem(&wildcard, &wc_port_key);
+        if (wc_port_p) {
+            wc_port = *wc_port_p;
+        }
+        __u64 *wc_vlan_p = bpf_map_lookup_elem(&wildcard, &wc_vlan_key);
+        if (wc_vlan_p) {
+            wc_vlan = *wc_vlan_p;
+        }
+        __u64 *wc_mac_p = bpf_map_lookup_elem(&wildcard, &wc_mac_key);
+        if (wc_mac_p) {
+            wc_mac = *wc_mac_p;
+        }
+        __u64 *wc_dst6_p = bpf_map_lookup_elem(&wildcard, &wc_dst6_key);
+        if (wc_dst6_p) {
+            wc_dst6 = *wc_dst6_p;
+        }
+        __u64 *wc_src6_p = bpf_map_lookup_elem(&wildcard, &wc_src6_key);
+        if (wc_src6_p) {
+            wc_src6 = *wc_src6_p;
+        }
+
+        /* /128 host-route v6 LPM keys: addr6 is network byte order
+         * (addr6[0]=MSB), memcpy'd straight from ip6->daddr/saddr (no swap —
+         * PI-mvp-4.13-V6KEY). LPM_TRIE returns the longest matching prefix's
+         * prefix-closed __u64 bitmask (close_prefixes6). NULL → 0. */
+        struct xdpmf_cidr_v6 dst6_key = { .prefixlen = 128u };
+        struct xdpmf_cidr_v6 src6_key = { .prefixlen = 128u };
+        __builtin_memcpy(dst6_key.addr6, &ip6->daddr, 16);
+        __builtin_memcpy(src6_key.addr6, &ip6->saddr, 16);
+        __u64 dmask6 = 0;
+        __u64 smask6 = 0;
+        __u64 *dm6 = bpf_map_lookup_elem(dst6_inner, &dst6_key);
+        if (dm6) {
+            dmask6 = *dm6;
+        }
+        __u64 *sm6 = bpf_map_lookup_elem(src6_inner, &src6_key);
+        if (sm6) {
+            smask6 = *sm6;
+        }
+
+        /* proto exact-HASH (NO closure); port bounded range-scan only for
+         * TCP/UDP; vlan exact-HASH only when the frame carried a tag. */
+        __u32 proto_key = proto;
+        __u64 proto_mask = 0;
+        __u64 *pm = bpf_map_lookup_elem(proto_inner, &proto_key);
+        if (pm) {
+            proto_mask = *pm;
+        }
+        __u64 port_mask = has_port ? port_scan(port_inner, dport) : 0;
+        __u32 vlan_key = (__u32)vlan_id;
+        __u64 vlan_mask = 0;
+        if (has_vlan) {
+            __u64 *vm = bpf_map_lookup_elem(vlan_inner, &vlan_key);
+            if (vm) {
+                vlan_mask = *vm;
+            }
+        }
+
+        /* src-MAC exact-HASH (eth->h_source, VLAN-agnostic base offset). */
+        struct xdpmf_mac mac_key = {0};
+        __builtin_memcpy(mac_key.octets, eth->h_source, 6);
+        __u64 mac_mask = 0;
+        __u64 *mm = bpf_map_lookup_elem(mac_inner, &mac_key);
+        if (mm) {
+            mac_mask = *mm;
+        }
+
+        /* Symmetric 8-term AND (Q2): v4 address axes are wildcard-only here. */
+        __u64 acc = wc_dst                  &
+                    wc_src                  &
+                    (proto_mask | wc_proto) &
+                    (port_mask  | wc_port)  &
+                    (vlan_mask  | wc_vlan)  &
+                    (mac_mask   | wc_mac)   &
+                    (dmask6     | wc_dst6)  &
+                    (smask6     | wc_src6);
+        if (acc != 0) {
+            /* first-match-by-id + the reused rules_outer → rules_inner →
+             * action_table dispatch (identical to the v4 arm). */
+            __u32 rid = first_set_u64(acc) - 1;
+            bump_rule(rid, active);
+            void *rules_inner_map = bpf_map_lookup_elem(&rules_outer, &active);
+            if (rules_inner_map) {
+                struct rule_entry *r = bpf_map_lookup_elem(rules_inner_map, &rid);
+                if (r && r->present) {
+                    __u32 aid = r->action_id;
+                    struct action_entry *a = bpf_map_lookup_elem(&action_table, &aid);
+                    if (a && a->action_type == ACTION_DROP) {
+                        bump_stat(STAT_DROP_DENY);
+                        return XDP_DROP;
+                    }
+                }
+            }
+            bump_stat(STAT_PASS_CIDR);
+            return XDP_PASS;
+        }
+        /* acc == 0 → no rule matched; fall through to defaults[active]. */
     }
 
     /* No match (non-IPv4, or IPv4 with acc==0) — consult defaults[active].

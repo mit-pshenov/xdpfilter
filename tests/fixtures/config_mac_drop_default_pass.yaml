@@ -1,13 +1,22 @@
-# config_mac_drop_default_pass.yaml — §5.47 MVP-4.7 IPv4-gate boundary fixture.
+# config_mac_drop_default_pass.yaml — MAC-only DROP boundary fixture.
 #
 # default_action: pass; a single MAC-only DROP rule. This INVERTS the usual
-# polarity so the IPv4-gate semantic (D-mvp-4.7-Q2-GATE) becomes observable:
+# polarity so the match semantics become observable via STAT_DROP_DENY deltas:
 #   - an IPv4 frame from MAC 02:00:00:00:00:01 → MAC rule fires → DROP.
-#   - a NON-IPv4 frame (e.g. EtherType 0x88B5 via inject_eth.py) from the SAME
-#     MAC → falls through to defaults (= pass), NOT dropped. The rule-model is
-#     IPv4-gated; a MAC rule matches IPv4 frames ONLY.
-# A datapath that (wrongly) applied the MAC drop rule to non-IPv4 frames would
-# DROP the 0x88B5 frame → the test's STAT_DROP_DENY-delta==0 assertion trips it.
+#   - a NON-IP frame (e.g. EtherType 0x88B5 via inject_eth.py) from the SAME
+#     MAC → matches NEITHER classification arm → falls through to defaults
+#     (= pass), NOT dropped (covered by T_MAC_NON_IP).
+#
+# §5.53 (MVP-4.13 / S4) SEMANTIC UPDATE — the MAC axis is FAMILY-AGNOSTIC.
+# Under the Q2 symmetric 8-term AND, `mac` is one of the 8 axes composed in
+# BOTH the IPv4 and IPv6 arms. A mac-only rule wildcards the other 7 axes, so it
+# matches ANY frame (IPv4 OR IPv6) whose src-MAC equals the rule's MAC:
+#   - an IPv6 frame from MAC 02:00:00:00:00:01 → MAC rule ALSO fires → DROP.
+#     (This was NOT true pre-S4: the S1/S2 era had an IPv4-only gate. The old
+#     "MAC matches IPv4 frames ONLY" comment is RETIRED — see D-mvp-4.13-Q2 +
+#     the §5.53 ⚠ S4-SUPERSEDED note. T_IPV6_INJECT_DEFAULT proves the v6 drop;
+#     T_IPV6_GATE_DEFAULT uses a NON-matching MAC to prove the no-match→defaults
+#     fallthrough for well-formed v6.)
 schema_version: 2
 default_action: pass
 rules:

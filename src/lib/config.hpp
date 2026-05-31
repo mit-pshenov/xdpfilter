@@ -48,6 +48,8 @@ struct RuleMatch {
     std::optional<std::uint8_t>  protocol;  // §5.44 NEW (MVP-4.4) — L4 proto axis (exact-match; tcp/udp/icmp/numeric)
     std::optional<PortRange>     dst_port;  // §5.44 NEW (MVP-4.4) — L4 dst-port axis (inclusive range)
     std::optional<std::uint16_t> vlan;      // §5.45 NEW (MVP-4.5) — outer 802.1Q VID axis (exact-match; [0,4095])
+    std::optional<xdpmf_cidr_v6> dst_cidr6; // §5.53 NEW (MVP-4.13) — IPv6 dst-CIDR axis (LPM)
+    std::optional<xdpmf_cidr_v6> src_cidr6; // §5.53 NEW (MVP-4.13) — IPv6 src-CIDR axis (LPM)
 };
 
 struct Rule {

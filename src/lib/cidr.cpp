@@ -51,6 +51,21 @@ namespace {
     return v;
 }
 
+/* §5.53: parse a decimal prefix length 0..128 (IPv6 ceiling). Returns -1 on
+ * any malformed input (empty, non-digit, overflow above 128). Sign handling
+ * is the caller's, mirroring parse_prefix. */
+[[nodiscard]] int parse_prefix6(std::string_view s) noexcept
+{
+    if (s.empty()) return -1;
+    int v = 0;
+    for (char c : s) {
+        if (c < '0' || c > '9') return -1;
+        v = v * 10 + (c - '0');
+        if (v > 128) return -1;  // 128 is the v6 ceiling; bail early
+    }
+    return v;
+}
+
 }  // namespace
 
 xdpmf_cidr_v4 parse_cidr_v4(std::string_view s,
@@ -145,6 +160,101 @@ xdpmf_cidr_v4 parse_cidr_v4(std::string_view s,
     xdpmf_cidr_v4 out{};
     out.prefixlen = static_cast<std::uint32_t>(prefix);
     out.addr      = addr_be;
+    return out;
+}
+
+xdpmf_cidr_v6 parse_cidr_v6(std::string_view s,
+                            std::string_view file,
+                            std::uint32_t    line,
+                            std::uint32_t    col)
+{
+    if (s.empty()) {
+        throw_cfg(file, line, col, "malformed CIDR: empty string");
+    }
+
+    const auto slash = s.find('/');
+    if (slash == std::string_view::npos) {
+        throw_cfg(file, line, col,
+                  std::format("malformed IPv6 CIDR: missing prefix length: '{}'", s));
+    }
+
+    const std::string_view addr_part   = s.substr(0, slash);
+    const std::string_view prefix_part = s.substr(slash + 1);
+
+    if (prefix_part.empty()) {
+        throw_cfg(file, line, col,
+                  std::format("malformed IPv6 CIDR: empty prefix length: '{}'", s));
+    }
+
+    // Reject explicit signs before parse_prefix6 sees only digits.
+    if (prefix_part.front() == '-' || prefix_part.front() == '+') {
+        throw_cfg(file, line, col,
+                  std::format("malformed IPv6 CIDR: prefix length out of range [0,128]: '{}'", s));
+    }
+
+    const int prefix = parse_prefix6(prefix_part);
+    if (prefix < 0) {
+        throw_cfg(file, line, col,
+                  std::format("malformed IPv6 CIDR: prefix length out of range [0,128]: '{}'", s));
+    }
+
+    // inet_pton needs NUL-terminated input; substr is not guaranteed
+    // terminated. INET6_ADDRSTRLEN = 46 (incl. NUL); guard against overrun.
+    if (addr_part.size() >= INET6_ADDRSTRLEN) {
+        throw_cfg(file, line, col,
+                  std::format("malformed IPv6 CIDR: invalid IPv6 address: '{}'", s));
+    }
+    char addr_cstr[INET6_ADDRSTRLEN] = {};
+    std::memcpy(addr_cstr, addr_part.data(), addr_part.size());
+
+    in6_addr in6{};
+    if (::inet_pton(AF_INET6, addr_cstr, &in6) != 1) {
+        throw_cfg(file, line, col,
+                  std::format("malformed IPv6 CIDR: invalid IPv6 address: '{}'", s));
+    }
+
+    // Host-bits-set check in the 16-byte (network-order) domain. Build the
+    // per-byte network mask for `prefix` bits; addr & ~mask must be all-zero.
+    // Byte k is fully inside the prefix if (k+1)*8 <= prefix → 0xFF; fully
+    // outside if k*8 >= prefix → 0x00; the boundary byte keeps its top
+    // (prefix - k*8) bits. prefix==0 → all bytes 0x00 (every set bit is a host
+    // bit → reject a non-zero address).
+    unsigned char mask[16] = {};
+    for (int k = 0; k < 16; ++k) {
+        const int bit_lo = k * 8;
+        if (prefix >= bit_lo + 8) {
+            mask[k] = 0xFF;
+        } else if (prefix <= bit_lo) {
+            mask[k] = 0x00;
+        } else {
+            const int keep = prefix - bit_lo;  // 1..7 top bits
+            mask[k] = static_cast<unsigned char>((0xFF << (8 - keep)) & 0xFF);
+        }
+    }
+    bool host_bits = false;
+    for (int k = 0; k < 16; ++k) {
+        if (in6.s6_addr[k] & static_cast<unsigned char>(~mask[k])) {
+            host_bits = true;
+            break;
+        }
+    }
+    if (host_bits) {
+        in6_addr canon{};
+        for (int k = 0; k < 16; ++k) {
+            canon.s6_addr[k] = static_cast<unsigned char>(in6.s6_addr[k] & mask[k]);
+        }
+        char canon_buf[INET6_ADDRSTRLEN] = {};
+        (void)::inet_ntop(AF_INET6, &canon, canon_buf, sizeof(canon_buf));
+        const char* canon_c = canon_buf;
+        throw_cfg(file, line, col,
+                  std::format("malformed IPv6 CIDR: host bits set below prefix: "
+                              "'{}' (did you mean {}/{}?)",
+                              s, canon_c, prefix));
+    }
+
+    xdpmf_cidr_v6 out{};
+    out.prefixlen = static_cast<std::uint32_t>(prefix);
+    std::memcpy(out.addr6, in6.s6_addr, 16);  // already network byte order
     return out;
 }
 

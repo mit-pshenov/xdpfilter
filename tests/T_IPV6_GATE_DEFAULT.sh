@@ -1,37 +1,42 @@
 #!/bin/bash
-# T_IPV6_GATE_DEFAULT — design §5.51 / §6.70 TestStrategy (MVP-4.11 / S1), the
-# EtherType gate-scaffold negation control. S1 reshapes the terminal
-# `if (inner_proto == ETH_P_IP)` datapath gate into an
-# `if (ETH_P_IP) {…} else if (ETH_P_IPV6) {/* empty seam */}` dispatch. The new
-# `ETH_P_IPV6` arm is a recognized-but-not-classified seam that falls through to
-# defaults[active] — a provably-no-op reshape (S4 cidr6 lands in this arm later).
+# T_IPV6_GATE_DEFAULT — design §5.51 / §6.70 (MVP-4.11 / S1) + §5.53 ⚠
+# S4-SUPERSEDED (MVP-4.13 / S4): the ETH_P_IPV6 arm fallthrough proof.
 #
-# This is the OPS canary for the NEW datapath control-flow path: only a 0x86DD
-# frame traverses the new arm (T_MAC_NON_IP's 0x88B5 frame matches NEITHER arm
-# and only re-proves the pre-existing generic fallthrough). Without this test
-# the new seam ships untested.
+# S1 (§5.51) reshaped the terminal `if (ETH_P_IP)` gate into
+# `if (ETH_P_IP) {…} else if (ETH_P_IPV6) {/* empty seam */}` and proved a
+# 0x86DD frame fell through the EMPTY seam to defaults[active]. S4 (§5.53) fills
+# that seam with a LIVE 8-term v6 classifier. The S1-era step (2) (a bare
+# zero-payload 0x86DD ether frame asserting mal-delta==0) is SUPERSEDED: the
+# now-live v6 arm bounds-checks the 40B base header, so a malformed probe no
+# longer cleanly tests the fallthrough (see §5.53 ⚠ S4-SUPERSEDED, option b).
+#
+# The PROPERTY this test guards — a recognized v6 frame that matches NO rule
+# falls through to defaults[active] (the v6 arm's `acc==0` path) — is PRESERVED
+# under S4, but it must now be tested with a WELL-FORMED v6 frame whose src-MAC
+# matches NO rule (a matching MAC would fire the family-blind MAC axis — that
+# case is T_IPV6_INJECT_DEFAULT). Generic non-IP→defaults coverage stays in
+# T_MAC_NON_IP (0x88B5).
 #
 # The fixture config_mac_drop_default_pass.yaml (REUSED) inverts the usual
 # polarity:  default_action: pass; id0 mac=02:00:00:00:00:01 action DROP.
 #
 #   (1) IPv4 frame, src_mac=MAC_RULE (inject_ipv4.py) → the MAC rule fires →
-#       STAT_DROP_DENY delta == 1. (Positive/negation control: proves the rule +
-#       drop machinery are LIVE — a "must-drop" case that MUST register, so
-#       step (2)'s "not dropped" is meaningful, not a silently-broken
-#       pass-everything.)
-#   (2) 0x86DD frame, src_mac=MAC_RULE (inject_eth.py called DIRECTLY with the
-#       4th ethertype arg 0x86DD, per D-mvp-4.11-INJECT-DEFAULT) → the frame
-#       ENTERS the new ETH_P_IPV6 arm → falls to defaults[active] (= pass) →
-#       STAT_DROP_DENY delta == 0 AND STAT_DROP_MALFORMED delta == 0. THE
-#       boundary assertion: an IPv6 arm that (wrongly) early-returned DROP would
-#       fail the deny-delta; one that dereferenced the zero-payload "v6 header"
-#       and dropped on a bounds-miss would fail the malformed-delta.
+#       STAT_DROP_DENY delta == 1. (Positive control: proves the rule + drop
+#       machinery are LIVE, so step (2)'s "not dropped" is meaningful.)
+#   (2) a WELL-FORMED IPv6 base-header frame, src_mac=MAC_NOMATCH (inject_l6.py)
+#       → enters the LIVE ETH_P_IPV6 arm → the mac-only rule does NOT match
+#       (different MAC) and no other axis is constrained ⇒ acc==0 ⇒ falls to
+#       defaults[active] (= pass) → STAT_DROP_DENY delta == 0 AND
+#       STAT_DROP_MALFORMED delta == 0. THE fallthrough assertion: a v6 arm that
+#       (wrongly) dropped an unmatched frame fails the deny-delta; one that
+#       mis-derefed a well-formed frame fails the malformed-delta.
 #
-# Sanity floor: smoke = apply exit 0. Positive/negation control = step (1) (a
-# frame that MUST drop and does). Boundary/negation = step (2) (the new arm).
+# Sanity floor: smoke = apply exit 0. Positive control = step (1) (IPv4
+# must-drop). NEGATION/boundary = step (2) (well-formed v6, no match → defaults;
+# no rule may fire, nothing may be reclassified malformed).
 #
-# Maps to: PI-mvp-4.11-IPV6-DEFAULTS, D-mvp-4.11-DISPATCH, D-mvp-4.11-IPV6-EMPTY,
-#          D-mvp-4.11-NEGATION, D-mvp-4.11-INJECT-DEFAULT.
+# Maps to: PI-mvp-4.11-IPV6-DEFAULTS (preserved for well-formed v6),
+#          PI-mvp-4.13-CROSS-FAMILY (no-match v6 → defaults), §5.53 ⚠ S4-SUPERSEDED.
 set -euo pipefail
 source "${TEST_DIR}/lib/common.sh"
 require_passwordless_sudo
@@ -41,7 +46,10 @@ FIXTURE="${TEST_DIR}/fixtures/config_mac_drop_default_pass.yaml"
 [[ -f "${FIXTURE}" ]] || { echo "FAIL: missing fixture ${FIXTURE}" >&2; exit 1; }
 
 MAC_RULE="02:00:00:00:00:01"   # the drop-rule MAC in the fixture
+MAC_NOMATCH="02:00:00:00:00:99" # a MAC matching NO rule (for the v6 fallthrough)
 SRC_IP="10.0.0.7"
+V6_SRC="2001:db8::7"           # RFC 3849 documentation range; matches no cidr6 rule
+V6_DST="2001:db8::1"
 
 stderr_file=$(mktemp /tmp/xdpmf-ipv6gate-stderr.XXXXXX)
 trap 'cleanup_veth; rm -f "${stderr_file}"' EXIT INT TERM HUP
@@ -76,30 +84,35 @@ if (( d1 - d0 != 1 )); then
     fail=1
 fi
 
-# ── (2) 0x86DD frame from MAC_RULE → NOT dropped (new ETH_P_IPV6 seam) ─────
-# Call inject_eth.py DIRECTLY with the 4th ethertype arg 0x86DD so the frame
-# traverses the NEW ETH_P_IPV6 arm (the common.sh inject_eth 3-arg wrapper emits
-# the default 0x88B5, which matches NEITHER arm — D-mvp-4.11-INJECT-DEFAULT).
-echo "=== (2) inject 0x86DD frame src_mac=${MAC_RULE} → expect NOT dropped (new arm → defaults=pass)"
+# ── (2) well-formed v6 frame, NON-matching MAC → defaults (acc==0 fallthrough) ─
+# A real well-formed base-header IPv6 frame (inject_l6.py) with a src-MAC that
+# matches NO rule. It enters the LIVE ETH_P_IPV6 arm; the mac-only rule's MAC
+# axis does not match and no other axis is constrained ⇒ acc==0 ⇒ defaults
+# (= pass). (A MATCHING MAC would fire the family-blind MAC drop — see
+# T_IPV6_INJECT_DEFAULT.)
+echo "=== (2) inject well-formed IPv6 frame src_mac=${MAC_NOMATCH} (no rule) → expect defaults=pass (acc==0)"
 read -r p2 d2 m2 c2 < <(read_stats_with_cidr)
-${NSEXEC} python3 "${TEST_DIR}/inject/inject_eth.py" \
-    "${IFACE_B}" "${MAC_RULE}" "${MAC_DST}" 0x86DD
+${NSEXEC} python3 "${TEST_DIR}/inject/inject_l6.py" \
+    "${IFACE_B}" \
+    --src-mac "${MAC_NOMATCH}" --dst-mac "${MAC_DST}" \
+    --src-ip "${V6_SRC}" --dst-ip "${V6_DST}" \
+    --proto tcp --dport 443
 # The frame is counted somewhere (default pass) — wait for the total to advance.
 wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p2 + d2 + m2 + c2 + 1 )) || true
 read -r p3 d3 m3 c3 < <(read_stats_with_cidr)
-echo "  after 0x86DD: PASS=${p3} DROP_DENY=${d3} DROP_MALFORMED=${m3} PASS_CIDR=${c3}"
+echo "  after IPv6: PASS=${p3} DROP_DENY=${d3} DROP_MALFORMED=${m3} PASS_CIDR=${c3}"
 if (( d3 - d2 != 0 )); then
     echo "FAIL[2.deny]: STAT_DROP_DENY delta=$(( d3 - d2 )) (expected 0)" >&2
-    echo "             the new ETH_P_IPV6 arm must NOT early-return DROP — it falls to defaults[active]" >&2
-    echo "             (PI-mvp-4.11-IPV6-DEFAULTS; D-mvp-4.11-IPV6-EMPTY)" >&2
+    echo "             a well-formed v6 frame matching NO rule must fall to defaults[active], not DROP" >&2
+    echo "             (PI-mvp-4.11-IPV6-DEFAULTS preserved for well-formed v6; PI-mvp-4.13-CROSS-FAMILY)" >&2
     fail=1
 fi
 if (( m3 - m2 != 0 )); then
     echo "FAIL[2.mal]: STAT_DROP_MALFORMED delta=$(( m3 - m2 )) (expected 0)" >&2
-    echo "             the IPv6 arm must NOT deref the frame or reclassify it MALFORMED — no deref this slice" >&2
-    echo "             (PI-mvp-4.11-IPV6-DEFAULTS; Q1=A1 empty seam)" >&2
+    echo "             a WELL-FORMED v6 base-header frame must NOT be reclassified MALFORMED" >&2
+    echo "             (D-mvp-4.13-NO-MALFORMED-NONV6 fires only on a truncated base header)" >&2
     fail=1
 fi
 
-[[ "${fail}" == 0 ]] && echo "PASS: T_IPV6_GATE_DEFAULT (the new ETH_P_IPV6 arm routes to defaults)"
+[[ "${fail}" == 0 ]] && echo "PASS: T_IPV6_GATE_DEFAULT (well-formed unmatched v6 frame → defaults[active])"
 exit "${fail}"
