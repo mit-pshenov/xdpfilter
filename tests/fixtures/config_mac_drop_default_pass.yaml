@@ -4,8 +4,9 @@
 # polarity so the match semantics become observable via STAT_DROP_DENY deltas:
 #   - an IPv4 frame from MAC 02:00:00:00:00:01 → MAC rule fires → DROP.
 #   - a NON-IP frame (e.g. EtherType 0x88B5 via inject_eth.py) from the SAME
-#     MAC → matches NEITHER classification arm → falls through to defaults
-#     (= pass), NOT dropped (covered by T_MAC_NON_IP).
+#     MAC → ⚠ S5-SUPERSEDED (§5.54): the NEW non-IP `else` arm evaluates the
+#     family-blind mac axis → MAC rule FIRES → DROP. (Pre-S5 this fell to
+#     defaults=pass. T_MAC_NON_IP step (2) updated to expect deny-delta==1.)
 #
 # §5.53 (MVP-4.13 / S4) SEMANTIC UPDATE — the MAC axis is FAMILY-AGNOSTIC.
 # Under the Q2 symmetric 8-term AND, `mac` is one of the 8 axes composed in

@@ -208,6 +208,15 @@ constexpr ManagedMapEntry kManagedMaps[] = {
     { &SkelMapsT::src6_bitmask_a,   XDPMF_MAP_SRC6_INNER_A_NAME,        false },
     { &SkelMapsT::src6_bitmask_b,   XDPMF_MAP_SRC6_INNER_B_NAME,        false },
     { &SkelMapsT::src6_rulesets,    XDPMF_MAP_SRC6_RULESETS_OUTER_NAME, false },
+    /* §5.54 (MVP-4.14) D-mvp-4.14-Q1 net +3 (36 → 39): the NEW ethertype axis
+     * ARRAY_OF_MAPS trio (ethertype_bitmask_a/_b + ethertype_rulesets, HASH
+     * inners keyed by host-order u32 ethertype) CLONING the §5.44 proto axis
+     * topology. The `wildcard` ARRAY is UNCHANGED here (its max_entries grows
+     * 16→18 via the BITVEC_NUM_AXES macro, not a new row). All three call-site
+     * loops (clear, pin, reuse) walk this single table — HK-9 again. */
+    { &SkelMapsT::ethertype_bitmask_a, XDPMF_MAP_ETHERTYPE_INNER_A_NAME,        false },
+    { &SkelMapsT::ethertype_bitmask_b, XDPMF_MAP_ETHERTYPE_INNER_B_NAME,        false },
+    { &SkelMapsT::ethertype_rulesets,  XDPMF_MAP_ETHERTYPE_RULESETS_OUTER_NAME, false },
     { &SkelMapsT::active_idx,       XDPMF_MAP_ACTIVE_IDX_NAME,          false },
     { &SkelMapsT::defaults,         XDPMF_MAP_DEFAULTS_NAME,            false },
     { &SkelMapsT::stats,            XDPMF_MAP_STATS_NAME,               false },
@@ -1389,6 +1398,10 @@ struct AxisAggregate {
 using ProtoLowering = AxisAggregate<std::uint32_t>;
 using VlanLowering  = AxisAggregate<std::uint32_t>;
 using MacLowering   = AxisAggregate<xdpmf_mac>;
+// §5.54 (MVP-4.14): ethertype is an exact-HASH axis identical in shape to
+// proto/vlan (only the projected source member differs: r.match.ethertype,
+// widened u16→u32). Same instantiation; CLONE not fork (D-mvp-4.14-CLONE).
+using EthertypeLowering = AxisAggregate<std::uint32_t>;
 
 /* §5.50 (MVP-4.10 B28-2) unify lower_proto_axis / lower_vlan_axis /
  * lower_mac_axis into ONE monomorphized template (rule-of-three OVERRIDES guard
@@ -1676,21 +1689,24 @@ void write_wildcard_slots(int wildcard_fd, std::uint32_t inactive,
                           std::uint64_t wc_dst, std::uint64_t wc_src,
                           std::uint64_t wc_proto, std::uint64_t wc_port,
                           std::uint64_t wc_vlan, std::uint64_t wc_mac,
-                          std::uint64_t wc_dst6, std::uint64_t wc_src6)
+                          std::uint64_t wc_dst6, std::uint64_t wc_src6,
+                          std::uint64_t wc_eth)
 {
     const struct {
         std::uint32_t axis;
         std::uint64_t value;
         const char*   name;
     } slots[] = {
-        { BV_AXIS_DST,   wc_dst,   "dst"   },
-        { BV_AXIS_SRC,   wc_src,   "src"   },
-        { BV_AXIS_PROTO, wc_proto, "proto" },
-        { BV_AXIS_PORT,  wc_port,  "port"  },
-        { BV_AXIS_VLAN,  wc_vlan,  "vlan"  },
-        { BV_AXIS_MAC,   wc_mac,   "mac"   },
-        { BV_AXIS_DST6,  wc_dst6,  "dst6"  },
-        { BV_AXIS_SRC6,  wc_src6,  "src6"  },
+        { BV_AXIS_DST,       wc_dst,   "dst"       },
+        { BV_AXIS_SRC,       wc_src,   "src"       },
+        { BV_AXIS_PROTO,     wc_proto, "proto"     },
+        { BV_AXIS_PORT,      wc_port,  "port"      },
+        { BV_AXIS_VLAN,      wc_vlan,  "vlan"      },
+        { BV_AXIS_MAC,       wc_mac,   "mac"       },
+        { BV_AXIS_DST6,      wc_dst6,  "dst6"      },
+        { BV_AXIS_SRC6,      wc_src6,  "src6"      },
+        /* §5.54 (MVP-4.14): NET-NEW wildcard slot for the ethertype axis. */
+        { BV_AXIS_ETHERTYPE, wc_eth,   "ethertype" },
     };
     for (const auto& s : slots) {
         const std::uint32_t key = inactive * BITVEC_NUM_AXES + s.axis;
@@ -1896,6 +1912,7 @@ void populate_all_axes(mac_filter_bpf* skel, std::uint32_t slot,
                        const VlanLowering&       vlan_low,
                        const AxisLowering6&      dst6_low,
                        const AxisLowering6&      src6_low,
+                       const EthertypeLowering&  eth_low,
                        const std::vector<Rule>&  rules,
                        DefaultAction             default_action)
 {
@@ -1939,6 +1956,11 @@ void populate_all_axes(mac_filter_bpf* skel, std::uint32_t slot,
         inactive_axis_fd(skel->maps.src6_bitmask_a, skel->maps.src6_bitmask_b, slot,
                          "inactive src6 inner fd unavailable"),
         src6_low.prefixes);
+    // §5.54 ethertype — paired ethertype_bitmask_a/_b exact-HASH (host-order u32 key)
+    populate_hash_inner_slot(
+        inactive_axis_fd(skel->maps.ethertype_bitmask_a, skel->maps.ethertype_bitmask_b, slot,
+                         "inactive ethertype inner fd unavailable"),
+        eth_low.entries, "ethertype");
     // 7 wildcard — SINGLE map indexed by slot (D-mvp-4.8-FD-HELPER-SCOPE)
     {
         const int wildcard_fd = bpf_map__fd(skel->maps.wildcard);
@@ -1949,7 +1971,8 @@ void populate_all_axes(mac_filter_bpf* skel, std::uint32_t slot,
                              dst_low.wildcard, src_low.wildcard,
                              proto_low.wildcard, port_low.wildcard,
                              vlan_low.wildcard, mac_low.wildcard,
-                             dst6_low.wildcard, src6_low.wildcard);
+                             dst6_low.wildcard, src6_low.wildcard,
+                             eth_low.wildcard);
     }
     // 8 defaults — SINGLE map indexed by slot
     {
@@ -2195,6 +2218,17 @@ std::uint32_t apply_request(const ApplyRequest& req)
             return std::nullopt;
         },
         std::equal_to<std::uint32_t>{});
+    // §5.54 (MVP-4.14): lower the NEW ethertype axis (exact-HASH, host-order u16
+    // widened to the BPF __u32 HASH key). CLONE of the vlan lowering above; NO
+    // closure (D-mvp-4.14-CLONE / D-mvp-4.14-HASH-MAX). Family-blind: the axis
+    // is composed into all three datapath arms by the hoisted lookup.
+    const EthertypeLowering    eth_low     = aggregate_axis<std::uint32_t>(
+        req.config.rules,
+        [](const Rule& r) -> std::optional<std::uint32_t> {
+            if (r.match.ethertype) return std::uint32_t{*r.match.ethertype};
+            return std::nullopt;
+        },
+        std::equal_to<std::uint32_t>{});
     const DefaultAction default_action     = req.config.default_action;
 
     if (mac_low.entries.size() > XDPMF_ALLOWLIST_MAX) {
@@ -2423,7 +2457,7 @@ std::uint32_t apply_request(const ApplyRequest& req)
         // (guard #15 / D-mvp-4.8-BOUNDARY).
         populate_all_axes(skel.get(), inactive, mac_low, dst_low, src_low,
                           proto_low, port_low, vlan_low, dst6_low, src6_low,
-                          req.config.rules, default_action);
+                          eth_low, req.config.rules, default_action);
         // §5.29 (MVP-3.4) step 8.5: `action_table` STAYS SHARED per
         // §5.34 HG-3.4b-c2-3 / D-3.4b-c2-6 — values are static
         // {PASS=0, DROP=1}, never mutate at runtime; atomic-swap meaningless.
@@ -2549,8 +2583,8 @@ std::uint32_t apply_request(const ApplyRequest& req)
     // the `_a` inners (inactive_axis_fd). populate_action_table + the self-copy
     // copy_rule_counters_forward stay EXPLICIT below (guard #15).
     populate_all_axes(skel.get(), 0u, mac_low, dst_low, src_low, proto_low,
-                      port_low, vlan_low, dst6_low, src6_low, req.config.rules,
-                      default_action);
+                      port_low, vlan_low, dst6_low, src6_low, eth_low,
+                      req.config.rules, default_action);
     // §5.29 (MVP-3.4) step 8.5: `action_table` STAYS SHARED per §5.34
     // HG-3.4b-c2-3 / D-3.4b-c2-6 — static {PASS=0, DROP=1} mapping.
     {

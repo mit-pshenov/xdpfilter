@@ -343,6 +343,36 @@ struct {
 };
 
 /*
+ * §5.54 (MVP-4.14) D-mvp-4.14-Q1: NEW ethertype axis — an ARRAY_OF_MAPS[2] of
+ * HASH inners (ethertype_bitmask_a/_b + ethertype_rulesets) CLONING the §5.44
+ * proto axis (only the keyed source differs: the post-VLAN inner ethertype,
+ * host order). Exact-match keyed lookup, NO prefix-closure. A rule constraining
+ * `ethertype=e` ORs its bit into ethertype_bitmask[active][e]; the outer selects
+ * the active inner via the SHARED active_idx. The lookup is HOISTED once above
+ * the family dispatch (EtherType is the family selector) and the axis term
+ * `& (eth_mask|wc_eth)` is composed into all THREE arms (v4, v6, non-IP else).
+ */
+struct xdpmf_ethertype_inner {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __type(key, __u32);
+    __type(value, __u64);
+    __uint(max_entries, XDPMF_ETHERTYPE_HASH_MAX);
+};
+
+struct xdpmf_ethertype_inner ethertype_bitmask_a SEC(".maps");
+struct xdpmf_ethertype_inner ethertype_bitmask_b SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY_OF_MAPS);
+    __uint(max_entries, XDPMF_RULESET_COUNT);
+    __uint(key_size, sizeof(__u32));
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+    __array(values, struct xdpmf_ethertype_inner);
+} ethertype_rulesets SEC(".maps") = {
+    .values = { &ethertype_bitmask_a, &ethertype_bitmask_b },
+};
+
+/*
  * active_idx: single-slot ARRAY whose only entry is the index in {0,1}
  * naming the currently-live inner slot. Userspace atomic swap is a single
  * BPF_ANY update on key=0. §5.27: shared across MAC AND CIDR outers.
@@ -677,6 +707,33 @@ int mac_filter_prog(struct xdp_md *ctx)
      * vlan_id at the sentinel → has_vlan=0 → vlan axis contributes 0 (only
      * vlan-wildcard rules survive). Parallels the §5.44 has_port semantic. */
     int has_vlan = (vlan_id != XDPMF_VLAN_NONE);
+
+    /* §5.54 (MVP-4.14) D-mvp-4.14-Q1: HOIST the ethertype axis lookup ONCE above
+     * the family dispatch. EtherType IS the family selector — family-independent
+     * — so a single lookup is natural and composes the `& (eth_mask|wc_eth)`
+     * term into all THREE arms (v4, v6, and the NEW non-IP else arm). The key is
+     * the HOST-order post-VLAN inner ethertype (D-mvp-4.14-ETHKEY); exact-HASH,
+     * NO closure (guard #23 N/A). For a config with no ethertype rule every rule
+     * wildcards this axis ⇒ (eth_mask|wc_eth) is an all-ones no-op ⇒ the IP-arm
+     * verdicts stay bit-identical (PI-mvp-4.14-IPVERDICT). */
+    void *eth_inner = bpf_map_lookup_elem(&ethertype_rulesets, &active);
+    if (unlikely(!eth_inner)) {
+        bump_stat(STAT_DROP_DENY);
+        return XDP_DROP;
+    }
+    __u32 eth_key  = (__u32)bpf_ntohs(inner_proto);
+    __u64 eth_mask = 0;
+    __u64 *em = bpf_map_lookup_elem(eth_inner, &eth_key);
+    if (em) {
+        eth_mask = *em;
+    }
+    __u64 wc_eth = 0;
+    __u32 wc_eth_key = active * BITVEC_NUM_AXES + BV_AXIS_ETHERTYPE;
+    __u64 *wc_eth_p = bpf_map_lookup_elem(&wildcard, &wc_eth_key);
+    if (wc_eth_p) {
+        wc_eth = *wc_eth_p;
+    }
+
     if (inner_proto == bpf_htons(ETH_P_IP)) {
         /* Verifier-required IPv4 header bounds check before daddr/saddr deref
          * — applied at the post-VLAN L3 offset (the only MALFORMED path). */
@@ -895,7 +952,8 @@ int mac_filter_prog(struct xdp_md *ctx)
                     (vlan_mask  | wc_vlan)  &
                     (mac_mask   | wc_mac)   &
                     wc_dst6                 &
-                    wc_src6;
+                    wc_src6                 &
+                    (eth_mask   | wc_eth);  /* §5.54 hoisted ethertype axis */
         if (acc != 0) {
             /* HG-mvp-4.3-4 first-match-by-id: the lowest set bit IS the lowest
              * matching rule id (bit position == id), so ffsll picks it for
@@ -1099,7 +1157,9 @@ int mac_filter_prog(struct xdp_md *ctx)
             mac_mask = *mm;
         }
 
-        /* Symmetric 8-term AND (Q2): v4 address axes are wildcard-only here. */
+        /* Symmetric 9-term AND (Q2 + §5.54): v4 address axes are wildcard-only
+         * here; the hoisted ethertype axis composes uniformly (eth_mask carries
+         * the bit for an `ethertype: ipv6` rule on a 0x86DD frame). */
         __u64 acc = wc_dst                  &
                     wc_src                  &
                     (proto_mask | wc_proto) &
@@ -1107,7 +1167,8 @@ int mac_filter_prog(struct xdp_md *ctx)
                     (vlan_mask  | wc_vlan)  &
                     (mac_mask   | wc_mac)   &
                     (dmask6     | wc_dst6)  &
-                    (smask6     | wc_src6);
+                    (smask6     | wc_src6)  &
+                    (eth_mask   | wc_eth);  /* §5.54 hoisted ethertype axis */
         if (acc != 0) {
             /* first-match-by-id + the reused rules_outer → rules_inner →
              * action_table dispatch (identical to the v4 arm). */
@@ -1129,10 +1190,139 @@ int mac_filter_prog(struct xdp_md *ctx)
             return XDP_PASS;
         }
         /* acc == 0 → no rule matched; fall through to defaults[active]. */
+    } else {
+        /* §5.54 (MVP-4.14) D-mvp-4.14-Q1 / D-mvp-4.14-NONIP-ARM: the NEW non-IP
+         * classification arm. A non-IP frame (ARP 0x0806, LLDP 0x88B5, …) has NO
+         * L3/L4, so the IP-family axes (dst/src/proto/port/dst6/src6) contribute
+         * WILDCARD-ONLY halves; the family-agnostic axes (mac via eth->h_source,
+         * vlan via the captured outer VID, ethertype via the hoisted eth_mask)
+         * carry real survivors. This is the FULL SYMMETRIC 9-term AND — an
+         * "ethertype-only" path would silently never-match `ethertype: X` + `mac:`
+         * / `vlan:` rules (zeroed by & wc_mac / & wc_vlan). NO MALFORMED path
+         * (D-mvp-4.14-NONIP-NO-MALFORMED): a non-IP frame carries no L3/L4 to
+         * bounds-check; runts are caught upstream by the base-eth check at the
+         * datapath head. Family-agnostic mac/vlan now fire on non-IP frames —
+         * SUPERSEDING the old mac-IPv4-gated boundary (D-mvp-4.14-MAC-NONIP-SUPERSEDE). */
+        void *vlan_inner = bpf_map_lookup_elem(&vlan_rulesets, &active);
+        if (unlikely(!vlan_inner)) {
+            bump_stat(STAT_DROP_DENY);
+            return XDP_DROP;
+        }
+        void *mac_inner = bpf_map_lookup_elem(&rulesets, &active);
+        if (unlikely(!mac_inner)) {
+            bump_stat(STAT_DROP_DENY);
+            return XDP_DROP;
+        }
+
+        /* All wildcard halves. The IP-family axes (dst/src/proto/port/dst6/src6)
+         * have NO real survivors on a non-IP frame ⇒ each reduces to its
+         * wildcard half. A rule constraining an IP-family axis is ABSENT from
+         * that axis's wildcard ⇒ excluded from non-IP traffic. */
+        __u64 wc_dst   = 0;
+        __u64 wc_src   = 0;
+        __u64 wc_proto = 0;
+        __u64 wc_port  = 0;
+        __u64 wc_vlan  = 0;
+        __u64 wc_mac   = 0;
+        __u64 wc_dst6  = 0;
+        __u64 wc_src6  = 0;
+        __u32 wc_dst_key   = active * BITVEC_NUM_AXES + BV_AXIS_DST;
+        __u32 wc_src_key   = active * BITVEC_NUM_AXES + BV_AXIS_SRC;
+        __u32 wc_proto_key = active * BITVEC_NUM_AXES + BV_AXIS_PROTO;
+        __u32 wc_port_key  = active * BITVEC_NUM_AXES + BV_AXIS_PORT;
+        __u32 wc_vlan_key  = active * BITVEC_NUM_AXES + BV_AXIS_VLAN;
+        __u32 wc_mac_key   = active * BITVEC_NUM_AXES + BV_AXIS_MAC;
+        __u32 wc_dst6_key  = active * BITVEC_NUM_AXES + BV_AXIS_DST6;
+        __u32 wc_src6_key  = active * BITVEC_NUM_AXES + BV_AXIS_SRC6;
+        __u64 *wc_dst_p = bpf_map_lookup_elem(&wildcard, &wc_dst_key);
+        if (wc_dst_p) {
+            wc_dst = *wc_dst_p;
+        }
+        __u64 *wc_src_p = bpf_map_lookup_elem(&wildcard, &wc_src_key);
+        if (wc_src_p) {
+            wc_src = *wc_src_p;
+        }
+        __u64 *wc_proto_p = bpf_map_lookup_elem(&wildcard, &wc_proto_key);
+        if (wc_proto_p) {
+            wc_proto = *wc_proto_p;
+        }
+        __u64 *wc_port_p = bpf_map_lookup_elem(&wildcard, &wc_port_key);
+        if (wc_port_p) {
+            wc_port = *wc_port_p;
+        }
+        __u64 *wc_vlan_p = bpf_map_lookup_elem(&wildcard, &wc_vlan_key);
+        if (wc_vlan_p) {
+            wc_vlan = *wc_vlan_p;
+        }
+        __u64 *wc_mac_p = bpf_map_lookup_elem(&wildcard, &wc_mac_key);
+        if (wc_mac_p) {
+            wc_mac = *wc_mac_p;
+        }
+        __u64 *wc_dst6_p = bpf_map_lookup_elem(&wildcard, &wc_dst6_key);
+        if (wc_dst6_p) {
+            wc_dst6 = *wc_dst6_p;
+        }
+        __u64 *wc_src6_p = bpf_map_lookup_elem(&wildcard, &wc_src6_key);
+        if (wc_src6_p) {
+            wc_src6 = *wc_src6_p;
+        }
+
+        /* vlan exact-HASH only when the frame carried an outer tag (parallels
+         * the IP arms); src-MAC exact-HASH (eth->h_source, VLAN-agnostic base
+         * offset, already bounds-checked at the datapath head). */
+        __u32 vlan_key = (__u32)vlan_id;
+        __u64 vlan_mask = 0;
+        if (has_vlan) {
+            __u64 *vm = bpf_map_lookup_elem(vlan_inner, &vlan_key);
+            if (vm) {
+                vlan_mask = *vm;
+            }
+        }
+        struct xdpmf_mac mac_key = {0};
+        __builtin_memcpy(mac_key.octets, eth->h_source, 6);
+        __u64 mac_mask = 0;
+        __u64 *mm = bpf_map_lookup_elem(mac_inner, &mac_key);
+        if (mm) {
+            mac_mask = *mm;
+        }
+
+        /* Full symmetric 9-term AND: IP-family axes wildcard-only; mac/vlan/
+         * ethertype carry real survivors. */
+        __u64 acc = wc_dst                  &
+                    wc_src                  &
+                    wc_proto                &
+                    wc_port                 &
+                    (vlan_mask  | wc_vlan)  &
+                    (mac_mask   | wc_mac)   &
+                    wc_dst6                 &
+                    wc_src6                 &
+                    (eth_mask   | wc_eth);
+        if (acc != 0) {
+            /* first-match-by-id + the reused rules_outer → rules_inner →
+             * action_table dispatch (identical to the IP arms). */
+            __u32 rid = first_set_u64(acc) - 1;
+            bump_rule(rid, active);
+            void *rules_inner_map = bpf_map_lookup_elem(&rules_outer, &active);
+            if (rules_inner_map) {
+                struct rule_entry *r = bpf_map_lookup_elem(rules_inner_map, &rid);
+                if (r && r->present) {
+                    __u32 aid = r->action_id;
+                    struct action_entry *a = bpf_map_lookup_elem(&action_table, &aid);
+                    if (a && a->action_type == ACTION_DROP) {
+                        bump_stat(STAT_DROP_DENY);
+                        return XDP_DROP;
+                    }
+                }
+            }
+            bump_stat(STAT_PASS_CIDR);
+            return XDP_PASS;
+        }
+        /* acc == 0 → no rule matched; fall through to defaults[active]. */
     }
 
-    /* No match (non-IPv4, or IPv4 with acc==0) — consult defaults[active].
-     * The same active_idx value indexes every outer; one u32 flip swaps all. */
+    /* No match (non-IP with acc==0, or IPv4/IPv6 with acc==0) — consult
+     * defaults[active]. The same active_idx value indexes every outer; one u32
+     * flip swaps all. */
     __u32 *default_p = bpf_map_lookup_elem(&defaults, &active);
     if (unlikely(!default_p)) {
         bump_stat(STAT_DROP_DENY);

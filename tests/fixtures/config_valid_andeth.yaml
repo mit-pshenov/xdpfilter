@@ -1,0 +1,69 @@
+# config_valid_andeth.yaml — §5.54 MVP-4.14 / S5 v2 9-axis AND-compose fixture
+# (adds the NEW exact-HASH `ethertype` axis, BV_AXIS_ETHERTYPE=8).
+#
+# Used by §6.74 (T_ANDETH_ORACLE_AGREEMENT) — the OPS canary for the NEW non-IP
+# classification `else` arm (which previously routed every non-IP frame to
+# defaults with ZERO classification).
+#
+# schema_version: 2 (ADDITIVE-within-v2 — `ethertype` is the RE-ENABLED 9th match
+# key per HG-mvp-4.14-1; existing v2 configs parse unchanged). Match grammar is
+# now {mac, dst_cidr, src_cidr, protocol, dst_port, vlan, dst_cidr6, src_cidr6,
+# ethertype} (>=1 required). `ethertype`: a name {ipv4,ipv6,arp}, a hex literal
+# (0x86dd), or a decimal [0,65535] — the host-order POST-VLAN inner EtherType;
+# EXACT match (NO prefix-closure — D-mvp-4.14-CLONE, like proto/vlan/mac).
+#
+# FAMILY-AGNOSTIC composition (D-mvp-4.14-Q1): the ethertype axis is hoisted
+# ONCE above the family dispatch and composed into ALL THREE arms (v4, v6, and
+# the NEW non-IP `else` arm). mac/vlan/ethertype are family-agnostic; the
+# IP-family axes (dst/src/proto/port/dst6/src6) are wildcard-only in the non-IP
+# arm (a non-IP frame has no L3/L4). So an `ethertype` (or mac/vlan) rule fires
+# on a NON-IP frame too — the coarse non-IP steering this slice unlocks.
+#
+# Rule layout (bit position == id; first-match by lowest id, ffsll):
+#   id 0 : ethertype 0x88b5 AND mac 02:00:00:00:00:11   DROP  (combined; non-IP)
+#   id 1 : ethertype 0x88b5                             DROP  (pure 0x88b5; non-IP)
+#   id 2 : ethertype arp (0x0806)                       DROP  (pure arp; non-IP headline)
+#   id 3 : ethertype ipv4 (0x0800) AND dst_cidr 10.1.0.0/16  PASS (v4-arm compose)
+#   id 4 : protocol udp                                 PASS  (ethertype-WILDCARD)
+#   default_action: drop
+#
+# Coverage the §6.74 battery extracts:
+#   * arp 0x0806 frame              -> id2 (pure arp in the NEW non-IP arm)
+#   * 0x88b5 frame from mac ...:11  -> id0 (combined mac+ethertype; TIE id0<id1)
+#   * 0x88b5 frame from other mac   -> id1 (pure 0x88b5; mac axis excludes id0)
+#   * IPv4 udp to 10.1.2.3          -> id3 (ethertype ipv4 AND dst_cidr, v4 arm)
+#   * IPv4 udp to 10.9.9.9          -> id4 (ethertype-wildcard proto rule on v4)
+#   * IPv6 udp                      -> id4 (ethertype-wildcard rule matches v6 —
+#                                     verdict-identity; the ipv4-ethertype rule
+#                                     id3 is EXCLUDED from the v6 arm)
+#   * 0x9999 non-IP / IPv6 tcp      -> NOMATCH (ethertype-miss / proto-miss ->
+#                                     defaults; the negation control)
+#
+# IMPORTANT: tests/bitvec/bitvec_oracle_prod.py transcribes these rules BY HAND
+# (table RULES_ANDETH). Any edit here MUST be mirrored there — data-independence
+# is intentional (divergence fails the §6.74 agreement test loudly).
+schema_version: 2
+default_action: drop
+rules:
+  - id: 0
+    action: drop
+    match:
+      ethertype: 0x88b5
+      mac: "02:00:00:00:00:11"
+  - id: 1
+    action: drop
+    match:
+      ethertype: 0x88b5
+  - id: 2
+    action: drop
+    match:
+      ethertype: arp
+  - id: 3
+    action: pass
+    match:
+      ethertype: ipv4
+      dst_cidr: "10.1.0.0/16"
+  - id: 4
+    action: pass
+    match:
+      protocol: udp

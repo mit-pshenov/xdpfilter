@@ -1,0 +1,28 @@
+# config_steer_arp_drop.yaml — §5.54 MVP-4.14 / S5 — the headline coarse non-IP
+# steering fixture for §6.75 (T_ANDETH_NONIP_STEER).
+#
+# default_action: pass + two PURE ethertype DROP rules. This inverts the usual
+# polarity so the NEW non-IP-arm classification becomes observable via
+# STAT_DROP_DENY deltas:
+#   id 0 : ethertype arp (0x0806)   DROP  — drops an ARP frame (the headline:
+#          a non-IP frame that previously only hit defaults is now classified +
+#          dropped by the NEW non-IP `else` arm).
+#   id 1 : ethertype 0x88b5         DROP  — second pure non-IP DROP vector.
+#
+# Cross-arm exclusion (PI-mvp-4.14-CROSS-ARM-EXCL): neither rule constrains a
+# non-ethertype axis, so each is ABSENT from wc_eth and from eth_mask for 0x0800
+# — an IPv4 (or IPv6) frame is therefore NOT dropped by the arp/0x88b5 rule and
+# falls through to default_action: pass. That is the §6.75 negation control.
+#
+# schema_version: 2 (ADDITIVE-within-v2; `ethertype` is the 9th match key).
+schema_version: 2
+default_action: pass
+rules:
+  - id: 0
+    action: drop
+    match:
+      ethertype: arp
+  - id: 1
+    action: drop
+    match:
+      ethertype: 0x88b5

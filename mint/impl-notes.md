@@ -640,3 +640,60 @@ T_AND_COMPOSE_OK / T_AND_ORACLE_AGREEMENT / T_AND_PREFIX_CLOSURE_OVERLAP
 
 ## Phase 2.5 result
 - See final SendMessage to team-lead (bpftool prog load rc + which IHL path loaded).
+
+---
+
+# MVP-4.14 / S5 EtherType axis (§5.54)
+
+Implemented strictly per design.md §5.54. brownfield DIFF — impl owns src/ +
+mac_filter.h only (tests/fixtures/oracle/CMakeLists/T_MAC_NON_IP owned by tester).
+
+## Files edited
+- `src/common/mac_filter.h` — ethertype map-name consts + `XDPMF_ETHERTYPE_HASH_MAX`
+  (= XDPMF_ALLOWLIST_MAX = 64, D-mvp-4.14-HASH-MAX) + `BV_AXIS_ETHERTYPE=8` +
+  `BITVEC_NUM_AXES 8→9` (wildcard max_entries auto-grows 16→18 via the macro).
+- `src/bpf/mac_filter.bpf.c` — (a) NEW `xdpmf_ethertype_inner` HASH trio
+  (`ethertype_bitmask_a/_b` + `ethertype_rulesets` AOM[2]), clone of the proto
+  trio; (b) HOISTED ethertype lookup (eth_inner NULL→DENY, host-order
+  `(u32)bpf_ntohs(inner_proto)` key, eth_mask exact-HASH, wc_eth) above the
+  family dispatch; (c)+(d) `& (eth_mask|wc_eth)` appended to the v4 + v6 `acc`;
+  (e) NEW non-IP `else` arm — full symmetric 9-term AND (IP-family axes
+  wildcard-only; mac/vlan/ethertype real survivors) + the standard
+  first_set/bump_rule/dispatch tail + `acc==0`→defaults. NO MALFORMED path in
+  the non-IP arm (D-mvp-4.14-NONIP-NO-MALFORMED).
+- `src/lib/loader.cpp` — kManagedMaps 36→39 (+3 ethertype rows);
+  `EthertypeLowering` alias (= AxisAggregate<u32>, clone of Proto/Vlan);
+  `aggregate_axis<u32>` eth lowering in `apply_request` (projector
+  `r.match.ethertype` widened u16→u32); `write_wildcard_slots` +1 param + 1 row;
+  `populate_all_axes` +1 param + `populate_hash_inner_slot(... "ethertype")`;
+  both call sites pass `eth_low`. loader.hpp untouched (PI-7 zero-diff).
+- `src/lib/config.hpp` — `RuleMatch` +`std::optional<std::uint16_t> ethertype`.
+- `src/lib/config.cpp` — NEW `parse_ethertype` (names ipv4/ipv6/arp + explicit
+  base-16 hex path + decimal [0,65535]; `parse_bounded_uint` is base-10-only so
+  the hex path is hand-rolled). Added `ethertype` to the accepted key-set (8→9),
+  the at-least-one-of node-set, and a parse block.
+
+## Deviations from design
+None. Load-bearing contracts all met: BITVEC_NUM_AXES=9, kManagedMaps=39,
+wildcard=18, +1 ethertype AND-term in all 3 arms, host-order post-VLAN inner
+ethertype key, NEW symmetric non-IP arm, VERSION stays 0.15.0, loader.hpp
+zero-diff.
+
+## Minor implementation choice (documented, not a deviation)
+- The hex path binds `std::string_view{v.scalar}.substr(2)` (NOT
+  `v.scalar.substr(2)`): the latter returns a temporary std::string and would
+  dangle (clang -Wdangling-gsl). string_view::substr returns a view into the
+  long-lived node scalar. No design/behaviour impact.
+
+## NOT touched by impl (tester domain, task #3)
+- NEW fixtures `config_valid_andeth.yaml`; NEW tests `T_ANDETH_ORACLE_AGREEMENT.sh`,
+  `T_ANDETH_NONIP_STEER.sh`; `tests/bitvec/bitvec_oracle_prod.py` `--ruleset andeth`;
+  `tests/CMakeLists.txt` registration; the `T_MAC_NON_IP.sh` step-(2) S5-SUPERSEDED
+  rewrite + the stale fixture comment.
+
+## Phase 2.5 result
+- Clean build, zero warnings (-Wall -Wextra; rebuilt touched TUs to confirm).
+- `bpftool prog loadall` on the production `mac_filter.bpf.o` → rc=0 (verifier
+  passed); xlated 37704B / jited 20873B — within the §5.53 spike budget. Isolated
+  pin, cleaned up.
+- `xdpmacfilter --version` → `0.15.0`. Full ctest result: see final SendMessage.

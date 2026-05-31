@@ -192,7 +192,25 @@ enum mac_filter_stat {
 #define XDPMF_MAP_SRC6_INNER_A_NAME        "src6_bitmask_a" /* inner slot 0, LPM_TRIE of __u64 */
 #define XDPMF_MAP_SRC6_INNER_B_NAME        "src6_bitmask_b" /* inner slot 1, LPM_TRIE of __u64 */
 
-#define BITVEC_NUM_AXES 8
+/* §5.54 (MVP-4.14) D-mvp-4.14-Q1: ADDITIVE +1 bit-vector axis — ethertype (the
+ * post-VLAN inner L2 EtherType, exact-match HASH) — a CLONE of the §5.44 proto
+ * axis (only the keyed source differs: the inner ethertype, host order).
+ * BITVEC_NUM_AXES 8→9 auto-grows the `wildcard` ARRAY's max_entries 16→18 via
+ * the XDPMF_RULESET_COUNT * BITVEC_NUM_AXES formula (no literal edit in the
+ * .bpf.c decl). New axis index BV_AXIS_ETHERTYPE=8. The ethertype lookup is
+ * HOISTED once above the family dispatch (EtherType is the family selector,
+ * family-independent) and the axis term is composed into ALL THREE arms (v4,
+ * v6, and the NEW non-IP `else` arm) — see design §5.54 Q1. NO closure. */
+#define XDPMF_MAP_ETHERTYPE_RULESETS_OUTER_NAME "ethertype_rulesets"  /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] of HASH fds */
+#define XDPMF_MAP_ETHERTYPE_INNER_A_NAME        "ethertype_bitmask_a" /* inner slot 0, HASH of __u64 */
+#define XDPMF_MAP_ETHERTYPE_INNER_B_NAME        "ethertype_bitmask_b" /* inner slot 1, HASH of __u64 */
+
+/* EtherType HASH inner capacity — distinct ethertypes are bounded by the rule
+ * count (≤ XDPMF_ALLOWLIST_MAX), NOT the 16-bit key space (D-mvp-4.14-HASH-MAX).
+ * Pre-sizing to 65536 would be wasteful; entries ≤ 64 ⇒ no separate bound-check. */
+#define XDPMF_ETHERTYPE_HASH_MAX XDPMF_ALLOWLIST_MAX
+
+#define BITVEC_NUM_AXES 9
 #define BV_AXIS_DST     0
 #define BV_AXIS_SRC     1
 #define BV_AXIS_PROTO   2
@@ -204,6 +222,8 @@ enum mac_filter_stat {
 /* §5.53 (MVP-4.13): axes 6/7 = IPv6 dst/src CIDR LPM. */
 #define BV_AXIS_DST6    6
 #define BV_AXIS_SRC6    7
+/* §5.54 (MVP-4.14): axis 8 = post-VLAN inner EtherType exact-match HASH. */
+#define BV_AXIS_ETHERTYPE 8
 
 /* §5.44 (MVP-4.4) D-mvp-4.4-Q2: production-owned port-range slot — analog of
  * the §5.42 spike's `bv_port_range`. One slot per port-constrained rule; a

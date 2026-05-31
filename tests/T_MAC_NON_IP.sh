@@ -1,26 +1,34 @@
 #!/bin/bash
-# T_MAC_NON_IP — design §5.47 TestStrategy (MVP-4.7 / §5.47), the
-# D-mvp-4.7-Q2-GATE boundary. The whole 6-axis rule-model composes INSIDE the
-# `if (inner_proto == ETH_P_IP)` block, so a MAC-constrained rule matches IPv4
-# frames ONLY; a NON-IPv4 frame from the same src-MAC falls through to
-# defaults[active] (Phase A FINDING-1, §7 OOS fence).
+# T_MAC_NON_IP — design §5.47 TestStrategy (MVP-4.7), step (2) ⚠ S5-SUPERSEDED
+# by §5.54 (MVP-4.14 / S5, D-mvp-4.14-MAC-NONIP-SUPERSEDE).
 #
-# This test pins that boundary so it is deliberate, not accidental. The fixture
-# config_mac_drop_default_pass.yaml inverts the usual polarity:
+# HISTORY OF THE BOUNDARY: in MVP-4.7 the 6-axis rule-model composed INSIDE the
+# `if (inner_proto == ETH_P_IP)` block, so a MAC-constrained rule matched IPv4
+# frames ONLY and a non-IPv4 frame fell to defaults (D-mvp-4.7-Q2-GATE). S5
+# (§5.54) adds a NEW full-symmetric non-IP `else` arm in which the family-blind
+# mac/vlan/ethertype axes ARE evaluated — so a MAC-constrained DROP rule now
+# fires on a NON-IP frame from that MAC too. This is the DESIGNED family-blind
+# property (the natural completion of S4's "mac fires on IPv6 too", §5.53), NOT
+# an impl bug. The mac-IPv4-gated boundary that step (2) used to pin is RETIRED.
+#
+# The fixture config_mac_drop_default_pass.yaml inverts the usual polarity:
 #   default_action: pass; id0 mac=02:00:00:00:00:01 action DROP.
 #
 #   (1) IPv4 frame, src_mac=MAC_RULE (inject_ipv4.py) → the MAC rule fires →
 #       STAT_DROP_DENY delta == 1. (Proves the rule + drop machinery are live —
 #       this is the negation control: a "must-drop" case that MUST register.)
-#   (2) NON-IPv4 frame, src_mac=MAC_RULE (inject_eth.py emits EtherType 0x88B5)
-#       → falls to defaults (= pass), NOT dropped → STAT_DROP_DENY delta == 0,
-#       STAT_DROP_MALFORMED delta == 0. THE boundary assertion: a datapath that
-#       (wrongly) applied the MAC drop rule to non-IPv4 frames would drop it.
+#       UNCHANGED across S5.
+#   (2) NON-IP frame, src_mac=MAC_RULE (inject_eth.py emits EtherType 0x88B5)
+#       → under the S5 non-IP arm the family-blind mac axis FIRES → DROP →
+#       STAT_DROP_DENY delta == 1, STAT_DROP_MALFORMED delta == 0 (the non-IP
+#       arm has no MALFORMED path; the 60B frame is well-formed). A datapath
+#       that still gated mac on IPv4 only would NOT drop it (delta 0) and fail.
 #
 # Sanity floor: smoke = apply exit 0. Negation control = step (1) (a frame that
 # MUST drop and does).
 #
-# Maps to: PI-mvp-4.7-MAC, D-mvp-4.7-Q2-GATE, §7 OOS "MAC on non-IPv4 frames".
+# Maps to: PI-mvp-4.14-NONIP-ARM, D-mvp-4.14-MAC-NONIP-SUPERSEDE,
+#          PI-mvp-4.14-NONIP-NO-MALFORMED.
 set -euo pipefail
 source "${TEST_DIR}/lib/common.sh"
 require_passwordless_sudo
@@ -65,24 +73,28 @@ if (( d1 - d0 != 1 )); then
     fail=1
 fi
 
-# ── (2) NON-IPv4 (0x88B5) frame from MAC_RULE → NOT dropped (gate boundary) ─
-echo "=== (2) inject NON-IPv4 (0x88B5) frame src_mac=${MAC_RULE} → expect NOT dropped (defaults=pass)"
+# ── (2) NON-IP (0x88B5) frame from MAC_RULE → DROPPED (S5 family-blind mac) ─
+# ⚠ S5-SUPERSEDED (§5.54 / D-mvp-4.14-MAC-NONIP-SUPERSEDE): the NEW non-IP `else`
+# arm evaluates the family-blind mac axis, so the 0x88B5 frame from the drop-rule
+# MAC is now DROPPED (deny-delta == 1, CORRECT by design). Pre-S5 this asserted
+# delta == 0 (mac-IPv4-gated). Same shape as S4's "mac fires on IPv6 too".
+echo "=== (2) inject NON-IP (0x88B5) frame src_mac=${MAC_RULE} → expect DROP (S5 family-blind mac fires in the non-IP arm)"
 read -r p2 d2 m2 c2 < <(read_stats_with_cidr)
 inject_eth "${IFACE_B}" "${MAC_RULE}" "${MAC_DST}"
-# The frame is counted somewhere (default pass) — wait for the total to advance.
+# The frame is classified by the non-IP arm — wait for the total to advance.
 wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p2 + d2 + m2 + c2 + 1 )) || true
 read -r p3 d3 m3 c3 < <(read_stats_with_cidr)
-echo "  after non-IPv4: PASS=${p3} DROP_DENY=${d3} DROP_MALFORMED=${m3} PASS_CIDR=${c3}"
-if (( d3 - d2 != 0 )); then
-    echo "FAIL[2.deny]: STAT_DROP_DENY delta=$(( d3 - d2 )) (expected 0)" >&2
-    echo "             the MAC rule is IPv4-gated — a non-IPv4 frame must NOT be dropped by it" >&2
-    echo "             (D-mvp-4.7-Q2-GATE; §7 OOS 'MAC on non-IPv4 frames')" >&2
+echo "  after non-IP: PASS=${p3} DROP_DENY=${d3} DROP_MALFORMED=${m3} PASS_CIDR=${c3}"
+if (( d3 - d2 != 1 )); then
+    echo "FAIL[2.deny]: STAT_DROP_DENY delta=$(( d3 - d2 )) (expected 1)" >&2
+    echo "             under S5 the mac axis is family-blind — a non-IP frame from the drop-rule" >&2
+    echo "             MAC MUST be dropped by the NEW non-IP arm (§5.54 D-mvp-4.14-MAC-NONIP-SUPERSEDE)" >&2
     fail=1
 fi
 if (( m3 - m2 != 0 )); then
-    echo "FAIL[2.mal]: STAT_DROP_MALFORMED delta=$(( m3 - m2 )) (expected 0 — the 60B frame is well-formed)" >&2
+    echo "FAIL[2.mal]: STAT_DROP_MALFORMED delta=$(( m3 - m2 )) (expected 0 — the non-IP arm has no MALFORMED path; 60B frame well-formed)" >&2
     fail=1
 fi
 
-[[ "${fail}" == 0 ]] && echo "PASS: T_MAC_NON_IP (MAC axis is IPv4-gated)"
+[[ "${fail}" == 0 ]] && echo "PASS: T_MAC_NON_IP (S5 family-blind mac fires on non-IP frames)"
 exit "${fail}"

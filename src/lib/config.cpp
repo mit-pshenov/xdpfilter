@@ -170,6 +170,62 @@ namespace {
     return static_cast<std::uint8_t>(n);
 }
 
+/* §5.54 (MVP-4.14) D-mvp-4.14-ETH-GRAMMAR: parse an `ethertype` scalar — a name
+ * {ipv4→0x0800, ipv6→0x86dd, arp→0x0806}, a hex literal `0x…` (base-16; the
+ * shared parse_bounded_uint is base-10 only and would reject `0x86dd`), OR a
+ * decimal in [0,65535]. The result is the HOST-order EtherType value (the axis
+ * keys on the post-VLAN inner ethertype, D-mvp-4.14-ETHKEY). Unknown name /
+ * out-of-range / malformed hex → ConfigError exit 9. */
+[[nodiscard]] std::uint16_t parse_ethertype(const yaml::Node& v, std::string_view file)
+{
+    if (v.kind != yaml::Node::Kind::Scalar || v.scalar.empty()) {
+        throw_cfg("rule match ethertype", file, v.line, v.col,
+                  "ethertype must be a name (ipv4/ipv6/arp), a hex literal "
+                  "(0x86dd), or a number in [0,65535]");
+    }
+    if (v.scalar == "ipv4") return 0x0800u;
+    if (v.scalar == "ipv6") return 0x86DDu;
+    if (v.scalar == "arp")  return 0x0806u;
+
+    // Hex path: `0x…` / `0X…` — base-16, [0,0xFFFF]. parse_bounded_uint cannot
+    // handle hex (base-10 only), so do an explicit base-16 scan here.
+    if (v.scalar.size() > 2 && v.scalar[0] == '0' &&
+        (v.scalar[1] == 'x' || v.scalar[1] == 'X')) {
+        const std::string_view hex = std::string_view{v.scalar}.substr(2);
+        std::uint32_t value = 0;
+        for (const char ch : hex) {
+            std::uint32_t digit = 0;
+            if (ch >= '0' && ch <= '9')      digit = static_cast<std::uint32_t>(ch - '0');
+            else if (ch >= 'a' && ch <= 'f') digit = static_cast<std::uint32_t>(ch - 'a' + 10);
+            else if (ch >= 'A' && ch <= 'F') digit = static_cast<std::uint32_t>(ch - 'A' + 10);
+            else {
+                throw_cfg("rule match ethertype", file, v.line, v.col,
+                          std::format("ethertype hex literal '{}' contains "
+                                      "non-hex digit '{}'", v.scalar, ch));
+            }
+            value = value * 16u + digit;
+            if (value > 0xFFFFu) {
+                throw_cfg("integer out of range", file, v.line, v.col,
+                          "ethertype must be in [0,65535]");
+            }
+        }
+        return static_cast<std::uint16_t>(value);
+    }
+
+    // A leading non-digit (e.g. an unknown name) is reported as the
+    // ethertype-grammar error, not a bare integer diagnostic.
+    if (v.scalar[0] < '0' || v.scalar[0] > '9') {
+        throw_cfg("rule match ethertype", file, v.line, v.col,
+                  std::format("unknown ethertype '{}' (expected ipv4/ipv6/arp, "
+                              "a hex literal like 0x86dd, or a number in "
+                              "[0,65535])", v.scalar));
+    }
+    // Decimal path.
+    const std::uint32_t n = parse_bounded_uint(v.scalar, 65535u, file,
+                                               v.line, v.col, "ethertype");
+    return static_cast<std::uint16_t>(n);
+}
+
 /* §5.44 (MVP-4.4) D-mvp-4.4-PORT-GRAMMAR: parse a `dst_port` scalar — an
  * integer [0,65535] (→ {p,p}) OR a "lo-hi" string (inclusive range, both
  * endpoints ∈ [0,65535], lo ≤ hi). Malformed / out-of-range / lo>hi → exit 9. */
@@ -362,25 +418,27 @@ Config validate(const yaml::Node& root, std::string_view file)
                     throw_cfg("rule match", file, match->line, match->col,
                               "rule.match must be a mapping");
                 }
-                // §5.53 (MVP-4.13) v2 match grammar: the accepted match-key set
-                // is the 8 axes {mac, dst_cidr, src_cidr, protocol, dst_port,
-                // vlan, dst_cidr6, src_cidr6}. Any other key → ConfigError exit 9
-                // (fail loud, not a silent no-op the operator believes is live).
-                // (Per-axis grammar lineage §5.43–§5.53 lives in git/RETROSPECTIVES.)
+                // §5.54 (MVP-4.14) v2 match grammar: the accepted match-key set
+                // is the 9 axes {mac, dst_cidr, src_cidr, protocol, dst_port,
+                // vlan, dst_cidr6, src_cidr6, ethertype}. Any other key →
+                // ConfigError exit 9 (fail loud, not a silent no-op the operator
+                // believes is live). (Per-axis grammar lineage §5.43–§5.54 lives
+                // in git/RETROSPECTIVES.)
                 for (const std::pair<std::string, yaml::Node>& kv : match->mapping) {
                     if (kv.first != "mac" && kv.first != "dst_cidr"
                         && kv.first != "src_cidr" && kv.first != "protocol"
                         && kv.first != "dst_port" && kv.first != "vlan"
-                        && kv.first != "dst_cidr6" && kv.first != "src_cidr6") {
+                        && kv.first != "dst_cidr6" && kv.first != "src_cidr6"
+                        && kv.first != "ethertype") {
                         throw_cfg("unsupported match type", file,
                                   kv.second.line, kv.second.col,
                                   std::format("match type '{}' not supported in schema_version 2",
                                               kv.first));
                     }
                 }
-                // §5.53 v2 match grammar: each rule's match MUST contain AT
+                // §5.54 v2 match grammar: each rule's match MUST contain AT
                 // LEAST ONE of {mac, dst_cidr, src_cidr, protocol, dst_port,
-                // vlan, dst_cidr6, src_cidr6}. Empty match: {} → exit 9.
+                // vlan, dst_cidr6, src_cidr6, ethertype}. Empty match: {} → exit 9.
                 const yaml::Node* mac_node       = find_key(*match, "mac");
                 const yaml::Node* dst_cidr_node  = find_key(*match, "dst_cidr");
                 const yaml::Node* src_cidr_node  = find_key(*match, "src_cidr");
@@ -389,14 +447,16 @@ Config validate(const yaml::Node& root, std::string_view file)
                 const yaml::Node* vlan_node      = find_key(*match, "vlan");
                 const yaml::Node* dst_cidr6_node = find_key(*match, "dst_cidr6");
                 const yaml::Node* src_cidr6_node = find_key(*match, "src_cidr6");
+                const yaml::Node* ethertype_node = find_key(*match, "ethertype");
                 if (mac_node == nullptr && dst_cidr_node == nullptr
                     && src_cidr_node == nullptr && protocol_node == nullptr
                     && dst_port_node == nullptr && vlan_node == nullptr
-                    && dst_cidr6_node == nullptr && src_cidr6_node == nullptr) {
+                    && dst_cidr6_node == nullptr && src_cidr6_node == nullptr
+                    && ethertype_node == nullptr) {
                     throw_cfg("rule match", file, match->line, match->col,
                               "rule must specify at least one of "
                               "'mac', 'dst_cidr', 'src_cidr', 'protocol', 'dst_port', "
-                              "'vlan', 'dst_cidr6', 'src_cidr6'");
+                              "'vlan', 'dst_cidr6', 'src_cidr6', 'ethertype'");
                 }
                 // §5.47 D-mvp-4.7-MAC-PARSER: canonical 17-char src-MAC → exact axis.
                 if (mac_node != nullptr) {
@@ -469,6 +529,14 @@ Config validate(const yaml::Node& root, std::string_view file)
                     r.match.src_cidr6 = cidr::parse_cidr_v6(
                         src_cidr6_node->scalar, file,
                         src_cidr6_node->line, src_cidr6_node->col);
+                }
+                // §5.54 (MVP-4.14) D-mvp-4.14-ETH-GRAMMAR: `ethertype` accepts a
+                // name {ipv4→0x0800, ipv6→0x86dd, arp→0x0806}, a hex literal
+                // (0x86dd), or a decimal in [0,65535]; exact-match (post-VLAN
+                // inner ethertype, host order). Unknown name / malformed hex /
+                // out-of-range → exit 9.
+                if (ethertype_node != nullptr) {
+                    r.match.ethertype = parse_ethertype(*ethertype_node, file);
                 }
 
                 // Reject unknown sibling keys in the rule (forward-compat hinge).

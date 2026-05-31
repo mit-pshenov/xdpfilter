@@ -1356,3 +1356,44 @@ set_tests_properties(T_ANDV6_CROSS_FAMILY PROPERTIES
     TIMEOUT 120
     SKIP_RETURN_CODE 77
 )
+
+# ── §5.54 MVP-4.14 / S5: EtherType match axis (9th axis, exact-HASH) ─────────
+# Two NEW datapath ctests exercising the hoisted ethertype axis + the NEW non-IP
+# classification `else` arm (guard #12: both touch veth/netns/bpffs →
+# RESOURCE_LOCK xdp_fixture; SKIP_RETURN_CODE 77). They drive REAL frames via
+# inject_eth.py (arp/0x88b5/0x9999), inject_ipv4.py (v4), and inject_l6.py (v6).
+#   T_ANDETH_ORACLE_AGREEMENT (§6.74): table-driven 9-axis datapath-vs-oracle —
+#     the OPS canary for the NEW non-IP arm + ethertype axis across all 3 arms.
+#     Needs AND_ORACLE_PROD (--ruleset andeth) + INJECT_ETH + INJECT_IPV4 + INJECT_L6.
+#   T_ANDETH_NONIP_STEER (§6.75): the headline coarse non-IP steering proof — a
+#     pure ethertype:arp DROP drops an ARP frame, while an IPv4 frame is NOT
+#     dropped by it (cross-arm wc_eth exclusion). Needs INJECT_ETH + INJECT_IPV4.
+set(TEST_ENV_ANDETH
+    ${TEST_ENV}
+    "AND_ORACLE_PROD=${CMAKE_SOURCE_DIR}/tests/bitvec/bitvec_oracle_prod.py"
+    "INJECT_ETH=${CMAKE_SOURCE_DIR}/tests/inject/inject_eth.py"
+    "INJECT_IPV4=${CMAKE_SOURCE_DIR}/tests/inject/inject_ipv4.py"
+    "INJECT_L6=${CMAKE_SOURCE_DIR}/tests/inject/inject_l6.py"
+)
+add_test(
+    NAME T_ANDETH_ORACLE_AGREEMENT
+    COMMAND bash ${TEST_DIR}/T_ANDETH_ORACLE_AGREEMENT.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_ANDETH_ORACLE_AGREEMENT PROPERTIES
+    ENVIRONMENT "${TEST_ENV_ANDETH}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 120
+    SKIP_RETURN_CODE 77
+)
+add_test(
+    NAME T_ANDETH_NONIP_STEER
+    COMMAND bash ${TEST_DIR}/T_ANDETH_NONIP_STEER.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_ANDETH_NONIP_STEER PROPERTIES
+    ENVIRONMENT "${TEST_ENV_ANDETH}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 120
+    SKIP_RETURN_CODE 77
+)

@@ -224,6 +224,46 @@ RULES_ANDV6 = [
 ]
 
 
+# ── 9-axis ethertype table: by hand from config_valid_andeth.yaml (§5.54 §6.74)
+# Each rule: (id, dst_cidr|W, src_cidr|W, proto|W, port(lo,hi)|W, vlan|W, mac|W,
+#            dst_cidr6|W, src_cidr6|W, ethertype|W, action). The NEW 9th axis is
+# `ethertype` (BV_AXIS_ETHERTYPE=8): the host-order post-VLAN inner EtherType,
+# EXACT match, NO closure (like proto/vlan/mac).
+#
+# ethertype is BOTH a normal exact-match axis AND the FAMILY SELECTOR
+# (D-mvp-4.14-Q1): a frame's ethertype decides which IP-family axes are even
+# evaluable. A non-IP frame (ethertype ∉ {0x0800, 0x86dd}) carries NO L3/L4, so
+# the dst/src/proto/port/dst6/src6 axes are UNSATISFIABLE for any rule that
+# CONSTRAINS them — exactly mirroring the datapath's wildcard-only IP-family
+# halves in the NEW non-IP `else` arm. mac/vlan/ethertype are FAMILY-AGNOSTIC
+# (composed in ALL THREE arms — v4, v6, and the new non-IP arm), so a mac/vlan/
+# ethertype rule fires on a non-IP frame too (the family-blind property, the
+# natural completion of S4's family-blind mac-fires-on-v6).
+#
+# Consumed by §6.74 (T_ANDETH_ORACLE_AGREEMENT), invoked
+#   --ruleset andeth --ethertype E [--dst-ip/--src-ip | --dst-ip6/--src-ip6]
+#   [--proto P --dport N] [--vlan V] [--src-mac M]
+# The --ethertype value (named ipv4/ipv6/arp, hex, or numeric base-0) is the
+# load-bearing discriminator: ipv4→0x0800 = v4 frame (reads --dst-ip/--src-ip/
+# --proto), ipv6→0x86dd = v6 frame (reads --dst-ip6/--src-ip6/--proto), anything
+# else = non-IP frame (no L3/L4 at all).
+#
+# IMPORTANT: tests/fixtures/config_valid_andeth.yaml transcribes the SAME rules.
+# Any edit here MUST be mirrored there — data-independence is intentional.
+ETH_ARP = 0x0806
+ETH_IPV4 = 0x0800
+ETH_IPV6 = 0x86DD
+
+RULES_ANDETH = [
+    # id dst_cidr             src_cidr proto port vlan mac                  dst6 src6 ethertype action
+    (0, W,                    W,       W,    W,   W,   "02:00:00:00:00:11", W,   W,   0x88B5,   "drop"),  # 0x88b5 + mac (combined; non-IP)
+    (1, W,                    W,       W,    W,   W,   W,                   W,   W,   0x88B5,   "drop"),  # pure 0x88b5 (non-IP)
+    (2, W,                    W,       W,    W,   W,   W,                   W,   W,   0x0806,   "drop"),  # pure arp (non-IP headline)
+    (3, _cidr("10.1.0.0/16"), W,       W,    W,   W,   W,                   W,   W,   0x0800,   "pass"),  # ethertype ipv4 + dst_cidr (v4-arm compose)
+    (4, W,                    W,       17,   W,   W,   W,                   W,   W,   W,        "pass"),  # proto udp (ethertype-WILDCARD)
+]
+
+
 def _norm_mac(s):
     """Normalize a MAC to lowercase canonical for exact comparison."""
     return s.lower() if s is not None else None
@@ -446,6 +486,101 @@ def classify_andv6(dst_ip, src_ip, dst_ip6, src_ip6, proto, dport, vlan,
     return NOMATCH
 
 
+def classify_andeth(ethertype, dst_ip, src_ip, dst_ip6, src_ip6, proto, dport,
+                    vlan, src_mac, rules=RULES_ANDETH):
+    """9-axis (dst+src+proto+port+vlan+mac+dst6+src6+ethertype) first-match
+    (§5.54 §6.74).
+
+    ethertype is the host-order EtherType value of the frame AND the family
+    selector. From it we derive the frame family:
+      * ethertype == 0x0800 → IPv4 frame (reads dst_ip/src_ip/proto/dport).
+      * ethertype == 0x86dd → IPv6 frame (reads dst_ip6/src_ip6/proto/dport).
+      * anything else        → non-IP frame: NO L3/L4 (proto/port/all addr
+                               axes are wildcard-only — a rule constraining any
+                               of them can never match, exactly mirroring the
+                               datapath's wildcard-only halves in the non-IP arm).
+
+    mac/vlan/ethertype are family-agnostic (evaluated for every frame). This is
+    the naive O(N) algorithm-independent reference for the datapath's 9-term AND
+    composed across all three dispatch arms.
+    """
+    has_v4 = ethertype == ETH_IPV4
+    has_v6 = ethertype == ETH_IPV6
+    dst_i = _ip_to_int(dst_ip) if (has_v4 and dst_ip is not None) else None
+    src_i = _ip_to_int(src_ip) if (has_v4 and src_ip is not None) else None
+    dst6_i = _ip6_to_int(dst_ip6) if (has_v6 and dst_ip6 is not None) else None
+    src6_i = _ip6_to_int(src_ip6) if (has_v6 and src_ip6 is not None) else None
+    # proto/port exist ONLY for an IP frame; a non-IP frame has neither.
+    eff_proto = proto if (has_v4 or has_v6) else None
+    has_port = (eff_proto is not None and dport is not None
+                and eff_proto not in (ICMP, ICMP6))
+    has_vlan = vlan is not None
+    mac_n = _norm_mac(src_mac)
+
+    for (rid, dst_c, src_c, p, port, vl, mac, dst_c6, src_c6, eth, _action) \
+            in rules:
+        # ethertype axis (exact; the family selector). Wildcard matches any.
+        if eth is not W and ethertype != eth:
+            continue
+        # dst axis (IPv4) — a v4-constrained rule cannot match a non-v4 frame.
+        if dst_c is not W:
+            if not has_v4 or not _ip_in_cidr(dst_i, dst_c):
+                continue
+        # src axis (IPv4)
+        if src_c is not W:
+            if not has_v4 or not _ip_in_cidr(src_i, src_c):
+                continue
+        # proto axis (exact); a non-IP frame has no proto.
+        if p is not W:
+            if eff_proto is None or eff_proto != p:
+                continue
+        # port axis (inclusive range; icmp/icmp6/non-IP have no L4 port)
+        if port is not W:
+            if not has_port:
+                continue
+            lo, hi = port
+            if not (lo <= dport <= hi):
+                continue
+        # vlan axis (exact membership; untagged cannot match a vlan rule)
+        if vl is not W:
+            if not has_vlan or vlan != vl:
+                continue
+        # mac axis (exact membership; src-MAC h_source; family-agnostic)
+        if mac is not W and mac_n != _norm_mac(mac):
+            continue
+        # dst6 axis (IPv6) — a v6-constrained rule cannot match a non-v6 frame.
+        if dst_c6 is not W:
+            if not has_v6 or not _ip6_in_cidr6(dst6_i, dst_c6):
+                continue
+        # src6 axis (IPv6)
+        if src_c6 is not W:
+            if not has_v6 or not _ip6_in_cidr6(src6_i, src_c6):
+                continue
+        # all constrained axes satisfied → first match wins (ascending id)
+        return rid
+    return NOMATCH
+
+
+# ethertype name → host-order value (§5.54 D-mvp-4.14-ETH-GRAMMAR).
+ETHERTYPE_NUM = {"ipv4": ETH_IPV4, "ipv6": ETH_IPV6, "arp": ETH_ARP}
+
+
+def _ethertype_arg(s):
+    """Parse --ethertype: named (ipv4/ipv6/arp), hex (0x86dd), or decimal."""
+    lowered = s.lower()
+    if lowered in ETHERTYPE_NUM:
+        return ETHERTYPE_NUM[lowered]
+    try:
+        v = int(s, 0)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"ethertype must be ipv4/ipv6/arp or a number, got {s!r}")
+    if not 0 <= v <= 0xFFFF:
+        raise argparse.ArgumentTypeError(
+            f"ethertype out of range [0,65535]: {v}")
+    return v
+
+
 def _proto_arg(s):
     s = s.lower()
     if s in PROTO_NUM:
@@ -463,13 +598,15 @@ def main():
         description="independent production AND first-match classifier "
                     "(§5.43 2-axis / §5.44 4-axis / §5.45 5-axis)")
     ap.add_argument("--ruleset",
-                    choices=("and", "and4", "and5", "and6", "andv6", "macmerge"),
+                    choices=("and", "and4", "and5", "and6", "andv6", "andeth",
+                             "macmerge"),
                     default="and",
                     help="and = 2-axis (config_valid_and.yaml, §6.61); "
                          "and4 = 4-axis (config_valid_and4.yaml, §6.66); "
                          "and5 = 5-axis (config_valid_and5.yaml, §6.69); "
                          "and6 = 6-axis (config_valid_and6.yaml, §6.70); "
                          "andv6 = 8-axis +dst6/src6 (config_valid_andv6.yaml, §6.71); "
+                         "andeth = 9-axis +ethertype (config_valid_andeth.yaml, §6.74); "
                          "macmerge = mac-dedup MERGE canary "
                          "(config_valid_macmerge.yaml, §5.50)")
     # §5.53: --dst-ip/--src-ip are now OPTIONAL (a v6 frame carries no v4
@@ -489,7 +626,10 @@ def main():
                     help="outer 802.1Q VID; and5/and6/andv6 only (omit ⇒ untagged "
                          "frame, has_vlan=0)")
     ap.add_argument("--src-mac", default=None,
-                    help="source MAC (eth->h_source); and6/andv6 only (exact match)")
+                    help="source MAC (eth->h_source); and6/andv6/andeth only (exact match)")
+    ap.add_argument("--ethertype", type=_ethertype_arg, default=None,
+                    help="EtherType (ipv4/ipv6/arp or hex/decimal); andeth only "
+                         "(the family selector + exact axis)")
     args = ap.parse_args()
 
     # The v4-only rulesets require an IPv4 dst+src (the v6 axes don't exist).
@@ -509,6 +649,15 @@ def main():
         print(classify_andv6(args.dst_ip, args.src_ip,
                              args.dst_ip6, args.src_ip6,
                              args.proto, dport, args.vlan, args.src_mac))
+    elif args.ruleset == "andeth":
+        if args.ethertype is None:
+            ap.error("--ruleset andeth requires --ethertype")
+        # proto/dport apply only to an IP frame; for a non-IP ethertype the
+        # classifier ignores them (eff_proto=None). icmp/icmp6 carry no port.
+        dport = None if args.proto in (ICMP, ICMP6) else args.dport
+        print(classify_andeth(args.ethertype, args.dst_ip, args.src_ip,
+                              args.dst_ip6, args.src_ip6,
+                              args.proto, dport, args.vlan, args.src_mac))
     elif args.ruleset == "macmerge":
         if args.proto is None:
             ap.error("--ruleset macmerge requires --proto")
