@@ -1397,3 +1397,45 @@ set_tests_properties(T_ANDETH_NONIP_STEER PROPERTIES
     TIMEOUT 120
     SKIP_RETURN_CODE 77
 )
+
+# ── §5.55 MVP-4.15 / S6: IPv6 extension-header walk ─────────────────────────
+# Two NEW datapath ctests proving the v6 arm WALKS the ext-header chain so the
+# EXISTING proto/dst_port axes read the TRUE upper-layer L4 (no new axis). Guard
+# #12: both touch veth/netns/bpffs -> RESOURCE_LOCK xdp_fixture; SKIP_RETURN_CODE
+# 77. Real ext-bearing frames via inject_l6.py --ext / --truncate (the now-filled
+# S6 seam). The walk-transparency / non-ext-identical guard (PI-mvp-4.15-NONEXT-V6)
+# is realized as W2 inside T_ANDEXT_WALK_STEER + the unchanged T_ANDV6_*/T_IPV6_*
+# net staying green (design §5.55 TestStrategy test 3 = oracle no-op).
+#   T_ANDEXT_WALK_STEER (test 1): VA-5 detectability headline — an ext-bearing v6
+#     frame matched by proto:tcp/dst_port:443 that base-only would MISS, the
+#     non-ext walk-no-op control, and the wrong-port negation. Needs
+#     AND_ORACLE_PROD (--ruleset andext) + INJECT_L6.
+#   T_ANDEXT_TRUNCATED_MALFORMED (test 2): a truncated mid-walk chain ->
+#     STAT_DROP_MALFORMED, no OOB. Needs INJECT_L6.
+set(TEST_ENV_ANDEXT
+    ${TEST_ENV}
+    "AND_ORACLE_PROD=${CMAKE_SOURCE_DIR}/tests/bitvec/bitvec_oracle_prod.py"
+    "INJECT_L6=${CMAKE_SOURCE_DIR}/tests/inject/inject_l6.py"
+)
+add_test(
+    NAME T_ANDEXT_WALK_STEER
+    COMMAND bash ${TEST_DIR}/T_ANDEXT_WALK_STEER.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_ANDEXT_WALK_STEER PROPERTIES
+    ENVIRONMENT "${TEST_ENV_ANDEXT}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 120
+    SKIP_RETURN_CODE 77
+)
+add_test(
+    NAME T_ANDEXT_TRUNCATED_MALFORMED
+    COMMAND bash ${TEST_DIR}/T_ANDEXT_TRUNCATED_MALFORMED.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_ANDEXT_TRUNCATED_MALFORMED PROPERTIES
+    ENVIRONMENT "${TEST_ENV_ANDEXT}"
+    RESOURCE_LOCK xdp_fixture
+    TIMEOUT 120
+    SKIP_RETURN_CODE 77
+)

@@ -561,6 +561,34 @@ def classify_andeth(ethertype, dst_ip, src_ip, dst_ip6, src_ip6, proto, dport,
     return NOMATCH
 
 
+# ── andext ruleset: by hand from tests/fixtures/andext.yaml (§5.55 / S6) ──────
+# Each rule: same 9-tuple shape as RULES_ANDV6 (dst_cidr|W, src_cidr|W, proto|W,
+# port(lo,hi)|W, vlan|W, mac|W, dst_cidr6|W, src_cidr6|W, action) — andext reuses
+# the v6 classifier (classify_andv6) because the slice changes NOTHING about the
+# match model: it only changes how the datapath READS proto/port off a v6 frame
+# carrying an extension-header chain.
+#
+# THE ORACLE IS WALK-TRANSPARENT (the load-bearing detectability property,
+# §5.55 / VA-5): ext-headers are INVISIBLE to this oracle. It keys on the TRUE
+# upper-layer protocol + L4 port the test injects via --proto/--dport — i.e. the
+# value the datapath must reach by WALKING the chain. The oracle NEVER parses an
+# ext chain; it asserts the OUTCOME the walk must produce. So for an ext-bearing
+# frame the oracle predicts the true-L4 verdict (id0=drop for tcp/443) while a
+# datapath that did NOT walk computes proto=HOPOPTS(0) and predicts NOMATCH —
+# the disagreement is exactly the VA-5 trap that makes T_ANDEXT_WALK_STEER RED on
+# a non-walking / short-walking datapath.
+#
+# Rule layout (mirrors andext.yaml; default_action: pass ⇒ NOMATCH means PASS):
+#   id 0 : protocol tcp AND dst_port 443    DROP   (proto+port; addr/mac/vlan wild)
+#
+# IMPORTANT: tests/fixtures/andext.yaml transcribes the SAME rule. Any edit here
+# MUST be mirrored there — data-independence is intentional.
+RULES_ANDEXT = [
+    # id dst_cidr src_cidr proto port        vlan mac dst_cidr6 src_cidr6 action
+    (0, W,       W,       6,    (443, 443), W,   W,  W,        W,        "drop"),  # tcp + dport 443
+]
+
+
 # ethertype name → host-order value (§5.54 D-mvp-4.14-ETH-GRAMMAR).
 ETHERTYPE_NUM = {"ipv4": ETH_IPV4, "ipv6": ETH_IPV6, "arp": ETH_ARP}
 
@@ -599,7 +627,7 @@ def main():
                     "(§5.43 2-axis / §5.44 4-axis / §5.45 5-axis)")
     ap.add_argument("--ruleset",
                     choices=("and", "and4", "and5", "and6", "andv6", "andeth",
-                             "macmerge"),
+                             "andext", "macmerge"),
                     default="and",
                     help="and = 2-axis (config_valid_and.yaml, §6.61); "
                          "and4 = 4-axis (config_valid_and4.yaml, §6.66); "
@@ -649,6 +677,19 @@ def main():
         print(classify_andv6(args.dst_ip, args.src_ip,
                              args.dst_ip6, args.src_ip6,
                              args.proto, dport, args.vlan, args.src_mac))
+    elif args.ruleset == "andext":
+        # §5.55 / S6: a v6 frame carrying an ext-header chain. The oracle is
+        # walk-TRANSPARENT — it keys on the TRUE L4 (--proto/--dport), exactly the
+        # value the datapath must reach by walking the chain. Requires the v6
+        # family (the frame is always IPv6).
+        if args.proto is None:
+            ap.error("--ruleset andext requires --proto")
+        if args.dst_ip6 is None or args.src_ip6 is None:
+            ap.error("--ruleset andext requires --dst-ip6 and --src-ip6 (v6 frame)")
+        dport = None if args.proto in (ICMP, ICMP6) else args.dport
+        print(classify_andv6(None, None, args.dst_ip6, args.src_ip6,
+                             args.proto, dport, args.vlan, args.src_mac,
+                             rules=RULES_ANDEXT))
     elif args.ruleset == "andeth":
         if args.ethertype is None:
             ap.error("--ruleset andeth requires --ethertype")

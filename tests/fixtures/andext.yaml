@@ -1,0 +1,33 @@
+# andext.yaml — §5.55 MVP-4.15 / S6 IPv6 extension-header walk fixture.
+#
+# Used by T_ANDEXT_WALK_STEER (the VA-5 detectability headline) and
+# T_ANDEXT_TRUNCATED_MALFORMED (the mid-walk bounds-miss MALFORMED path).
+#
+# schema_version: 2 — NO new match grammar. S6 changes ONLY how the datapath
+# READS proto/dst_port off a v6 frame carrying an extension-header chain (it now
+# WALKS {HopByHop,Routing,DestOpt,Fragment} to the true upper-layer L4 instead of
+# reading the first nexthdr at the fixed 40-byte base offset). The rule below is
+# an ordinary proto+port rule — its whole point is that an ext-bearing v6 frame
+# whose TRUE L4 is tcp/443 must now MATCH it, where a base-header-only datapath
+# would compute proto=HOPOPTS(0) and MISS.
+#
+# Rule layout (bit position == id; first-match by lowest id, ffsll):
+#   id 0 : protocol tcp AND dst_port 443    DROP   (addr/mac/vlan wildcard)
+#   default_action: pass
+#
+# default_action is PASS so the observable is a DROP-counter delta: an ext-bearing
+# tcp/443 frame DROPS (id0 fires) while a tcp/8080 frame (negation) falls to the
+# default PASS — proving the match is the PORT axis reaching true L4, not a
+# blanket "drop any ext-bearing frame".
+#
+# IMPORTANT: tests/bitvec/bitvec_oracle_prod.py transcribes this rule BY HAND
+# (table RULES_ANDEXT). Any edit here MUST be mirrored there — data-independence
+# is intentional (divergence fails the agreement assertion loudly).
+schema_version: 2
+default_action: pass
+rules:
+  - id: 0
+    action: drop
+    match:
+      protocol: tcp
+      dst_port: 443

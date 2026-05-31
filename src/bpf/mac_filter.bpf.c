@@ -89,6 +89,36 @@
 #define IPPROTO_UDP 17
 #endif
 
+/* §5.55 (MVP-4.15 / S6) D-mvp-4.15-EXT-CONSTS: IPv6 extension-header protocol
+ * numbers for the bounded ext-header walk. Same rationale as the IPPROTO_TCP/UDP
+ * and ETH_P_* inline-defines above — vmlinux.h is BTF-derived (types only, no
+ * CPP macros) and linux/in.h is unavailable in the BPF-target build. Values are
+ * byte-equivalent to the IANA-assigned IP protocol numbers. HOPOPTS/ROUTING/
+ * DSTOPTS use struct ipv6_opt_hdr (length (hdrlen+1)*8); FRAGMENT uses struct
+ * frag_hdr (fixed 8B); NONE is a terminal no-next-header. */
+#ifndef IPPROTO_HOPOPTS
+#define IPPROTO_HOPOPTS 0
+#endif
+#ifndef IPPROTO_ROUTING
+#define IPPROTO_ROUTING 43
+#endif
+#ifndef IPPROTO_FRAGMENT
+#define IPPROTO_FRAGMENT 44
+#endif
+#ifndef IPPROTO_NONE
+#define IPPROTO_NONE 59
+#endif
+#ifndef IPPROTO_DSTOPTS
+#define IPPROTO_DSTOPTS 60
+#endif
+
+/* §5.55 (MVP-4.15 / S6) D-mvp-4.15-MAXHOPS: ext-header walk hop cap. Single
+ * source of truth for the #pragma unroll count. Spike-validated at 8 (rc=0,
+ * 26548/1M insns, stack 280/512, max_states 12 on the 6.1 host); 8 covers all
+ * realistic chains with huge verifier headroom. A chain exceeding the cap
+ * fail-safes to a non-L4 residual proto ⇒ has_port=0 (D-mvp-4.15-Q2-CAP). */
+#define MAX_EXT_HOPS 8
+
 /* Named inner-map type. Used by both concrete inner instances and the
  * outer MAP_OF_MAPS template (so &instance pointer types match exactly). */
 struct xdpmf_allowlist_inner {
@@ -983,10 +1013,10 @@ int mac_filter_prog(struct xdp_md *ctx)
         /* §5.53 (MVP-4.13 / S4) D-mvp-4.13-Q2: the IPv6 classification arm.
          * Symmetric 8-term AND mirroring the v4 arm; the v4 address axes
          * contribute wildcard-only halves (no v4 address in a v6 frame), and
-         * dst6/src6 carry the IPv6 LPM survivors. Base-header only — proto sees
-         * ip6->nexthdr (first nexthdr), port reads the L4 header at the fixed
-         * 40B base offset; extension-header chains are NOT walked (S6 boundary,
-         * PI-mvp-4.13-BASE-HEADER). */
+         * dst6/src6 carry the IPv6 LPM survivors. §5.55 (MVP-4.15 / S6)
+         * D-mvp-4.15-Q1-WALK: proto/port now read the TRUE upper-layer L4 via a
+         * bounded ext-header chain walk (PI-mvp-4.15-EXT-WALK; the S4
+         * base-header-only boundary PI-mvp-4.13-BASE-HEADER is RETIRED). */
 
         /* Verifier-required IPv6 base-header bounds check before nexthdr/addr
          * deref — the ONLY MALFORMED path for a 0x86DD frame
@@ -997,14 +1027,57 @@ int mac_filter_prog(struct xdp_md *ctx)
         }
         struct ipv6hdr *ip6 = (struct ipv6hdr *)l3hdr;
 
-        /* Base nexthdr only (no ext-header walk). */
-        __u8 proto = ip6->nexthdr;
+        /* §5.55 (MVP-4.15 / S6) bounded ext-header walk (D-mvp-4.15-Q1-WALK,
+         * A1 fixed-MAX_EXT_HOPS #pragma unroll — the verifier-safe no-back-edge
+         * pattern proven by port_scan / the VLAN tag-walk). Start at the base
+         * nexthdr / 40B offset (== today's base-only values), then advance the
+         * cursor over {HOPOPTS,ROUTING,DSTOPTS} by (hdrlen+1)*8 and over
+         * FRAGMENT by a fixed 8B, bounds-checking each hop. The loop breaks at a
+         * recognized L4 / unrecognized nexthdr / NONE (terminal), leaving proto
+         * = true upper-layer protocol and cursor = the L4 (or terminal) header.
+         * A non-ext frame breaks at hop 0 ⇒ proto/cursor == the old base-offset
+         * values (PI-mvp-4.15-NONEXT-V6 no-op). A chain exceeding MAX_EXT_HOPS
+         * leaves proto an ext-header number (≠ TCP/UDP) ⇒ has_port=0 fail-safe
+         * (D-mvp-4.15-Q2-CAP — no explicit post-loop check needed). */
+        __u8 proto    = ip6->nexthdr;
+        void *cursor  = (void *)(ip6 + 1);
+#pragma unroll
+        for (__u32 i = 0; i < MAX_EXT_HOPS; i++) {
+            if (proto == IPPROTO_HOPOPTS || proto == IPPROTO_ROUTING ||
+                proto == IPPROTO_DSTOPTS) {
+                /* Mid-walk bounds miss ⇒ genuinely malformed chain
+                 * (D-mvp-4.15-Q2-MALFORMED). */
+                if (unlikely(cursor + sizeof(struct ipv6_opt_hdr) > data_end)) {
+                    bump_stat(STAT_DROP_MALFORMED);
+                    return XDP_DROP;
+                }
+                struct ipv6_opt_hdr *opt = cursor;
+                proto  = opt->nexthdr;
+                cursor += ((__u32)opt->hdrlen + 1) * 8;
+            } else if (proto == IPPROTO_FRAGMENT) {
+                if (unlikely(cursor + sizeof(struct frag_hdr) > data_end)) {
+                    bump_stat(STAT_DROP_MALFORMED);
+                    return XDP_DROP;
+                }
+                /* frag_off NOT consulted — first-fragment L4 only; deep
+                 * reassembly OUT OF SCOPE (D-mvp-4.15-FRAG). */
+                struct frag_hdr *frag = cursor;
+                proto  = frag->nexthdr;
+                cursor += 8;
+            } else {
+                /* Terminal: a recognized L4 (TCP/UDP), NONE, ICMPv6, or any
+                 * unrecognized nexthdr (D-mvp-4.15-Q2-UNRECOGNIZED). */
+                break;
+            }
+        }
 
-        /* L4 sits at the fixed 40B base-header offset. dport read only for
-         * TCP/UDP after an explicit L4-header bounds-check (has_port); other
-         * frames keep has_port=0 → port_mask=0 (only port-wildcard rules
-         * survive), mirroring the v4 arm's has_port logic. */
-        void *l4 = (void *)(ip6 + 1);
+        /* L4 (or terminal header) sits at the walked offset. dport read only
+         * for TCP/UDP after an explicit L4-header bounds-check (has_port); other
+         * frames — incl. a residual ext-header proto if the chain exceeded
+         * MAX_EXT_HOPS, NONE, ICMPv6, unrecognized — keep has_port=0 ⇒
+         * port_mask=0 (only port-wildcard rules survive), mirroring the v4
+         * arm's has_port logic. */
+        void *l4 = cursor;
         __u32 dport    = 0;
         int   has_port = 0;
         if (proto == IPPROTO_TCP) {
