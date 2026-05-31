@@ -1,86 +1,86 @@
-# Task brief — MVP-4.17 / housekeeping: dead-code + stale-comment cleanup (brownfield, CLEANUP)
+# Task brief — MVP-4.18 / housekeeping: remove the legacy `allowlist` alias map (brownfield, CLEANUP)
 
 ## Goal
-Two pure-cleanup backlog items, **zero behavior change**, bundled as one housekeeping slice:
+Remove the vestigial bare `allowlist` BPF map + its bespoke special-pin/skip control-flow (BACKLOG **B29**). The map is a typed alias of `allowlist_a`, retained ONLY so MVP-2-era out-of-tree harnesses / ctests that grep the `${PIN_DIR}/allowlist` pin still resolve. Runtime ruleset data lives ONLY in the live `allowlist_a`/`allowlist_b` ARRAY_OF_MAPS pair; the datapath program NEVER reads the alias. This is dead-infrastructure removal, **verdict-identical for the live datapath**.
 
-- **B24** — delete vestigial dead code in the exporter sidecar reader: `classify_match_kind()` scans for a retired bare `"cidr"` key the producer NEVER emits (it emits `dst_cidr`/`src_cidr`/`dst_cidr6`/… — never bare `"cidr"`), so `has_cidr` is permanently false; the function's result `match_kind` is **written but never read** (the live label path = the per-axis `extract_axis` fields). Delete the function, its single assignment, and the `RuleMeta::match_kind` member (~−12 LOC).
-- **B25** — fix comments + one dead initializer that still assert the **pre-S4/S5/S6** reality ("at-least-one-of mac/src_cidr", "6-axis", `schema_version = 1`). The match model is now **9 axes** (dst/src/proto/port/vlan/mac/dst6/src6/ethertype); the loader only ever applies v2. These are live-misleading prose, not history.
+The legacy `${PIN_DIR}/allowlist` pin is literally `allowlist_a` pinned a SECOND time at the legacy path by a dedicated apply step (loader.cpp special-pin block, grep-anchor `"§5.26 backward-compat: pin allowlist_a ALSO at the legacy"`). Four ctests assert that pin's existence as an "attach succeeded" canary — they migrate to assert the live `allowlist_a` pin (`XDPMF_MAP_INNER_A_NAME = "allowlist_a"`) instead.
 
-This is the cleanup-cluster first slice after the S1→S6 ladder + C3 fast-follow shipped. No schema change, no VERSION bump, verdict-identical. The `prom_format.hpp:16` "6-axis" fix is a direct C3 follow-on — C3 (`9abb02d`) changed the `prom_format.cpp` HELP line to "9-axis" but the `.hpp` doc-mirror still says "6-axis" (now self-contradictory).
-
-**Bundle**: the uncommitted `docs/BACKLOG.md` status-marking edits (B21/B28/B31 + IPv4-gate marked SHIPPED, "ladder+C3 SHIPPED" section) ride in this slice's commit.
+**ABI-promise discharge (DONE at brief time — code-grounded, NOT a PO gate):** `bpf.c` frames the alias as a compat promise for "any out-of-tree harness that linked against MVP-2's allowlist symbol." Tree-wide grep (`src/ tests/ ansible/ systemd/ include/`) finds the ONLY consumers are: the alias definition itself, the loader special-pin/skip flow, and the 4 ctest pin-assertions being migrated. **No external/out-of-tree consumer exists** (consistent with project reality: filter output consumed at-the-network, CLI+YAML integration surface, libxdpmf deferred-no-consumer). The promise is vestigial → safe to retire. If the architect's independent Phase-A grep finds a genuine live consumer, HALT.
 
 ## Context: prior work
-- Prior briefs archived in `mint/task-brief-*.md` (latest archived: `task-brief-mvp-4.15.md` = S6 ext-walk).
-- Recent slices: S4 cidr6 (`971f2fd`), S5 EtherType (`99eb17e`), S6 ext-walk (`ce59a5e`), C3 sidecar match-kinds (`9abb02d`). Match model = 9 axes AND-composed across 3 family arms.
-- Brief-author Phase 2 greps (all run, see verification footer): B24 sites (`sidecar_reader.cpp:7/39-47/93`, `.hpp:30`); confirmed `match_kind` has ZERO consumers (only the write at `:93`); B25 sites enumerated below.
-- PI continuity: **loader.hpp PI-7 zero-diff CONTINUES** (this slice does NOT touch loader.hpp). No schema/VERSION PI moves.
+- Prior briefs archived in `mint/task-brief-*.md` (latest archived: `task-brief-mvp-4.17.md` = the B24/B25 cleanup, just shipped `9aa68fd`).
+- Recent: S4/S5/S6 ladder + C3 + MVP-4.17 cleanup all on origin/main. Match model = 9 axes; kManagedMaps = 39.
+- Phase-2 grep verification (brief author ran — see footer): confirmed the loader sites, the 4-ctest migration set, the constant's 2 uses, and the ABI discharge.
+- PI continuity: **loader.hpp PI-7 zero-diff EXPECTED to continue** (kManagedMaps table + struct live in loader.cpp anon-namespace; the `legacy_alias` field is on that anon struct — architect VERIFIES loader.hpp is untouched). **PI-6** (byte-equivalent pin existence) has a legacy-alias clause that this slice RETIRES — architect amends PI-6.
 
 ## Workflow rules (brownfield)
-- **Architect**: read design.md §5.46 (sidecar_reader axis-extraction), §5.43/§5.47 (config schema/mac re-accept), §5.56 (C3); EDIT design.md in place; append a short §5.57 (MVP-4.17) cleanup amendment. Re-run the Phase 2 greps independently (guard #5).
-- **Impl**: FileList is EXACT — delete/edit only the listed sites. No opportunistic refactor beyond B24/B25.
-- **Tester**: NO new ctests expected (pure cleanup, nothing new to assert). Confirm the full suite stays **96/96** green; the deleted `classify_match_kind`/`match_kind` are asserted by NO test (verified — guard #13). If the architect identifies a genuine assertion gap, a regression-guard ctest is OPTIONAL, not required.
-- **Reviewer**: 5-point brownfield framework; **special attention**: (a) verdict-identity — diff the loader/exporter behavior is byte-identical except the deleted dead code; (b) no fixture/test references the retired `match_kind`/`classify_match_kind`/`"mac"`/`"cidr"`/`"both"` strings (guard #13); (c) `prom_format.cpp` HELP ("9-axis") and `prom_format.hpp:16` doc-mirror now AGREE.
+- **Architect**: read design.md §5.26/§5.27 (allowlist/cidr ARRAY_OF_MAPS topology + PI-6), the `kManagedMaps` HK-9 single-table section, §5.43 (cidr reshape mirror); EDIT design.md in place; append §5.58 (MVP-4.18). Re-run the Phase-2 greps + the ABI-discharge grep INDEPENDENTLY (guard #5). Amend PI-6 (retire the legacy-alias byte-equivalent clause; the live `allowlist_a` pin is the surviving surface).
+- **Impl**: FileList is a DIFF — Edit only. The 3 kManagedMaps call-site loops (clear / pin / reuse) MUST still walk the table correctly with the entry + `legacy_alias` field gone. Remove the special-pin step as a whole block.
+- **Tester**: NO new ctests. Migrate the 4 pin-assertion ctests (`${PIN_DIR}/allowlist` → `${PIN_DIR}/allowlist_a`). Confirm the suite stays **96/96**. The migrated assertions are the regression guard (they prove `allowlist_a` is pinned + attach succeeded).
+- **Reviewer**: 5-point brownfield; **special attention**: (a) live datapath verdict-identity (allowlist_a/_b untouched, program never read the alias); (b) `bpftool prog load` rc=0 on the prod object with the map gone (impl Phase 2.5); (c) no dangling ref to `allowlist`/`XDPMF_MAP_ALLOWLIST_NAME`/`legacy_alias` anywhere (`grep -rn` = ∅ except retirement-citation comments); (d) the 4 migrated ctests assert the LIVE pin and still pass; (e) kManagedMaps 39→38 (guard #10); (f) PI-7 loader.hpp ∅.
 
 ## Human-gate decisions (defaults applied — architect overrides at Phase A)
 
-### HG-mvp-4.17-1: `schema_version` dead init value → **`= 2`**
-`config.hpp:63` currently `= 1` (dead — `validate()` always overwrites from the parsed config, which `config.cpp:286-297` requires `== 2`). Set the in-struct default to `2` (the only supported value) so the init reflects reality rather than a retired `{1}` default. Architect MAY instead choose `= 0` (an obviously-invalid sentinel that would fail-loud if ever observed unvalidated) — both are behavior-identical since validate always writes. Default `= 2` for "reflects the only legal value".
+### HG-mvp-4.18-1: the MVP-2 out-of-tree-harness ABI promise → **RETIRE**
+Discharge passed (no consumer tree-wide). Retire the alias + its compat promise with a one-line "retired vestigial MVP-2 ABI alias — no consumer; superseded by allowlist_a/_b" note in §5.58 + the bpf.c header. Architect re-confirms the discharge grep independently before deleting (the one judgment item — it is a code-grounded discharge, not a PO question).
 
-### HG-mvp-4.17-2: comment-edit depth → **minimal-truthful**
-Update each stale comment to state CURRENT reality (9 axes, v2-only) in ≤1 line; do NOT expand into history/changelog prose (that belongs in git/RETROSPECTIVES). Retain the existing `§5.xx` citation anchors.
+### HG-mvp-4.18-2: the 4 canary ctests → **MIGRATE to `allowlist_a`, do NOT delete the assertion**
+The pin-existence check is a useful "attach succeeded" canary. Re-point it at the live `${PIN_DIR}/allowlist_a` pin rather than deleting the assertion outright — keeps the test's intent intact. (Q1 below.)
 
-## Open mechanism questions (architect decides; document in §5.57)
+## Open mechanism questions (architect decides; document in §5.58)
 
-### Q1: regression-guard ctest for the B24 deletion?
-- **A1**: none — pure dead-code removal, no observable behavior to assert; rely on the existing exporter tests staying green.
-- **A2**: add a tiny ctest asserting the exporter still emits well-formed `xdpfilter_rule_info` after the delete (redundant with `T_EXPORTER_RULE_LABELS`).
-- **Recommendation**: **A1**. `match_kind` was never in any output surface; `T_EXPORTER_RULE_LABELS` + `T_SIDECAR_V6_ETH_KINDS` already cover the live label path. Adding a test would assert nothing new.
+### Q1: how to migrate the 4 canary ctests?
+- **A1**: re-point each `test -e ${PIN_DIR}/allowlist` → `test -e ${PIN_DIR}/allowlist_a` (the live inner-A pin, always created via kManagedMaps).
+- **A2**: delete the pin-existence assertions (rely on other attach-success signals in each test).
+- **Recommendation**: **A1** — preserves each test's attach-canary intent with a one-token change; `allowlist_a` is guaranteed pinned by the normal kManagedMaps pin loop (loader.cpp `XDPMF_MAP_INNER_A_NAME` row, `legacy_alias=false`).
 
-## Scope (concrete items — FileList EXACT)
+### Q2: delete the `XDPMF_MAP_ALLOWLIST_NAME` constant?
+- **A1**: delete it (mac_filter.h) once its 2 uses (kManagedMaps row + special-pin step) are gone.
+- **A2**: keep it (harmless unused macro).
+- **Recommendation**: **A1** — leaving an unused pin-name macro is exactly the dead-infra this slice removes. Verify ∅ uses after the loader edits, then delete.
 
-### B24-1 — delete `classify_match_kind` + `match_kind`
-**Where**: `src/exporter/sidecar_reader.cpp` + `src/exporter/sidecar_reader.hpp`
-- `sidecar_reader.cpp:39-47` — delete the `classify_match_kind` function definition.
-- `sidecar_reader.cpp:93` — delete the `rm.match_kind = classify_match_kind(body);` assignment.
-- `sidecar_reader.cpp:7` — fix the file-header comment that references `match_kind` "derived by substring scan" (now removed).
-- `sidecar_reader.hpp:30` — delete the `std::string match_kind;` member + its comment.
-- Verified: NO consumer of `RuleMeta::match_kind` anywhere (`prom_format.cpp`, `http.cpp`, tests) — only the deleted write.
+## Scope (concrete items — FileList DIFF; line anchors are SHOULD-level, grep to confirm)
 
-### B25-1 — config.hpp stale prose + dead init
-**Where**: `src/lib/config.hpp`
-- `:12-13` — "§5.27 rule 7: at-least-one-of **mac/src_cidr** required" → reflect the current grammar: at-least-one-of the **9** match axes (the live error string at `config.cpp:457-459` already enumerates all 9 correctly).
-- `:63` — `schema_version = 1` dead init → per HG-mvp-4.17-1.
-- `:4` — "The schema (cycles 1+2)" — OPTIONAL light touch (mildly historical; architect's call).
+### B29-1 — delete the BPF alias map
+**Where**: `src/bpf/mac_filter.bpf.c`
+- Delete `struct xdpmf_allowlist_inner allowlist SEC(".maps");` (grep-anchor: the `allowlist SEC` line that is NOT `_a`/`_b`).
+- Delete the legacy-alias header-comment paragraph (grep-anchor `"The legacy \`allowlist\` symbol is RETAINED"`) + the inline `"/* Legacy \`allowlist\` symbol — retained for MVP-2 compat-time wiring"` comment. KEEP allowlist_a/_b, `xdpmf_allowlist_inner` type, the rulesets ARRAY_OF_MAPS.
 
-### B25-2 — config.cpp + apply_internal.hpp header comments
-**Where**: `src/lib/config.cpp`
-- `:6` — header comment "match.* mapping MUST contain at-least-one-of {mac, src_cidr}" → 9 axes.
-- (apply_internal.hpp:27 already says "schema_version 2" correctly — NO edit; listed only to fence it as verified-clean.)
-- (config.cpp:457-459 error STRING already correct — NO edit; operator-facing, do not touch.)
+### B29-2 — remove the loader special-pin + skip flow
+**Where**: `src/lib/loader.cpp`
+- Remove the `kManagedMaps` entry `{ &SkelMapsT::allowlist, XDPMF_MAP_ALLOWLIST_NAME, true }`.
+- Remove the `bool legacy_alias;` field from the kManagedMaps struct + update the 2 branch guards (`if (entry.legacy_alias) continue;` in the pin loop + the reuse loop) — with the entry gone, the field + its guards are dead; remove both so the 3 loops walk a clean table.
+- Remove the whole special-pin block (grep-anchor `"§5.26 backward-compat: pin allowlist_a ALSO at the legacy"` through the `bpf_obj_pin(inner_a_fd, legacy...)` step).
+- Update the now-stale comments (grep-anchors `"legacy alias (\`allowlist\`, kept ONLY"`, `"INCLUDING the legacy \`allowlist\` alias"`, `"EXCEPT the legacy \`allowlist\` alias"`) — drop or retire-cite.
+- **PI-7**: confirm all edits are in loader.cpp (anon-namespace table/struct) → loader.hpp byte-unchanged.
 
-### B25-3 — "6-axis" prose now stale at 9 axes
-**Where**: `src/lib/loader.cpp` + `src/exporter/prom_format.hpp`
-- `loader.cpp:2452` — "the single u32 store commits the whole **6-axis**+rules+wildcard+…" → 9-axis.
-- `prom_format.hpp:16` — HELP doc-mirror "Per-rule match constraints (**6-axis**)" → "9-axis" (matches the C3 `prom_format.cpp` change; closes a self-contradiction C3 introduced).
+### B29-3 — delete the unused pin-name constant
+**Where**: `src/common/mac_filter.h`
+- Delete `#define XDPMF_MAP_ALLOWLIST_NAME "allowlist"` once its uses are ∅ (Q2=A1). The `:17` doc comment "looked up in the `allowlist` hash map" is inner-map semantics (allowlist_a) — light-touch OPTIONAL, architect's call.
+
+### B29-4 — migrate the 4 canary ctests
+**Where**: `tests/T_LOAD_ATTACH.sh`, `tests/T_ATTACH_TAG_MISMATCH.sh`, `tests/T_MODE_GENERIC_DEFAULT.sh`, `tests/T_BPFFS_ROOT_SYMLINK.sh`
+- Each asserts `test -e "${PIN_DIR}/allowlist"` → change to `"${PIN_DIR}/allowlist_a"` (per Q1=A1). Update the adjacent FAIL message strings. Grep-confirmed set = exactly these 4 (the broad `allowlist` grep's other hits are `inner-allowlist` prose / `allowlist_a/_b` / `cidr_allowlist` — NOT the bare legacy pin; do NOT touch them).
 
 ## Out of scope (explicit)
-- B26 (pass_cidr→pass_rule rename — metric contract, own slice), B29 (legacy allowlist map delete — ctest-gated), B30 (slot/id decouple — designed slice), B22/B23 (test hardening), B27 (security — held by PO).
-- Any behavior/schema/VERSION change. Any loader.hpp touch (PI-7 zero-diff must continue).
-- Reformatting / re-flowing unrelated comments. FileList sites ONLY.
+- B26 (pass_cidr→pass_rule — metric contract, defer to a stat-enum slice), B30 (slot/id decouple — designed slice), B22/B23 (test hardening), B27 (security — held by PO), B15 (.pyc/gitignore hygiene).
+- Any live-datapath change (allowlist_a/_b, cidr_allowlist_a/_b, rulesets, all 9 axes untouched). Any schema/VERSION change.
+- Renaming/reshaping any LIVE map. The `cidr_allowlist*` maps (named with the `allowlist` substring) are NOT touched.
 
 ## Definition of done
-- §5.57 (MVP-4.17) cleanup amendment in design.md.
-- PI-7 loader.hpp zero-diff CONTINUES (loader.hpp untouched).
-- ctest baseline **96/96** unchanged (no new tests required; suite stays green).
-- NO VERSION bump (stays 0.15.0), NO schema change (stays 2).
-- `docs/BACKLOG.md` status-marking edits committed in this slice.
+- §5.58 (MVP-4.18) amendment in design.md; PI-6 legacy-alias clause retired + documented.
+- PI-7 loader.hpp zero-diff CONTINUES (verify).
+- kManagedMaps 39 → 38 (guard #10 catalog arithmetic).
+- LIVE datapath verdict-identical; `bpftool prog load` rc=0 on the prod object (impl Phase 2.5).
+- ctest stays **96/96** after the 4-ctest migration (no new tests).
+- NO schema/VERSION change (stays 0.15.0 / schema 2).
+- `grep -rn 'XDPMF_MAP_ALLOWLIST_NAME\|legacy_alias' src/` = ∅; `grep -rn '\ballowlist\b SEC' src/bpf/` = ∅.
 - `mint/review.md` round-1 verdict = pass.
 - One git commit per phase boundary.
 
 ## Dependencies
-- Build: clang-19/C++23 toolchain (unchanged). No new deps.
-- Runtime/kernel: none (no datapath change).
+- Build: clang-19 / C++23 + the BPF skeleton regen (the `.bpf.c` map-set changes → skeleton struct loses the `allowlist` member; impl rebuilds the skeleton).
+- Runtime/kernel: veth + bpffs + sudo for the attach ctests (existing fixture).
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 ```yaml
@@ -95,17 +95,21 @@ packs:
 ---
 
 ## Pre-brief sanity check (per mint-hld-scope-discipline)
-**MECHANICAL.** Single design axis (none, really — it's deletion + comment truth-fixing). Answer falls out of stated constraints + grep-verified current code. No expensive-to-undo decision, no ≥3-option fork. **No /mint-hld, no spike.** Single-architect via /mint-dev handles it. Light path per "additive/low-risk → lighter band run" ([[feedback_band_by_default]] — band IS used, just without hld/spike).
+**MECHANICAL.** Single axis (dead-infra removal). No design fork: the one judgment item (ABI-promise retirement) is a code-grounded discharge that PASSED at brief time (no consumer tree-wide) — framed as an architect Phase-A re-confirm, NOT a PO question (PO-filter: no external value to name; "out-of-tree harness" is hypothetical with zero in-tree evidence). No ≥3-option fork, no expensive-to-undo (git-revertable; the alias can be re-added if a phantom consumer ever surfaces). **No /mint-hld, no spike** (map REMOVAL, not a new verifier-bounded loop; impl Phase-2.5 `bpftool prog load` is the load check). Single-architect via /mint-dev. Light path per [[feedback_band_by_default]].
 
 ## Notes for architect Phase A code-grep discipline
 Re-run (guard #5 — brief author already ran these; verify independently):
-- `grep -rn 'classify_match_kind\|match_kind' src/ tests/ include/` — confirm only the 4 B24 sites; ZERO test/fixture hits.
-- `grep -rn '\.match_kind\|->match_kind' src/ tests/ include/` — confirm only the `:93` write (no reader).
-- `grep -nE 'at-least-one|at least one|mac/src_cidr' src/lib/config.hpp src/lib/config.cpp` — confirm header sites stale, error STRING (config.cpp:457-459) already correct.
-- `grep -rnE '6-axis|6 axis|schema_version = 1' src/lib/ src/exporter/` — confirm the loader.cpp:2452 + prom_format.hpp:16 + config.hpp:63 sites.
+- ABI discharge: `grep -rn 'allowlist' src/ tests/ ansible/ systemd/ include/ | grep -vE 'allowlist_a|allowlist_b|cidr_allowlist|inner-allowlist|MAC allowlist'` — confirm the ONLY bare-`allowlist` consumers are the alias def + loader special-pin/skip + the 4 ctests. No external consumer ⇒ HG-1 RETIRE holds.
+- `grep -rn 'XDPMF_MAP_ALLOWLIST_NAME' src/ include/` — confirm exactly 2 uses (kManagedMaps row + special-pin step); both removed ⇒ delete the constant (Q2).
+- `grep -n 'legacy_alias' src/lib/loader.cpp` — confirm the field + the 2 branch guards (pin-skip + reuse-skip); all removed with the entry.
+- `grep -rn 'PIN_DIR}/allowlist"' tests/*.sh` — confirm the 4-ctest migration set EXACTLY (T_LOAD_ATTACH, T_ATTACH_TAG_MISMATCH, T_MODE_GENERIC_DEFAULT, T_BPFFS_ROOT_SYMLINK).
+- Confirm `XDPMF_MAP_INNER_A_NAME == "allowlist_a"` (the live pin the ctests migrate to).
+- Confirm the kManagedMaps struct/table are loader.cpp anon-namespace (PI-7 loader.hpp ∅).
 
 ### Anti-misdiagnosis guards applicable to this slice (per Phase 3)
-- **Guard #13 (retired emit-site string ripple)** — B24 retires `classify_match_kind` + `match_kind` + the return values `"mac"`/`"cidr"`/`"both"`. Brief verified NO test/fixture asserts these (the values never reached any output surface). Architect: re-confirm `grep -rln 'match_kind\|classify_match_kind' tests/`.
-- **Guard #5 (Phase A code-grep discipline)** — always applies; architect re-runs the greps above.
-- **Operative-semantic discipline** — the "9-axis" / "−12 LOC" / site-count figures in this brief are SHOULD-level orientation, not literal-match contracts. Impl deviations that preserve the intent (e.g. retaining a `§5.xx` citation comment at a retired site, a slightly different LOC delta) are `inline-merge`, not OOT.
-- **Guard #11 (VERSION-bump propagation)** — N/A (no bump).
+- **Guard #10 (catalog arithmetic)** — kManagedMaps drops 39→38; verify the table count + all 3 walking loops (clear/pin/reuse) stay correct with the entry gone.
+- **Guard #16 (retired pin-path / map-name ripple)** — the `${PIN_DIR}/allowlist` pin is RETIRED; the 4 ctests asserting it are pre-listed as EDITED (migrate to allowlist_a). This is the exact guard-#16 class.
+- **Guard #13 (retired symbol ripple)** — `allowlist` map symbol + `XDPMF_MAP_ALLOWLIST_NAME` retired; confirm ∅ test/fixture refs to the bare pin survive (only allowlist_a/_b/cidr_allowlist remain).
+- **Guard #5 (Phase A grep discipline)** — always; architect re-runs the discharge + site greps above.
+- **Operative-semantic discipline** — line anchors / the "−30-ish LOC" / "39→38" figures are SHOULD-level orientation; impl deviations preserving intent (retirement-citation comments, slightly different LOC) are `inline-merge`.
+- **Guard #11 (VERSION-bump propagation)** — N/A (no bump). **Guard #12 (RESOURCE_LOCK)** — N/A (no new ctest; migrated ones keep their existing locks).
