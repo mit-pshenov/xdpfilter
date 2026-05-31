@@ -16086,7 +16086,7 @@ struct xdpmf_cidr_v6 {
 - **D-mvp-4.13-V4-ARM-VERDICT-NOT-BYTE (C1)** — the v4 arm is NOT byte-identical (gains 2 wildcard terms + the macro reindex); the invariant is **v4 VERDICT bit-identical for v4-only configs**, proven by the v4 oracle net. **Because** Q2's correctness requires the dst6/src6 terms in the v4 arm to exclude v6-only rules; byte-identity is impossible, verdict-identity is provable and is the operative contract. Corrects the brief's "v4 arm byte-identical" framing.
 - **D-mvp-4.13-FORK** — `close_prefixes6`/`lower_axis6`/`BitPrefix6`/`host_mask6`/`populate_bitvec6_inner_slot` are FORKED v6 siblings, NOT a shared template (HG-2). **Because** rule-of-three is at TWO and the two closure bodies have divergent UB profiles; templating couples two correctness-critical bodies (why S3 was rejected).
 - **D-mvp-4.13-MAP-NAMES** — fresh trios `dst6_*`/`src6_*` (NOT a value-reshape of an existing map). **Because** there is no existing v6 map to reshape; fresh pins mirror the §5.43 dst-trio topology with zero pin-name churn to v4 maps (guard #16). The src(v4) axis's historical `cidr_*` naming is NOT mimicked for src6 — `src6_*` is consistent with `dst6_*`.
-- **D-mvp-4.13-BASE-HEADER** — v6 proto/port read `ip6->nexthdr` / the L4 header at the fixed 40B base offset only; ext-header chains NOT walked. **Because** PO-confirmed base-nexthdr honesty boundary (model-validation, not production); ext-walk = S6. Documented as PI-mvp-4.13-BASE-HEADER.
+- **D-mvp-4.13-BASE-HEADER** — v6 proto/port read `ip6->nexthdr` / the L4 header at the fixed 40B base offset only; ext-header chains NOT walked. **Because** PO-confirmed base-nexthdr honesty boundary (model-validation, not production); ext-walk = S6. Documented as PI-mvp-4.13-BASE-HEADER. **[SUPERSEDED BY §5.55 (MVP-4.15 / S6) — see D-mvp-4.15-Q1-WALK + PI-mvp-4.15-EXT-WALK: the v6 proto/port now read TRUE upper-layer L4 via a bounded ext-header walk; the base-header-only boundary is closed.]**
 - **D-mvp-4.13-NO-MALFORMED-NONV6** — the v6 arm DROP_MALFORMED only on a truncated v6 BASE header (the bounds-check miss before deref); it NEVER reclassifies a non-v6 frame. **Because** extends the §5.41/§5.51 non-IP-never-MALFORMED contract to v6 (the seam is entered only for 0x86DD frames; a 0x86DD frame too short to hold a 40B base header is genuinely malformed).
 - **D-mvp-4.13-NO-BUMP** — VERSION stays `0.15.0`; guard #11 N/A. **Because** the project treats the whole rule-model as bootstrap/model-validation (memory: dual-purpose, internal milestone); bumping propagates the literal to `T_EXPORTER_METRICS_FORMAT` (4 sites) for no operator-deployment benefit. HG-able — if the PO wants operator-visible "IPv6 support" in `--version`, bump 0.15.0→0.16.0 + propagate (flagged to team-lead).
 - **D-mvp-4.13-SIDECAR-DEFER (C3)** — `sidecar.cpp` stays UNCHANGED; v6 match-kinds are omitted from the status JSON this slice. **Because** brief scope (S4-4) fences the config surface to cidr/config; no existing test breaks; the status-dump gap is fenced to §7 OOS (a 4-line additive mirror when a future slice needs it).
@@ -16141,7 +16141,7 @@ Reviewer's framework point 5 walks this list. Items are **MUST contracts**; `[IN
 | **PI-mvp-4.13-V6KEY (NEW, load-bearing)** | The dst6/src6 LPM key is the network-order byte array `{u32 prefixlen; u8 addr6[16]}` (`addr6[0]`=MSB), `memcpy`'d from `ip6->daddr/saddr`; NOT host-order limbs. | `T_ANDV6_ORACLE_AGREEMENT` GREEN on non-aligned prefixes (a byte-order bug mis-walks the trie → oracle disagreement); reviewer reads the key struct + the datapath memcpy. |
 | **PI-mvp-4.13-CLOSURE6 (NEW, load-bearing)** | `close_prefixes6` cover-direction is correct at 128 bits incl. partial-byte/limb boundaries — the covering (lower-id) rule's bit flows INTO the more-specific entry; `/0` mask = 0 (no shift-128 UB). | `T_ANDV6_PREFIX_CLOSURE_OVERLAP` (§6.72): closure golden GREEN + the /68 frame matches the lower-id /40 rule. |
 | **PI-mvp-4.13-AXES8 (NEW)** | `BITVEC_NUM_AXES=8`; `BV_AXIS_DST6=6`/`SRC6=7`; `wildcard` max_entries=16 (auto via macro); `kManagedMaps[]`=36; `active*8+axis` indexing holds for all 8 axes; single `active_idx` commits dst6/src6 swap; dst6/src6 inners + wildcard RESET-on-apply (guard #15). | `grep BITVEC_NUM_AXES` ⇒ 8; `bpftool map dump wildcard` = 16 entries; code-review of the 36-row table + RESET+flip order. |
-| **PI-mvp-4.13-BASE-HEADER (NEW, honesty)** | v6 proto/port read `ip6->nexthdr` / L4 at the fixed 40B base offset only; extension-header chains are NOT walked (first nexthdr only). | reviewer reads the v6 arm = no ext-header loop; documented boundary; `inject_l6.py --ext` absent (= S6). |
+| **PI-mvp-4.13-BASE-HEADER (NEW, honesty)** ~~[SUPERSEDED BY §5.55 PI-mvp-4.15-EXT-WALK]~~ | v6 proto/port read `ip6->nexthdr` / L4 at the fixed 40B base offset only; extension-header chains are NOT walked (first nexthdr only). | reviewer reads the v6 arm = no ext-header loop; documented boundary; `inject_l6.py --ext` absent (= S6). **SUPERSEDED in §5.55 (MVP-4.15 / S6): the v6 arm now walks the ext-header chain to true L4; this PI is RETIRED and replaced by PI-mvp-4.15-EXT-WALK. Reviewer: do NOT flag the now-present ext-walk loop / `inject_l6.py --ext` as a regression.** |
 | **PI-7-mvp-4.13-loader-hpp (CONTINUES)** | `src/lib/loader.hpp` byte-identical — all v6 lowering/populate/wildcard is anon-namespace `loader.cpp` internal; `apply_request` signature unchanged. | `git diff abd3292 -- src/lib/loader.hpp` EMPTY. |
 | **PI-mvp-4.13-SCHEMA-V2 (CONTINUES)** | Config schema stays `2` (additive `std::optional` dst_cidr6/src_cidr6); no schema bump. | `grep schema_version` supported-set `{2}`; v2 fixtures load. |
 | **PI-mvp-4.13-ACTIVE-IDX (CONTINUES)** | A single `active_idx` u32 store commits the swap for ALL outers incl. dst6/src6; no torn read. | `T_*_ATOMIC_SWAP_NO_DROP` GREEN; code-review of the single flip. |
@@ -16410,3 +16410,173 @@ Guards applied: **#5** (Phase A code-grep — re-anchored every literal: `kManag
 **Forward-defense note (S6 ext-walk):** S6 adds the IPv6 extension-header walk at the v6 arm's `ip6->nexthdr`→L4 seam (PI-mvp-4.13-BASE-HEADER boundary). It does NOT touch the ethertype axis or the non-IP arm. The L2/L3 gate ladder is now S1✓ S2✓ S4✓ S5✓; S6 (ext-walk) is the remaining deferred slice. If a future cycle adds ANOTHER family-agnostic axis (e.g. a payload-byte axis), it MUST compose into the non-IP arm too (the symmetric-arm discipline now spans all 3 arms).
 
 Evidence: `mint/task-brief.md` MVP-4.14 (HG-mvp-4.14-1/2, Q1/Q2, S5-1..S5-5, guards #5/#10/#11/#12/#22/#23/#24/#27, the operative-semantic note); `mint/architecture-l2l3-gate.md` (ethertype lens / Option 3 coarse non-IP steering); independent Phase A reads of `src/common/mac_filter.h:60-207`, `src/bpf/mac_filter.bpf.c:255-294/620-1147`, `src/lib/loader.cpp:157-210/1393-1463/1675-1704/1890-1962/2160-2224`, `src/lib/config.hpp:30-59`, `src/lib/config.cpp:110-171/360-469`, `tests/inject/inject_eth.py`, `tests/T_MAC_NON_IP.sh`, `tests/T_PASS_ALLOWED.sh`, `tests/T_NEGATION_CONTROL.sh`, `tests/T_EXPORTER_VALUES_MATCH_STATS.sh:1-130`, `tests/bitvec/bitvec_oracle_prod.py:1-546`, `CMakeLists.txt:1-18`; design §5.44 (the proto-axis HASH clone + `aggregate_axis`/`populate_hash_inner_slot`), §5.45/§5.47 (vlan/mac exact-HASH axes), §5.50 (the `aggregate_axis<Key>` template), §5.51 (the 3-arm dispatch + non-IP-never-MALFORMED), §5.53 (the symmetric cross-arm model + guard #27 + the S4-SUPERSEDED test-rewrite precedent).
+
+---
+
+### §5.55 MVP-4.15 / S6: IPv6 extension-header walk — the v6 proto/port axes read TRUE upper-layer L4 via a bounded ext-header chain walk (rule-model L2/L3 gate-rework S6, brownfield, PURE-DATAPATH read-depth, NO new axis, 2026-05-31)
+
+#### §5.55 Problem statement
+
+Walk the IPv6 extension-header chain in the v6 classification arm so the EXISTING **proto** (`BV_AXIS_PROTO`) and **dst_port** (`BV_AXIS_PORT`) axes see the TRUE upper-layer protocol and L4 header on ext-header-bearing IPv6 frames, instead of the first `nexthdr` at the fixed 40-byte base offset (the S4 base-header-only boundary, `PI-mvp-4.13-BASE-HEADER`, which this slice RETIRES). Today a v6 frame carrying e.g. a Hop-by-Hop (nexthdr=0) or Destination-Options (60) header has `proto = ip6->nexthdr = 0/60` — an ext-header number, NOT the real L4 — so a `proto: tcp` or `dst_port: 443` rule silently never matches it. S6 closes the last honesty gap of the L2/L3 gate ladder (S1✓ §5.51 / S2✓ §5.52 / S4✓ §5.53 / S5✓ §5.54).
+
+This is the LAST sharp edge of the ladder — the only one whose mechanism is a **verifier-bounded loop** in the XDP datapath. **NO new match axis, NO BITVEC growth, NO `kManagedMaps` change, NO schema change, NO map touch** — it is a pure datapath read-depth change confined to the v6 arm's `ip6->nexthdr`→L4 seam (`mac_filter.bpf.c:1000-1026`). The v4 arm is byte-untouched (IPv4 has no ext-header chain). loader.hpp stays byte-identical (PI-7 continues). The pre-slice **verifier spike PASSED** (see §5.55 spike result) and is the realizability ground-truth: design is calibrated to what the spike proved loadable.
+
+#### §5.55 Phase A code-grep verification report (architect-independent — 2026-05-31, per guard #5)
+
+Architect re-read every literal against the live tree. Brief's Phase-A claims CONFIRMED. Baseline commit for all `git diff` invariant checks: pre-§5.55 HEAD = `ca67ce4` ("mint-dev: prep — task-brief for mvp-4.15"). Reviewer substitutes the actual merge-base if different.
+
+1. **Base-only v6 proto/port block — CONFIRMED** (`mac_filter.bpf.c:1000-1026`): `__u8 proto = ip6->nexthdr;` (`:1001`), `void *l4 = (void *)(ip6 + 1);` fixed 40B (`:1007`), `has_port` set only for `IPPROTO_TCP`/`IPPROTO_UDP` after an L4-header bounds-check (`:1010-1026`). This is the EXACT block S6 replaces with the chain-walk. The downstream per-axis lookups (`:1028+`) and the 8-term AND (`:1060+`) are UNCHANGED — they consume `proto`/`dport`/`has_port` exactly as before.
+2. **Bounded-loop precedent — CONFIRMED** (`mac_filter.bpf.c:589-609`): `port_scan` is `#pragma unroll for (__u32 i=0; i<XDPMF_ALLOWLIST_MAX; i++)` — a fixed-bound straight-line unroll with no back-edge (the verifier-safe pattern S6 mirrors). The VLAN tag-walk (`:611+`, `XDPMF_VLAN_MAX_DEPTH`) is a second precedent for a bounded header-chain walk that advances a cursor and bounds-checks each hop.
+3. **v4 variable-offset-L4 precedent — CONFIRMED** (`mac_filter.bpf.c:748-783`): the v4 arm already reads L4 at a VARIABLE offset `(void *)ip + ip->ihl * 4` after rejecting `ihl<5` as MALFORMED so the offset is bounded — the direct analog for the ext-walk's variable cursor + per-hop bounds-check.
+4. **ext-header structs — CONFIRMED in `include/vmlinux.h`**: `struct ipv6_opt_hdr { __u8 nexthdr; __u8 hdrlen; }` (`:39927`) covers HOPOPTS/ROUTING/DSTOPTS; `struct frag_hdr { __u8 nexthdr; __u8 reserved; __be16 frag_off; __be32 identification; }` (`:63996`, 8 bytes fixed). Both are BTF types (no CPP macros).
+5. **ext-header proto numbers NOT defined — CONFIRMED**: `grep IPPROTO_HOPOPTS|ROUTING|FRAGMENT|DSTOPTS|NONE` → absent; only `IPPROTO_TCP`/`IPPROTO_UDP` are inline-defined (`:85-90`). S6 inline-defines the ext-proto numbers (the `ETH_P_*`/`IPPROTO_*` inline-define precedent at `:51-90`).
+6. **inject_l6.py S6 SEAM — CONFIRMED** (`tests/inject/inject_l6.py:31-34,72-73`): a documented insertion point in `build_frame()` between the `IPv6()` layer and the L4 layer + a planned `--ext` CLI option. Extend, don't rebuild.
+7. **Oracle is outcome-only — CONFIRMED** (`tests/bitvec/bitvec_oracle_prod.py`): the oracle predicts a verdict from `(dst,src,proto,dport,vlan,…)` inputs; ext-header presence is TRANSPARENT to matching (the walk's job is to make the datapath SEE the true L4 the oracle already keys on). No structural oracle change needed beyond a new ext-bearing ruleset/frame matrix.
+
+#### §5.55 FileList (DIFF — brownfield)
+
+**NEW**
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `tests/T_ANDEXT_WALK_STEER.sh` | VA-5 headline canary: ext-bearing v6 frame matched by `proto:tcp`/`dst_port:N` that base-only would MISS + negation control (wrong dport ⇒ no match). | bash | ~70 |
+| `tests/T_ANDEXT_TRUNCATED_MALFORMED.sh` | truncated/mid-walk ext chain ⇒ `STAT_DROP_MALFORMED`, no OOB. | bash | ~55 |
+| `tests/fixtures/andext.yaml` (+ any negation/malformed fixture) | rule config(s) for the ext ctests (`proto:tcp dst_port:N → drop`, etc.). | YAML | ~20 |
+
+**EDITED**
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `src/bpf/mac_filter.bpf.c` | (a) inline-define `IPPROTO_HOPOPTS/ROUTING/FRAGMENT/DSTOPTS/NONE` near `:85-90`; (b) replace the base-only v6 proto/port block (`:1000-1026`) with the bounded `MAX_EXT_HOPS` ext-walk producing `(proto, l4, has_port)`. v4 arm + all downstream v6 lookups/AND UNTOUCHED. | C (BPF) | ~50 |
+| `tests/inject/inject_l6.py` | fill the S6 SEAM: `--ext TYPE` (append; `hbh`/`dstopt`/`rt`/`frag`) inserts the scapy ext-header chain between `IPv6()` and L4; `--truncate N` trims trailing bytes for the malformed path. | Python | ~30 |
+| `tests/bitvec/bitvec_oracle_prod.py` | add an `andext` ruleset + ext-bearing frame matrix; document that ext-headers are walk-transparent (oracle predicts true-L4; a non-walking datapath diverges = VA-5 detectability). | Python | ~25 |
+| `CMakeLists.txt` (or the tests CMake) | register the 2 new ctests with `RESOURCE_LOCK xdp_fixture` (guard #12). | CMake | ~8 |
+
+**UNCHANGED-BUT-AFFECTED** (impl/tester MUST NOT touch; reviewer asserts the stated invariant)
+
+| Path | Why affected / invariant that must hold |
+|---|---|
+| `src/bpf/mac_filter.bpf.c` **v4 arm** (`:740-783` + the v4 AND) | S6 edits ONLY the v6 arm. The v4 arm is **byte-identical** (stronger than guard #27 verdict-identity — there is no sibling-arm source change here). `git diff` of the v4-arm region EMPTY. (PI-mvp-4.15-IPV4-BYTE) |
+| `src/bpf/mac_filter.bpf.c` **non-ext v6 path** (the AND at `:1028-1147`) | The walk is a **no-op** when the first `nexthdr` is already a terminal L4 (loop breaks at hop 0 with `proto`/`l4` == today's values). Non-ext v6 frames are VERDICT-identical. (PI-mvp-4.15-NONEXT-V6) |
+| `src/lib/loader.hpp`, `loader.cpp`, `config.hpp`, `config.cpp`, `src/common/mac_filter.h`, `sidecar.cpp` | Pure datapath read-depth change: NO map/lowering/parse/schema/axis touch. `loader.hpp` byte-identical (PI-7). `BITVEC_NUM_AXES=9`, `kManagedMaps[]`=39, schema `2` all UNCHANGED. |
+
+#### §5.55 DataStructures
+
+NO new cross-boundary data structure; NO new map; NO axis/BITVEC/`kManagedMaps`/schema change. The slice adds only datapath-local constants + walk-state locals:
+
+- **ext-header proto constants** (inline-defined in `mac_filter.bpf.c`, byte-equivalent to IANA IP-protocol numbers, `#ifndef`-guarded per the `IPPROTO_TCP`/`UDP` precedent):
+  - `IPPROTO_HOPOPTS = 0` (Hop-by-Hop Options)
+  - `IPPROTO_ROUTING = 43`
+  - `IPPROTO_FRAGMENT = 44`
+  - `IPPROTO_DSTOPTS = 60` (Destination Options)
+  - `IPPROTO_NONE = 59` (No Next Header — terminal, has_port=0)
+- **ext-header structs** (already in `vmlinux.h`, BTF types — NOT redefined): `struct ipv6_opt_hdr { __u8 nexthdr; __u8 hdrlen; }` (HOPOPTS/ROUTING/DSTOPTS; total length `(hdrlen+1)*8` bytes); `struct frag_hdr { __u8 nexthdr; __u8 reserved; __be16 frag_off; __be32 identification; }` (FRAGMENT; fixed 8 bytes).
+- **walk-state locals** (datapath-local, not crossing any boundary): `__u8 proto` (running nexthdr), `void *cursor` (running header offset), `__u32 i` (unroll index). The downstream contract `(proto, void *l4, int has_port, __u32 dport)` consumed by the 8-term AND is IDENTICAL in shape to today — only its VALUES change on ext-bearing frames.
+
+#### §5.55 Interfaces
+
+**Datapath (BPF, internal — no new exported symbol).** The walk MAY be an inline block in the v6 arm or an `__always_inline` helper (impl's call, MAY — see D-mvp-4.15-HELPER). Its contract:
+
+```
+INPUT:  ip6 (bounds-checked base header, :994-998 already present), data_end
+OUTPUT: proto      = true upper-layer protocol number (post-walk)
+        l4         = pointer to the L4 header (or the terminal non-L4 header)
+        has_port   = 1 iff proto∈{TCP,UDP} AND the L4 header is in-bounds
+        dport      = bpf_ntohs(L4->dest) when has_port, else 0
+        — OR — XDP_DROP + STAT_DROP_MALFORMED on a mid-walk bounds-miss
+```
+
+**Walk algorithm (Q1=A1, bounded `#pragma unroll`, `MAX_EXT_HOPS=8` — spike-validated):**
+1. `proto = ip6->nexthdr; cursor = (void *)(ip6 + 1)` (the 40B base offset — today's `l4`).
+2. `#pragma unroll for (i = 0; i < MAX_EXT_HOPS; i++)`:
+   - if `proto ∈ {HOPOPTS, ROUTING, DSTOPTS}`: bounds-check `cursor + sizeof(struct ipv6_opt_hdr) > data_end` → DROP_MALFORMED; read `opt = (ipv6_opt_hdr*)cursor`; `proto = opt->nexthdr`; `cursor += (opt->hdrlen + 1) * 8`; continue.
+   - else if `proto == FRAGMENT`: bounds-check `cursor + sizeof(struct frag_hdr) > data_end` → DROP_MALFORMED; read `frag = (frag_hdr*)cursor`; `proto = frag->nexthdr`; `cursor += 8`; continue. (frag_off NOT consulted — first-fragment L4 only, D-mvp-4.15-FRAG.)
+   - else: `break` (terminal: a recognized L4, NONE=59, ICMPv6=58, or any unrecognized nexthdr).
+3. After the loop: `l4 = cursor`. The existing has_port switch runs unchanged — `IPPROTO_TCP`→`tcphdr`, `IPPROTO_UDP`→`udphdr`, each with its own L4-header bounds-check (`:1010-1026` logic, now at the walked offset). Any other `proto` (incl. a still-ext value if the chain exceeded `MAX_EXT_HOPS`, NONE, ICMPv6, unrecognized) ⇒ `has_port=0` automatically (fail-safe, D-mvp-4.15-Q2-CAP).
+
+**Injector (`inject_l6.py`):**
+- `--ext TYPE` — `action="append"`, `choices={hbh, dstopt, rt, frag}`; each occurrence inserts one scapy ext header (`IPv6ExtHdrHopByHop` / `IPv6ExtHdrDestOpt` / `IPv6ExtHdrRouting` / `IPv6ExtHdrFragment`) at the SEAM between `IPv6()` and the L4 layer, in CLI order (first `--ext` closest to the base header). scapy auto-chains the `nh` fields (correct-by-construction, per Q1=A1 / D-mvp-4.12-L2-SENDP).
+- `--truncate N` (optional int, default 0) — after building the full frame, drop the trailing `N` bytes (e.g. `bytes(pkt)[:-N]` sent as a raw L2 frame) so a mid-walk or L4 bounds-check fails → exercises the MALFORMED path WITHOUT scapy refusing to build a malformed packet. Keeps the well-formed path correct-by-construction.
+
+**Config / oracle:** NO new CLI/config surface — the `proto`/`dst_port` rule grammar is unchanged. The oracle gains an `andext` ruleset table + an ext-bearing frame matrix; ext-headers are TRANSPARENT to the oracle's verdict (it keys on the true L4 the test specifies via `--proto`/`--dport`).
+
+#### §5.55 Decisions (with rationale)
+
+- **D-mvp-4.15-Q1-WALK** — ext-walk mechanism = **A1: fixed-`MAX_EXT_HOPS` `#pragma unroll` straight-line loop** (mirror `port_scan`/VLAN-walk), advancing a cursor over `{HOPOPTS,ROUTING,DSTOPTS}` by `(hdrlen+1)*8` and over `FRAGMENT` by a fixed 8, bounds-checking each hop, terminating at a recognized L4 / unrecognized nexthdr / cap. **Because** it is the proven-in-this-codebase verifier-safe pattern (no back-edge, no kernel-version dependency), and the pre-slice spike validated its verifier cost. A2 (bpf-helper/dynptr chain walk) REJECTED — overkill, adds a 6.1-floor dependency for no benefit.
+- **D-mvp-4.15-MAXHOPS** — `MAX_EXT_HOPS = 8`. **Because** the spike loaded the 8-hop unroll with huge headroom (26548/1M insns, stack 280/512), and 8 comfortably covers all realistic chains (common deployments carry ≤2-3 ext headers). A smaller cap (4) would also load but 8 costs nothing at the spike's budget and gives margin; a chain exceeding 8 is pathological and fail-safes to non-L4 (D-mvp-4.15-Q2-CAP). The exact value is a MAY-knob ≥4 for impl IF the production object's verifier budget differs from the spike (Phase 2.5-gated, inline-merge).
+- **D-mvp-4.15-Q2-MALFORMED** — a mid-walk per-hop bounds-check miss (`cursor + sizeof(ext-hdr) > data_end`) ⇒ `STAT_DROP_MALFORMED` + `XDP_DROP`. **Because** extends the §5.53 `D-mvp-4.13-NO-MALFORMED-NONV6` chain semantic: a 0x86DD frame whose declared chain runs past the packet end is genuinely malformed; the bounds-check is verifier-mandated and prevents OOB.
+- **D-mvp-4.15-Q2-CAP** — a chain that EXCEEDS `MAX_EXT_HOPS` (loop exhausts with `proto` still an ext-header number) ⇒ **NOT** malformed; `has_port=0`, `proto`=last-seen nexthdr. **Because** a >8-header chain is pathological, not corrupt; fail-safe to "only wildcard-on-proto/port rules survive" rather than dropping. This needs NO explicit post-loop check — a residual ext-header `proto` (e.g. 0/43/60) never equals `IPPROTO_TCP`(6)/`UDP`(17), so `has_port` stays 0 automatically.
+- **D-mvp-4.15-Q2-UNRECOGNIZED** — an unrecognized nexthdr (not a known ext-header, not TCP/UDP) ⇒ terminal: `proto`=that value, `has_port=0`. **Because** exact today's base-only semantic for non-TCP/UDP frames (the proto axis still matches `proto:<that value>`; the port axis contributes wildcard-only). No behaviour change for these.
+- **D-mvp-4.15-EXT-CONSTS** — inline-define `IPPROTO_HOPOPTS=0`/`ROUTING=43`/`FRAGMENT=44`/`DSTOPTS=60`/`NONE=59` in `mac_filter.bpf.c` (`#ifndef`-guarded). **Because** the `ETH_P_*`/`IPPROTO_TCP`/`UDP` inline-define precedent (`:51-90`); vmlinux.h is BTF-derived (types only, no CPP macros). Byte-equivalent to IANA values.
+- **D-mvp-4.15-FRAG** — FRAGMENT header is walked for its `nexthdr` only (fixed 8B advance); `frag_off` is NOT consulted; **first-fragment L4 only** (deep fragment reassembly OUT OF SCOPE). **Because** the brief explicitly scopes out reassembly; a non-first fragment carries no L4 header at the walked offset, so reading TCP/UDP there reads payload bytes — bounds-checked (no OOB) but possibly a spurious port. Impl MAY gate `has_port` on `(frag->frag_off & bpf_htons(0xFFF8)) == 0` (first-fragment) to suppress the spurious read — that refinement is **MAY** (inline-merge), not required this slice. Documented honesty boundary (the S6-successor of PI-mvp-4.13-BASE-HEADER).
+- **D-mvp-4.15-HELPER** — the walk MAY be an `__always_inline` helper (e.g. `walk_v6_ext()`) or an inline block in the v6 arm. **Because** both produce identical verifier-unrolled code; structure is impl's readability call (inline-merge either way). The helper, if used, returns the malformed signal to the arm (the arm owns the `bump_stat`+`XDP_DROP`).
+- **D-mvp-4.15-INJECTOR** — extend `inject_l6.py` (`--ext`/`--truncate`), do NOT create a new injector. **Because** S2 pre-planned the seam (`:31-34,72`); scapy ext-header layers keep the chain correct-by-construction.
+- **D-mvp-4.15-NO-BUMP** — VERSION stays `0.15.0` (HG-mvp-4.15-2 default). **Because** internal model-validation read-depth change, mirrors S4/S5 no-bump precedent; guard #11 N/A. (HG-able: impl MAY bump to `0.16.0` for operator-visible "full IPv6 L4 matching" IF the PO requests it — inline-merge + propagate to `T_EXPORTER_METRICS_FORMAT`.)
+- **D-mvp-4.15-PROSE-VS-INVARIANTS** — within this amendment, if §5.55 prose conflicts with a §6.5 `PI-mvp-4.15-*` item or a load-bearing test assertion, **the invariants block / PI wins (prose loses)**; if impl deviates from a verifiable-invariants hint to satisfy a PI or a load-bearing assertion, disposition is `inline-merge`, NOT `[UNRELATED-EDIT]`.
+
+#### §5.55 TestStrategy
+
+Tester writes against THIS section (not impl's code). Target ≈2-3 new ctests; full suite 93 → ~95. Every datapath ctest carries `RESOURCE_LOCK xdp_fixture` (guard #12). Frames via `inject_l6.py --ext`.
+
+1. **T_ANDEXT_WALK_STEER (VA-5 detectability headline + OPS-canary for the new FRAME-SHAPE path).** Trigger: load a config with `proto: tcp, dst_port: N → drop`; inject a v6 frame WITH an ext-header chain (`--ext hbh --ext dstopt --proto tcp --dport N`). Observable: the frame is DROPPED — the drop-counter delta == the delta a NON-ext TCP/N frame produces. Assertion mechanism: `bump_stat(STAT_DROP_*)` counter delta via the sidecar/exporter, mirroring `T_ANDV6_*`. **Detectability (the trap):** a datapath that did NOT walk computes `proto = nexthdr = 0 (HOPOPTS)`, the `proto:tcp` rule does NOT match, the frame is NOT dropped → the test goes RED. A walk that stops short (reaches dstopt but not L4) likewise mis-reads dport → RED. **Negation control (MANDATORY):** the SAME ext-bearing frame with a DIFFERENT dport (`--dport M≠N`) must NOT be dropped by that rule (drop-delta==0) — proves the match is the port axis, not a blanket ext-frame drop. **OPS-canary rationale:** the ext-bearing frame is a NEW frame-shape the existing v6 test corpus never puts on the wire; existing tests inject base-header-only v6 and so cannot catch a non-walking / short-walking datapath. This canary is the only test exercising the walk's reach.
+2. **T_ANDEXT_TRUNCATED_MALFORMED.** Trigger: inject an ext-bearing v6 frame with `--ext hbh --truncate K` such that the chain's declared length runs past the (trimmed) packet end, OR the L4 header is cut off. Observable: `STAT_DROP_MALFORMED` increments by exactly 1 and the frame is dropped; NO OOB read (the prod `.bpf.o` already loaded clean — verifier guarantees no OOB). Assertion: malformed-counter delta == 1 (and the verdict is DROP). Mechanism hint: sidecar stat delta, mirroring the v6 base-header MALFORMED tests.
+3. **T_ANDEXT_NONEXT_IDENTICAL / oracle no-op (MAY be folded into the existing v6 oracle net).** Trigger: the full existing v6 oracle/regression corpus (`T_ANDV6_*`, `T_IPV6_*`) re-run unchanged + a new `andext` oracle-agreement vector set comparing a NON-ext v6 frame's datapath verdict to the oracle. Observable: ALL GREEN — the walk is a no-op when `nexthdr` is already L4 (loop breaks at hop 0). Assertion: oracle==datapath agreement (algorithm-different, outcome-equal). This is the PI-mvp-4.15-NONEXT-V6 guard; tester MAY realize it as a new ctest or assert it via the existing net staying green (count then 93→~95 with tests 1+2 + this as oracle vectors).
+
+Oracle discipline: `bitvec_oracle_prod.py` MODELS the walk by treating the ext-bearing frame's TRUE L4 (the `--proto`/`--dport` the test injects) as the proto/port input — it stays algorithm-different (it does NOT itself parse an ext chain; it asserts the OUTCOME the walk must reach). The detectability in test 1 is precisely the oracle predicting true-L4 while a non-walking datapath predicts ext-number.
+
+Reviewer load-bearing checks (5-point brownfield): (1) v4 arm `git diff` EMPTY + non-ext v6 oracle net GREEN (PI-mvp-4.15-IPV4-BYTE / NONEXT-V6); (2) the walk is a fixed `MAX_EXT_HOPS` unroll with NO back-edge and the prod `.bpf.o` loads on 6.1 (PI-mvp-4.15-BOUNDED — the spike's pass/fail criterion); (3) the ext-bearing frame MATCHES where base-only missed (T_ANDEXT_WALK_STEER green; a walk that doesn't reach L4 FAILS it); (4) truncated chain → DROP_MALFORMED, no OOB (PI-mvp-4.15-MALFORMED); (5) §6.5 PI walk.
+
+#### §6.5 Preserved invariants (§5.55 MVP-4.15 brownfield)
+
+Reviewer's framework point 5 walks this list. Items are **MUST contracts**; `[INVARIANT-VIOLATED]` per failed check. **ALL prior PIs CONTINUE** EXCEPT `PI-mvp-4.13-BASE-HEADER`, which this slice **RETIRES** (replaced by `PI-mvp-4.15-EXT-WALK` — the ext-walk closes the base-header-only honesty boundary by design).
+
+| PI | Property | Check mechanism |
+|---|---|---|
+| **PI-mvp-4.15-EXT-WALK (NEW, load-bearing, headline; SUPERSEDES PI-mvp-4.13-BASE-HEADER)** | The v6 arm reads the TRUE upper-layer protocol + L4 header via a bounded walk over `{HOPOPTS,ROUTING,DSTOPTS,FRAGMENT}`; an ext-bearing v6 frame is matched by a `proto:tcp`/`dst_port:N` rule that base-only would MISS. | `T_ANDEXT_WALK_STEER` GREEN incl. negation; reviewer reads the v6 arm = bounded ext-walk present at the `ip6->nexthdr`→L4 seam. |
+| **PI-mvp-4.15-IPV4-BYTE (NEW, load-bearing)** | The IPv4 arm is **byte-identical** to pre-slice (S6 edits ONLY the v6 arm; IPv4 has no ext chain). Stronger than guard-#27 verdict-identity — there is NO sibling-arm source change. | `git diff ca67ce4 -- src/bpf/mac_filter.bpf.c` shows changes ONLY in the v6 arm + the ext-proto `#define`s; v4 arm region untouched. Full v4 oracle net GREEN. |
+| **PI-mvp-4.15-NONEXT-V6 (NEW, load-bearing)** | A non-ext-bearing v6 frame (first `nexthdr` already L4) is VERDICT-identical to pre-slice — the walk breaks at hop 0 with `proto`/`l4` == the old base-offset values. | full v6 oracle net GREEN (`T_ANDV6_*`, `T_IPV6_*`); `andext` non-ext oracle vectors agree. |
+| **PI-mvp-4.15-BOUNDED (NEW, load-bearing)** | The walk is a fixed `MAX_EXT_HOPS` (=8) `#pragma unroll` with NO back-edge / NO unbounded loop; the PRODUCTION `.bpf.o` verifier-loads on the 6.1 host. Spike PASS: rc=0, 26548/1M insns, stack 280/512, max_states_per_insn 12. | impl Phase 2.5 `bpftool prog load` rc=0 on the prod object; reviewer reads the unroll; `T_LOAD_ATTACH`/`T_VERIFIER_REJECT` GREEN. |
+| **PI-mvp-4.15-MALFORMED (NEW)** | A truncated/mid-walk chain (per-hop bounds-check miss) ⇒ `STAT_DROP_MALFORMED` + `XDP_DROP`, no OOB read. Extends D-mvp-4.13-NO-MALFORMED-NONV6 to the chain. | `T_ANDEXT_TRUNCATED_MALFORMED` GREEN (malformed-delta==1). |
+| **PI-mvp-4.15-CAP-FAILSAFE (NEW)** | A chain exceeding `MAX_EXT_HOPS` ⇒ NOT malformed; `has_port=0`, `proto`=last-seen nexthdr (only wildcard-on-port rules survive). | reviewer reads the post-loop path = residual ext `proto` ≠ TCP/UDP ⇒ has_port auto-0; no explicit malformed/drop on cap. |
+| **PI-7-mvp-4.15-loader-hpp (CONTINUES)** | `src/lib/loader.hpp` byte-identical — pure datapath change, no map/lowering/signature touch. | `git diff ca67ce4 -- src/lib/loader.hpp` EMPTY. |
+| **PI-mvp-4.15-NO-AXIS-GROWTH (CONTINUES)** | `BITVEC_NUM_AXES=9`; `kManagedMaps[]`=39; `wildcard` max_entries=18; NO new map/axis; schema `2`. S6 is read-depth only. | `grep BITVEC_NUM_AXES`⇒9; `kManagedMaps` row count 39; `bpftool map dump wildcard`=18; no new pin. |
+| **PI-mvp-4.15-ACTIVE-IDX / FIRST-MATCH (CONTINUES)** | Single `active_idx` swap; first-match-by-id via `first_set_u64(acc)-1` in all arms; unchanged. | existing `T_*_ATOMIC_SWAP_NO_DROP` + oracle tie-vectors GREEN. |
+| **PI-mvp-4.15-VERSION (CONTINUES)** | VERSION stays `0.15.0` (D-mvp-4.15-NO-BUMP; guard #11 N/A). | `--version`⇒`0.15.0`; `grep -rn '0\.15\.0'` unchanged. |
+| **PI-mvp-4.15-5.15-FLOOR (NEW, caveat)** | The ext-walk verifier-loads on the kernel floor (spike PASS on 6.1; 5.15 re-confirmation deferred — strong margins per the S4 precedent / guard #25). | impl Phase 2.5 `bpftool prog load` rc=0 on the prod object; document the 5.15 stance. |
+
+#### §5.55 verifiable invariants for reviewer (MAY-default per architect-spec §6.5 discipline)
+
+Guidance for reviewer, NOT contracts for impl. **Resolution rule (per D-mvp-4.15-PROSE-VS-INVARIANTS): if any item conflicts with a §6.5 PI-mvp-4.15-* item, the §6.5 item wins; if impl deviates from a hint to satisfy a PI or a load-bearing test assertion, disposition is `inline-merge`, NOT `[UNRELATED-EDIT]`.**
+
+1. (MUST) the v6 arm contains a bounded `MAX_EXT_HOPS` `#pragma unroll` ext-walk at the `ip6->nexthdr`→L4 seam; an ext-bearing `proto:tcp`/`dst_port:N` frame MATCHES (VA-5). (PI-mvp-4.15-EXT-WALK)
+2. (MUST) the v4 arm is byte-identical; the ONLY source changes are in the v6 arm + the ext-proto `#define`s — a v4-arm change is a finding. (PI-mvp-4.15-IPV4-BYTE)
+3. (MUST) non-ext v6 frames are verdict-identical (walk no-op at hop 0); full v6 oracle net GREEN. (PI-mvp-4.15-NONEXT-V6)
+4. (MUST) the walk is a FIXED unroll (no back-edge); the prod `.bpf.o` loads on 6.1. (PI-mvp-4.15-BOUNDED)
+5. (MUST) truncated chain ⇒ `STAT_DROP_MALFORMED`, no OOB. (PI-mvp-4.15-MALFORMED)
+6. (MUST) `loader.hpp` byte-identical; `BITVEC_NUM_AXES=9`, `kManagedMaps`=39 unchanged (no axis growth). (PI-7 / PI-mvp-4.15-NO-AXIS-GROWTH)
+7. (MAY) `MAX_EXT_HOPS=8` — a different cap ≥4 chosen at Phase 2.5 to fit the prod verifier budget is `inline-merge` (the spike used 8). (D-mvp-4.15-MAXHOPS)
+8. (MAY) the walk is an `__always_inline` helper OR an inline block — either is `inline-merge`. (D-mvp-4.15-HELPER)
+9. (MAY) FRAGMENT first-fragment-only; impl MAY gate `has_port` on `frag_off==0` to suppress a non-first-fragment spurious port read — `inline-merge`, not required. (D-mvp-4.15-FRAG)
+10. (MAY) ext-proto consts in `mac_filter.bpf.c` vs `mac_filter.h`; equivalent `#ifndef`-guarded placement is `inline-merge`. (D-mvp-4.15-EXT-CONSTS)
+11. (MAY) line/count anchors (`:1000-1026`, `MAX_EXT_HOPS` value, 93→~95) are SHOULD-level orientation; landing at a different line is `inline-merge`.
+12. (MAY) NO VERSION bump — bumping `0.15.0`→`0.16.0` for operator-visible IPv6-L4 on PO request + propagating to `T_EXPORTER_METRICS_FORMAT` is `inline-merge`, not a finding. (D-mvp-4.15-NO-BUMP)
+
+#### §5.55 Anti-misdiagnosis institutional learning (per architect-spec §6.6)
+
+Guards applied: **#5** (Phase A code-grep — re-anchored the v6 base-only block `:1000-1026`, the `port_scan`/VLAN bounded-unroll precedent, the v4 `ihl*4` variable-offset precedent, the `ipv6_opt_hdr`/`frag_hdr` BTF structs, the absent ext-proto defines, the `inject_l6.py` SEAM); **#25** (5.15 verifier-floor — the bounded walk is NEW verifier surface; spike on 6.1, 5.15 re-confirm deferred per S4); **#12** (RESOURCE_LOCK — 2 new datapath ctests); **#27 (soft)** (cross-arm verdict-identity — here STRENGTHENED to v4-arm BYTE-identity since S6 touches ONLY the v6 arm, NOT a sibling arm); **#11 N/A** (no VERSION bump); **#23 N/A** (parse-depth, NOT LPM closure); **#10 N/A** (no catalog arithmetic — no map/axis growth); **#15 N/A** (no map RESET — no new inner/wildcard).
+
+**NEW guard #28 — "a verifier-bounded header-chain walk with a VARIABLE per-hop advance MUST be pre-slice spiked on the kernel floor before design commits to it; design to the spike's loaded shape (MAX_HOPS, per-hop bounds-check), and carry the spike's `insns/stack/states` numbers into a load-bearing PI."** The ext-walk's `cursor += (hdrlen+1)*8` is a verifier-hostile variable offset (unlike `port_scan`'s constant-stride lookups); only an empirical load proves the unroll × per-hop-bounds-check fits the instruction/state budget. **Mechanism:** future cycles adding a bounded loop with a data-dependent advance (TLV walks, option chains, nested headers) MUST (a) run the `reference_bpf_spike_tooling` load BEFORE /mint-dev, (b) set the loop cap from the spike's headroom (not a guess), (c) record `rc=0 + insns/stack/states` in a `*-BOUNDED` PI for impl Phase-2.5 re-verification on the PRODUCTION object, and (d) keep the 5.15-floor caveat (guard #25). **Audit trail:** the S4 cidr6 128-bit-closure spike and this S6 ext-walk spike are the two ladder slices that required a pre-slice load; both passed with large margins; both became `*-5.15-FLOOR` + `*-BOUNDED`/`*-LOAD` PIs. Guard catalog 27 → **28**.
+
+**Forward-defense note (ladder COMPLETE):** the L2/L3 gate-rework ladder is now S1✓ §5.51 / S2✓ §5.52 / S4✓ §5.53 / S5✓ §5.54 / **S6✓ §5.55** — all sharp edges shipped. Remaining deferred work is NOT on this ladder: the C3 sidecar match-kinds gap (v6 + ethertype omitted from status JSON — fast-follow, §5.54 invariant #12 / brief OOS) and any future family-agnostic axis (must compose into all 3 arms per §5.54). Deep IPv6 fragment reassembly (beyond first-fragment L4) is a documented honesty boundary (D-mvp-4.15-FRAG), the S6-successor of the now-retired base-header boundary.
+
+#### §5.55 Out of scope (anti-drift fence)
+
+- Any NEW match axis or BITVEC growth — S6 is pure datapath read-depth; the proto/port axes are unchanged in shape (no `BITVEC_NUM_AXES`/`kManagedMaps`/schema touch).
+- The IPv4 arm — IPv4 has no ext-header chain; the v4 arm is byte-untouched (PI-mvp-4.15-IPV4-BYTE).
+- ICMPv6-specific matching beyond `proto=58` passthrough (proto=58 is a terminal non-TCP/UDP ⇒ has_port=0, handled by the existing logic).
+- **C3 sidecar match-kinds gap** (v6 + ethertype omitted from the status JSON — carried fast-follow, not this slice).
+- `schema_version` bump; VERSION bump (HG default no — D-mvp-4.15-NO-BUMP).
+- **Deep IPv6 fragment reassembly** — the FRAGMENT header is walked for its `nexthdr` only (NOT reassembled); first-fragment L4 only. Non-first-fragment exact-L4 honesty is a documented boundary (D-mvp-4.15-FRAG); impl MAY gate `has_port` on first-fragment but full reassembly is out of scope.
+- loader/config/sidecar changes — no lowering, parse, schema, or status-JSON change (loader.hpp byte-identical, PI-7).
+
+Evidence: `mint/task-brief.md` MVP-4.15 (HG-mvp-4.15-1/2, Q1/Q2, S6-1..S6-4, the spike result, guards #5/#11/#12/#23/#25/#27, the operative-semantic note); `mint/architecture-l2l3-gate.md` (addr-axis ext-walk Approach A + testability VA-5 detectability trap); the pre-slice verifier spike (rc=0, 26548/1M insns, stack 280/512, max_states 12, MAX_HOPS=8 on the 6.1 host; 5.15-floor caveat per S4); independent Phase A reads of `src/bpf/mac_filter.bpf.c:51-90/589-609/740-783/982-1147`, `include/vmlinux.h:39927/63996`, `tests/inject/inject_l6.py:1-124`, `tests/bitvec/bitvec_oracle_prod.py:1-250`; design §5.44 (the v4 `ihl*4` variable-offset-L4 + has_port precedent), §5.51 (the 3-arm dispatch + non-IP-never-MALFORMED + bounded VLAN-walk), §5.52 (`inject_l6.py` + the documented S6 SEAM), §5.53 (the v6 arm S6 amends + PI-mvp-4.13-BASE-HEADER now retired + D-mvp-4.13-NO-MALFORMED-NONV6 chain semantic), §5.54 (the 3-arm symmetric model + guard #27 + the S5-SUPERSEDED precedent).
