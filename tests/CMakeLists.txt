@@ -732,6 +732,21 @@ set_tests_properties(T_EXPORTER_RULE_LABELS PROPERTIES
     SKIP_RETURN_CODE 77
 )
 
+# §6.76 (MVP-4.16 C3 — §5.56): the v6-CIDR (S4) + EtherType (S5) match-kinds on
+# BOTH observability surfaces (sidecar status JSON + exporter rule_info labels).
+# Spawns the exporter on the shared 9417-base port → same RESOURCE_LOCK pair.
+add_test(
+    NAME T_SIDECAR_V6_ETH_KINDS
+    COMMAND bash ${TEST_DIR}/T_SIDECAR_V6_ETH_KINDS.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_SIDECAR_V6_ETH_KINDS PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK "xdp_fixture;exporter_port_9417"
+    TIMEOUT 90
+    SKIP_RETURN_CODE 77
+)
+
 # ─────────────────────────────────────────────────────────────────────────
 # MVP-3.4b cycle 2 additions (§5.34 / §6.NN–§6.NN+2 — rules atomic-swap
 # promotion + datapath dispatch via rules→action_table + schema cycle

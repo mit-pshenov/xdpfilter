@@ -37,6 +37,14 @@ struct RuleMeta {
     std::string   protocol;   /* "tcp" | "udp" | "icmp" | numeric | "" */
     std::string   dst_port;   /* "443" | "1000-2000" | "" */
     std::string   vlan;       /* "100" | "" */
+    /* §5.56 (MVP-4.16 C3): the v6-CIDR (mvp-4.13/S4) + EtherType (mvp-4.14/S5)
+     * axes — previously written to the BPF maps but omitted from the sidecar
+     * status JSON, so v6/ethertype rules surfaced as all-empty (match-all) in
+     * xdpfilter_rule_info. Key-anchored extraction disambiguates dst_cidr6 from
+     * dst_cidr (the `"dst_cidr"` key anchor's closing quote stops before `6`). */
+    std::string   dst_cidr6;  /* §5.56 "2001:db8::/32" or "" */
+    std::string   src_cidr6;  /* §5.56 "2001:db8::/32" or "" */
+    std::string   ethertype;  /* §5.56 "ipv4" | "ipv6" | "arp" | "0xXXXX" or "" */
 };
 
 /* Reads rule_index.json at `path`; returns empty vector if file missing,

@@ -100,6 +100,13 @@ std::vector<RuleMeta> parse_rule_index(std::string_view path) noexcept
             rm.protocol = extract_axis(body, "protocol");
             rm.dst_port = extract_axis(body, "dst_port");
             rm.vlan     = extract_axis(body, "vlan");
+            /* §5.56 (MVP-4.16 C3): v6-CIDR + EtherType axes. The `"dst_cidr"`
+             * key anchor in extract_axis ends with a quote, so it does NOT
+             * alias `"dst_cidr6"` (the byte after `dst_cidr` is `6`, not `"`);
+             * the v4 and v6 extractions are independent. */
+            rm.dst_cidr6 = extract_axis(body, "dst_cidr6");
+            rm.src_cidr6 = extract_axis(body, "src_cidr6");
+            rm.ethertype = extract_axis(body, "ethertype");
             out.push_back(std::move(rm));
         }
     } catch (...) {

@@ -448,9 +448,11 @@ if [[ "${ri_type}" != "1" ]]; then
     fail=1
 fi
 
-# (b)+(f) ≥1 sample matches the stable 8-key ERE in fixed order, value EXACTLY 1.
-# §5.47 D-mvp-4.7-Q3: `mac` is the 8th key, appended LAST after `vlan`.
-ri_ere='^xdpfilter_rule_info\{iface="[^"]+",rule_id="[0-9]+",dst_cidr="[^"]*",src_cidr="[^"]*",protocol="[^"]*",dst_port="[^"]*",vlan="[^"]*",mac="[^"]*"\} 1$'
+# (b)+(f) ≥1 sample matches the stable 11-key ERE in fixed order, value EXACTLY 1.
+# §5.47 D-mvp-4.7-Q3: `mac` is the 8th key, appended after `vlan`.
+# §5.56 (MVP-4.16 C3): dst_cidr6/src_cidr6/ethertype are keys 9/10/11, appended
+# LAST after `mac` — the first 8 keys stay byte-identical (PI-mvp-4.16-LABEL-CONTRACT).
+ri_ere='^xdpfilter_rule_info\{iface="[^"]+",rule_id="[0-9]+",dst_cidr="[^"]*",src_cidr="[^"]*",protocol="[^"]*",dst_port="[^"]*",vlan="[^"]*",mac="[^"]*",dst_cidr6="[^"]*",src_cidr6="[^"]*",ethertype="[^"]*"\} 1$'
 ri_stable=$(grep -cE "${ri_ere}" "${metrics_body3}" 2>/dev/null || true)
 ri_stable=${ri_stable:-0}
 # Total rule_info SAMPLE lines (exclude HELP/TYPE comment lines).
@@ -458,13 +460,13 @@ ri_total=$(grep -cE '^xdpfilter_rule_info\{' "${metrics_body3}" 2>/dev/null || t
 ri_total=${ri_total:-0}
 echo "rule_info sample lines: stable-key-matching=${ri_stable} total=${ri_total}"
 if (( ri_stable < 1 )); then
-    echo "FAIL[ri.b]: no rule_info sample line matches the stable 8-key ERE:" >&2
+    echo "FAIL[ri.b]: no rule_info sample line matches the stable 11-key ERE:" >&2
     echo "            ${ri_ere}" >&2
     fail=1
 fi
-# (f) EVERY sample line must carry the same 8 keys in the same order + value 1.
+# (f) EVERY sample line must carry the same 11 keys in the same order + value 1.
 if [[ "${ri_stable}" != "${ri_total}" ]]; then
-    echo "FAIL[ri.f]: key set unstable — ${ri_total} rule_info lines but only ${ri_stable} match the 8-key ERE" >&2
+    echo "FAIL[ri.f]: key set unstable — ${ri_total} rule_info lines but only ${ri_stable} match the 11-key ERE" >&2
     fail=1
 fi
 # We applied 7 rules (ids 0..6); expect a series per configured rule.
@@ -547,6 +549,21 @@ for key in dst_cidr src_cidr protocol dst_port vlan; do
         echo "FAIL[ri.e.mac.${key}]: id6 (mac-only) ${key}='${got}' (expected empty sentinel)" >&2
         fail=1
     fi
+done
+
+# (e.4) §5.56 (MVP-4.16 C3) NON-FABRICATION — config_valid_and6.yaml has NO
+#       v6/ethertype rules, so the 3 NEW axes MUST be the empty sentinel "" for
+#       EVERY rule (they were absent from the sidecar JSON entirely). This proves
+#       the additive label growth does not fabricate v6/ethertype values for a
+#       pure-v4 config (the mirror of the byte-stability contract above).
+for rid in 0 5 2 6; do
+    for key in dst_cidr6 src_cidr6 ethertype; do
+        got=$(axis_of "${rid}" "${key}")
+        if [[ -n "${got}" ]]; then
+            echo "FAIL[ri.e4.${rid}.${key}]: id${rid} ${key}='${got}' — fabricated (expected empty \"\" for a v4-only config)" >&2
+            fail=1
+        fi
+    done
 done
 
 # (e.2) NEGATION — a NON-configured rule_id (99 is absent from the fixture)

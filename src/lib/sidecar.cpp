@@ -30,6 +30,7 @@
 #include <string>
 #include <string_view>
 
+#include <arpa/inet.h>   // §5.56 (MVP-4.16 C3) inet_ntop for IPv6 CIDR rendering
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -68,6 +69,42 @@ namespace {
     // member. a/b/d/e are already such aligned local copies.
     const unsigned int plen = c.prefixlen;
     return std::format("{}.{}.{}.{}/{}", a, b, d, e, plen);
+}
+
+/* §5.56 (MVP-4.16 C3) PI-mvp-4.16-SIDECAR: format an xdpmf_cidr_v6 (addr6 is
+ * network byte order, addr6[0]=MSB) as canonical `<compressed-v6>/N` via
+ * inet_ntop(AF_INET6). cidr.cpp already validated + stored the address, so the
+ * bytes here round-trip to the operator's source YAML (PI-15/PI-17 v6 analog).
+ * Never throws — inet_ntop failure (never expected for a 16-byte buffer) emits
+ * an empty address so the sidecar-never-throws contract (PI-32-3.4b) holds. */
+[[nodiscard]] std::string format_cidr6(const xdpmf_cidr_v6& c)
+{
+    char buf[INET6_ADDRSTRLEN] = {};
+    // addr6 is a packed unsigned char[16] in network order — exactly the shape
+    // inet_ntop reads (it consumes raw bytes; char alignment = 1, no packed-ref UB).
+    if (::inet_ntop(AF_INET6, c.addr6, buf, sizeof(buf)) == nullptr) {
+        buf[0] = '\0';
+    }
+    const unsigned int plen = c.prefixlen;  // aligned copy (packed-member ref is UB)
+    // CAST to const char*: std::format renders a `char[N]` ARRAY as the FULL
+    // fixed-width buffer (trailing NULs after inet_ntop's terminator leak in as
+    // embedded \0 — corrupts the JSON). The const char* overload stops at \0.
+    return std::format("{}/{}", static_cast<const char*>(buf), plen);
+}
+
+/* §5.56 (MVP-4.16 C3) PI-mvp-4.16-SIDECAR: format a host-order EtherType as the
+ * config grammar's preferred spelling — the well-known names {ipv4,ipv6,arp}
+ * (mirroring parse_ethertype, D-mvp-4.14-ETH-GRAMMAR), else a lowercase hex
+ * literal `0xXXXX` (the form config also accepts; more idiomatic than decimal
+ * for an EtherType). Operators see the SAME token here as in their source YAML. */
+[[nodiscard]] std::string format_ethertype(std::uint16_t et)
+{
+    switch (et) {
+        case 0x0800u: return "ipv4";
+        case 0x86DDu: return "ipv6";
+        case 0x0806u: return "arp";
+        default:      return std::format("0x{:04x}", et);
+    }
 }
 
 /* §5.37 (MVP-3.4f) D-3.4f-1: `format_timestamp_utc` + `json_escape`
@@ -126,6 +163,16 @@ namespace {
         if (r.match.src_cidr.has_value()) {
             append_kind("src_cidr", format_cidr(*r.match.src_cidr));
         }
+        /* §5.56 (MVP-4.16 C3) PI-mvp-4.16-SIDECAR: emit the IPv6 dst/src-CIDR
+         * axes (mvp-4.13/S4) as canonical compressed-v6 `<addr>/N`. Key-anchored
+         * extraction in the exporter disambiguates `dst_cidr6` from `dst_cidr`
+         * (the closing quote in the `"dst_cidr"` key anchor stops at the `6`). */
+        if (r.match.dst_cidr6.has_value()) {
+            append_kind("dst_cidr6", format_cidr6(*r.match.dst_cidr6));
+        }
+        if (r.match.src_cidr6.has_value()) {
+            append_kind("src_cidr6", format_cidr6(*r.match.src_cidr6));
+        }
         /* §5.44 (MVP-4.4) PI-mvp-4.4-SIDECAR: emit the proto axis as a name
          * for the well-known protocols {tcp,udp,icmp} (matching the config
          * grammar), else the numeric string. */
@@ -151,6 +198,12 @@ namespace {
          * outer VID string (matching the single-integer config grammar). */
         if (r.match.vlan.has_value()) {
             append_kind("vlan", std::to_string(*r.match.vlan));
+        }
+        /* §5.56 (MVP-4.16 C3) PI-mvp-4.16-SIDECAR: emit the EtherType axis
+         * (mvp-4.14/S5) as the config grammar's preferred spelling (named for
+         * {ipv4,ipv6,arp}, else `0xXXXX`). */
+        if (r.match.ethertype.has_value()) {
+            append_kind("ethertype", format_ethertype(*r.match.ethertype));
         }
         const std::string match = std::format("{{{}}}", parts);
 

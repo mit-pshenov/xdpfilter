@@ -157,7 +157,7 @@ std::string emit_metrics(
      * NOT rule_counters — a counter-orphan rule_id has unknown axes and gets
      * NO series (D-mvp-4.6-METRIC-SOURCE). HELP+TYPE fire once unconditionally
      * (PI-32 empty-scrape). */
-    out.append("# HELP xdpfilter_rule_info Per-rule match constraints (6-axis) by iface and rule_id; constant gauge value 1.\n");
+    out.append("# HELP xdpfilter_rule_info Per-rule match constraints (9-axis) by iface and rule_id; constant gauge value 1.\n");
     out.append("# TYPE xdpfilter_rule_info gauge\n");
 
     for (const auto& [iface, metas] : rule_meta_by_iface) {
@@ -180,11 +180,16 @@ std::string emit_metrics(
                   });
 
         for (const RuleMeta* rm : rules) {
-            /* §5.47 (MVP-4.7) D-mvp-4.7-Q3: `mac` is the 8th (LAST) label key,
-             * appended after `vlan` so the existing 7 keys' order stays byte-
-             * stable; `""` for a MAC-unconstrained rule. */
+            /* §5.47 (MVP-4.7) D-mvp-4.7-Q3: `mac` is the 8th label key, appended
+             * after `vlan` so the older keys' order stays byte-stable; `""` for
+             * a MAC-unconstrained rule.
+             * §5.56 (MVP-4.16 C3) PI-mvp-4.16-EXPORTER-AXIS-AWARE: the v6-CIDR +
+             * EtherType axes are appended AFTER `mac` (keys 9/10/11) by the same
+             * append-at-end discipline — the existing 8 keys stay byte-identical
+             * (PI-mvp-4.16-LABEL-CONTRACT), and a v6/ethertype rule no longer
+             * appears as all-empty (match-all) in the info-metric. */
             std::format_to(std::back_inserter(out),
-                "xdpfilter_rule_info{{iface=\"{}\",rule_id=\"{}\",dst_cidr=\"{}\",src_cidr=\"{}\",protocol=\"{}\",dst_port=\"{}\",vlan=\"{}\",mac=\"{}\"}} 1\n",
+                "xdpfilter_rule_info{{iface=\"{}\",rule_id=\"{}\",dst_cidr=\"{}\",src_cidr=\"{}\",protocol=\"{}\",dst_port=\"{}\",vlan=\"{}\",mac=\"{}\",dst_cidr6=\"{}\",src_cidr6=\"{}\",ethertype=\"{}\"}} 1\n",
                 iface_escaped,
                 rm->rule_id,
                 escape_label_value(rm->dst_cidr),
@@ -192,7 +197,10 @@ std::string emit_metrics(
                 escape_label_value(rm->protocol),
                 escape_label_value(rm->dst_port),
                 escape_label_value(rm->vlan),
-                escape_label_value(rm->mac));
+                escape_label_value(rm->mac),
+                escape_label_value(rm->dst_cidr6),
+                escape_label_value(rm->src_cidr6),
+                escape_label_value(rm->ethertype));
         }
     }
 
