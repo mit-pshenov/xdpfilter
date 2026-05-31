@@ -16580,3 +16580,115 @@ Guards applied: **#5** (Phase A code-grep — re-anchored the v6 base-only block
 - loader/config/sidecar changes — no lowering, parse, schema, or status-JSON change (loader.hpp byte-identical, PI-7).
 
 Evidence: `mint/task-brief.md` MVP-4.15 (HG-mvp-4.15-1/2, Q1/Q2, S6-1..S6-4, the spike result, guards #5/#11/#12/#23/#25/#27, the operative-semantic note); `mint/architecture-l2l3-gate.md` (addr-axis ext-walk Approach A + testability VA-5 detectability trap); the pre-slice verifier spike (rc=0, 26548/1M insns, stack 280/512, max_states 12, MAX_HOPS=8 on the 6.1 host; 5.15-floor caveat per S4); independent Phase A reads of `src/bpf/mac_filter.bpf.c:51-90/589-609/740-783/982-1147`, `include/vmlinux.h:39927/63996`, `tests/inject/inject_l6.py:1-124`, `tests/bitvec/bitvec_oracle_prod.py:1-250`; design §5.44 (the v4 `ihl*4` variable-offset-L4 + has_port precedent), §5.51 (the 3-arm dispatch + non-IP-never-MALFORMED + bounded VLAN-walk), §5.52 (`inject_l6.py` + the documented S6 SEAM), §5.53 (the v6 arm S6 amends + PI-mvp-4.13-BASE-HEADER now retired + D-mvp-4.13-NO-MALFORMED-NONV6 chain semantic), §5.54 (the 3-arm symmetric model + guard #27 + the S5-SUPERSEDED precedent).
+
+---
+
+### §5.57 MVP-4.17 / housekeeping: dead-code (B24) + stale-comment (B25) cleanup (brownfield, PURE-CLEANUP, ZERO behavior change, 2026-05-31)
+
+> **Numbering note:** the highest prior section is **§5.55** (MVP-4.15/S6). **§5.56 is reserved for the hand-coded C3 fast-follow (MVP-4.16, commit `9abb02d`)** — C3 shipped without a formal design section (per the "band by default" learning it was hand-coded), but its code comments cite `§5.56` throughout (`sidecar_reader.{hpp,cpp}`, `prom_format.cpp:189` PI-mvp-4.16-LABEL-CONTRACT). This amendment is therefore **§5.57** (MVP-4.17), preserving the §5.56≡C3 association the code already uses. No prior section is rewritten; B24 deletes code and B25 corrects live-misleading comments only.
+
+#### §5.57 Problem statement
+
+Two backlog cleanup items, bundled, **zero behavior change, no schema/VERSION move, loader.hpp untouched (PI-7 continues)**:
+- **B24** — delete vestigial dead code in the exporter sidecar reader. `classify_match_kind()` scans the match-body for a bare `"cidr"` key the producer NEVER emits (it emits `dst_cidr`/`src_cidr`/`dst_cidr6`/…), so `has_cidr` is permanently false; its result `RuleMeta::match_kind` is **written once and read nowhere** (the live label path is the per-axis `extract_axis` fields, surfaced by `prom_format.cpp`). Delete the function, its single assignment, and the struct member.
+- **B25** — correct comments + one dead initializer that still assert the **pre-S4/S5/S6** reality ("at-least-one-of mac/src_cidr", "6-axis"/"5 axes"/"6 live axes", `schema_version = 1`, and one now-**false** "config.cpp rejects `mac`"). The match model is now **9 axes** (dst/src/proto/port/vlan/mac/dst6/src6/ethertype); the loader applies **v2 only**; `mac` was **re-accepted in §5.47**. These are live-misleading prose, not history.
+
+#### §5.57 Phase A code-grep verification report (architect-independent — 2026-05-31, per guard #5)
+
+Re-ran all four brief greps independently; confirmed every site AND found four same-class adjacent stale comments the brief's FileList missed (folded into EDITED below):
+1. `grep classify_match_kind|match_kind src/ tests/ include/` → **exactly 4 B24 sites**: `sidecar_reader.cpp:7` (header), `:39-47` (fn def), `:93` (assignment); `sidecar_reader.hpp:30` (member). **ZERO test/fixture hits** (guard #13 satisfied — `match_kind` never reached any output surface; `.match_kind`/`->match_kind` reader grep = the `:93` write only).
+2. `grep -E 'at-least-one|mac/src_cidr' config.{hpp,cpp}` → header sites stale (`config.hpp:12-13`, `config.cpp:6`); the **operator-facing error STRING `config.cpp:457-459` already enumerates all 9 axes correctly — verified-clean, DO NOT touch**.
+3. `grep -E '6-axis|schema_version = 1' src/lib src/exporter` → `loader.cpp:2452` ("6-axis"), `prom_format.hpp:16` ("6-axis" HELP doc-mirror), `config.hpp:63` (`schema_version = 1`). Confirmed `apply_internal.hpp:27` already says "schema_version 2" — verified-clean, no edit.
+4. **C3 self-contradiction confirmed**: `prom_format.cpp:160` already emits `"(9-axis)"` HELP and `:192` emits **11 labels (9 axes)**; the `prom_format.hpp:16` doc-mirror still says "6-axis" AND the `:18` sample line still lists only 6 labels — both stale vs the live emitter.
+5. **Architect-found adjacent same-class sites (guard #5 — brief missed):** `sidecar_reader.cpp:94` ("populate the 6 live axes"→9), `sidecar_reader.hpp:9` ("fill the 5 axis fields"→9), `prom_format.hpp:18` (6-label sample → 9 to mirror `prom_format.cpp:192`), `sidecar.cpp:145-148` (now-**false** "config.cpp rejects `mac` at parse" — `mac` re-accepted §5.47 — plus stale "at-least-one-of {dst_cidr, src_cidr}"). These are folded into EDITED so the slice does not ship self-contradictory axis-count prose immediately adjacent to the lines it corrects.
+
+#### §5.57 FileList (brownfield DIFF — exact sites)
+
+**NEW:** none.
+
+**EDITED** — delete/edit ONLY the listed sites; no opportunistic refactor (operative-semantic discipline: exact line anchors are SHOULD-level orientation — landing at a shifted line after the B24 deletions is `inline-merge`):
+
+| Path | Sites (role) | Lang | LOC est |
+|---|---|---|---|
+| `src/exporter/sidecar_reader.cpp` | **B24:** delete `classify_match_kind` def (`:39-47`); delete `rm.match_kind = …` assignment (`:93`); fix header comment (`:7`, drop the "`match_kind` derived by substring scan" clause). **B25-arch:** `:94` "the 6 live axes"→"9 live axes". | C++ | −10 / ±2 |
+| `src/exporter/sidecar_reader.hpp` | **B24:** delete `std::string match_kind;` member + comment (`:30`). **B25-arch:** `:9` "fill the 5 axis fields"→"9". | C++ | −1 / ±1 |
+| `src/lib/config.hpp` | **B25:** `:12-13` "at-least-one-of mac/src_cidr"→"at-least-one of the 9 match axes (see config.cpp error string)"; `:63` `schema_version = 1`→`= 2` (HG-mvp-4.17-1); `:4` "(cycles 1+2)" OPTIONAL minimal touch ("schema_version 2; v1 retired §5.43"). | C++ | ±3 |
+| `src/lib/config.cpp` | **B25:** `:6` header comment "{mac, src_cidr}"→"the 9 match axes". (`:457-459` error STRING NOT touched — already correct.) | C++ | ±1 |
+| `src/lib/loader.cpp` | **B25:** `:2452` comment "6-axis"→"9-axis". **NOT loader.hpp** (PI-7 zero-diff continues). | C++ | ±1 |
+| `src/exporter/prom_format.hpp` | **B25:** `:16` HELP doc-mirror "6-axis"→"9-axis" (agrees with `prom_format.cpp:160`). **B25-arch:** `:18` sample line add the 3 C3 labels (`dst_cidr6`,`src_cidr6`,`ethertype`) to mirror `prom_format.cpp:192`. | C++ | ±2 |
+| `src/lib/sidecar.cpp` | **B25-arch:** `:145-148` comment "at-least-one-of {dst_cidr, src_cidr}"→"the 9 match axes"; drop/correct the now-**false** "config.cpp rejects `mac` at parse (HG-mvp-4.3-2)" clause (`mac` re-accepted §5.47). Retain the `§5.xx` anchors + the "one-rule-per-line D-3.4b-20" rationale. | C++ | ±2 |
+| `docs/BACKLOG.md` | status-marking edits (B21/B28/B31 + IPv4-gate marked SHIPPED, "ladder+C3 SHIPPED" section) ride in this slice's commit. | md | ±N |
+
+**UNCHANGED-BUT-AFFECTED** — must remain byte-identical; reviewer asserts zero git-diff:
+- `src/lib/loader.hpp` — **PI-7 zero-diff CONTINUES** (this slice does NOT touch it).
+- `src/exporter/prom_format.cpp` — already correct (9-axis HELP `:160`, 11-label emit `:192`); the doc-mirror is what's being aligned TO it.
+- `src/lib/config.cpp:457-459` — operator-facing error string, already enumerates 9 axes; DO NOT touch.
+- `src/lib/apply_internal.hpp:27` — already "schema_version 2"; verified-clean.
+- `tests/**`, `tests/fixtures/**` — **guard #13:** no test/fixture references `match_kind`/`classify_match_kind`/`"mac"`/`"cidr"`/`"both"`; ctest stays **96/96** green.
+
+Anything not listed above is off-limits; an impl edit to an unlisted file is a design gap → SendMessage architect.
+
+#### §5.57 DataStructures
+
+`RuleMeta` (`sidecar_reader.hpp`) loses one member: `std::string match_kind;`. All 9 axis fields (`mac`,`dst_cidr`,`src_cidr`,`protocol`,`dst_port`,`vlan`,`dst_cidr6`,`src_cidr6`,`ethertype`) **UNCHANGED**. No other struct, map, schema, or wire format touched. `xdpfilter_rule_info` label set UNCHANGED (already 9 from C3).
+
+#### §5.57 Interfaces
+
+`classify_match_kind` (file-local `namespace {}` symbol) is **removed** — it had no external linkage and no caller outside its single deleted assignment. `parse_rule_index(std::string_view) noexcept` signature + return semantics **UNCHANGED** (still returns `std::vector<RuleMeta>`, never-throws). No CLI flag, env var, metric label, or log line changes. No VERSION bump (stays `0.15.0`), no schema bump (stays `2`).
+
+#### §5.57 Human-gate decisions
+
+- **HG-mvp-4.17-1 — `schema_version` dead init `= 1` → `= 2`.** `config.hpp:63` default is dead (`validate()` always overwrites from the parsed config, which `config.cpp` requires `== 2`). Set to `2` (the only legal value) so the init reflects reality — **because** a `{1}` literal default re-asserts the retired v1 schema and is the exact prose this slice removes. (Architect considered `= 0` fail-loud sentinel; rejected — both behavior-identical since validate always writes, and `= 2` is self-documenting of "the only supported version".)
+
+- **HG-mvp-4.17-2 — comment depth = minimal-truthful.** Each stale comment states CURRENT reality (9 axes, v2-only, mac re-accepted) in ≤1 line; NO history/changelog prose (that belongs in git/RETROSPECTIVES). Existing `§5.xx` citation anchors RETAINED.
+
+#### §5.57 Decisions (with rationale)
+
+- **D-mvp-4.17-VERDICT-IDENTITY** — the loader/exporter runtime behavior is **byte-identical** before/after except the removal of one dead write to a never-read field; no observable output (metric, log, verdict, exit code, status JSON) changes — **because** `match_kind` never reached any output surface (`prom_format.cpp` reads only the per-axis fields), and every B25 edit is comment/doc-only or a dead-init whose value `validate()` always overwrites. Reviewer verifies via behavior diff = ∅.
+- **D-mvp-4.17-ARCH-SCOPE** — the four guard-#5 adjacent sites (`sidecar_reader.cpp:94`, `sidecar_reader.hpp:9`, `prom_format.hpp:18`, `sidecar.cpp:145-148`) are **folded into EDITED**, NOT fenced OOS — **because** they are the same stale-N-axis / now-false-prose class as the brief's explicit B25 targets, three of them sit in the very files/comment-blocks already being edited, and `sidecar.cpp:148`'s "config.cpp rejects `mac`" is flatly **false** post-§5.47 (worse than a stale count). The design's FileList — not the brief — is the contract; these are authorized. Impl treating a guard-#5 site as `inline-merge` (or escalating if a site proves load-bearing) is correct, NOT OOT.
+- **D-mvp-4.17-Q1 (regression-guard ctest) → A1 (none).** No new ctest — **because** `match_kind` was never in any output surface and the live label path is already covered by `T_EXPORTER_RULE_LABELS` + `T_SIDECAR_V6_ETH_KINDS`; a new test would assert nothing new. Rely on the existing exporter tests staying green (96/96). (A2 — assert well-formed `xdpfilter_rule_info` post-delete — rejected as redundant.)
+- **Trust-model note:** no injection observed in the brief; the "FileList is EXACT" instruction is honored as the floor, then deliberately extended via D-mvp-4.17-ARCH-SCOPE under the architect's design-authority + the brief's own "if the architect identifies a genuine gap" clause.
+
+#### §5.57 TestStrategy (verification spec)
+
+Pure-cleanup slice — **no new test required** (D-mvp-4.17-Q1=A1). Tester's job is to confirm the cleanup is behavior-neutral:
+1. **Suite-green regression** — trigger: full `ctest` after the edits. Outcome: **96/96 pass** (same count as the `ce59a5e`/C3 baseline), zero new/removed tests. Assertion: ctest pass count == prior baseline; no test references the deleted symbols.
+2. **Build clean** — trigger: `T_BUILD` + `T_SANITIZER_BUILD`. Outcome: compiles with no new warning from the removed member/function or the comment edits. Assertion: build rc=0.
+3. **Live-label path unaffected (existing tests, no change needed)** — `T_EXPORTER_RULE_LABELS` + `T_SIDECAR_V6_ETH_KINDS` still emit well-formed `xdpfilter_rule_info` with all 9 axis labels. Assertion mechanism: those tests' existing grep of the exporter output stays GREEN — they are the proof that deleting `match_kind` changed nothing observable.
+4. **Guard #13 string-ripple (tester re-confirm)** — `grep -rln 'match_kind\|classify_match_kind\|"mac"\|"cidr"\|"both"' tests/` returns no assertion on these. (Architect already confirmed ZERO hits; tester re-runs as the closeout check.)
+
+**No OPS-canary applies** — this slice introduces no new invocation path, capability mask, or namespace; the runtime environment is identical (in fact, no runtime code path changes at all).
+
+#### §5.57 verifiable invariants for reviewer (MAY-default per architect-spec §6.5 discipline)
+
+Guidance for reviewer, NOT contracts for impl. **Resolution rule: if any item below conflicts with a §6.5 PI item, the PI wins; if impl deviates from a hint to satisfy a PI or a load-bearing test, disposition is `inline-merge`, NOT `[UNRELATED-EDIT]`.**
+
+1. (MUST) `loader.hpp` byte-identical — `git diff -- src/lib/loader.hpp` = ∅. (PI-7)
+2. (MUST) `prom_format.cpp` behavior-identical — the 9-axis HELP (`:160`) + 11-label emit (`:192`) unchanged; only the `.hpp` doc-mirror is aligned to it. (PI-mvp-4.17-EXPORTER-BEHAVIOR)
+3. (MUST) ctest 96/96; no test added/removed; no test references the deleted `match_kind`/`classify_match_kind`. (PI-mvp-4.17-SUITE)
+4. (MUST) no schema (stays 2) / VERSION (stays 0.15.0) / axis (stays 9) / `BITVEC_NUM_AXES` / `kManagedMaps` move. (PI-mvp-4.17-NO-MOVE)
+5. (MUST) `config.cpp:457-459` operator-facing error string byte-unchanged. (PI-mvp-4.17-ERRSTRING)
+6. (MAY) exact line anchors shift after the `:39-47`/`:93`/`:30` deletions — landing at a different line is `inline-merge`.
+7. (MAY) the four guard-#5 adjacent sites (D-mvp-4.17-ARCH-SCOPE) — impl correcting them is in-scope; a reviewer seeing them edited should `inline-merge`, NOT flag `[UNRELATED-EDIT]`. If impl declines `sidecar.cpp:145-148` (different file) and escalates, that is also acceptable.
+8. (MAY) `config.hpp:4` "(cycles 1+2)" light touch — editing or leaving it is `inline-merge` (OPTIONAL per HG-mvp-4.17-2).
+9. (MAY) exact LOC delta (≈ −12 net) — a slightly different delta from comment-rewording is `inline-merge`.
+
+#### §6.5 Preserved-invariants delta (MVP-4.17)
+
+| PI | Property | Check mechanism |
+|---|---|---|
+| **PI-7 (CONTINUES)** | `loader.hpp` byte-identical — no new public symbol, no signature change. | `git diff -- src/lib/loader.hpp` = ∅. (This is the streak's continuation; this slice does not touch loader.hpp.) |
+| **PI-mvp-4.17-VERDICT (NEW, narrow)** | Loader + exporter observable behavior byte-identical except removal of one dead write; no metric/log/verdict/exit/status-JSON change. | re-run exporter tests (`T_EXPORTER_RULE_LABELS`, `T_SIDECAR_V6_ETH_KINDS`) GREEN; behavior diff = ∅. |
+| **PI-mvp-4.17-NO-MOVE (NEW)** | No schema (2) / VERSION (0.15.0) / axis (9) / `BITVEC_NUM_AXES` / `kManagedMaps` / map / wire move. | `git diff` touches only the 7 listed `src/` files (comments + 1 member-delete + 1 dead-init) + `docs/BACKLOG.md`; grep the version/schema literals unchanged. |
+
+**No new guard.** Guards APPLIED: **#5** (Phase A grep — re-ran all four, found four adjacent same-class sites the brief missed), **#13** (retired-string ripple — confirmed ZERO test/fixture references to `match_kind`/`classify_match_kind`/`"mac"`/`"cidr"`/`"both"`). N/A: #7/#10/#11/#15/#22/#23/#25/#27 (no behavior, no map/axis/catalog/version move, no datapath, no new test). **Guard catalog stays at 28** (no forward-defense class introduced by a pure cleanup).
+
+#### §5.57 Out of scope (anti-drift fence)
+
+- **B26** (`pass_cidr`→`pass_rule` metric rename — metric contract change, own slice), **B29** (legacy allowlist map delete — ctest-gated), **B30** (slot/id decouple — designed slice), **B22/B23** (test hardening), **B27** (security — held by PO).
+- Any behavior / schema / VERSION / axis / map / wire-format change. Any `loader.hpp` touch (PI-7).
+- Any edit to the `config.cpp:457-459` operator-facing error string (already correct), `prom_format.cpp` (already correct), or `apply_internal.hpp:27` (already correct).
+- Reformatting / re-flowing unrelated comments, or "while I'm here" edits to files not in EDITED. The FileList (incl. the four guard-#5 sites authorized by D-mvp-4.17-ARCH-SCOPE) is the complete footprint.
+- A new regression ctest (D-mvp-4.17-Q1=A1 — none).
+
+Evidence: `mint/task-brief.md` MVP-4.17 (B24/B25 enumeration, HG-mvp-4.17-1/2, Q1=A1, guards #5/#13, operative-semantic note); independent Phase A greps + Reads of `src/exporter/sidecar_reader.{cpp,hpp}`, `src/exporter/prom_format.{cpp,hpp}`, `src/lib/config.{hpp,cpp}`, `src/lib/loader.cpp:2448-2455`, `src/lib/sidecar.cpp:140-151` (2026-05-31); design §5.46 (sidecar_reader axis-extraction), §5.43/§5.47 (config schema v2 cutover + mac re-accept), §5.55 OOS (the C3 sidecar match-kinds gap reference); commits `ce59a5e` (S6 baseline 95→96 via C3) / `9abb02d` (C3, the §5.56-reserved hand-coded fast-follow).
