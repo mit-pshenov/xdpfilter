@@ -15,7 +15,7 @@
 # Outcome (ALL must hold):
 #   (a) Step 2 exits 0.
 #   (b) Attached XDP mode is generic OR xdpgeneric (kernel-version variance).
-#   (c) ${PIN_DIR}/{allowlist,stats} both exist.
+#   (c) ${PIN_DIR}/{allowlist_a,stats} both exist.
 #
 # Cleanup (trap EXIT, idempotent): detach (NO --mode per Q1 Option A) +
 # cleanup_veth.

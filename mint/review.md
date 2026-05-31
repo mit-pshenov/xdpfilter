@@ -1,4 +1,4 @@
-# Review — MVP-4.17 housekeeping cleanup (B24+B25) (mint triangulation)
+# Review — MVP-4.18 remove legacy `allowlist` alias map (B29) (mint triangulation)
 
 ## Verdict
 `pass` (round 1)
@@ -8,44 +8,41 @@
 | Framework point | Findings | Tags |
 |---|---|---|
 | 1. Spec ↔ Code | 0 | — |
-| 2. Spec ↔ Tests | 0 | — (D-mvp-4.17-Q1=A1: no new test by design; existing suite carries negation control T_NEGATION_CONTROL #7 GREEN) |
-| 3. Code ↔ Tests | 0 | — (96/96, classify_match_kind deleted not orphaned) |
+| 2. Spec ↔ Tests | 0 | (negation control PRESENT) |
+| 3. Code ↔ Tests | 0 | — |
 | 4. Out-of-Scope Drift | 0 | — |
-| 5. Behaviour preserved (brownfield) | 0 | — (PI-7 ∅, no REGRESSION, no UNRELATED-EDIT, no INVARIANT-VIOLATED) |
+| 5. Behaviour preserved (brownfield) | 0 | (PI-7 ∅, no REGRESSION/UNRELATED-EDIT/INVARIANT-VIOLATED) |
 
-## What was verified (cite-by-cite)
+Plus 2 [OUT-OF-TRIANGULATION] (both `inline-merge`, do NOT affect verdict).
 
-**Point 1 — Spec ↔ Code (FileList §5.57):** git diff = exactly the 7 src/ files + docs/BACKLOG.md.
-- B24 dead-code (`sidecar_reader.{cpp,hpp}`): `classify_match_kind` def deleted, `rm.match_kind` assignment deleted, `match_kind` member deleted, header comments fixed. `grep -rn 'match_kind\|classify_match_kind' src/ include/ tests/` = ZERO.
-- B25 comment/dead-init: `config.hpp:4/12-13` + dead-init `schema_version = 1`→`= 2` (HG-mvp-4.17-1, validate() always overwrites — behavior-neutral); `config.cpp:6` header → "9 match axes"; `loader.cpp:2452` "6-axis"→"9-axis"; `prom_format.hpp:16` HELP + :18 sample line gains dst_cidr6/src_cidr6/ethertype mirroring `prom_format.cpp:192`; `sidecar.cpp:142-148` now-false "config.cpp rejects mac" → "re-accepted §5.47".
-- `parse_rule_index` signature/return UNCHANGED; `classify_match_kind` was file-local (no external linkage) — clean removal. No VERSION/schema bump.
+## Point-by-point (all cites independently re-verified by reviewer)
 
-**Point 5 — MUST invariants (§6.5 delta) all hold:**
-- PI-7: `git diff ce59a5e -- src/lib/loader.hpp` = ∅ (streak continues).
-- PI-mvp-4.17-EXPORTER-BEHAVIOR: `git show HEAD -- src/exporter/prom_format.cpp` = ∅ (already correct from C3; only the .hpp doc-mirror aligned to it).
-- PI-mvp-4.17-ERRSTRING: `config.cpp:457-459` operator-facing error string byte-unchanged.
-- PI-mvp-4.17-NO-MOVE: footprint = the 7 listed src/ + BACKLOG.md only; no schema/axis/BITVEC/kManagedMaps/version literal moved.
+**1. Spec ↔ Code:** alias map decl GONE (`grep '\ballowlist\b SEC' src/bpf/` = ∅); allowlist_a/_b + xdpmf_allowlist_inner TYPE + rulesets AOM KEPT. loader.cpp: kManagedMaps alias row + `legacy_alias` field + both skip-guards + the §5.26 special-pin block all removed; kManagedMaps = 38 rows (was 39, guard #10 ✓), 2-tuple. mac_filter.h XDPMF_MAP_ALLOWLIST_NAME deleted. Skeleton regen green (no `&SkelMapsT::allowlist` build error — member-pointer safety net).
 
-**Point 4 — OOS fence:** no code touches B26/B29/B30/B22/B23/B27; no "while-I'm-here" edits; guard #13 holds.
+**2. Spec ↔ Tests:** all 4 canaries assert `${PIN_DIR}/allowlist_a` + FAIL strings updated. NEGATION CONTROL present (T_LOAD_ATTACH.sh:32-33 `! test -e ${PIN_DIR}/allowlist` proves legacy pin GONE). T_VERIFIER_REJECT bad-input backstop. No CIRCULAR-TEST.
+
+**3. Code ↔ Tests:** reviewer re-ran full suite (sole owner, exit 0): 100% passed, 0 failed out of 96 (2 env-skips, baseline-identical). bpftool prog loadall rc=0; live map list shows allowlist_a/allowlist_b only, bare allowlist GONE.
+
+**4. OOS:** no live-datapath edit; no schema(2)/VERSION(0.15.0)/axis(9)/BITVEC change. T_DROP_RULE_OPERATIVE + T_DROP_RULE_BUMPS_COUNTER green = verdict-identity.
+
+**5. Brownfield:** PI-7 `git diff 9aa68fd -- src/lib/loader.hpp` = ∅. ABI-discharge re-run: filtered grep returns ONLY §5.58 invariant-#7 residue; ZERO dangling ref to deleted alias/constant/field; ZERO external consumer. D-mvp-4.18-FIXTURE honored (mac_filter_bad.bpf.c independent map untouched; T_VERIFIER_REJECT green). No REGRESSION, no UNRELATED-EDIT.
 
 ## Test execution
+Reviewer's independent sole-owner run: `100% tests passed, 0 tests failed out of 96` (2 env-skips). Log `/tmp/mint-review-4.18-1780255427.log`. Matches the team-lead's canonical run (exit 0, mint/test-run.log).
 
-Independent rebuild (rc=0) + full suite `sudo -n ctest --output-on-failure -j2`:
-```
-100% tests passed, 0 tests failed out of 96
-Total Test time (real) = 650.93 sec
-Skipped: #5 T_DROP_MALFORMED, #38 T_ANSIBLE_PLAYBOOK_SYNTAX (env, pre-existing — NOT regressions)
-```
-Byte-identical outcome to tester's `mint/test-run.log`. Live-label-path GREEN: T_EXPORTER_RULE_LABELS #54, T_SIDECAR_V6_ETH_KINDS #55, T_SIDECAR_JSON_SHAPE #52, T_NEGATION_CONTROL #7. Verdict-identity (PI-mvp-4.17-VERDICT) confirmed: behavior diff = ∅.
+> Session note: heavy output-lag caused multiple FS-lag confabulations in the tester's secondary reporting (timings/provenance). The VERDICT (96/96) was correct throughout; it was independently re-grounded by the team-lead's sole-owner clean run AND the reviewer's independent re-run. Code + the 4 ctest edits were verified on-disk by the team-lead.
 
-## Out-of-triangulation findings
+## Out-of-triangulation findings (both inline-merge, pre-classified by §5.58 MAY-invariants #8/#9)
 
-### [OUT-OF-TRIANGULATION] BACKLOG.md B25 entry body still said "Update to v2/6-axis"
-**Location**: `docs/BACKLOG.md` B25 entry (under "✅ SHIPPED MVP-4.17").
-**Evidence**: the original B25 task-description "Update to v2/6-axis" survived verbatim under the now-SHIPPED header — ironic in a 6→9-axis-drift-correction slice. Historical task-description prose, not live-misleading code prose; non-blocking.
-**Disposition**: `inline-merge`.
+### [OUT-OF-TRIANGULATION] docs/BACKLOG.md B29 not marked DONE → inline-merge
+B29 fully implemented but its backlog entry wasn't flipped. Disposition: inline-merge.
+
+### [OUT-OF-TRIANGULATION] T_MODE_GENERIC_DEFAULT.sh:18 header comment stale → inline-merge
+`{allowlist,stats}` orienting comment not updated alongside the :95 assertion migration. Disposition: inline-merge.
 
 ### Post-review sweep — round 1
-- OOT: BACKLOG.md B25 "Update to v2/6-axis" → `docs/BACKLOG.md` B25 entry edited → corrected to "v2/**9-axis**" + noted the broader shipped scope (8 sites incl. dead-init, sidecar.cpp false-comment, prom_format.hpp doc-mirror). Rides in the Phase 6 final commit.
+- OOT: BACKLOG.md B29 → `docs/BACKLOG.md:154` flipped to "✅ SHIPPED MVP-4.18 (194be4f)" with the full removal summary.
+- OOT: T_MODE_GENERIC_DEFAULT header → `tests/T_MODE_GENERIC_DEFAULT.sh:18` `{allowlist,stats}` → `{allowlist_a,stats}`.
+Both ride in the Phase 6 final commit.
 
-No SPEC-DRIFT, no SPEC-UNTESTED, no CIRCULAR-TEST, no OOS-DRIFT, no REGRESSION, no UNRELATED-EDIT, no INVARIANT-VIOLATED. Clean pure-cleanup slice. **pass.**
+**Verdict: pass.**
