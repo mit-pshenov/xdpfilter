@@ -1,7 +1,7 @@
 /*
  * config.hpp — typed schema for the §5.26/§5.27 YAML config.
  *
- * The schema (cycles 1+2) is a top-level block mapping with:
+ * The schema (schema_version 2; v1 retired §5.43) is a top-level block mapping with:
  *   schema_version: 2     (REQUIRED; MUST be 2; supported set {2} — §5.43
  *                          HG-mvp-4.3-3 hard cutover from {1})
  *   interface: <name>     (optional; redundant with CLI --iface)
@@ -9,8 +9,8 @@
  *   rules:                (optional; list of rule mappings)
  *     - id: <u32>         (REQUIRED; range [0, XDPMF_ALLOWLIST_MAX-1])
  *       action: pass|drop (REQUIRED)
- *       match:            (REQUIRED mapping; §5.27 rule 7: at-least-one-of
- *                          mac/src_cidr required)
+ *       match:            (REQUIRED mapping; rule 7: at-least-one of the 9
+ *                          match axes required — see config.cpp error string)
  *         mac: "AA:BB:..."         (§5.47 — src-MAC exact-match axis; re-accepted in v2)
  *         src_cidr: "10.0.0.0/8"   (§5.27 — IPv4 dotted-decimal CIDR; v6 rejected)
  *
@@ -60,7 +60,7 @@ struct Rule {
 };
 
 struct Config {
-    std::uint32_t              schema_version = 1;
+    std::uint32_t              schema_version = 2;
     std::optional<std::string> iface;
     DefaultAction              default_action = DefaultAction::Drop;
     std::vector<Rule>          rules;

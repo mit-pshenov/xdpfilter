@@ -142,11 +142,10 @@ namespace {
 
         /* Build the `match` sub-object inline so the rule lives on one line
          * (one-rule-per-line per D-3.4b-20). §5.43 (MVP-4.3) C1: the v2
-         * match grammar is at-least-one-of {dst_cidr, src_cidr} (guaranteed
-         * by config.cpp validation); emit the explicit `dst_cidr` / `src_cidr`
-         * match-kinds (PI-mvp-4.3-SIDECAR). The `mac` branch is dead-but-
-         * harmless under v2 (config.cpp rejects `mac` at parse — HG-mvp-4.3-2),
-         * retained so the MAC-axis slice (mvp-4.5) re-activates it cleanly. */
+         * match grammar is at-least-one of the 9 match axes (guaranteed by
+         * config.cpp validation); emit each present axis as an explicit
+         * match-kind (PI-mvp-4.3-SIDECAR). The `mac` axis is re-accepted under
+         * v2 (§5.47) and fires whenever a rule sets it. */
         std::string parts;
         bool match_first = true;
         const auto append_kind = [&](const char* key, const std::string& value) {

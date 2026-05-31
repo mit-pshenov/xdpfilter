@@ -2449,7 +2449,7 @@ std::uint32_t apply_request(const ApplyRequest& req)
         // §5.48 (MVP-4.8) D-mvp-4.8-BOUNDARY: populate ALL RESET-on-apply axes
         // (mac/dst/src/proto/port/vlan/wildcard/defaults/rules) into the
         // INACTIVE slot via the table-driven helper BEFORE the active_idx flip,
-        // so the single u32 store commits the whole 6-axis+rules+wildcard+
+        // so the single u32 store commits the whole 9-axis+rules+wildcard+
         // defaults swap atomically (D-mvp-4.3-RESET-VS-PRESERVE — match/wildcard
         // maps RESET-on-apply). The HK-9 `_a`/`_b`<->slot hazard now lives in
         // exactly ONE place (inactive_axis_fd). populate_action_table (shared

@@ -13,9 +13,9 @@
  *   # HELP xdpfilter_rule_match_total Total per-rule packet matches by iface and rule_id, labelled with action.
  *   # TYPE xdpfilter_rule_match_total counter
  *   xdpfilter_rule_match_total{iface="<I>",rule_id="<N>",action="(pass|drop|unknown)"} <N>
- *   # HELP xdpfilter_rule_info Per-rule match constraints (6-axis) by iface and rule_id; constant gauge value 1.
+ *   # HELP xdpfilter_rule_info Per-rule match constraints (9-axis) by iface and rule_id; constant gauge value 1.
  *   # TYPE xdpfilter_rule_info gauge
- *   xdpfilter_rule_info{iface="<I>",rule_id="<N>",dst_cidr="<v|>",src_cidr="<v|>",protocol="<v|>",dst_port="<v|>",vlan="<v|>",mac="<v|>"} 1
+ *   xdpfilter_rule_info{iface="<I>",rule_id="<N>",dst_cidr="<v|>",src_cidr="<v|>",protocol="<v|>",dst_port="<v|>",vlan="<v|>",mac="<v|>",dst_cidr6="<v|>",src_cidr6="<v|>",ethertype="<v|>"} 1
  *
  * Block ordering: existing `xdpfilter_packets_total` HELP+TYPE+samples
  * FIRST, then `xdpfilter_rule_match_total` HELP+TYPE+samples, then the §5.46

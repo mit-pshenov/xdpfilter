@@ -6,7 +6,7 @@
  * extraction, NOT full JSON parse. The writer's output shape is stable +
  * controlled (D-3.4b-20 one-rule-per-line); a simple ERE captures
  * `(rule_id, action)` per rule, and §5.46 adds a key-anchored per-axis scan
- * over the same match-object body to fill the 5 axis fields below — still no
+ * over the same match-object body to fill the 9 axis fields below — still no
  * parser dependency.
  *
  * PI-31-3.4b: READ-ONLY by construction — no writes to rule_index.json.
@@ -27,7 +27,6 @@ namespace xdpmf::exporter {
 struct RuleMeta {
     std::uint32_t rule_id;
     std::string   action;     /* "pass" | "drop" */
-    std::string   match_kind; /* "mac" | "cidr" | "both" — informational only */
     /* §5.46 (MVP-4.6): per-axis match values, extracted verbatim from the
      * sidecar's match-object body via a key-anchored scan (D-3.4b-10 — NO
      * JSON parser). Empty string ⇒ the rule does not constrain that axis. */

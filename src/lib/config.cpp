@@ -3,8 +3,9 @@
  *
  * Per §5.26 schema rules (1-6) + §5.27 rules (7-11): default_action REQUIRED &
  * ∈ {drop,pass}; rules' id ∈ [0,63] unique; action ∈ {pass,drop}; each rule's
- * match.* mapping MUST contain at-least-one-of {mac, src_cidr} (§5.27 rule 7,
- * superseding §5.26 rule 5's mac-REQUIRED). `mac` parses canonical 17-char
+ * match.* mapping MUST contain at-least-one of the 9 match axes (rule 7,
+ * superseding §5.26 rule 5's mac-REQUIRED; see the config.cpp error string for
+ * the full enumeration). `mac` parses canonical 17-char
  * XX:XX:..., `src_cidr` parses IPv4 A.B.C.D/N with host-bits-zero (§5.27 rule 8);
  * IPv6 strings rejected at the validator (§5.27 rule 9 / HG-3.2-1).
  *

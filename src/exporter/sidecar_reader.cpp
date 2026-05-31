@@ -4,9 +4,9 @@
  * D-3.4b-14: cycle-1 budget discipline avoids a full JSON parser. The
  * writer (src/lib/sidecar.cpp) emits one rule object per line of the form:
  *   {"rule_id": <N>, "match": {<KIND>: "<VAL>"[, <KIND2>: "..."]}, "action": "<ACT>"}
- * Our ERE captures `(rule_id, action)` per such line; `match_kind` is
- * derived by substring scan (informational only — exporter does not emit
- * the match value in metric labels per Q4 A3).
+ * Our ERE captures `(rule_id, action)` per such line; the per-axis values
+ * are extracted by key-anchored sub-scan (exporter does not emit the match
+ * value in metric labels per Q4 A3).
  *
  * PI-31-3.4b: READ-ONLY. Only file-reads here.
  */
@@ -34,16 +34,6 @@ const std::regex& rule_line_re()
         R"RE(\{"rule_id":\s*([0-9]+),\s*"match":\s*\{([^}]*)\},\s*"action":\s*"(pass|drop)"\s*\}\s*,?\s*$)RE",
         std::regex::ECMAScript | std::regex::optimize};
     return r;
-}
-
-[[nodiscard]] std::string classify_match_kind(std::string_view body)
-{
-    const bool has_mac  = body.find("\"mac\"")  != std::string_view::npos;
-    const bool has_cidr = body.find("\"cidr\"") != std::string_view::npos;
-    if (has_mac && has_cidr) return "both";
-    if (has_mac)             return "mac";
-    if (has_cidr)            return "cidr";
-    return "";
 }
 
 /* §5.46 (MVP-4.6) D-mvp-4.6-Q2: key-anchored extraction of a single axis
@@ -90,8 +80,7 @@ std::vector<RuleMeta> parse_rule_index(std::string_view path) noexcept
             }
             rm.action     = m[3].str();
             const std::string body = m[2].str();
-            rm.match_kind = classify_match_kind(body);
-            /* §5.46/§5.47: populate the 6 live axes verbatim (empty when
+            /* §5.46/§5.47: populate the 9 live axes verbatim (empty when
              * absent). `mac` un-frozen this slice (the producer's
              * append_kind("mac",…) branch fires once a rule sets it). */
             rm.mac      = extract_axis(body, "mac");
