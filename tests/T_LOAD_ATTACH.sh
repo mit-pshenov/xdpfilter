@@ -26,8 +26,11 @@ sleep 0.3
 # /sys/fs/bpf may be mode 1700 (root-only traversal) on some hosts —
 # gate the existence check via `sudo -n test` so it works regardless of
 # bpffs perms.
-sudo -n test -e "${PIN_DIR}/allowlist" \
-    || { echo "FAIL: ${PIN_DIR}/allowlist pin missing" >&2; exit 1; }
+sudo -n test -e "${PIN_DIR}/allowlist_a" \
+    || { echo "FAIL: ${PIN_DIR}/allowlist_a pin missing" >&2; exit 1; }
+# Negation control (MVP-4.18): the legacy single-pin alias must be GONE.
+! sudo -n test -e "${PIN_DIR}/allowlist" \
+    || { echo "FAIL: legacy ${PIN_DIR}/allowlist pin must NOT exist after MVP-4.18 removal" >&2; exit 1; }
 sudo -n test -e "${PIN_DIR}/stats" \
     || { echo "FAIL: ${PIN_DIR}/stats pin missing"     >&2; exit 1; }
 

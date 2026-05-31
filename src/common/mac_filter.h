@@ -14,7 +14,7 @@ extern "C" {
 /*
  * Allow-list key. Source MAC of a received Ethernet frame is copied into
  * `octets` (network order: octets[0] is the first byte on the wire) and
- * looked up in the `allowlist` hash map.
+ * looked up in the `allowlist_a` hash map.
  *
  * Named `xdpmf_mac` (not `mac_addr`) because vmlinux.h on Linux ≥ 5.x
  * already declares an unrelated kernel-internal `struct mac_addr` that
@@ -86,7 +86,6 @@ enum mac_filter_stat {
 
 /* Map names — MUST match `SEC(".maps")` declarations in mac_filter.bpf.c
  * because libbpf auto-pins by map name under pin_root_path. */
-#define XDPMF_MAP_ALLOWLIST_NAME "allowlist"
 #define XDPMF_MAP_STATS_NAME     "stats"
 
 /* §5.26 (MVP-3.1): atomic apply via ARRAY_OF_MAPS[2] — see design §5.26 Q2.

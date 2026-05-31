@@ -92,8 +92,8 @@ case "${mode}" in
 esac
 
 # (c) Both pinned maps must exist (gate via sudo for bpffs mode 1700).
-if ! sudo -n test -e "${PIN_DIR}/allowlist"; then
-    echo "FAIL: ${PIN_DIR}/allowlist pin missing after default-mode attach" >&2
+if ! sudo -n test -e "${PIN_DIR}/allowlist_a"; then
+    echo "FAIL: ${PIN_DIR}/allowlist_a pin missing after default-mode attach" >&2
     fail=1
 fi
 if ! sudo -n test -e "${PIN_DIR}/stats"; then

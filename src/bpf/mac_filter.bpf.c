@@ -28,10 +28,7 @@
  * Inner-map TYPE shape is shared via the named `xdpmf_allowlist_inner` /
  * `xdpmf_cidr_inner` structs so &inner_a / &inner_b satisfy the outer
  * `__array(values, struct ...)` pointer-type contract without warning.
- * The legacy `allowlist` symbol is RETAINED as a typed alias (same shape)
- * so any out-of-tree harness that linked against MVP-2's allowlist symbol
- * still resolves — runtime ruleset data lives ONLY in allowlist_a/_b /
- * cidr_allowlist_a/_b.
+ * Runtime ruleset data lives ONLY in allowlist_a/_b / cidr_allowlist_a/_b.
  */
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -138,10 +135,8 @@ struct xdpmf_allowlist_inner {
 struct xdpmf_allowlist_inner allowlist_a SEC(".maps");
 struct xdpmf_allowlist_inner allowlist_b SEC(".maps");
 
-/* Legacy `allowlist` symbol — retained for MVP-2 compat-time wiring; NOT
- * pinned (the two real slots take its place). Userspace clears its
- * pin_path explicitly in load_skeleton(). */
-struct xdpmf_allowlist_inner allowlist SEC(".maps");
+/* §5.58 (MVP-4.18): the vestigial MVP-2 `allowlist` ABI alias map was retired
+ * here — no in/out-of-tree consumer; superseded by allowlist_a/_b (HG-mvp-4.18-1). */
 
 /*
  * Outer MAP_OF_MAPS: ARRAY[XDPMF_RULESET_COUNT] whose value at slot N is an

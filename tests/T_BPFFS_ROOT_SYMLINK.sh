@@ -297,8 +297,8 @@ if [[ "${rc_neg_attach}" -ne 0 ]]; then
 fi
 
 # (N2) Pin dir populated (proves attach actually completed pinning).
-if ! sudo -n test -e "${PIN_DIR}/allowlist"; then
-    echo "FAIL[N2]: negation: expected ${PIN_DIR}/allowlist after successful attach" >&2
+if ! sudo -n test -e "${PIN_DIR}/allowlist_a"; then
+    echo "FAIL[N2]: negation: expected ${PIN_DIR}/allowlist_a after successful attach" >&2
     fail=1
 fi
 

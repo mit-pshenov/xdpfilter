@@ -353,8 +353,8 @@ if [[ -z "${our_id_1}" ]]; then
     echo "FAIL[N1b]: first attach: no XDP attached after rc=${rc1}" >&2
     fail=1
 fi
-if ! sudo -n test -e "${PIN_DIR}/allowlist"; then
-    echo "FAIL[N1c]: first attach: expected ${PIN_DIR}/allowlist" >&2
+if ! sudo -n test -e "${PIN_DIR}/allowlist_a"; then
+    echo "FAIL[N1c]: first attach: expected ${PIN_DIR}/allowlist_a" >&2
     fail=1
 fi
 if ! sudo -n test -e "${PIN_DIR}/stats"; then

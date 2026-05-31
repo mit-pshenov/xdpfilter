@@ -125,10 +125,10 @@ constexpr std::string_view kBpfObjectPathEnv{"XDPMF_BPF_OBJECT_PATH"};
  * The table below replaces the three literals. Member-pointer
  * representation (Q4 T1; D-3.4.5-3) catches a libbpf-skel rename at
  * BUILD time (compiler error) rather than at runtime (cryptic libbpf
- * NULL deref or pin-already-set EEXIST). 17 entries post-§5.35: 16 "real"
- * maps (walked by all three callsites; pin/reuse loops skip none) + 1
- * legacy alias (`allowlist`, kept ONLY in the clear-list because its actual
- * per-iface pin uses the special-pin path at the legacy alias location).
+ * NULL deref or pin-already-set EEXIST). All entries are "real" maps
+ * (walked uniformly by all three callsites). §5.58 (MVP-4.18) retired the
+ * vestigial `allowlist` alias row + its per-entry skip flag — the table is
+ * now a clean 2-tuple walked without any per-entry guard.
  * Pre-§5.34: 13 entries (12 real + 1 alias). §5.34 D-3.4b-c2-1 net +2:
  * REMOVE the SHARED `rules` entry; ADD three (`rules_a`, `rules_b`,
  * `rules_outer`) — DIRECT MIRROR of the §5.27 CIDR axis triple. §5.35
@@ -144,23 +144,18 @@ struct ManagedMapEntry {
      * fails the build at this initializer. */
     ::bpf_map* SkelMapsT::* member_ptr;
     const char* name;       // pin file name under ${PIN_DIR}/<iface>/
-    bool legacy_alias;      // true → SKIP from pin_specs and reuse_specs;
-                            // KEEP in pinned_maps clear-list (the legacy
-                            // `allowlist` alias is pinned via the special
-                            // path at apply_request's legacy-alias step,
-                            // NOT via this table's per-iface loop).
 };
 
 /* Order matches the existing pre-HK-9 `pin_specs[]` literal for line-diff
- * readability across the refactor commit. The legacy `allowlist` alias is
- * appended at the end (only walked by open_skeleton_only's clear-list). */
+ * readability across the refactor commit. All three call-site loops (clear,
+ * pin, reuse) walk every row uniformly (§5.58: no legacy-alias skip). */
 constexpr ManagedMapEntry kManagedMaps[] = {
-    { &SkelMapsT::allowlist_a,      XDPMF_MAP_INNER_A_NAME,             false },
-    { &SkelMapsT::allowlist_b,      XDPMF_MAP_INNER_B_NAME,             false },
-    { &SkelMapsT::rulesets,         XDPMF_MAP_RULESETS_OUTER_NAME,      false },
-    { &SkelMapsT::cidr_allowlist_a, XDPMF_MAP_CIDR_INNER_A_NAME,        false },
-    { &SkelMapsT::cidr_allowlist_b, XDPMF_MAP_CIDR_INNER_B_NAME,        false },
-    { &SkelMapsT::cidr_rulesets,    XDPMF_MAP_CIDR_RULESETS_OUTER_NAME, false },
+    { &SkelMapsT::allowlist_a,      XDPMF_MAP_INNER_A_NAME },
+    { &SkelMapsT::allowlist_b,      XDPMF_MAP_INNER_B_NAME },
+    { &SkelMapsT::rulesets,         XDPMF_MAP_RULESETS_OUTER_NAME },
+    { &SkelMapsT::cidr_allowlist_a, XDPMF_MAP_CIDR_INNER_A_NAME },
+    { &SkelMapsT::cidr_allowlist_b, XDPMF_MAP_CIDR_INNER_B_NAME },
+    { &SkelMapsT::cidr_rulesets,    XDPMF_MAP_CIDR_RULESETS_OUTER_NAME },
     /* §5.43 (MVP-4.3) D-mvp-4.3-Q1/Q2 net +4 (17 → 21): the NEW dst-CIDR
      * ARRAY_OF_MAPS trio (dst_bitmask_a/_b + dst_rulesets) mirroring the
      * §5.27 CIDR-axis triple, plus the single combined `wildcard` ARRAY
@@ -169,10 +164,10 @@ constexpr ManagedMapEntry kManagedMaps[] = {
      * reshape, pin names unchanged — guard #16, so NO kManagedMaps churn
      * there). All three call-site loops (clear, pin, reuse) walk this single
      * table — HK-9 dividend collected again. */
-    { &SkelMapsT::dst_bitmask_a,    XDPMF_MAP_DST_INNER_A_NAME,         false },
-    { &SkelMapsT::dst_bitmask_b,    XDPMF_MAP_DST_INNER_B_NAME,         false },
-    { &SkelMapsT::dst_rulesets,     XDPMF_MAP_DST_RULESETS_OUTER_NAME,  false },
-    { &SkelMapsT::wildcard,         XDPMF_MAP_WILDCARD_NAME,            false },
+    { &SkelMapsT::dst_bitmask_a,    XDPMF_MAP_DST_INNER_A_NAME },
+    { &SkelMapsT::dst_bitmask_b,    XDPMF_MAP_DST_INNER_B_NAME },
+    { &SkelMapsT::dst_rulesets,     XDPMF_MAP_DST_RULESETS_OUTER_NAME },
+    { &SkelMapsT::wildcard,         XDPMF_MAP_WILDCARD_NAME },
     /* §5.44 (MVP-4.4) D-mvp-4.4-Q1/Q2 net +6 (21 → 27): the NEW proto axis
      * ARRAY_OF_MAPS trio (proto_bitmask_a/_b + proto_rulesets, HASH inners)
      * and the NEW dst_port axis ARRAY_OF_MAPS trio (port_ranges_a/_b +
@@ -180,21 +175,21 @@ constexpr ManagedMapEntry kManagedMaps[] = {
      * topology. The `wildcard` ARRAY is UNCHANGED here (its max_entries grows
      * 4→8 via the BITVEC_NUM_AXES macro, not a new row). All three call-site
      * loops (clear, pin, reuse) walk this single table — HK-9 again. */
-    { &SkelMapsT::proto_bitmask_a,  XDPMF_MAP_PROTO_INNER_A_NAME,       false },
-    { &SkelMapsT::proto_bitmask_b,  XDPMF_MAP_PROTO_INNER_B_NAME,       false },
-    { &SkelMapsT::proto_rulesets,   XDPMF_MAP_PROTO_RULESETS_OUTER_NAME, false },
-    { &SkelMapsT::port_ranges_a,    XDPMF_MAP_PORT_INNER_A_NAME,        false },
-    { &SkelMapsT::port_ranges_b,    XDPMF_MAP_PORT_INNER_B_NAME,        false },
-    { &SkelMapsT::port_rulesets,    XDPMF_MAP_PORT_RULESETS_OUTER_NAME, false },
+    { &SkelMapsT::proto_bitmask_a,  XDPMF_MAP_PROTO_INNER_A_NAME },
+    { &SkelMapsT::proto_bitmask_b,  XDPMF_MAP_PROTO_INNER_B_NAME },
+    { &SkelMapsT::proto_rulesets,   XDPMF_MAP_PROTO_RULESETS_OUTER_NAME },
+    { &SkelMapsT::port_ranges_a,    XDPMF_MAP_PORT_INNER_A_NAME },
+    { &SkelMapsT::port_ranges_b,    XDPMF_MAP_PORT_INNER_B_NAME },
+    { &SkelMapsT::port_rulesets,    XDPMF_MAP_PORT_RULESETS_OUTER_NAME },
     /* §5.45 (MVP-4.5) D-mvp-4.5-Q1 net +3 (27 → 30): the NEW vlan axis
      * ARRAY_OF_MAPS trio (vlan_bitmask_a/_b + vlan_rulesets, HASH inners),
      * byte-mirroring the §5.44 proto axis topology. The `wildcard` ARRAY is
      * UNCHANGED here (its max_entries grows 8→10 via the BITVEC_NUM_AXES macro,
      * not a new row). All three call-site loops (clear, pin, reuse) walk this
      * single table — HK-9 again. */
-    { &SkelMapsT::vlan_bitmask_a,   XDPMF_MAP_VLAN_INNER_A_NAME,        false },
-    { &SkelMapsT::vlan_bitmask_b,   XDPMF_MAP_VLAN_INNER_B_NAME,        false },
-    { &SkelMapsT::vlan_rulesets,    XDPMF_MAP_VLAN_RULESETS_OUTER_NAME, false },
+    { &SkelMapsT::vlan_bitmask_a,   XDPMF_MAP_VLAN_INNER_A_NAME },
+    { &SkelMapsT::vlan_bitmask_b,   XDPMF_MAP_VLAN_INNER_B_NAME },
+    { &SkelMapsT::vlan_rulesets,    XDPMF_MAP_VLAN_RULESETS_OUTER_NAME },
     /* §5.53 (MVP-4.13) D-mvp-4.13-Q1/MAP-NAMES net +6 (30 → 36): the NEW
      * IPv6 dst6 + src6 axis ARRAY_OF_MAPS trios (dst6_bitmask_a/_b +
      * dst6_rulesets, src6_bitmask_a/_b + src6_rulesets, LPM_TRIE inners keyed
@@ -202,34 +197,34 @@ constexpr ManagedMapEntry kManagedMaps[] = {
      * `wildcard` ARRAY is UNCHANGED here (its max_entries grows 12→16 via the
      * BITVEC_NUM_AXES macro, not a new row). All three call-site loops (clear,
      * pin, reuse) walk this single table — HK-9 dividend collected again. */
-    { &SkelMapsT::dst6_bitmask_a,   XDPMF_MAP_DST6_INNER_A_NAME,        false },
-    { &SkelMapsT::dst6_bitmask_b,   XDPMF_MAP_DST6_INNER_B_NAME,        false },
-    { &SkelMapsT::dst6_rulesets,    XDPMF_MAP_DST6_RULESETS_OUTER_NAME, false },
-    { &SkelMapsT::src6_bitmask_a,   XDPMF_MAP_SRC6_INNER_A_NAME,        false },
-    { &SkelMapsT::src6_bitmask_b,   XDPMF_MAP_SRC6_INNER_B_NAME,        false },
-    { &SkelMapsT::src6_rulesets,    XDPMF_MAP_SRC6_RULESETS_OUTER_NAME, false },
+    { &SkelMapsT::dst6_bitmask_a,   XDPMF_MAP_DST6_INNER_A_NAME },
+    { &SkelMapsT::dst6_bitmask_b,   XDPMF_MAP_DST6_INNER_B_NAME },
+    { &SkelMapsT::dst6_rulesets,    XDPMF_MAP_DST6_RULESETS_OUTER_NAME },
+    { &SkelMapsT::src6_bitmask_a,   XDPMF_MAP_SRC6_INNER_A_NAME },
+    { &SkelMapsT::src6_bitmask_b,   XDPMF_MAP_SRC6_INNER_B_NAME },
+    { &SkelMapsT::src6_rulesets,    XDPMF_MAP_SRC6_RULESETS_OUTER_NAME },
     /* §5.54 (MVP-4.14) D-mvp-4.14-Q1 net +3 (36 → 39): the NEW ethertype axis
      * ARRAY_OF_MAPS trio (ethertype_bitmask_a/_b + ethertype_rulesets, HASH
      * inners keyed by host-order u32 ethertype) CLONING the §5.44 proto axis
      * topology. The `wildcard` ARRAY is UNCHANGED here (its max_entries grows
      * 16→18 via the BITVEC_NUM_AXES macro, not a new row). All three call-site
      * loops (clear, pin, reuse) walk this single table — HK-9 again. */
-    { &SkelMapsT::ethertype_bitmask_a, XDPMF_MAP_ETHERTYPE_INNER_A_NAME,        false },
-    { &SkelMapsT::ethertype_bitmask_b, XDPMF_MAP_ETHERTYPE_INNER_B_NAME,        false },
-    { &SkelMapsT::ethertype_rulesets,  XDPMF_MAP_ETHERTYPE_RULESETS_OUTER_NAME, false },
-    { &SkelMapsT::active_idx,       XDPMF_MAP_ACTIVE_IDX_NAME,          false },
-    { &SkelMapsT::defaults,         XDPMF_MAP_DEFAULTS_NAME,            false },
-    { &SkelMapsT::stats,            XDPMF_MAP_STATS_NAME,               false },
+    { &SkelMapsT::ethertype_bitmask_a, XDPMF_MAP_ETHERTYPE_INNER_A_NAME },
+    { &SkelMapsT::ethertype_bitmask_b, XDPMF_MAP_ETHERTYPE_INNER_B_NAME },
+    { &SkelMapsT::ethertype_rulesets,  XDPMF_MAP_ETHERTYPE_RULESETS_OUTER_NAME },
+    { &SkelMapsT::active_idx,       XDPMF_MAP_ACTIVE_IDX_NAME },
+    { &SkelMapsT::defaults,         XDPMF_MAP_DEFAULTS_NAME },
+    { &SkelMapsT::stats,            XDPMF_MAP_STATS_NAME },
     /* §5.34 (MVP-3.4b cycle 2) D-3.4b-c2-1: REMOVE prior SHARED `rules`
      * entry (the SHARED-ARRAY pin retired per HG-3.4b-c2-1); ADD three new
      * entries `rules_a` / `rules_b` / `rules_outer` mirroring the §5.27
      * CIDR-axis triple. Net 13 → 15 entries (12 → 14 real + 1 alias). All
      * three call-site loops (clear, pin, reuse) walk this table — HK-9
      * dividend collected for the 3rd consecutive cycle. */
-    { &SkelMapsT::rules_a,          XDPMF_MAP_RULES_INNER_A_NAME,       false },
-    { &SkelMapsT::rules_b,          XDPMF_MAP_RULES_INNER_B_NAME,       false },
-    { &SkelMapsT::rules_outer,      XDPMF_MAP_RULES_OUTER_NAME,         false },
-    { &SkelMapsT::action_table,     XDPMF_MAP_ACTION_TABLE_NAME,        false },
+    { &SkelMapsT::rules_a,          XDPMF_MAP_RULES_INNER_A_NAME },
+    { &SkelMapsT::rules_b,          XDPMF_MAP_RULES_INNER_B_NAME },
+    { &SkelMapsT::rules_outer,      XDPMF_MAP_RULES_OUTER_NAME },
+    { &SkelMapsT::action_table,     XDPMF_MAP_ACTION_TABLE_NAME },
     /* §5.35 (MVP-3.4d) D-3.4d-1: REMOVE prior single `rule_counters`
      * PERCPU_ARRAY entry (the single-PERCPU pin retired per HG-3.4d-4);
      * ADD three new entries `rule_counters_a` / `rule_counters_b` /
@@ -241,10 +236,9 @@ constexpr ManagedMapEntry kManagedMaps[] = {
      * PRESERVE-across-apply held. All three call-site loops (clear, pin,
      * reuse) walk this table — HK-9 dividend collected for the 4th
      * consecutive cycle. */
-    { &SkelMapsT::rule_counters_a,     XDPMF_MAP_RULE_COUNTERS_INNER_A_NAME,  false },
-    { &SkelMapsT::rule_counters_b,     XDPMF_MAP_RULE_COUNTERS_INNER_B_NAME,  false },
-    { &SkelMapsT::rule_counters_outer, XDPMF_MAP_RULE_COUNTERS_OUTER_NAME,    false },
-    { &SkelMapsT::allowlist,        XDPMF_MAP_ALLOWLIST_NAME,           true  },
+    { &SkelMapsT::rule_counters_a,     XDPMF_MAP_RULE_COUNTERS_INNER_A_NAME },
+    { &SkelMapsT::rule_counters_b,     XDPMF_MAP_RULE_COUNTERS_INNER_B_NAME },
+    { &SkelMapsT::rule_counters_outer, XDPMF_MAP_RULE_COUNTERS_OUTER_NAME },
 };
 
 /* §5.4 + §5.20: per-iface XDP slot classification as observed by the §5.20
@@ -1029,9 +1023,8 @@ private:
                          std::format("mac_filter_bpf__open: {}", std::strerror(e)));
         }
     }
-    /* §5.30 HK-9: clear LIBBPF_PIN_BY_NAME auto-pin for ALL managed maps,
-     * INCLUDING the legacy `allowlist` alias (`legacy_alias=true`). Manual
-     * pinning happens in `internal::apply_request` after the §5.4 state
+    /* §5.30 HK-9: clear LIBBPF_PIN_BY_NAME auto-pin for ALL managed maps.
+     * Manual pinning happens in `internal::apply_request` after the §5.4 state
      * machine. Walks kManagedMaps[]; if a future cycle adds a new
      * LIBBPF_PIN_BY_NAME map, adding ONE row to the table propagates to
      * all three callsites (this clear-list, pin_specs, reuse_specs). */
@@ -2410,15 +2403,11 @@ std::uint32_t apply_request(const ApplyRequest& req)
         skel.reset();
         skel = open_skeleton_only();
 
-        // §5.30 HK-9: reuse-fd loop walks kManagedMaps[] for every entry
-        // EXCEPT the legacy `allowlist` alias (its kernel-side map is the
-        // same as `allowlist_a`; the legacy pin dentry is recreated by the
-        // alias-step at the end of fresh-attach and reused via the same
-        // kernel fd implicitly). Same reuse semantic per slot — single
-        // active_idx shared. PI-7-3.4.5-cpp scope: this loop body replaces
-        // the prior pre-HK-9 11-entry literal at this site.
+        // §5.30 HK-9: reuse-fd loop walks every kManagedMaps[] entry. Same
+        // reuse semantic per slot — single active_idx shared. PI-7-3.4.5-cpp
+        // scope: this loop body replaces the prior pre-HK-9 11-entry literal
+        // at this site.
         for (const ManagedMapEntry& entry : kManagedMaps) {
-            if (entry.legacy_alias) continue;
             const std::string p = pin_dir + "/" + entry.name;
             const int fd = bpf_obj_get(p.c_str());
             if (fd < 0) {
@@ -2538,36 +2527,16 @@ std::uint32_t apply_request(const ApplyRequest& req)
     }
 
     // FRESH ATTACH path (state a / state d / state c-fleet).
-    // §5.30 HK-9: per-iface pin loop walks kManagedMaps[] for every entry
-    // EXCEPT the legacy `allowlist` alias (its pin is created via the
-    // special-pin path immediately below — same kernel fd as allowlist_a;
-    // a separate bpffs dentry the MVP-2 grep-checks expect).
+    // §5.30 HK-9: per-iface pin loop walks every kManagedMaps[] entry.
+    // §5.58 (MVP-4.18): the legacy `allowlist` alias map + its special-pin
+    // step were retired (no consumer); the 4 MVP-2 canary ctests migrate to
+    // the live ${PIN_DIR}/allowlist_a pin created by this loop.
     for (const ManagedMapEntry& entry : kManagedMaps) {
-        if (entry.legacy_alias) continue;
         const std::string p = pin_dir + "/" + entry.name;
         const int rc = bpf_map__pin(skel->maps.*entry.member_ptr, p.c_str());
         if (rc < 0) {
             throw_loader(classify(rc, LoaderError::LoadFailed),
                          std::format("bpf_map__pin({}): {}", p, std::strerror(-rc)));
-        }
-    }
-
-    // §5.26 backward-compat: pin allowlist_a ALSO at the legacy
-    // ${PIN_DIR}/allowlist path so MVP-2-era ctests that grep for pin
-    // existence (T_LOAD_ATTACH, T_ATTACH_TAG_MISMATCH, T_MODE_GENERIC_DEFAULT,
-    // T_BPFFS_ROOT_SYMLINK) pass byte-equivalent (PI-6 invariant). The
-    // legacy alias is a separate bpffs dentry wrapping the same kernel-side
-    // inner-map; tests only check existence, not contents.
-    {
-        const int inner_a_fd = bpf_map__fd(skel->maps.allowlist_a);
-        if (inner_a_fd < 0) {
-            throw_loader(LoaderError::LoadFailed, "allowlist_a fd unavailable (legacy alias)");
-        }
-        const std::string legacy = pin_dir + "/" XDPMF_MAP_ALLOWLIST_NAME;
-        if (bpf_obj_pin(inner_a_fd, legacy.c_str()) < 0) {
-            const int e = errno;
-            throw_loader(classify(-e, LoaderError::LoadFailed),
-                         std::format("bpf_obj_pin (legacy {}): {}", legacy, std::strerror(e)));
         }
     }
 
