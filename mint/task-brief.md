@@ -1,86 +1,68 @@
-# Task brief — MVP-4.18 / housekeeping: remove the legacy `allowlist` alias map (brownfield, CLEANUP)
+# Task brief — MVP-4.19 / test-hardening: sanitize the 9-axis lowering + datapath (brownfield, TEST-ONLY)
 
 ## Goal
-Remove the vestigial bare `allowlist` BPF map + its bespoke special-pin/skip control-flow (BACKLOG **B29**). The map is a typed alias of `allowlist_a`, retained ONLY so MVP-2-era out-of-tree harnesses / ctests that grep the `${PIN_DIR}/allowlist` pin still resolve. Runtime ruleset data lives ONLY in the live `allowlist_a`/`allowlist_b` ARRAY_OF_MAPS pair; the datapath program NEVER reads the alias. This is dead-infrastructure removal, **verdict-identical for the live datapath**.
+Enrich `tests/T_SANITIZER_BUILD.sh` so the ASAN/UBSAN-built binary exercises the **9-axis** lowering + datapath, not just one axis (BACKLOG **B22**). The test currently applies a single-rule fixture (`config_valid_cidr.yaml`, src_cidr `10.0.0.0/8` → STAT_PASS_CIDR) + one matched inject — so under the sanitizer ONLY the src-CIDR lowering path is covered. The net-new / highest-risk lowering added since has NEVER been sanitized: `close_prefixes6` (`__int128` 128-bit prefix closure, S4), the `populate_hash_inner_slot<Key>` + `aggregate_axis<Key>` templates (proto/port/vlan/mac/ethertype, B28), `write_wildcard_slots` (all axes), the IPv6 ext-header walk (S6, bounded `#pragma unroll` with a variable per-hop advance — the sharpest UB-catch target), and the per-axis bounds reads.
 
-The legacy `${PIN_DIR}/allowlist` pin is literally `allowlist_a` pinned a SECOND time at the legacy path by a dedicated apply step (loader.cpp special-pin block, grep-anchor `"§5.26 backward-compat: pin allowlist_a ALSO at the legacy"`). Four ctests assert that pin's existence as an "attach succeeded" canary — they migrate to assert the live `allowlist_a` pin (`XDPMF_MAP_INNER_A_NAME = "allowlist_a"`) instead.
-
-**ABI-promise discharge (DONE at brief time — code-grounded, NOT a PO gate):** `bpf.c` frames the alias as a compat promise for "any out-of-tree harness that linked against MVP-2's allowlist symbol." Tree-wide grep (`src/ tests/ ansible/ systemd/ include/`) finds the ONLY consumers are: the alias definition itself, the loader special-pin/skip flow, and the 4 ctest pin-assertions being migrated. **No external/out-of-tree consumer exists** (consistent with project reality: filter output consumed at-the-network, CLI+YAML integration surface, libxdpmf deferred-no-consumer). The promise is vestigial → safe to retire. If the architect's independent Phase-A grep finds a genuine live consumer, HALT.
+**PURE test enrichment — NO product-code change** (`git diff -- src/` MUST be empty). The sanitizer just drives more of the existing datapath. Enrich the EXISTING test in-place — do NOT add a second `XDPMF_SANITIZERS=ON` build (that doubles the slow ~64 MB `/tmp` ASAN rebuild). Keep vectors minimal (each apply+inject adds wall-clock under the already-slow rebuild).
 
 ## Context: prior work
-- Prior briefs archived in `mint/task-brief-*.md` (latest archived: `task-brief-mvp-4.17.md` = the B24/B25 cleanup, just shipped `9aa68fd`).
-- Recent: S4/S5/S6 ladder + C3 + MVP-4.17 cleanup all on origin/main. Match model = 9 axes; kManagedMaps = 39.
-- Phase-2 grep verification (brief author ran — see footer): confirmed the loader sites, the 4-ctest migration set, the constant's 2 uses, and the ABI discharge.
-- PI continuity: **loader.hpp PI-7 zero-diff EXPECTED to continue** (kManagedMaps table + struct live in loader.cpp anon-namespace; the `legacy_alias` field is on that anon struct — architect VERIFIES loader.hpp is untouched). **PI-6** (byte-equivalent pin existence) has a legacy-alias clause that this slice RETIRES — architect amends PI-6.
+- Prior briefs archived in `mint/task-brief-*.md` (latest: `task-brief-mvp-4.18.md` = B29, just shipped `0acca78`).
+- Match model = 9 axes (dst/src/proto/port/vlan/mac/dst6/src6/ethertype) across 3 family arms; IPv6 with ext-header L4 depth. Clean tree, main == origin/main.
+- Phase-2 grep verification (run — see footer): the current fixture is `config_valid_cidr.yaml` (NOT `and6` as the backlog note guessed); the 3 richer fixtures (and6/andv6/andeth) + both injectors (inject_ipv4, inject_l6 with `--ext`) all exist; T_SANITIZER_BUILD carries `RESOURCE_LOCK build_cpu`.
+- PI continuity: loader.hpp PI-7 trivially CONTINUES (untouched); no product PI moves (test-only).
 
 ## Workflow rules (brownfield)
-- **Architect**: read design.md §5.26/§5.27 (allowlist/cidr ARRAY_OF_MAPS topology + PI-6), the `kManagedMaps` HK-9 single-table section, §5.43 (cidr reshape mirror); EDIT design.md in place; append §5.58 (MVP-4.18). Re-run the Phase-2 greps + the ABI-discharge grep INDEPENDENTLY (guard #5). Amend PI-6 (retire the legacy-alias byte-equivalent clause; the live `allowlist_a` pin is the surviving surface).
-- **Impl**: FileList is a DIFF — Edit only. The 3 kManagedMaps call-site loops (clear / pin / reuse) MUST still walk the table correctly with the entry + `legacy_alias` field gone. Remove the special-pin step as a whole block.
-- **Tester**: NO new ctests. Migrate the 4 pin-assertion ctests (`${PIN_DIR}/allowlist` → `${PIN_DIR}/allowlist_a`). Confirm the suite stays **96/96**. The migrated assertions are the regression guard (they prove `allowlist_a` is pinned + attach succeeded).
-- **Reviewer**: 5-point brownfield; **special attention**: (a) live datapath verdict-identity (allowlist_a/_b untouched, program never read the alias); (b) `bpftool prog load` rc=0 on the prod object with the map gone (impl Phase 2.5); (c) no dangling ref to `allowlist`/`XDPMF_MAP_ALLOWLIST_NAME`/`legacy_alias` anywhere (`grep -rn` = ∅ except retirement-citation comments); (d) the 4 migrated ctests assert the LIVE pin and still pass; (e) kManagedMaps 39→38 (guard #10); (f) PI-7 loader.hpp ∅.
+- **Architect**: read design.md §5.43/§5.44/§5.45/§5.47 (axis lowering), §5.53 (close_prefixes6 `__int128`), §5.55 (S6 ext-walk), §5.50 (B28 templates), §6.8 (the T_SANITIZER_BUILD design). EDIT design.md in place; append §5.59 (MVP-4.19). Decide Q1 (fixture/vector matrix) — you own realizability (which fixture + which inject vectors actually drive `close_prefixes6`/`write_wildcard_slots`/the ext-walk; how the post-inject stats read must change vs the current 4-col `read_stats_with_cidr`).
+- **Impl**: FileList DIFF — Edit `tests/T_SANITIZER_BUILD.sh` (+ a fixture if the architect needs a new one, though the 3 existing ones likely suffice). `git diff -- src/` MUST stay EMPTY. NO product-code edit.
+- **Tester**: this slice IS test work — but per the mint split, the ARCHITECT specs the vectors in §5.59 and the IMPL writes them into T_SANITIZER_BUILD.sh; the tester VERIFIES the enriched sanitizer test runs clean (no ASAN/UBSAN diag) + the full suite stays green. No NEW ctest expected (enrich in place); if the architect splits a vector into its own assertion, ctest count may tick — flag it.
+- **Reviewer**: 5-point brownfield; **special attention**: (a) `git diff -- src/` EMPTY (test-only); (b) the enriched test ACTUALLY exercises the claimed net-new paths (the chosen fixture's axes map to `close_prefixes6`/`populate_hash_inner_slot`/`write_wildcard_slots`/ext-walk — not just a different single axis); (c) the sanitizer assertion (`grep -E 'AddressSanitizer|UndefinedBehavior'` → must be absent) still fires; (d) the post-inject stats read matches the chosen fixture's verdict slot; (e) build_cpu RESOURCE_LOCK retained (guard #12).
 
 ## Human-gate decisions (defaults applied — architect overrides at Phase A)
 
-### HG-mvp-4.18-1: the MVP-2 out-of-tree-harness ABI promise → **RETIRE**
-Discharge passed (no consumer tree-wide). Retire the alias + its compat promise with a one-line "retired vestigial MVP-2 ABI alias — no consumer; superseded by allowlist_a/_b" note in §5.58 + the bpf.c header. Architect re-confirms the discharge grep independently before deleting (the one judgment item — it is a code-grounded discharge, not a PO question).
+### HG-mvp-4.19-1: enrich in-place vs new test → **enrich `T_SANITIZER_BUILD.sh` in-place**
+Do NOT add a second ASAN-build test (doubles the slow `/tmp` rebuild + disk). The single existing build, exercised by more vectors, gets the coverage. Architect MAY add a fixture file but NOT a second `cmake -DXDPMF_SANITIZERS=ON` build.
 
-### HG-mvp-4.18-2: the 4 canary ctests → **MIGRATE to `allowlist_a`, do NOT delete the assertion**
-The pin-existence check is a useful "attach succeeded" canary. Re-point it at the live `${PIN_DIR}/allowlist_a` pin rather than deleting the assertion outright — keeps the test's intent intact. (Q1 below.)
+### HG-mvp-4.19-2: vector count → **3 (full-match, wildcard, NOMATCH)**
+Minimal set that hits the three datapath regions: the populated AND path (full-match), `write_wildcard_slots` / the wildcard accumulator (a rule omitting some axes + a frame that matches via wildcard), and the defaults path (NOMATCH). Architect MAY trim to 2 or add 1 if a specific net-new path needs a dedicated vector (e.g. an `--ext` frame to drive the ext-walk).
 
-## Open mechanism questions (architect decides; document in §5.58)
+## Open mechanism questions (architect decides; document in §5.59)
 
-### Q1: how to migrate the 4 canary ctests?
-- **A1**: re-point each `test -e ${PIN_DIR}/allowlist` → `test -e ${PIN_DIR}/allowlist_a` (the live inner-A pin, always created via kManagedMaps).
-- **A2**: delete the pin-existence assertions (rely on other attach-success signals in each test).
-- **Recommendation**: **A1** — preserves each test's attach-canary intent with a one-token change; `allowlist_a` is guaranteed pinned by the normal kManagedMaps pin loop (loader.cpp `XDPMF_MAP_INNER_A_NAME` row, `legacy_alias=false`).
+### Q1: which fixture + vector matrix maximizes sanitized coverage of the net-new lowering, in the fewest vectors?
+- **A1 — andv6 primary**: `config_valid_andv6.yaml` drives `close_prefixes6` (`__int128`, the highest-risk net-new code) + the v6 LPM populate + proto/port/vlan; inject via `inject_l6.py`. Best single-fixture coverage of the v6 closure math.
+- **A2 — andeth primary**: `config_valid_andeth.yaml` drives the ethertype HASH + the non-IP `else` arm + mac; inject via `inject_l6.py`/raw eth. Best for the S5 non-IP path.
+- **A3 — sequence**: apply andv6 (closure + LPM) THEN andeth (ethertype + non-IP), 1-2 vectors each — broadest coverage, more wall-clock. Optionally an `inject_l6.py --ext` frame to sanitize the S6 ext-walk (a bounded loop with a data-dependent advance — genuine UB-catch value).
+- **Recommendation**: **A1 (andv6) + one `--ext` vector** — concentrates the sanitizer on the two genuinely-net-new sharp edges (the `__int128` closure and the ext-header walk) for the least wall-clock; the v4 HASH templates (proto/vlan/mac) are lower-risk (exact-match, no pointer math) and already partially exercised. Architect overrides if a fuller sweep is cheap.
 
-### Q2: delete the `XDPMF_MAP_ALLOWLIST_NAME` constant?
-- **A1**: delete it (mac_filter.h) once its 2 uses (kManagedMaps row + special-pin step) are gone.
-- **A2**: keep it (harmless unused macro).
-- **Recommendation**: **A1** — leaving an unused pin-name macro is exactly the dead-infra this slice removes. Verify ∅ uses after the loader edits, then delete.
+## Scope (concrete items — FileList DIFF)
 
-## Scope (concrete items — FileList DIFF; line anchors are SHOULD-level, grep to confirm)
+### B22-1 — enrich the sanitizer exercise
+**Where**: `tests/T_SANITIZER_BUILD.sh` (EDIT)
+- Replace the single `config_valid_cidr.yaml` apply + single `10.0.0.5` inject with the architect's chosen fixture(s) + the 3-vector matrix (HG-2). Update the post-inject stats read to the verdict slot the chosen fixture produces (the current `read_stats_with_cidr` 4-col helper assumes a CIDR-axis PASS; a different fixture may land on STAT_PASS or STAT_DROP_DENY — architect/impl adjust the assertion accordingly).
+- The header-comment "Trigger" block (steps 3-7) must be updated to describe the enriched exercise (retirement-discipline on the now-stale "single src_cidr" prose).
+- Keep: the `XDPMF_SANITIZERS=ON` configure+build, the `grep -E 'AddressSanitizer|UndefinedBehavior'` clean-run assertion, the build_cpu RESOURCE_LOCK, the mktemp `/tmp` ASAN dir + its trap cleanup (the leak-on-kill is a session-fragility note, not this slice's concern).
 
-### B29-1 — delete the BPF alias map
-**Where**: `src/bpf/mac_filter.bpf.c`
-- Delete `struct xdpmf_allowlist_inner allowlist SEC(".maps");` (grep-anchor: the `allowlist SEC` line that is NOT `_a`/`_b`).
-- Delete the legacy-alias header-comment paragraph (grep-anchor `"The legacy \`allowlist\` symbol is RETAINED"`) + the inline `"/* Legacy \`allowlist\` symbol — retained for MVP-2 compat-time wiring"` comment. KEEP allowlist_a/_b, `xdpmf_allowlist_inner` type, the rulesets ARRAY_OF_MAPS.
-
-### B29-2 — remove the loader special-pin + skip flow
-**Where**: `src/lib/loader.cpp`
-- Remove the `kManagedMaps` entry `{ &SkelMapsT::allowlist, XDPMF_MAP_ALLOWLIST_NAME, true }`.
-- Remove the `bool legacy_alias;` field from the kManagedMaps struct + update the 2 branch guards (`if (entry.legacy_alias) continue;` in the pin loop + the reuse loop) — with the entry gone, the field + its guards are dead; remove both so the 3 loops walk a clean table.
-- Remove the whole special-pin block (grep-anchor `"§5.26 backward-compat: pin allowlist_a ALSO at the legacy"` through the `bpf_obj_pin(inner_a_fd, legacy...)` step).
-- Update the now-stale comments (grep-anchors `"legacy alias (\`allowlist\`, kept ONLY"`, `"INCLUDING the legacy \`allowlist\` alias"`, `"EXCEPT the legacy \`allowlist\` alias"`) — drop or retire-cite.
-- **PI-7**: confirm all edits are in loader.cpp (anon-namespace table/struct) → loader.hpp byte-unchanged.
-
-### B29-3 — delete the unused pin-name constant
-**Where**: `src/common/mac_filter.h`
-- Delete `#define XDPMF_MAP_ALLOWLIST_NAME "allowlist"` once its uses are ∅ (Q2=A1). The `:17` doc comment "looked up in the `allowlist` hash map" is inner-map semantics (allowlist_a) — light-touch OPTIONAL, architect's call.
-
-### B29-4 — migrate the 4 canary ctests
-**Where**: `tests/T_LOAD_ATTACH.sh`, `tests/T_ATTACH_TAG_MISMATCH.sh`, `tests/T_MODE_GENERIC_DEFAULT.sh`, `tests/T_BPFFS_ROOT_SYMLINK.sh`
-- Each asserts `test -e "${PIN_DIR}/allowlist"` → change to `"${PIN_DIR}/allowlist_a"` (per Q1=A1). Update the adjacent FAIL message strings. Grep-confirmed set = exactly these 4 (the broad `allowlist` grep's other hits are `inner-allowlist` prose / `allowlist_a/_b` / `cidr_allowlist` — NOT the bare legacy pin; do NOT touch them).
+### B22-2 (CONDITIONAL) — new fixture only if needed
+**Where**: `tests/fixtures/` (NEW, only if the architect determines the 3 existing fixtures can't drive a required net-new path)
+- Default expectation: the existing and6/andv6/andeth suffice → NO new fixture. Flag if a new one is genuinely required (e.g. a wildcard-specific layout).
 
 ## Out of scope (explicit)
-- B26 (pass_cidr→pass_rule — metric contract, defer to a stat-enum slice), B30 (slot/id decouple — designed slice), B22/B23 (test hardening), B27 (security — held by PO), B15 (.pyc/gitignore hygiene).
-- Any live-datapath change (allowlist_a/_b, cidr_allowlist_a/_b, rulesets, all 9 axes untouched). Any schema/VERSION change.
-- Renaming/reshaping any LIVE map. The `cidr_allowlist*` maps (named with the `allowlist` substring) are NOT touched.
+- ANY product-code change (`src/` byte-untouched). ANY new axis / schema / VERSION change.
+- A second ASAN build / a separate sanitizer ctest (HG-1).
+- B26 (pass_cidr rename — deferred to a stat-enum slice), B30 (slot/id decouple — designed slice), B23 (5.15 verifier-load — infra-gated), B27 (security — held), B15 (.pyc/gitignore hygiene).
+- The T_SANITIZER_BUILD `/tmp` ASAN-temp leak-on-abnormal-kill (a session-hygiene artifact, not a product/test defect — the trap handles clean exits).
 
 ## Definition of done
-- §5.58 (MVP-4.18) amendment in design.md; PI-6 legacy-alias clause retired + documented.
-- PI-7 loader.hpp zero-diff CONTINUES (verify).
-- kManagedMaps 39 → 38 (guard #10 catalog arithmetic).
-- LIVE datapath verdict-identical; `bpftool prog load` rc=0 on the prod object (impl Phase 2.5).
-- ctest stays **96/96** after the 4-ctest migration (no new tests).
-- NO schema/VERSION change (stays 0.15.0 / schema 2).
-- `grep -rn 'XDPMF_MAP_ALLOWLIST_NAME\|legacy_alias' src/` = ∅; `grep -rn '\ballowlist\b SEC' src/bpf/` = ∅.
+- §5.59 (MVP-4.19) amendment in design.md (the chosen fixture/vector matrix + rationale).
+- `git diff -- src/` EMPTY (test-only); loader.hpp PI-7 trivially continues.
+- The enriched T_SANITIZER_BUILD runs CLEAN under ASAN/UBSAN (no diag) AND drives the chosen net-new paths.
+- Full ctest stays green (96/96, or +N if the architect splits vectors into assertions — flagged).
+- NO schema/VERSION change (stays 0.15.0 / schema 2 / 9 axes).
 - `mint/review.md` round-1 verdict = pass.
 - One git commit per phase boundary.
 
 ## Dependencies
-- Build: clang-19 / C++23 + the BPF skeleton regen (the `.bpf.c` map-set changes → skeleton struct loses the `allowlist` member; impl rebuilds the skeleton).
-- Runtime/kernel: veth + bpffs + sudo for the attach ctests (existing fixture).
+- Build: clang-19/C++23, `XDPMF_SANITIZERS=ON` (ASAN+UBSAN) toolchain (existing). The ASAN rebuild is slow (~minutes) + mktemps a ~64 MB `/tmp` dir.
+- Runtime: veth + bpffs + sudo (existing fixture); python3 scapy for inject_l6 `--ext`.
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 ```yaml
@@ -95,21 +77,17 @@ packs:
 ---
 
 ## Pre-brief sanity check (per mint-hld-scope-discipline)
-**MECHANICAL.** Single axis (dead-infra removal). No design fork: the one judgment item (ABI-promise retirement) is a code-grounded discharge that PASSED at brief time (no consumer tree-wide) — framed as an architect Phase-A re-confirm, NOT a PO question (PO-filter: no external value to name; "out-of-tree harness" is hypothetical with zero in-tree evidence). No ≥3-option fork, no expensive-to-undo (git-revertable; the alias can be re-added if a phantom consumer ever surfaces). **No /mint-hld, no spike** (map REMOVAL, not a new verifier-bounded loop; impl Phase-2.5 `bpftool prog load` is the load check). Single-architect via /mint-dev. Light path per [[feedback_band_by_default]].
+**MECHANICAL-ish.** One design axis: the fixture/vector selection (Q1), which is an architect realizability call (which inject actually drives `close_prefixes6` / the ext-walk + how the stats read changes), NOT a multi-axis design fork or expensive-to-undo decision (it's a test; trivially revertable). No PO-tier value question (PO-filter: no external value to name — it's pure engineering coverage). **No /mint-hld, no spike.** Single-architect. Light path per [[feedback_band_by_default]].
 
 ## Notes for architect Phase A code-grep discipline
-Re-run (guard #5 — brief author already ran these; verify independently):
-- ABI discharge: `grep -rn 'allowlist' src/ tests/ ansible/ systemd/ include/ | grep -vE 'allowlist_a|allowlist_b|cidr_allowlist|inner-allowlist|MAC allowlist'` — confirm the ONLY bare-`allowlist` consumers are the alias def + loader special-pin/skip + the 4 ctests. No external consumer ⇒ HG-1 RETIRE holds.
-- `grep -rn 'XDPMF_MAP_ALLOWLIST_NAME' src/ include/` — confirm exactly 2 uses (kManagedMaps row + special-pin step); both removed ⇒ delete the constant (Q2).
-- `grep -n 'legacy_alias' src/lib/loader.cpp` — confirm the field + the 2 branch guards (pin-skip + reuse-skip); all removed with the entry.
-- `grep -rn 'PIN_DIR}/allowlist"' tests/*.sh` — confirm the 4-ctest migration set EXACTLY (T_LOAD_ATTACH, T_ATTACH_TAG_MISMATCH, T_MODE_GENERIC_DEFAULT, T_BPFFS_ROOT_SYMLINK).
-- Confirm `XDPMF_MAP_INNER_A_NAME == "allowlist_a"` (the live pin the ctests migrate to).
-- Confirm the kManagedMaps struct/table are loader.cpp anon-namespace (PI-7 loader.hpp ∅).
+Re-run (guard #5):
+- `grep -nE 'config_valid_cidr|read_stats_with_cidr|inject_ipv4|SANITIZERS' tests/T_SANITIZER_BUILD.sh` — confirm the current single-axis exercise + the stats-read helper that must change.
+- `grep -rn 'close_prefixes6\|populate_hash_inner_slot\|write_wildcard_slots\|MAX_EXT_HOPS' src/bpf/ src/lib/loader.cpp` — confirm the net-new lowering you intend the enriched vectors to exercise (so the brief's coverage claim is real, not assumed).
+- Inspect `tests/fixtures/config_valid_{andv6,andeth,and6}.yaml` + `tests/inject/inject_l6.py --ext` to confirm a vector that lands on the intended path.
+- Verify which STAT_* slot each candidate fixture's full-match produces (STAT_PASS vs STAT_PASS_CIDR vs STAT_DROP_DENY) so the post-inject assertion is correct.
 
 ### Anti-misdiagnosis guards applicable to this slice (per Phase 3)
-- **Guard #10 (catalog arithmetic)** — kManagedMaps drops 39→38; verify the table count + all 3 walking loops (clear/pin/reuse) stay correct with the entry gone.
-- **Guard #16 (retired pin-path / map-name ripple)** — the `${PIN_DIR}/allowlist` pin is RETIRED; the 4 ctests asserting it are pre-listed as EDITED (migrate to allowlist_a). This is the exact guard-#16 class.
-- **Guard #13 (retired symbol ripple)** — `allowlist` map symbol + `XDPMF_MAP_ALLOWLIST_NAME` retired; confirm ∅ test/fixture refs to the bare pin survive (only allowlist_a/_b/cidr_allowlist remain).
-- **Guard #5 (Phase A grep discipline)** — always; architect re-runs the discharge + site greps above.
-- **Operative-semantic discipline** — line anchors / the "−30-ish LOC" / "39→38" figures are SHOULD-level orientation; impl deviations preserving intent (retirement-citation comments, slightly different LOC) are `inline-merge`.
-- **Guard #11 (VERSION-bump propagation)** — N/A (no bump). **Guard #12 (RESOURCE_LOCK)** — N/A (no new ctest; migrated ones keep their existing locks).
+- **Guard #12 (RESOURCE_LOCK for shared host state)** — the enriched test still touches veth + does a full compile; the existing `build_cpu` + xdp_fixture locks MUST be retained (do not drop them when editing). If a NEW ctest is split out, it needs the same locks.
+- **Guard #5 (Phase A grep discipline)** — architect re-runs the coverage greps above to prove the chosen vectors actually reach the net-new paths.
+- **Operative-semantic discipline** — "3 vectors" / "9-axis" / the net-new-path list are SHOULD-level orientation; the architect's realizability call on fixture/vector count is authoritative, deviations preserving coverage intent are `inline-merge`.
+- **Guard #11 (VERSION-bump propagation)** — N/A (no bump). **Guard #13 (retired-string ripple)** — minor: the stale "single src_cidr" header-comment prose in T_SANITIZER_BUILD is retired/updated in-place (no fixture/test references it elsewhere — confirm).
