@@ -194,3 +194,22 @@ after Tier-1 can the eBPF-vs-DPDK decision be closed with confidence.
 - `kernel.bpf_stats_enabled` returned to **0**.
 - No `src/` or committed-test files modified. All throwaway artifacts confined to
   `mint/perf-scratch/`.
+
+---
+
+## 8. Tier-1 — single-box loaded RX-path (ATTEMPTED — generator-bound, NEGATIVE result)
+
+**Setup:** veth pair `perf0`(TX)↔`perf1`(RX); filter applied on `perf1` in **NATIVE** XDP mode (`--mode native` → `XDP_FLAGS_DRV_MODE`, prog id 26, 1-rule `config_valid_cidr.yaml` src 10/8→PASS_CIDR); in-kernel **pktgen** on `kpktgend_0` (CPU0); `perf1` RX steered to CPU1 via `rps_cpus=0x2`.
+
+**Result (bounded 2M-packet burst):**
+- Filter correctness under load: **2,000,000 / 2,000,000** frames classified (`STAT_PASS_CIDR` 0→2e6), **0 spurious filter drops** — the native-mode datapath handles sustained real frames cleanly.
+- But pktgen delivered only **~195,000 pps** (2e6 pkts in 10.2 s, 93 Mb/s). `clone_skb` returned **ENOTSUPP (524) on veth** → per-packet skb alloc → it is **generation-bound at ~0.2 Mpps**, two orders of magnitude BELOW the filter's Tier-0 capacity (5–13 Mpps/core).
+
+**Conclusion — single-box Tier-1 is not measurable on this 2-core cloud VM:**
+1. The generator (pktgen/veth, no `clone_skb`) tops out ~0.2 Mpps — it cannot stress a filter that classifies at 5–13 Mpps/core. The filter trivially absorbed everything offered; its loaded ceiling is **unmeasured**.
+2. On 2 cores you cannot simultaneously generate at line rate AND run the DUT — they contend for the same cores. Pushing pktgen harder (more threads / unbounded) starves the box and drops the session (observed).
+3. **Deeper truth: on cloud VMs (virtio, no real-NIC DMA, link-capped) no software generator we can run out-paces the filter** — its intrinsic capacity exceeds what these VMs generate. A true *loaded-ceiling* number needs real 40G NIC hardware + a hardware/DPDK generator (TRex / DPDK-pktgen) — a lab setup, not available here. Even the two-VPS variant (aeza generator → this NIC) is virtio+link-capped well below the filter's capacity, so it would confirm correctness-under-real-frames, NOT the ceiling.
+
+**What Tier-1 still confirmed:** native-mode XDP attaches + runs correctly on the RX path under sustained real frames with zero spurious drops (correctness-under-load ✓).
+
+**Decision-grade takeaway stays Tier-0:** for SLA#1 (realistic Gi mix, 5–8 Mpps) the classifier cost (~1–2 cores program-only, dominant = dual IPv6 LPM) leaves comfortable headroom; eBPF is viable with no classifier-cost forcing-function to DPDK. A real loaded ceiling (and the adversarial-64B verdict) needs 40G lab hardware — parked until real hardware is available.
