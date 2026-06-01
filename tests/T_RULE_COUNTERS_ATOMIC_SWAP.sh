@@ -94,8 +94,10 @@ rule_counters_inner_for() {
 }
 
 read_rc_slot_at() {
-    local pin="$1" id="$2"
-    sudo -n python3 "${TEST_DIR}/lib/read_rule_counters.py" "${pin}" "${id}"
+    # §5.61 (B30): rule_counters is slot-keyed; remap operator id -> slot.
+    # Half is inferred from the inner pin's _a/_b suffix (so pre- and
+    # post-flip reads each resolve against the correct slot_rule_id half).
+    read_rule_counter_by_id "${IFACE_A}" "$1" "$2"
 }
 
 # ── (1) apply A ──────────────────────────────────────────────────────────

@@ -224,6 +224,31 @@ read_rule_counters(std::string_view bpffs_root) noexcept
                                                 std::span{percpu_buf});
         }
         (void)::close(fd);
+
+        /* §5.61 (MVP-4.21) B30: the counters above are SLOT-keyed; recover each
+         * slot's stable operator id from the `slot_rule_id` map's active half so
+         * prom_format can label `rule_match_total` by stable id (counters survive
+         * reorder/insert/renumber). PI-31 read-only (bpf_obj_get + lookup only).
+         * PI-32 graceful-empty: a pre-§5.61 iface has no slot_rule_id pin → leave
+         * slot_to_id all-sentinel (no per-rule series for that iface). No new
+         * event-name: a missing pin is the expected mixed-version case. */
+        for (std::uint32_t k = 0; k < XDPMF_RULE_COUNTERS_MAX; ++k) {
+            sample.slot_to_id[k] = XDPMF_SLOT_ID_EMPTY;
+        }
+        const std::string sri_pin = iface_dir + XDPMF_MAP_SLOT_RULE_ID_NAME;
+        const int sri_fd = ::bpf_obj_get(sri_pin.c_str());
+        if (sri_fd >= 0) {
+            const std::uint32_t base =
+                active * static_cast<std::uint32_t>(XDPMF_ALLOWLIST_MAX);
+            for (std::uint32_t slot = 0; slot < XDPMF_RULE_COUNTERS_MAX; ++slot) {
+                const std::uint32_t key = base + slot;
+                std::uint32_t       id  = XDPMF_SLOT_ID_EMPTY;
+                if (::bpf_map_lookup_elem(sri_fd, &key, &id) == 0) {
+                    sample.slot_to_id[slot] = id;
+                }
+            }
+            (void)::close(sri_fd);
+        }
         out.push_back(std::move(sample));
     }
 

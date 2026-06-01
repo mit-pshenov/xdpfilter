@@ -47,9 +47,11 @@
 #include <fstream>           // §5.24: read override BPF object from path
 #include <functional>        // §5.50 (MVP-4.10 B28-2): std::equal_to for aggregate_axis
 #include <optional>          // §5.50 (MVP-4.10 B28-2): std::optional projector return
+#include <span>              // §5.61 (MVP-4.21): copy_rule_counters_forward slot↔id spans
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>     // §5.61 (MVP-4.21): id→slot rank map (D-mvp-4.21-SLOT-PLUMB)
 #include <utility>
 #include <vector>
 
@@ -214,6 +216,13 @@ constexpr ManagedMapEntry kManagedMaps[] = {
     { &SkelMapsT::ethertype_rulesets,  XDPMF_MAP_ETHERTYPE_RULESETS_OUTER_NAME },
     { &SkelMapsT::active_idx,       XDPMF_MAP_ACTIVE_IDX_NAME },
     { &SkelMapsT::defaults,         XDPMF_MAP_DEFAULTS_NAME },
+    /* §5.61 (MVP-4.21) B30 D-mvp-4.21-Q1 net +1 (38 → 39): the NEW userspace-
+     * only `slot_rule_id` ARRAY (slot→id per ruleset half), mirroring the
+     * `defaults`/`wildcard` SINGLE-indexed-ARRAY shape (atomic-swap via the
+     * shared active_idx). Never referenced by mac_filter_prog (HG-mvp-4.21-1).
+     * All three call-site loops (clear, pin, reuse) walk this single table —
+     * HK-9 / guard #10 lockstep. */
+    { &SkelMapsT::slot_rule_id,     XDPMF_MAP_SLOT_RULE_ID_NAME },
     { &SkelMapsT::stats,            XDPMF_MAP_STATS_NAME },
     /* §5.34 (MVP-3.4b cycle 2) D-3.4b-c2-1: REMOVE prior SHARED `rules`
      * entry (the SHARED-ARRAY pin retired per HG-3.4b-c2-1); ADD three new
@@ -1250,6 +1259,48 @@ close_prefixes(const std::vector<BitPrefix>& entries)
     return closed;
 }
 
+/* §5.61 (MVP-4.21) B30 D-mvp-4.21-Q3 / SLOT-PLUMB: the loader-internal `slot`
+ * carrier. `slot` = the rank of a rule's `id` in ascending-unique-id order,
+ * ∈ [0, count-1]. Because slots are assigned in id-sorted order, `1ULL << slot`
+ * preserves first-match-by-lowest-id (ffsll(acc)-1 still yields the lowest-id
+ * survivor — HG-mvp-4.3-4, PI-mvp-4.21-PRIORITY) while decoupling the bit
+ * position / counter index from the (now sparse) operator id. The SAME slot
+ * value MUST be used at every populate site (the 4 lowering bit-shifts,
+ * rules_inner[slot], rule_counters[slot], slot_rule_id[active*64+slot]) —
+ * D-mvp-4.21-SLOT-COHERENCE. ids are unique (config seen_ids dedup). */
+[[nodiscard]] std::unordered_map<std::uint32_t, std::uint32_t>
+compute_id_to_slot(const std::vector<Rule>& rules)
+{
+    std::vector<std::uint32_t> ids;
+    ids.reserve(rules.size());
+    for (const Rule& r : rules) {
+        ids.push_back(r.id);
+    }
+    std::sort(ids.begin(), ids.end());
+    std::unordered_map<std::uint32_t, std::uint32_t> id_to_slot;
+    id_to_slot.reserve(ids.size());
+    for (std::uint32_t rank = 0; rank < ids.size(); ++rank) {
+        id_to_slot.emplace(ids[rank], rank);
+    }
+    return id_to_slot;
+}
+
+/* §5.61 B30: the slot→id inverse over the full [0,64) slot space — slot_to_id
+ * [slot] = the id occupying `slot`, or XDPMF_SLOT_ID_EMPTY for the unoccupied
+ * tail [count,64). Drives both the `slot_rule_id` map write (occupied prefix)
+ * and the copy-forward-by-id remap (new-side mapping). */
+[[nodiscard]] std::array<std::uint32_t, XDPMF_RULE_COUNTERS_MAX>
+compute_slot_to_id(const std::vector<Rule>& rules,
+                   const std::unordered_map<std::uint32_t, std::uint32_t>& id_to_slot)
+{
+    std::array<std::uint32_t, XDPMF_RULE_COUNTERS_MAX> slot_to_id;
+    slot_to_id.fill(XDPMF_SLOT_ID_EMPTY);
+    for (const Rule& r : rules) {
+        slot_to_id[id_to_slot.at(r.id)] = r.id;
+    }
+    return slot_to_id;
+}
+
 /* §5.43 per-LPM-axis lowering result: the constrained prefixes (rules that
  * set this axis) + the wildcard mask (OR of bits for rules that do NOT
  * constrain this axis — they survive the axis unconditionally via
@@ -1261,16 +1312,18 @@ struct AxisLowering {
 
 /* Lower one LPM axis (dst or src) from the validated Config: a rule that sets
  * the axis contributes a BitPrefix at its bit position; a rule that does NOT
- * set the axis contributes its bit to the wildcard mask. id range already
- * validated to [0, XDPMF_ALLOWLIST_MAX-1] in config.cpp (bit shift safe). */
-[[nodiscard]] AxisLowering lower_axis(const Config& c, bool dst_axis)
+ * set the axis contributes its bit to the wildcard mask. §5.61 (MVP-4.21) B30:
+ * the bit is `1ULL << slot` (id-sorted rank, D-mvp-4.21-Q3) — slot ∈ [0,count)
+ * is shift-safe (config caps the rule COUNT at XDPMF_ALLOWLIST_MAX). */
+[[nodiscard]] AxisLowering lower_axis(const Config& c, bool dst_axis,
+    const std::unordered_map<std::uint32_t, std::uint32_t>& id_to_slot)
 {
     AxisLowering out;
     out.prefixes.reserve(c.rules.size());
     for (const Rule& r : c.rules) {
         const std::optional<xdpmf_cidr_v4>& axis =
             dst_axis ? r.match.dst_cidr : r.match.src_cidr;
-        const std::uint64_t bit = std::uint64_t{1} << r.id;
+        const std::uint64_t bit = std::uint64_t{1} << id_to_slot.at(r.id);
         if (axis.has_value()) {
             BitPrefix bp{};
             bp.cidr      = *axis;
@@ -1352,15 +1405,16 @@ struct AxisLowering6 {
  * the axis contributes a BitPrefix6 at its bit; a rule that does NOT set the
  * axis contributes its bit to the wildcard mask (family-blind lowering — a
  * v4-only rule lands in wc_dst6/wc_src6 by this SAME mechanism, the load-
- * bearing Q2 cross-family fill). id range already validated in config.cpp. */
-[[nodiscard]] AxisLowering6 lower_axis6(const Config& c, bool dst6_axis)
+ * bearing Q2 cross-family fill). §5.61 (MVP-4.21) B30: bit = `1ULL << slot`. */
+[[nodiscard]] AxisLowering6 lower_axis6(const Config& c, bool dst6_axis,
+    const std::unordered_map<std::uint32_t, std::uint32_t>& id_to_slot)
 {
     AxisLowering6 out;
     out.prefixes.reserve(c.rules.size());
     for (const Rule& r : c.rules) {
         const std::optional<xdpmf_cidr_v6>& axis =
             dst6_axis ? r.match.dst_cidr6 : r.match.src_cidr6;
-        const std::uint64_t bit = std::uint64_t{1} << r.id;
+        const std::uint64_t bit = std::uint64_t{1} << id_to_slot.at(r.id);
         if (axis.has_value()) {
             BitPrefix6 bp{};
             bp.cidr       = *axis;
@@ -1401,21 +1455,23 @@ using EthertypeLowering = AxisAggregate<std::uint32_t>;
  * #9 per §5.37 / D-3.4f-1). They differed by THREE axes — key type, the
  * projected source member (proto/vlan/mac are distinct std::optional<> types),
  * and the dedup equality (== for proto/vlan, memcmp for the 6-octet mac). Per
- * rule: bit = 1<<r.id; key_of(r) projects the axis key (std::nullopt => the rule
+ * rule: bit = 1<<slot; key_of(r) projects the axis key (std::nullopt => the rule
  * does NOT constrain this axis, so its bit goes to `wildcard`, FI-2 mutual
  * exclusion); on a key, a linear dedup-scan via key_eq (D-mvp-4.10-MAC-EQ keeps
  * the mac memcmp, NOT ==) ORs the bit into the matching entry, else emplace_back
  * a new entry. Insertion order preserved EXACTLY (D-mvp-4.10-ORDER) =>
- * bit-identical entries/wildcard to the three originals. id range already
- * validated in config.cpp (bit shift safe). Each lambda inlines per
+ * bit-identical entries/wildcard to the three originals. §5.61 (MVP-4.21) B30:
+ * bit = `1ULL << slot` (id-sorted rank, D-mvp-4.21-Q3) — slot ∈ [0,count) is
+ * shift-safe (config caps the rule COUNT). Each lambda inlines per
  * instantiation => zero indirect-call cost (Q1 -> A1). */
 template<class Key, class Project, class Eq>
 [[nodiscard]] AxisAggregate<Key> aggregate_axis(const std::vector<Rule>& rules,
-                                                Project key_of, Eq key_eq)
+                                                Project key_of, Eq key_eq,
+    const std::unordered_map<std::uint32_t, std::uint32_t>& id_to_slot)
 {
     AxisAggregate<Key> out;
     for (const Rule& r : rules) {
-        const std::uint64_t      bit = std::uint64_t{1} << r.id;
+        const std::uint64_t      bit = std::uint64_t{1} << id_to_slot.at(r.id);
         const std::optional<Key> key = key_of(r);
         if (key.has_value()) {
             // Aggregate rules sharing the same exact key into one entry.
@@ -1448,13 +1504,14 @@ struct PortLowering {
 
 /* Lower the dst_port axis: a rule with `dst_port` set contributes one
  * {lo,hi,bit} slot; a rule WITHOUT `dst_port` contributes its bit to the port
- * wildcard (FI-2). id range already validated in config.cpp. */
-[[nodiscard]] PortLowering lower_port_axis(const Config& c)
+ * wildcard (FI-2). §5.61 (MVP-4.21) B30: bit = `1ULL << slot` (id-sorted rank). */
+[[nodiscard]] PortLowering lower_port_axis(const Config& c,
+    const std::unordered_map<std::uint32_t, std::uint32_t>& id_to_slot)
 {
     PortLowering out;
     out.ranges.reserve(c.rules.size());
     for (const Rule& r : c.rules) {
-        const std::uint64_t bit = std::uint64_t{1} << r.id;
+        const std::uint64_t bit = std::uint64_t{1} << id_to_slot.at(r.id);
         if (r.match.dst_port.has_value()) {
             xdpmf_port_range slot{};
             slot.lo  = r.match.dst_port->lo;
@@ -1756,7 +1813,8 @@ void write_active_idx(int active_idx_fd, std::uint32_t idx)
  * pass AND drop rules; this function writes BOTH faithfully (the action
  * discrimination happens downstream at the datapath's rules→action_table
  * lookup chain per HG-3.4b-c2-4). */
-void populate_rules_inner_slot(int rules_inner_fd, const std::vector<Rule>& rules)
+void populate_rules_inner_slot(int rules_inner_fd, const std::vector<Rule>& rules,
+    const std::unordered_map<std::uint32_t, std::uint32_t>& id_to_slot)
 {
     /* Clear all 64 slots first — operator may have removed rules across
      * applies; the prior occupant must not survive. */
@@ -1769,49 +1827,109 @@ void populate_rules_inner_slot(int rules_inner_fd, const std::vector<Rule>& rule
                                      k, std::strerror(-rc)));
         }
     }
-    /* Then write occupied slots. id range already validated in config.cpp. */
+    /* Then write occupied slots. §5.61 (MVP-4.21) B30: keyed by the rule's
+     * internal `slot` (id-sorted rank), NOT its operator id — the datapath
+     * winner `rid = ffsll(acc)-1` is a slot index into rules_inner, so this
+     * MUST use the SAME slot the lowering bit-shifts used (D-mvp-4.21-SLOT-
+     * COHERENCE). slot ∈ [0,count) is in range (config caps the count). */
     for (const Rule& r : rules) {
         struct rule_entry entry{};
         entry.present   = 1;
         entry.action_id = (r.action == RuleAction::Pass)
             ? static_cast<unsigned char>(ACTION_PASS)
             : static_cast<unsigned char>(ACTION_DROP);
-        const int rc = bpf_map_update_elem(rules_inner_fd, &r.id, &entry, BPF_ANY);
+        const std::uint32_t slot = id_to_slot.at(r.id);
+        const int rc = bpf_map_update_elem(rules_inner_fd, &slot, &entry, BPF_ANY);
         if (rc < 0) {
             throw_loader(classify(rc, LoaderError::LoadFailed),
                          std::format("bpf_map_update_elem(rules_inner[{}]): {}",
-                                     r.id, std::strerror(-rc)));
+                                     slot, std::strerror(-rc)));
         }
     }
 }
 
-/* §5.35 (MVP-3.4d) D-3.4d-3: per-rule-id per-CPU copy-forward from old-active
- * rule_counters inner to inactive rule_counters inner. Called from
- * apply_request BEFORE the single-u32 active_idx flip; ensures the new-active
- * inner (post-flip) carries the same per-CPU counter state as the old-active
- * inner. PI-3.4b-2 PRESERVE-across-apply held by this copy.
+/* §5.61 (MVP-4.21) B30 D-mvp-4.21-Q1: write the INACTIVE half of the single
+ * combined `slot_rule_id` ARRAY before the active_idx flip — slot_rule_id
+ * [inactive*XDPMF_ALLOWLIST_MAX + slot] = the operator id occupying that slot,
+ * or XDPMF_SLOT_ID_EMPTY for the unoccupied tail [count,64). RESET-on-apply
+ * (mirrors write_wildcard_slots / populate_rules_inner_slot): the whole half
+ * is rewritten so no stale id survives. The single active_idx u32 store commits
+ * this swap together with all 9 axes + defaults + rules + rule_counters +
+ * wildcard. NEVER read by mac_filter_prog — userspace-only (HG-mvp-4.21-1). */
+void write_slot_rule_id(int slot_rule_id_fd, std::uint32_t inactive,
+    const std::array<std::uint32_t, XDPMF_RULE_COUNTERS_MAX>& slot_to_id)
+{
+    const std::uint32_t base = inactive * static_cast<std::uint32_t>(XDPMF_ALLOWLIST_MAX);
+    for (std::uint32_t slot = 0;
+         slot < static_cast<std::uint32_t>(XDPMF_ALLOWLIST_MAX); ++slot) {
+        const std::uint32_t key = base + slot;
+        const std::uint32_t val = slot_to_id[slot];  // id or XDPMF_SLOT_ID_EMPTY
+        const int rc = bpf_map_update_elem(slot_rule_id_fd, &key, &val, BPF_ANY);
+        if (rc < 0) {
+            throw_loader(classify(rc, LoaderError::LoadFailed),
+                         std::format("bpf_map_update_elem(slot_rule_id[{}]): {}",
+                                     key, std::strerror(-rc)));
+        }
+    }
+}
+
+/* §5.61 (MVP-4.21) B30: read one half (`active`) of the persisted slot_rule_id
+ * map into a slot→id array. Used by the copy-forward to recover the OLD-active
+ * slot assignment so a surviving id's counter follows its id across a slot move
+ * (D-mvp-4.21-COPYFWD-BY-ID). Lookup-fail on any slot leaves the EMPTY sentinel
+ * (defensive — a missing/half-written slot is treated as unoccupied). */
+[[nodiscard]] std::array<std::uint32_t, XDPMF_RULE_COUNTERS_MAX>
+read_slot_rule_id_half(int slot_rule_id_fd, std::uint32_t active)
+{
+    std::array<std::uint32_t, XDPMF_RULE_COUNTERS_MAX> out;
+    out.fill(XDPMF_SLOT_ID_EMPTY);
+    const std::uint32_t base = active * static_cast<std::uint32_t>(XDPMF_ALLOWLIST_MAX);
+    for (std::uint32_t slot = 0;
+         slot < static_cast<std::uint32_t>(XDPMF_RULE_COUNTERS_MAX); ++slot) {
+        const std::uint32_t key = base + slot;
+        std::uint32_t       val = XDPMF_SLOT_ID_EMPTY;
+        if (bpf_map_lookup_elem(slot_rule_id_fd, &key, &val) == 0) {
+            out[slot] = val;
+        }
+    }
+    return out;
+}
+
+/* §5.35 (MVP-3.4d) D-3.4d-3 + §5.61 (MVP-4.21) B30 D-mvp-4.21-COPYFWD-BY-ID:
+ * per-rule per-CPU copy-forward from old-active rule_counters inner to inactive
+ * rule_counters inner, REMAPPED BY OPERATOR ID. Called from apply_request BEFORE
+ * the single-u32 active_idx flip; ensures the new-active inner (post-flip)
+ * carries each surviving id's accumulated per-CPU counter state — even when
+ * that id's `slot` MOVED (reorder/insert/renumber). PI-3.4b-2 PRESERVE-across-
+ * apply held across slot reassignment (this is THE load-bearing B30 change).
  *
- * Loop bounded by XDPMF_RULE_COUNTERS_MAX (= 64), NOT by NCPUS — the PERCPU
- * map ABI ships NCPUS values per lookup/update syscall. Buffer is sized via
- * libbpf_num_possible_cpus() (matches exporter's existing precedent at
- * src/exporter/stats_reader.cpp:147 + the new reset_counters.cpp:open path).
+ * Semantics (D-mvp-4.21-COPYFWD-BY-ID): for each NEW slot k ∈ [0,64):
+ *   - new_slot_to_id[k] == EMPTY  → write zeros (unoccupied slot, no leak);
+ *   - new id is a SURVIVOR (present in old_slot_to_id) → copy old-active
+ *     [old_slot] → inactive[k] (the counter follows its id across the move);
+ *   - new id is NEW (absent from old) → write zeros (starts at 0);
+ * removed ids simply drop (their old slot is never a copy SOURCE). Every
+ * [0,64) inactive slot is written, so no stale value leaks forward.
  *
- * On lookup-fail (rare ENOENT for never-bumped slot): the kernel returns
- * zero-array for never-bumped PERCPU slots in practice, but we
- * defensively zero-init the buffer once outside the loop to guard any
- * errno path — then per-iter lookup overwrites; an explicit -rc != 0
- * resets the buffer to all-zero so the inactive slot is zeroed (not
- * carrying stale state from a prior iteration).
+ * old_slot_to_id is read from the OLD-active half of slot_rule_id (BEFORE the
+ * flip; populate writes only the INACTIVE half, so the old half is intact).
+ * new_slot_to_id is the freshly-computed slot→id for this apply.
  *
- * On update-fail: propagate as std::system_error (LoaderError::LoadFailed
- * via classify) — apply fails and the caller's existing rollback runs (no
- * active_idx flip). Should never fail at apply time (writes to a fresh
- * inactive inner are succeed-or-OOM).
+ * Loop bounded by XDPMF_RULE_COUNTERS_MAX (= 64), NOT by NCPUS — the PERCPU map
+ * ABI ships NCPUS values per lookup/update syscall. Buffer sized via
+ * libbpf_num_possible_cpus().
  *
- * On FIRST apply (initial attach, no prior active): caller is expected to
- * pass the SAME fd for both (self-copy = no-op). Uniform code path per
- * architect choice (D-3.4d-3) — no first-apply special case. */
-void copy_rule_counters_forward(int old_active_inner_fd, int inactive_inner_fd)
+ * On lookup-fail (never-bumped slot returns -ENOENT on some kernels): treat as
+ * zero (re-zero the buffer so prior-iteration values cannot leak forward).
+ * On update-fail: propagate as std::system_error (LoaderError::LoadFailed) —
+ * apply fails, caller's rollback runs (no active_idx flip).
+ *
+ * On FIRST apply (fresh attach): caller passes self-fd + an all-EMPTY
+ * old_slot_to_id, so nothing matches and every slot is zeroed — harmless since
+ * the fresh inner is already zero (D-mvp-4.21-FIRSTAPPLY). Uniform code path. */
+void copy_rule_counters_forward(int old_active_inner_fd, int inactive_inner_fd,
+    std::span<const std::uint32_t> old_slot_to_id,
+    std::span<const std::uint32_t> new_slot_to_id)
 {
     const int num_cpus = ::libbpf_num_possible_cpus();
     if (num_cpus <= 0) {
@@ -1823,12 +1941,23 @@ void copy_rule_counters_forward(int old_active_inner_fd, int inactive_inner_fd)
     for (std::uint32_t k = 0;
          k < static_cast<std::uint32_t>(XDPMF_RULE_COUNTERS_MAX);
          ++k) {
-        const int lk = bpf_map_lookup_elem(old_active_inner_fd, &k, buf.data());
-        if (lk < 0) {
-            /* Never-bumped slot returns -ENOENT in some kernels; treat as
-             * zero (re-zero the buffer to be safe — prior iteration may
-             * have left non-zero values that would otherwise leak forward). */
-            std::fill(buf.begin(), buf.end(), 0u);
+        std::fill(buf.begin(), buf.end(), 0u);
+        const std::uint32_t new_id = new_slot_to_id[k];
+        if (new_id != XDPMF_SLOT_ID_EMPTY) {
+            /* Find the OLD slot this surviving id occupied; copy its counter. */
+            for (std::uint32_t old_slot = 0;
+                 old_slot < static_cast<std::uint32_t>(XDPMF_RULE_COUNTERS_MAX);
+                 ++old_slot) {
+                if (old_slot_to_id[old_slot] == new_id) {
+                    const int lk = bpf_map_lookup_elem(old_active_inner_fd,
+                                                       &old_slot, buf.data());
+                    if (lk < 0) {
+                        std::fill(buf.begin(), buf.end(), 0u);
+                    }
+                    break;  // ids are unique → at most one old slot
+                }
+            }
+            /* new id absent from old → buf stays all-zero (starts at 0). */
         }
         const int up = bpf_map_update_elem(inactive_inner_fd, &k,
                                              buf.data(), BPF_ANY);
@@ -1907,6 +2036,8 @@ void populate_all_axes(mac_filter_bpf* skel, std::uint32_t slot,
                        const AxisLowering6&      src6_low,
                        const EthertypeLowering&  eth_low,
                        const std::vector<Rule>&  rules,
+                       const std::unordered_map<std::uint32_t, std::uint32_t>& id_to_slot,
+                       const std::array<std::uint32_t, XDPMF_RULE_COUNTERS_MAX>& slot_to_id,
                        DefaultAction             default_action)
 {
     // 1 mac — paired allowlist_a/_b -> __u64 aggregated rule-bitmask
@@ -1975,11 +2106,20 @@ void populate_all_axes(mac_filter_bpf* skel, std::uint32_t slot,
         }
         write_default_slot(defaults_fd, slot, default_action);
     }
-    // 9 rules — paired rules_a/_b inner ARRAY
+    // 9 rules — paired rules_a/_b inner ARRAY (keyed by internal slot)
     populate_rules_inner_slot(
         inactive_axis_fd(skel->maps.rules_a, skel->maps.rules_b, slot,
                          "inactive rules inner fd unavailable"),
-        rules);
+        rules, id_to_slot);
+    // 10 slot_rule_id — SINGLE map indexed by slot (§5.61 B30 D-mvp-4.21-Q1);
+    // RESET-on-apply, mirrors wildcard/defaults. Userspace-only.
+    {
+        const int sri_fd = bpf_map__fd(skel->maps.slot_rule_id);
+        if (sri_fd < 0) {
+            throw_loader(LoaderError::LoadFailed, "slot_rule_id fd unavailable");
+        }
+        write_slot_rule_id(sri_fd, slot, slot_to_id);
+    }
 }
 
 /* Read active_idx[0]. Returns 0 if unset; throws on real lookup error. */
@@ -2178,6 +2318,16 @@ std::uint32_t apply_request(const ApplyRequest& req)
     // (unconstrained), exactly like the proto/vlan exact-HASH axes. NO closure
     // (D-mvp-4.7-NO-CLOSURE). The two LPM axes are lowered to prefix+bit lists
     // (constrained) + wildcard masks (unconstrained).
+    // §5.61 (MVP-4.21) B30 D-mvp-4.21-Q3 / SLOT-PLUMB: assign each rule a dense
+    // internal `slot` = its rank in ascending-unique-id order, computed ONCE and
+    // threaded into EVERY populate site (the 4 lowering bit-shifts, rules_inner,
+    // rule_counters, slot_rule_id) so a single coherent slot per rule is used
+    // everywhere (D-mvp-4.21-SLOT-COHERENCE). slot_to_id is the [0,64) inverse
+    // (id or EMPTY) feeding the slot_rule_id map write + the copy-forward remap.
+    const std::unordered_map<std::uint32_t, std::uint32_t> id_to_slot =
+        compute_id_to_slot(req.config.rules);
+    const std::array<std::uint32_t, XDPMF_RULE_COUNTERS_MAX> slot_to_id =
+        compute_slot_to_id(req.config.rules, id_to_slot);
     // §5.50 (MVP-4.10 B28-2): mac/proto/vlan exact-HASH lowering folded into the
     // generic aggregate_axis template; per-axis projector + equality functors
     // here. mac uses a 6-octet memcmp equality (NOT ==, D-mvp-4.10-MAC-EQ).
@@ -2186,21 +2336,23 @@ std::uint32_t apply_request(const ApplyRequest& req)
         [](const Rule& r) { return r.match.mac; },
         [](const xdpmf_mac& a, const xdpmf_mac& b) {
             return std::memcmp(a.octets, b.octets, sizeof(a.octets)) == 0;
-        });
-    const AxisLowering         dst_low     = lower_axis(req.config, /*dst_axis=*/true);
-    const AxisLowering         src_low     = lower_axis(req.config, /*dst_axis=*/false);
+        },
+        id_to_slot);
+    const AxisLowering         dst_low     = lower_axis(req.config, /*dst_axis=*/true, id_to_slot);
+    const AxisLowering         src_low     = lower_axis(req.config, /*dst_axis=*/false, id_to_slot);
     // §5.53 (MVP-4.13): lower the two NEW IPv6 LPM axes (dst6/src6). FORKED
     // siblings of the v4 dst/src lowering; family-blind (a v4-only rule lands
     // in wc_dst6/wc_src6, the load-bearing Q2 cross-family fill).
-    const AxisLowering6        dst6_low    = lower_axis6(req.config, /*dst6_axis=*/true);
-    const AxisLowering6        src6_low    = lower_axis6(req.config, /*dst6_axis=*/false);
+    const AxisLowering6        dst6_low    = lower_axis6(req.config, /*dst6_axis=*/true, id_to_slot);
+    const AxisLowering6        src6_low    = lower_axis6(req.config, /*dst6_axis=*/false, id_to_slot);
     // §5.44 (MVP-4.4): lower the two NEW axes (proto exact-HASH, dst_port
     // range) alongside the §5.43 LPM axes. NO closure (D-mvp-4.4-NO-CLOSURE).
     const ProtoLowering        proto_low   = aggregate_axis<std::uint32_t>(
         req.config.rules,
         [](const Rule& r) -> std::optional<std::uint32_t> { return r.match.protocol; },
-        std::equal_to<std::uint32_t>{});
-    const PortLowering         port_low    = lower_port_axis(req.config);
+        std::equal_to<std::uint32_t>{},
+        id_to_slot);
+    const PortLowering         port_low    = lower_port_axis(req.config, id_to_slot);
     // §5.45 (MVP-4.5): lower the NEW vlan axis (exact-HASH outer VID) alongside
     // the §5.43/§5.44 axes. NO closure (D-mvp-4.5-NO-CLOSURE). The vlan projector
     // widens the config u16 VID -> the BPF __u32 HASH key (D-mvp-4.5-VLAN-VALUE-WIDTH).
@@ -2210,7 +2362,8 @@ std::uint32_t apply_request(const ApplyRequest& req)
             if (r.match.vlan) return std::uint32_t{*r.match.vlan};
             return std::nullopt;
         },
-        std::equal_to<std::uint32_t>{});
+        std::equal_to<std::uint32_t>{},
+        id_to_slot);
     // §5.54 (MVP-4.14): lower the NEW ethertype axis (exact-HASH, host-order u16
     // widened to the BPF __u32 HASH key). CLONE of the vlan lowering above; NO
     // closure (D-mvp-4.14-CLONE / D-mvp-4.14-HASH-MAX). Family-blind: the axis
@@ -2221,7 +2374,8 @@ std::uint32_t apply_request(const ApplyRequest& req)
             if (r.match.ethertype) return std::uint32_t{*r.match.ethertype};
             return std::nullopt;
         },
-        std::equal_to<std::uint32_t>{});
+        std::equal_to<std::uint32_t>{},
+        id_to_slot);
     const DefaultAction default_action     = req.config.default_action;
 
     if (mac_low.entries.size() > XDPMF_ALLOWLIST_MAX) {
@@ -2446,7 +2600,8 @@ std::uint32_t apply_request(const ApplyRequest& req)
         // (guard #15 / D-mvp-4.8-BOUNDARY).
         populate_all_axes(skel.get(), inactive, mac_low, dst_low, src_low,
                           proto_low, port_low, vlan_low, dst6_low, src6_low,
-                          eth_low, req.config.rules, default_action);
+                          eth_low, req.config.rules, id_to_slot, slot_to_id,
+                          default_action);
         // §5.29 (MVP-3.4) step 8.5: `action_table` STAYS SHARED per
         // §5.34 HG-3.4b-c2-3 / D-3.4b-c2-6 — values are static
         // {PASS=0, DROP=1}, never mutate at runtime; atomic-swap meaningless.
@@ -2479,7 +2634,19 @@ std::uint32_t apply_request(const ApplyRequest& req)
                 throw_loader(LoaderError::LoadFailed,
                              "rule_counters inner fd unavailable (reattach)");
             }
-            copy_rule_counters_forward(old_rc_fd, inactive_rc_fd);
+            // §5.61 B30 D-mvp-4.21-COPYFWD-BY-ID: recover the OLD-active slot→id
+            // (from the intact OLD half of slot_rule_id — populate touched only
+            // the INACTIVE half) so a surviving id's counter follows its id even
+            // if its slot moved. new mapping = this apply's slot_to_id.
+            const int sri_fd = bpf_map__fd(skel->maps.slot_rule_id);
+            if (sri_fd < 0) {
+                throw_loader(LoaderError::LoadFailed,
+                             "slot_rule_id fd unavailable (reattach)");
+            }
+            const std::array<std::uint32_t, XDPMF_RULE_COUNTERS_MAX> old_slot_to_id =
+                read_slot_rule_id_half(sri_fd, cur);
+            copy_rule_counters_forward(old_rc_fd, inactive_rc_fd,
+                                       old_slot_to_id, slot_to_id);
         }
 
         // Atomic prog swap. The OLD prog has been reading from these same
@@ -2553,7 +2720,7 @@ std::uint32_t apply_request(const ApplyRequest& req)
     // copy_rule_counters_forward stay EXPLICIT below (guard #15).
     populate_all_axes(skel.get(), 0u, mac_low, dst_low, src_low, proto_low,
                       port_low, vlan_low, dst6_low, src6_low, eth_low,
-                      req.config.rules, default_action);
+                      req.config.rules, id_to_slot, slot_to_id, default_action);
     // §5.29 (MVP-3.4) step 8.5: `action_table` STAYS SHARED per §5.34
     // HG-3.4b-c2-3 / D-3.4b-c2-6 — static {PASS=0, DROP=1} mapping.
     {
@@ -2576,7 +2743,12 @@ std::uint32_t apply_request(const ApplyRequest& req)
             throw_loader(LoaderError::LoadFailed,
                          "rule_counters_a fd unavailable (fresh attach)");
         }
-        copy_rule_counters_forward(rc_a_fd, rc_a_fd);
+        // §5.61 B30 D-mvp-4.21-FIRSTAPPLY: fresh attach has no prior slot→id;
+        // pass an all-EMPTY old mapping so nothing matches and every slot is
+        // zeroed (harmless — the fresh inner is already zero). Uniform path.
+        std::array<std::uint32_t, XDPMF_RULE_COUNTERS_MAX> empty_old;
+        empty_old.fill(XDPMF_SLOT_ID_EMPTY);
+        copy_rule_counters_forward(rc_a_fd, rc_a_fd, empty_old, slot_to_id);
     }
 
     // First attach: create+pin the XDP link with the operator-selected mode.

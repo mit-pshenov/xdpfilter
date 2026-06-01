@@ -121,29 +121,27 @@ std::string emit_metrics(
         std::sort(action_for_rule.begin(), action_for_rule.end(),
                   [](const auto& a, const auto& b) { return a.first < b.first; });
 
-        /* Emit ALL sidecar-known rules even at count 0 (Prometheus
-         * convention: emit zeroes for known series). Then emit any
-         * orphan counter slots (non-zero counter for a rule_id absent
-         * from sidecar) with action="unknown". */
-        for (const auto& [rule_id, action] : action_for_rule) {
-            const std::uint64_t v = (rule_id < XDPMF_RULE_COUNTERS_MAX)
-                                        ? s.counters[rule_id]
-                                        : 0u;
+        /* §5.61 (MVP-4.21) B30 D-mvp-4.21-Q1: the BPF inner counters are
+         * SLOT-keyed; the stable operator id for each slot comes from the
+         * slot_rule_id map (s.slot_to_id[k]). Iterate slots ascending — because
+         * `slot` = id-sorted rank, this emits ascending-id order, BYTE-IDENTICAL
+         * to the prior sidecar-id-sorted emission under dense ids (slot==id).
+         * Skip unoccupied slots (EMPTY sentinel) — so an occupied slot is emitted
+         * even at count 0 (Prometheus "emit zeroes for known series"), and a
+         * pre-§5.61 iface (all-sentinel slot_to_id) yields no per-rule series
+         * (graceful-empty, PI-32). The `action` label is still looked up by the
+         * stable operator id from the sidecar; a slot whose id is absent from the
+         * sidecar emits action="unknown" (orphan tolerance, PI-32-3.4b). */
+        for (std::uint32_t k = 0; k < XDPMF_RULE_COUNTERS_MAX; ++k) {
+            const std::uint32_t rule_id = s.slot_to_id[k];
+            if (rule_id == XDPMF_SLOT_ID_EMPTY) continue;
+            std::string_view action{"unknown"};
+            for (const auto& e : action_for_rule) {
+                if (e.first == rule_id) { action = e.second; break; }
+            }
             std::format_to(std::back_inserter(out),
                 "xdpfilter_rule_match_total{{iface=\"{}\",rule_id=\"{}\",action=\"{}\"}} {}\n",
-                iface_escaped, rule_id, action, v);
-        }
-        for (std::uint32_t k = 0; k < XDPMF_RULE_COUNTERS_MAX; ++k) {
-            if (s.counters[k] == 0) continue;
-            /* Linear scan over the ≤64-entry sorted vector (D-3.4i-4 / Q3):
-             * replaces the prior hash-map `.contains` membership test. */
-            const bool known = std::any_of(
-                action_for_rule.begin(), action_for_rule.end(),
-                [&](const auto& e) { return e.first == k; });
-            if (known) continue;
-            std::format_to(std::back_inserter(out),
-                "xdpfilter_rule_match_total{{iface=\"{}\",rule_id=\"{}\",action=\"unknown\"}} {}\n",
-                iface_escaped, k, s.counters[k]);
+                iface_escaped, rule_id, action, s.counters[k]);
         }
     }
 

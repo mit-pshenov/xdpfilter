@@ -81,9 +81,9 @@ rule_counters_pin() {
 }
 
 read_rc_slot() {
-    local id="$1" pin
-    pin=$(rule_counters_pin)
-    sudo -n python3 "${TEST_DIR}/lib/read_rule_counters.py" "${pin}" "${id}"
+    # §5.61 (B30): rule_counters is slot-keyed; remap operator id -> slot
+    # via slot_rule_id (D-mvp-4.21-RAWMAP-REMAP). Assertion values unchanged.
+    read_rule_counter_by_id "${IFACE_A}" "$(rule_counters_pin)" "$1"
 }
 
 # ── apply + bump baseline ────────────────────────────────────────────────
@@ -114,23 +114,34 @@ fi
 
 fail=0
 
-# ── (a) sub-case: selective reset --rule-id 17 ───────────────────────────
-echo "=== sub-case (a): reset-counters --iface ${IFACE_A} --rule-id 17"
+# ── (a) sub-case: selective reset of the rule with operator id 17 ────────
+# §5.61 (B30): reset-counters stays SLOT-index-addressed [0,63]
+# (D-mvp-4.21-RESETCTR-OOS — the CLI is NOT id-addressed this slice). To
+# zero the counter belonging to operator rule id 17, remap id->slot and
+# pass the SLOT; the audit line therefore reports rule_id=<slot>.
+slot17=$(id_to_slot "${IFACE_A}" 17)
+if [[ -z "${slot17}" ]]; then
+    echo "FAIL[a.remap]: id 17 not found in slot_rule_id active half" >&2
+    exit 1
+fi
+echo "id 17 occupies slot ${slot17}"
+
+echo "=== sub-case (a): reset-counters --iface ${IFACE_A} --rule-id ${slot17} (slot of id 17)"
 set +e
-sudo -n "${LOADER_BIN}" reset-counters --iface "${IFACE_A}" --rule-id 17 2>"${stderr_a}"
+sudo -n "${LOADER_BIN}" reset-counters --iface "${IFACE_A}" --rule-id "${slot17}" 2>"${stderr_a}"
 rc_a=$?
 set -e
 echo "rc_a=${rc_a}"
 cat "${stderr_a}" >&2 || true
 
 if [[ "${rc_a}" -ne 0 ]]; then
-    echo "FAIL[a1]: --rule-id 17 expected exit 0, got ${rc_a}" >&2
+    echo "FAIL[a1]: --rule-id ${slot17} expected exit 0, got ${rc_a}" >&2
     fail=1
 fi
 
-audit_ere_17="^xdpmacfilter: RESET-COUNTERS on ${IFACE_A} by uid=[0-9]+ .*rule_id=17\$"
+audit_ere_17="^xdpmacfilter: RESET-COUNTERS on ${IFACE_A} by uid=[0-9]+ .*rule_id=${slot17}\$"
 if ! grep -qE -- "${audit_ere_17}" "${stderr_a}"; then
-    echo "FAIL[a2]: stderr missing audit-log ERE for rule_id=17:" >&2
+    echo "FAIL[a2]: stderr missing audit-log ERE for rule_id=${slot17} (slot of id 17):" >&2
     echo "         ${audit_ere_17}" >&2
     fail=1
 fi

@@ -88,7 +88,11 @@ _jq_decode_key='
      else null end))
 '
 rule_present_at() {
-    local pin="$1" key="$2"
+    # §5.61 (B30): rules_inner is slot-keyed; remap operator id -> slot.
+    local pin="$1" id="$2" key half
+    half=$(half_of_pin "${pin}") || half=$(active_idx_of "${IFACE_A}")
+    key=$(id_to_slot "${IFACE_A}" "${id}" "${half}")
+    [[ -z "${key}" ]] && { echo 0; return; }   # id not loaded in this half → absent
     sudo -n bpftool map dump pinned "${pin}" --json 2>/dev/null \
         | jq -r --argjson k "${key}" "
             .[]
@@ -98,7 +102,11 @@ rule_present_at() {
         " 2>/dev/null | head -n1
 }
 rule_action_id_at() {
-    local pin="$1" key="$2"
+    # §5.61 (B30): rules_inner is slot-keyed; remap operator id -> slot.
+    local pin="$1" id="$2" key half
+    half=$(half_of_pin "${pin}") || half=$(active_idx_of "${IFACE_A}")
+    key=$(id_to_slot "${IFACE_A}" "${id}" "${half}")
+    [[ -z "${key}" ]] && { echo 0; return; }
     sudo -n bpftool map dump pinned "${pin}" --json 2>/dev/null \
         | jq -r --argjson k "${key}" "
             .[]
@@ -161,9 +169,8 @@ rule_counters_active_pin() {
     esac
 }
 read_rc_slot() {
-    local id="$1" pin
-    pin=$(rule_counters_active_pin)
-    sudo -n python3 "${TEST_DIR}/lib/read_rule_counters.py" "${pin}" "${id}"
+    # §5.61 (B30): rule_counters is slot-keyed; remap operator id -> slot.
+    read_rule_counter_by_id "${IFACE_A}" "$(rule_counters_active_pin)" "$1"
 }
 
 setup_veth

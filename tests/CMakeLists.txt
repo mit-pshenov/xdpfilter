@@ -732,6 +732,25 @@ set_tests_properties(T_EXPORTER_RULE_LABELS PROPERTIES
     SKIP_RETURN_CODE 77
 )
 
+# §6.76 T_RULE_COUNTER_SURVIVES_REORDER (MVP-4.21 / B30): the headline counter-
+# continuity-across-reorder spec — apply sparse-id base, bump per-id counters,
+# apply an insert that SHIFTS a rule's slot, assert each id's counter VALUE
+# survived the slot move (labelled by stable id via the slot_rule_id map). Also
+# proves Q2 sparse-id (id>63) acceptance + first-match-by-lowest-id parity.
+# Scrapes the exporter /metrics → takes BOTH xdp_fixture AND exporter_port_9417
+# RESOURCE_LOCKs (port-clash serialization, like T_EXPORTER_RULE_LABELS).
+add_test(
+    NAME T_RULE_COUNTER_SURVIVES_REORDER
+    COMMAND bash ${TEST_DIR}/T_RULE_COUNTER_SURVIVES_REORDER.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_RULE_COUNTER_SURVIVES_REORDER PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK "xdp_fixture;exporter_port_9417"
+    TIMEOUT 120
+    SKIP_RETURN_CODE 77
+)
+
 # §6.76 (MVP-4.16 C3 — §5.56): the v6-CIDR (S4) + EtherType (S5) match-kinds on
 # BOTH observability surfaces (sidecar status JSON + exporter rule_info labels).
 # Spawns the exporter on the shared 9417-base port → same RESOURCE_LOCK pair.

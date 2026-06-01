@@ -424,6 +424,23 @@ struct {
 } defaults SEC(".maps");
 
 /*
+ * §5.61 (MVP-4.21) B30 D-mvp-4.21-Q1: slot_rule_id — USERSPACE-ONLY map.
+ * Persists, per ruleset half, the operator `id` occupying each internal
+ * `slot` (= id-sorted rank): slot_rule_id[active*XDPMF_ALLOWLIST_MAX + slot].
+ * The loader writes it (copy-forward old-slot recovery + exporter stable-id
+ * labelling); mac_filter_prog NEVER references it, so the per-packet
+ * instruction stream is byte-identical (HG-mvp-4.21-1) — only the .o maps
+ * section gains this one entry.
+ */
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __type(key, __u32);
+    __type(value, __u32);
+    __uint(max_entries, XDPMF_RULESET_COUNT * XDPMF_ALLOWLIST_MAX);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} slot_rule_id SEC(".maps");
+
+/*
  * Stats counters. Per-CPU array (Decision §5.3 superseded by §5.23, MVP-2 Perf).
  * bpf_map_lookup_elem on a PERCPU_ARRAY returns a pointer to the CURRENT CPU's
  * slot — `*v += 1` is per-CPU local, no cross-CPU race, no atomic needed.

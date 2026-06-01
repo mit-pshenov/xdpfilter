@@ -62,7 +62,8 @@ rule_counters_active_pin() {
     esac
 }
 read_rc_slot() {
-    sudo -n python3 "${TEST_DIR}/lib/read_rule_counters.py" "$(rule_counters_active_pin)" "$1"
+    # §5.61 (B30): rule_counters is slot-keyed; remap operator id -> slot.
+    read_rule_counter_by_id "${IFACE_A}" "$(rule_counters_active_pin)" "$1"
 }
 inject_mac() {
     ${NSEXEC} python3 "${TEST_DIR}/inject/inject_ipv4.py" "${IFACE_B}" "$1" "${MAC_DST}" "${SRC_IP}"
@@ -115,12 +116,14 @@ wait_for_stats_sum_with_cidr "${IFACE_A}" $(( p0 + d0 + m0 + c0 + 5 )) || true
 c5=$(read_rc_slot 5)
 echo "rule_counters[5]=${c5} (expected 5)"
 [[ "${c5}" == "5" ]] || { echo "FAIL[b1]: rule_counters[5]='${c5}' (expected 5)" >&2; fail=1; }
-# All other slots STAY 0.
+# All other slots STAY 0. §5.61 (B30): the maps are slot-keyed, so the
+# only non-zero slot is id 5's SLOT (= its id-sorted rank), not raw index 5.
+slot5=$(id_to_slot "${IFACE_A}" 5)
 all_after_b=$(sudo -n python3 "${TEST_DIR}/lib/read_rule_counters.py" "$(rule_counters_active_pin)")
 idx=0
 for v in ${all_after_b}; do
-    if [[ "${idx}" != "5" && "${v}" != "0" ]]; then
-        echo "FAIL[b2]: rule_counters[${idx}]='${v}' (expected 0; only slot 5 should move)" >&2; fail=1
+    if [[ "${idx}" != "${slot5}" && "${v}" != "0" ]]; then
+        echo "FAIL[b2]: rule_counters[slot ${idx}]='${v}' (expected 0; only id 5's slot ${slot5} should move)" >&2; fail=1
     fi
     idx=$(( idx + 1 ))
 done

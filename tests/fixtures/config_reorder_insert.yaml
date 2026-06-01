@@ -1,0 +1,35 @@
+# config_reorder_insert.yaml — §5.61 (MVP-4.21 / B30) §6.76 AFTER state.
+#
+# The same two ids 5 + 100 from config_reorder_base.yaml PLUS an INSERTED
+# middle id 50, which (id-sorted-rank slot assignment, D-mvp-4.21-Q3)
+# SHIFTS id 100's slot:
+#
+#   base   ids {5,100}     → slot: id5=0, id100=1
+#   insert ids {5,50,100}  → slot: id5=0, id50=1, id100=2   (id100 1→2)
+#
+# id 50's dst 10.100.50.0/24 is NESTED INSIDE id 100's dst 10.100.0.0/16,
+# so a frame to 10.100.50.x matches BOTH id 50 and id 100. First-match by
+# lowest *id* (D-mvp-4.21-Q3 / PI-mvp-4.21-PRIORITY) ⟹ id 50 wins, even
+# though id 100 has a slot adjacent to it. A frame to 10.100.0.x (in
+# id 100's /16 but NOT in id 50's /24) still matches ONLY id 100.
+#
+#   id 5   : dst 10.5.0.0/16       PASS   (slot rank 0)
+#   id 50  : dst 10.100.50.0/24    PASS   (slot rank 1 — INSERTED; more specific)
+#   id 100 : dst 10.100.0.0/16     PASS   (slot rank 2 — MOVED from rank 1)
+#
+# default_action: drop.
+schema_version: 2
+default_action: drop
+rules:
+  - id: 5
+    action: pass
+    match:
+      dst_cidr: "10.5.0.0/16"
+  - id: 50
+    action: pass
+    match:
+      dst_cidr: "10.100.50.0/24"
+  - id: 100
+    action: pass
+    match:
+      dst_cidr: "10.100.0.0/16"

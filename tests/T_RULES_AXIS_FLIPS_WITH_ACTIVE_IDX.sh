@@ -92,7 +92,15 @@ _jq_decode_key='
      else null end))
 '
 rule_present_at() {
-    local pin="$1" key="$2"
+    # §5.61 (B30): rules_inner is slot-keyed; remap operator id -> slot.
+    # Half is inferred from the rules pin's _a/_b suffix, so the step-(g)
+    # rollback read of the now-INACTIVE half resolves against that half's
+    # retained slot_rule_id mapping. An id not loaded in the half -> echo 0
+    # (absent), preserving the present/absent assertions verbatim.
+    local pin="$1" id="$2" key half
+    half=$(half_of_pin "${pin}") || half=$(active_idx_of "${IFACE_A}")
+    key=$(id_to_slot "${IFACE_A}" "${id}" "${half}")
+    [[ -z "${key}" ]] && { echo 0; return; }
     sudo -n bpftool map dump pinned "${pin}" --json 2>/dev/null \
         | jq -r --argjson k "${key}" "
             .[]

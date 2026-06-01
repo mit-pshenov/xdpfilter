@@ -392,10 +392,17 @@ Config validate(const yaml::Node& root, std::string_view file)
                               "rule.id is required");
                 }
                 const std::uint32_t id = parse_u32_or_throw(*id_node, file, "rule.id");
-                if (id >= static_cast<std::uint32_t>(XDPMF_ALLOWLIST_MAX)) {
-                    throw_cfg("rule id out of range", file, id_node->line, id_node->col,
-                              std::format("rule.id {} >= XDPMF_ALLOWLIST_MAX={}",
-                                          id, XDPMF_ALLOWLIST_MAX));
+                /* §5.61 (MVP-4.21) B30 D-mvp-4.21-Q2: the operator `id` is now a
+                 * sparse stable identity decoupled from the internal `slot`
+                 * (id-sorted rank). The old `id < XDPMF_ALLOWLIST_MAX` value cap
+                 * is REMOVED — every u32 id is legal EXCEPT the reserved
+                 * slot_rule_id EMPTY sentinel (D-mvp-4.21-SENTINEL), so that
+                 * marker stays unambiguous. The ≤64 limit migrates to the slot
+                 * count cap below. */
+                if (id == XDPMF_SLOT_ID_EMPTY) {
+                    throw_cfg("rule id reserved", file, id_node->line, id_node->col,
+                              std::format("rule.id {} is reserved (XDPMF_SLOT_ID_EMPTY sentinel)",
+                                          id));
                 }
                 if (!seen_ids.insert(id).second) {
                     throw_cfg("duplicate rule id", file, id_node->line, id_node->col,
@@ -549,6 +556,17 @@ Config validate(const yaml::Node& root, std::string_view file)
                 }
 
                 out.rules.push_back(std::move(r));
+            }
+            /* §5.61 (MVP-4.21) B30 D-mvp-4.21-Q2: the ≤64 limit migrates from
+             * the id VALUE to the slot COUNT — the loader assigns each rule a
+             * dense slot ∈ [0, count) and shifts `1ULL << slot`, so the rule
+             * count (not the id value) is what must stay ≤ XDPMF_ALLOWLIST_MAX
+             * to keep the bit-vector shift safe. */
+            if (out.rules.size() > static_cast<std::size_t>(XDPMF_ALLOWLIST_MAX)) {
+                throw_cfg("too many rules", file, rs->line, rs->col,
+                          std::format("rule count {} exceeds slot space "
+                                      "XDPMF_ALLOWLIST_MAX={}",
+                                      out.rules.size(), XDPMF_ALLOWLIST_MAX));
             }
         }
     }

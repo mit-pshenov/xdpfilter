@@ -315,9 +315,23 @@ struct allow_entry {
 #define XDPMF_MAP_RULE_COUNTERS_INNER_A_NAME  "rule_counters_a"      /* inner slot 0, PERCPU_ARRAY of __u64 */
 #define XDPMF_MAP_RULE_COUNTERS_INNER_B_NAME  "rule_counters_b"      /* inner slot 1, PERCPU_ARRAY of __u64 */
 /* §5.31 (MVP-3.4b): alias for XDPMF_ALLOWLIST_MAX = 64. Documents that the
- * rule_counters[] index space and the operator's YAML `id:` namespace are
- * IDENTICAL (Q5 R1 + D-3.4b-9 + PI-3.4b-7). */
+ * rule_counters[] index space and the loader-internal `slot` namespace are
+ * IDENTICAL. §5.61 (MVP-4.21) B30: the operator's YAML `id:` is NO LONGER the
+ * counter index — `slot` (id-sorted rank) is; the slot→id map below restores
+ * the stable-id labelling at the exporter. */
 #define XDPMF_RULE_COUNTERS_MAX      XDPMF_ALLOWLIST_MAX
+
+/* §5.61 (MVP-4.21) B30 D-mvp-4.21-Q1: the userspace-only `slot_rule_id` ARRAY
+ * persists, per ruleset half, the operator `id` occupying each internal `slot`
+ * (= id-sorted rank). Indexed `slot_rule_id[active * XDPMF_ALLOWLIST_MAX + slot]`.
+ * Read by the loader copy-forward (old-slot recovery, keyed by id) AND the
+ * exporter (stable-id counter labelling). NEVER referenced by mac_filter_prog
+ * (datapath instruction stream byte-identical — HG-mvp-4.21-1). */
+#define XDPMF_MAP_SLOT_RULE_ID_NAME  "slot_rule_id"  /* ARRAY[XDPMF_RULESET_COUNT*XDPMF_ALLOWLIST_MAX] of __u32 */
+/* §5.61 D-mvp-4.21-SENTINEL: the EMPTY marker written to unoccupied slots
+ * [count, 64) of each half; config (Q2) rejects id == this value so the marker
+ * is unambiguous. */
+#define XDPMF_SLOT_ID_EMPTY          0xFFFFFFFFu
 
 /* §5.31 EDIT-1 (Phase B Q3 P4 correction): sidecar lives on tmpfs under
  * /run because bpffs (kernel/bpf/inode.c) rejects regular-file creation via

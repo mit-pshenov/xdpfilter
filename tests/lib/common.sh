@@ -241,6 +241,60 @@ wait_for_stats_sum_with_cidr() {
     return 1
 }
 
+# ── §5.61 (MVP-4.21 / B30) operator-id → internal-slot remap ─────────────
+# Post-B30 the raw `rule_counters` / `rules_inner` BPF maps are SLOT-keyed
+# (slot = a rule's rank in ascending-unique-id order), decoupled from the
+# operator `id`. A test that peeks those maps BY OPERATOR ID must first
+# resolve id->slot through the `slot_rule_id` pin's active/selected half —
+# exactly as the production exporter does (design.md §5.61 EDIT-1 /
+# D-mvp-4.21-RAWMAP-REMAP). These helpers centralise that remap.
+#
+# active_idx_of <iface> → echoes the shared active_idx value (0|1) or empty.
+active_idx_of() {
+    local iface="$1"
+    local raw v hex
+    raw=$(sudo -n bpftool map dump pinned "${PIN_ROOT}/${iface}/active_idx" --json 2>/dev/null)
+    [[ -z "${raw}" ]] && return
+    v=$(printf '%s' "${raw}" | jq -r '.[0].formatted.value // empty' 2>/dev/null)
+    if [[ -n "${v}" && "${v}" != "null" ]]; then echo "${v}"; return; fi
+    hex=$(printf '%s' "${raw}" | jq -r '.[0].value[0] // empty' 2>/dev/null | sed 's/^0x//')
+    if [[ -n "${hex}" && "${hex}" != "null" ]]; then printf '%d\n' "0x${hex}"; fi
+}
+
+# half_of_pin <pin> → echoes 0 for a *_a pin, 1 for a *_b pin (the shared
+# active_idx governs ALL parallel-outer maps uniformly, so the _a/_b suffix
+# of ANY parallel pin names its ruleset half). Empty if neither suffix.
+half_of_pin() {
+    case "$1" in
+        *_a) echo 0 ;;
+        *_b) echo 1 ;;
+        *)   return 1 ;;
+    esac
+}
+
+# id_to_slot <iface> <id> [half] → echoes the slot holding operator <id> in
+# ruleset half <half> (default = active half), or EMPTY if that id is not
+# loaded in that half. Reads the slot_rule_id pin (delegates to id_to_slot.py).
+id_to_slot() {
+    local iface="$1" id="$2" half="${3:-}"
+    if [[ -z "${half}" ]]; then half=$(active_idx_of "${iface}"); fi
+    [[ -z "${half}" ]] && return
+    sudo -n python3 "${TEST_DIR}/lib/id_to_slot.py" \
+        "${PIN_ROOT}/${iface}/slot_rule_id" "${half}" "${id}" 2>/dev/null
+}
+
+# read_rule_counter_by_id <iface> <counter_inner_pin> <id>
+#   Resolves <id> -> slot (half inferred from the inner pin's _a/_b suffix,
+#   falling back to the active half) and reads that slot's counter. Echoes 0
+#   if the id is not present in that half (an unloaded rule has no counter).
+read_rule_counter_by_id() {
+    local iface="$1" pin="$2" id="$3" half slot
+    half=$(half_of_pin "${pin}") || half=$(active_idx_of "${iface}")
+    slot=$(id_to_slot "${iface}" "${id}" "${half}")
+    [[ -z "${slot}" ]] && { echo 0; return; }
+    sudo -n python3 "${TEST_DIR}/lib/read_rule_counters.py" "${pin}" "${slot}"
+}
+
 # ── Frame injection (scapy / raw AF_PACKET) ──────────────────────────────
 # Per §5.25 P1: python3 is spawned via `ip netns exec` so the
 # AF_PACKET socket opened inside the interpreter binds inside the netns

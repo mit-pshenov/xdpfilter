@@ -697,3 +697,54 @@ zero-diff.
   passed); xlated 37704B / jited 20873B — within the §5.53 spike budget. Isolated
   pin, cleaned up.
 - `xdpmacfilter --version` → `0.15.0`. Full ctest result: see final SendMessage.
+
+---
+
+# MVP-4.21 / B30 slot/id decouple (§5.61) — 2026-06-01
+
+Implemented strictly per §5.61. brownfield DIFF — impl owns src/ + mac_filter.h +
+the tests/CMakeLists.txt registration only (test body + fixtures owned by tester).
+
+## SLOT-PLUMB carrier choice (D-mvp-4.21-SLOT-PLUMB — impl's call)
+Chose `std::unordered_map<u32,u32> id_to_slot` (id→rank) computed once via
+`compute_id_to_slot` (sort unique ids; rank = position), plus a parallel
+`std::array<u32,64> slot_to_id` (rank→id, EMPTY-padded) via `compute_slot_to_id`.
+Threaded into ALL populate sites so a single coherent slot per rule is used
+everywhere (D-mvp-4.21-SLOT-COHERENCE): the 4 lowering bit-shifts (lower_axis /
+lower_axis6 / aggregate_axis / lower_port_axis each gained an `id_to_slot` param),
+`populate_rules_inner_slot` (`&r.id`→`&slot`), `write_slot_rule_id`, and the
+copy-forward remap.
+
+## copy_rule_counters_forward keyed-by-id (D-mvp-4.21-COPYFWD-BY-ID — load-bearing)
+New anon-namespace signature (loader.cpp only, PI-7 hpp untouched):
+`copy_rule_counters_forward(int old_active_inner_fd, int inactive_inner_fd,
+std::span<const u32> old_slot_to_id, std::span<const u32> new_slot_to_id)`.
+For each NEW slot k: EMPTY→zeros; surviving id (present in old)→copy
+old_active[old_slot]→inactive[k]; new id→zeros. All [0,64) written (no stale
+leak). Old mapping recovered from the OLD-active `slot_rule_id` half via
+`read_slot_rule_id_half` BEFORE the flip (populate touches only the inactive
+half). Fresh attach passes an all-EMPTY old mapping (D-mvp-4.21-FIRSTAPPLY) →
+every slot zeroed (harmless, fresh inner already zero).
+
+## Deviation (coverage-preserving → inline-merge)
+- **§6.76 RESOURCE_LOCK widened `xdp_fixture` → `xdp_fixture;exporter_port_9417`**
+  (design FileList said `RESOURCE_LOCK xdp_fixture`). The tester's
+  `T_RULE_COUNTER_SURVIVES_REORDER.sh` scrapes the exporter `/metrics` on port
+  9417 (33 refs), so it can clash with `T_EXPORTER_RULE_LABELS` which holds that
+  lock. Conservative serialization; TIMEOUT 120 (multiple apply+inject+scrape
+  cycles). `RESOURCE_LOCK xdp_fixture` is SHOULD-level orientation per §5.61
+  operative-semantic note — this is an inline-merge.
+
+## Verification
+- kManagedMaps = **39** (was 38); slot_rule_id row added; all 3 walk loops
+  (clear/pin/reuse) walk the single table (HK-9 / guard #10).
+- PI-7: `git diff 73e2964 -- src/lib/loader.hpp src/lib/config.hpp` = ∅ (also
+  sidecar / logger / cli zero-diff).
+- **Datapath byte-identity (PI-mvp-4.21-DATAPATH-IDENTICAL):**
+  `llvm-objdump -d --section=xdp` of new vs baseline (`73e2964`)
+  `mac_filter.bpf.o` → **3660 insns, ZERO diff** (XDP-PROG-BYTE-IDENTICAL).
+  `slot_rule_id` present in the new `.maps` section ONLY (size 0x28; absent in
+  baseline) — the program references no new instruction.
+- Verifier: `bpftool prog loadall build/mac_filter.bpf.o` → rc=0.
+- Config Q2: id-value cap removed (reject only `id==0xFFFFFFFF` sentinel) +
+  `rules.size() > 64` count cap added (exit 9 ConfigError).

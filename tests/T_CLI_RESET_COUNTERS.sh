@@ -89,9 +89,11 @@ rule_counters_pin() {
 }
 
 read_rc_slot() {
-    local id="$1" pin
-    pin=$(rule_counters_pin)
-    sudo -n python3 "${TEST_DIR}/lib/read_rule_counters.py" "${pin}" "${id}"
+    # §5.61 (B30): rule_counters is slot-keyed; remap operator id -> slot
+    # via slot_rule_id (D-mvp-4.21-RAWMAP-REMAP). Assertion values unchanged.
+    # (read_rc_all below stays a RAW all-slots dump — the batch reset zeros
+    # every slot regardless of id, so the all-zero check needs no remap.)
+    read_rule_counter_by_id "${IFACE_A}" "$(rule_counters_pin)" "$1"
 }
 
 read_rc_all() {

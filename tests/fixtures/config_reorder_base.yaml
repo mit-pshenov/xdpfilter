@@ -1,0 +1,30 @@
+# config_reorder_base.yaml — §5.61 (MVP-4.21 / B30) §6.76 BASE state.
+#
+# The BEFORE ruleset for T_RULE_COUNTER_SURVIVES_REORDER. Two rules with
+# SPARSE, non-dense ids that also exercise id > 63 (proving the Q2
+# relaxation of the old dense `id < 64` cap — D-mvp-4.21-Q2):
+#
+#   id 5   : dst 10.5.0.0/16     PASS   (id-sorted rank 0 → slot 0)
+#   id 100 : dst 10.100.0.0/16   PASS   (id-sorted rank 1 → slot 1; id>63)
+#
+# Disjoint /16 dst ranges so each id is matched by exactly one dst_ip and
+# per-id counting is unambiguous. All rules dst-only (src wildcard) → the
+# injected frame's src_ip is irrelevant.
+#
+# default_action: drop — a frame matching no rule is dropped (so a matched
+# PASS verdict is unambiguous).
+#
+# The companion config_reorder_insert.yaml inserts id 50 between these two
+# (id-sorted), pushing id 100 from slot rank-1 to rank-2 — the slot move
+# whose counter-continuity §6.76 asserts survives.
+schema_version: 2
+default_action: drop
+rules:
+  - id: 5
+    action: pass
+    match:
+      dst_cidr: "10.5.0.0/16"
+  - id: 100
+    action: pass
+    match:
+      dst_cidr: "10.100.0.0/16"
