@@ -554,13 +554,17 @@ static __always_inline void bump_stat(__u32 idx)
     }
 }
 
-/* §5.31 (MVP-3.4b) PI-3.4b-4: per-rule counter bump. Called from BOTH the
- * MAC HASH-hit branch AND the CIDR LPM_TRIE-hit branch in mac_filter_prog
- * (Q1=B3 unified per-match semantic — two source-line call-sites sharing
- * the SAME helper). Verifier-required bounds check on `rule_id` is folded
- * inline; an out-of-range value is silently dropped (defense-in-depth —
- * loader-side validation at config.cpp:204 already ensures
- * `rule.id < XDPMF_ALLOWLIST_MAX`).
+/* §5.31 (MVP-3.4b) PI-3.4b-4: per-rule counter bump. Called from the
+ * bit-vector match dispatch in each family arm (Q1=B3 unified per-match
+ * semantic — call-sites share the SAME helper). NB: the `rule_id` parameter
+ * is actually the internal SLOT (`first_set_u64(acc) - 1`, an id-sorted rank
+ * in [0, count)), NOT the operator `id` — per §5.61 (MVP-4.21) B30 the two
+ * are decoupled and the raw counter map is slot-keyed. Verifier-required
+ * bounds check on that slot is folded inline; an out-of-range value is
+ * silently dropped (defense-in-depth — loader-side the rule COUNT is capped
+ * at XDPMF_ALLOWLIST_MAX (config.cpp rule-count cap), so every assigned slot
+ * is < XDPMF_RULE_COUNTERS_MAX; the old `id < XDPMF_ALLOWLIST_MAX` id-value
+ * cap was removed in B30).
  *
  * §5.35 (MVP-3.4d) D-3.4d-2: signature extends with `active` parameter so
  * the caller can pass the SAME active_idx snapshot used for MAC / CIDR /

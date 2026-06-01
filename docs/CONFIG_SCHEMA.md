@@ -36,7 +36,7 @@ rules:                     # optional list of rule mappings
 ## Rule mapping
 
 ```yaml
-- id: 0                    # REQUIRED, u32 in [0, 63]
+- id: 0                    # REQUIRED, any u32 except 4294967295 (reserved)
   action: pass             # REQUIRED: pass | drop
   match:                   # REQUIRED mapping; at least one axis below
     protocol: tcp
@@ -45,7 +45,7 @@ rules:                     # optional list of rule mappings
 
 | Key | Required | Type / values | Notes |
 |---|---|---|---|
-| `id` | **yes** | integer in `[0, 63]` | First-match-by-`id`; also the stable counter key (Prometheus `rule_id`). Up to 64 rules. |
+| `id` | **yes** | any u32 except `4294967295` (`0xFFFFFFFF`, reserved sentinel) | Sparse, operator-assigned. First-match-by-`id` (lowest wins); also the stable counter key (Prometheus `rule_id`). Need not be dense or zero-based — `id: 100` is valid. Duplicate ids rejected. The **rule count** (not the id value) is capped at 64. |
 | `action` | **yes** | `pass` \| `drop` | Verdict when this rule matches. |
 | `match` | **yes** | mapping | Must contain **at least one** of the 9 axes below. An unknown key in `match` is an error. |
 
@@ -62,7 +62,7 @@ is a wildcard (matches anything). At least one axis is required per rule.
 | `src_cidr` | `"192.168.1.0/24"` | Source IPv4 CIDR, longest-prefix. Same grammar as `dst_cidr`. |
 | `dst_cidr6` | `"2001:db8::/32"` | Destination IPv6 CIDR, longest-prefix. `len ∈ [0,128]`. |
 | `src_cidr6` | `"fe80::/10"` | Source IPv6 CIDR, longest-prefix. Same grammar as `dst_cidr6`. |
-| `protocol` | `tcp` / `17` | L4 protocol, exact. Name `tcp`(6) / `udp`(17) / `icmp`(1), or a numeric IP-protocol number in `[0,255]`. |
+| `protocol` | `tcp` / `17` | L4 protocol, exact (matches the IP `protocol`/`nexthdr` byte). Name `tcp`(6) / `udp`(17) / `icmp`(1), or a numeric IP-protocol number in `[0,255]`. ⚠️ `icmp` is **ICMPv4 (1) only** — there is no `icmp6` alias; to match ICMPv6 in the IPv6 arm use the numeric value `58`. |
 | `dst_port` | `"443"` / `"8000-8080"` | L4 destination port, inclusive range. Single integer in `[0,65535]`, or `"lo-hi"` with `lo ≤ hi`. |
 | `vlan` | `100` | Outer 802.1Q VLAN VID, exact. Integer in `[0,4095]`. (Lists/ranges are out of scope — use multiple rules.) |
 | `ethertype` | `arp` / `0x88b5` | Inner (post-VLAN) EtherType, exact. Name `ipv4`(0x0800) / `ipv6`(0x86dd) / `arp`(0x0806), a hex literal `0x…`, or a number in `[0,65535]`. |
@@ -117,9 +117,14 @@ rules:
 
 - **`apply` is a hot-swap.** Re-running `apply` on an attached iface swaps
   the rule set atomically via `bpf_link__update_program` — no drop window.
-- **Counter continuity.** Per-rule counters are keyed on the operator `id`,
-  not on internal bit-vector position, so renumbering or inserting a rule
-  preserves each rule's `xdpfilter_rule_match_total{rule_id=...}` series.
+- **Counter continuity.** The Prometheus per-rule series are keyed on the
+  operator `id` (the exporter recovers it from the internal slot), so
+  renumbering or inserting a rule preserves each rule's
+  `xdpfilter_rule_match_total{rule_id=...}` series.
+- **`reset-counters --rule-id <N>` takes a slot, not an `id`.** The kernel
+  counter array is indexed by internal **slot** (the `id`-sorted rank,
+  `[0, 63]`), so `--rule-id <N>` zeroes slot `N` — it does **not** look up
+  the operator `id` / Prometheus `rule_id`. Omit the flag to zero all slots.
 - **Ansible.** The example `ansible/templates/xdpfilter-config.yaml.j2`
   renders this schema from a `xdpfilter_rules` list (see
   `docs/FLEET_DEPLOYMENT.md`).

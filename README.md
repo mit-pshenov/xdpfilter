@@ -113,7 +113,11 @@ sudo build/xdpmacfilter --help | --version
   1 MiB. See [`docs/CONFIG_SCHEMA.md`](docs/CONFIG_SCHEMA.md).
 - **`bypass`** — temporarily pass-all (`--unsafe` required non-interactively;
   `--reason` is audit-logged).
-- **`reset-counters`** — zero all rule counters, or one slot with `--rule-id`.
+- **`reset-counters`** — zero all rule counters, or a single slot with
+  `--rule-id <N>`. ⚠️ Despite the flag name, `<N>` is the internal **slot
+  index** (`id`-sorted rank, range `[0, 63]`) — **not** the operator-assigned
+  rule `id` nor the Prometheus `rule_id` label. To zero a specific rule,
+  pass its rank among the sorted ids, or just omit the flag to zero all.
 - **`--mode {generic|native|offload}`** — XDP attach mode (attach/apply
   only; default `generic`/SKB). `native` (driver XDP) is the perf-correct
   mode where the driver supports it; `detach` auto-detects.
