@@ -511,10 +511,9 @@ void kernel_version_probe()
  * Throws std::system_error{on_fail, ...} with stderr containing the
  * literal `refusing to operate` token (load-bearing for §6 T-1 grep).
  *
- * Single-callsite per §5.22 anon-namespace fence (D-3.4e-2). Future slices
- * MAY promote to retrofit apply_request/detach() if /mint-review surfaces
- * a shape-rejection regression there. Not retrofitted this slice per
- * Q2.A2 scope discipline. */
+ * Anon-namespace fence (D-3.4e-2). §5.62 (MVP-4.22) R-1 / SEC-H1: now also
+ * the FIRST statement of apply_request() and detach() so the iface shape-fence
+ * (exit 8) is uniform across all three entry points (reset/apply/detach). */
 void validate_iface_name(const std::string& iface, LoaderError on_fail)
 {
     auto reject = [&](std::string_view why) {
@@ -2204,6 +2203,12 @@ std::uint32_t attach(const AttachConfig& cfg)
 
 std::uint32_t detach(const std::string& iface)
 {
+    // §5.62 (MVP-4.22) R-1 / SEC-H1: iface shape-fence as the FIRST statement —
+    // reject shape-invalid names (exit 8) before kernel_version_probe / any
+    // kernel touch; removes the implicit reliance on if_nametoindex as the
+    // sole shape gate.
+    validate_iface_name(iface, LoaderError::PathRefused);
+
     // §5.24 Q3 Option B: symmetric with attach() — detach() also early-loads
     // the skeleton (§5.22 Q1), so kernel-version gating must precede that.
     kernel_version_probe();
@@ -2313,6 +2318,10 @@ namespace internal {
  * lives in exactly ONE place. */
 std::uint32_t apply_request(const ApplyRequest& req)
 {
+    // §5.62 (MVP-4.22) R-1 / SEC-H1: iface shape-fence as the FIRST statement —
+    // reject shape-invalid names (exit 8) before any lowering/kernel touch.
+    validate_iface_name(req.iface, LoaderError::PathRefused);
+
     // §5.47 (MVP-4.7): the MAC axis is UN-FROZEN — lowered to a per-MAC
     // aggregated rule-bitmask list (constrained) + a wildcard mask
     // (unconstrained), exactly like the proto/vlan exact-HASH axes. NO closure

@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <format>
 #include <string>
 #include <string_view>
@@ -552,6 +553,22 @@ void write_rule_index(std::string_view iface,
                                 "sidecar.warn.write_failed",
                                 std::string_view{iface}, msg, fs);
         }
+    } catch (const std::exception& e) {
+        /* §5.62 (MVP-4.22) R-5 / Q1-A2: enrich the std-exception path with
+         * e.what() so the degradation is diagnosable. Never-throw PRESERVED —
+         * the trailing catch(...) below is the backstop for non-std throws
+         * (guard #30 / PI-mvp-4.22-NEVER-THROW). REUSES the existing event. */
+        const std::string what{e.what()};
+        const xdpmf::logger::Field fs[] = {
+            xdpmf::logger::Field{"exception", std::string_view{what}},
+        };
+        xdpmf::logger::emit(
+            xdpmf::logger::Level::Warn,
+            "sidecar.warn.write_exception",
+            std::string_view{iface},
+            "xdpmacfilter: WARN: rule_index.json write failed: "
+            "exception during body construction\n",
+            fs);
     } catch (...) {
         /* PI-32-3.4b never-throw contract: any exception (std::bad_alloc,
          * std::format argument-formatting issue, etc.) degrades to silent

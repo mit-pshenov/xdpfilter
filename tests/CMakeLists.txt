@@ -1473,3 +1473,50 @@ set_tests_properties(T_ANDEXT_TRUNCATED_MALFORMED PROPERTIES
     TIMEOUT 120
     SKIP_RETURN_CODE 77
 )
+
+# ── §5.62 MVP-4.22 / robustness hardening batch (R-1 / R-3 / R-5) ────────────
+# Three NEW ctests for the defense-in-depth pass (§6.77/§6.78/§6.79):
+#   §6.77 T_IFACE_SHAPE_REJECT_APPLY_DETACH (R-1 / SEC-H1): apply AND detach with
+#     a shape-invalid --iface → exit 8 + 'refusing to operate'; negation = a VALID
+#     iface name does NOT trip the gate. PURE userspace — the validate fires before
+#     any bpffs/iface mutation → NO root, NO RESOURCE_LOCK (guard #12 N/A), like
+#     T_EXIT_CODE_9_ON_CONFIG_ERROR / T_CLI_BAD_MAC. TIMEOUT 15 (binary launch ×5).
+#   §6.78 T_CONFIG_INT_OVERFLOW_REJECT (R-3): oversized digit strings in the
+#     id/protocol/dst_port/vlan integer grammars → exit 9 (ConfigError); parity
+#     control = the exact in-range maxima STILL parse. PURE userspace config-parse
+#     test — config parse rejects before any attach → NO root, NO RESOURCE_LOCK
+#     (per §5.62 FileList). TIMEOUT 30.
+#   §6.79 T_SIDECAR_READ_EXCEPTION_DIAGNOSTIC (R-5): a corrupt sidecar rule_index
+#     makes the exporter emit the NEW exporter.scrape.warn.sidecar_read_exception
+#     event WHILE still serving /metrics (never-throw preserved). Spawns the
+#     exporter (JSON mode) on the shared 9417-base port + touches veth → takes BOTH
+#     xdp_fixture AND exporter_port_9417 RESOURCE_LOCKs (like T_EXPORTER_RULE_LABELS).
+#     TIMEOUT 90. SKIP-77 if the throw is not inducible in this environment (the
+#     event's existence is independently pinned by T_LOG_EVENT_CATALOG_STABILITY).
+foreach(T IN ITEMS
+    T_IFACE_SHAPE_REJECT_APPLY_DETACH
+    T_CONFIG_INT_OVERFLOW_REJECT
+)
+    add_test(
+        NAME ${T}
+        COMMAND bash ${TEST_DIR}/${T}.sh
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    set_tests_properties(${T} PROPERTIES
+        ENVIRONMENT "${TEST_ENV}"
+        TIMEOUT 30
+        SKIP_RETURN_CODE 77
+    )
+endforeach()
+
+add_test(
+    NAME T_SIDECAR_READ_EXCEPTION_DIAGNOSTIC
+    COMMAND bash ${TEST_DIR}/T_SIDECAR_READ_EXCEPTION_DIAGNOSTIC.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_SIDECAR_READ_EXCEPTION_DIAGNOSTIC PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK "xdp_fixture;exporter_port_9417"
+    TIMEOUT 90
+    SKIP_RETURN_CODE 77
+)

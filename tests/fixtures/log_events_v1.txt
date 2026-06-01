@@ -16,6 +16,7 @@ exporter.error.all_ifaces_eacces
 exporter.fatal
 exporter.listening
 exporter.scrape.warn.rule_counters_open_failed
+exporter.scrape.warn.sidecar_read_exception
 exporter.scrape.warn.stats_open_failed
 exporter.shutdown
 exporter.usage_error

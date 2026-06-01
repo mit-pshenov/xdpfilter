@@ -17,6 +17,7 @@
 
 #include "common/escape_util.hpp"  // §5.37 (MVP-3.4f) — escape_json + format_timestamp_utc
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <format>
@@ -35,8 +36,12 @@ constexpr std::string_view kLogFormatJsonValue{"json"};
 
 /* Module-static cached format. Initialized lazily on the first emit() under
  * `g_init_once`; subsequent emits read without acquiring the once_flag's
- * lock (the call_once "already done" fast path is a single relaxed load). */
-Format         g_format = Format::Text;
+ * lock (the call_once "already done" fast path is a single relaxed load).
+ * §5.62 (MVP-4.22) R-4 / D-mvp-4.22-GFORMAT-ATOMIC: std::atomic closes the
+ * benign-but-real init-write / per-emit-read data race (TSAN-visible). Relaxed
+ * suffices — this selector publishes no other state; the recursive-emit guard
+ * is preserved (the queued-WARN emit() still observes the settled Text store). */
+std::atomic<Format> g_format = Format::Text;
 std::once_flag g_init_once;
 /* When the env-var carries an unknown value, the lazy init queues a one-shot
  * WARN to fire AFTER the format is set to Text — emitting it from inside
@@ -70,22 +75,22 @@ void init_format()
 {
     const char* raw = std::getenv(kLogFormatEnv.data());
     if (raw == nullptr || raw[0] == '\0') {
-        g_format = Format::Text;
+        g_format.store(Format::Text, std::memory_order_relaxed);
         return;
     }
     const std::string_view value{raw};
     if (value == kLogFormatJsonValue) {
-        g_format = Format::Json;
+        g_format.store(Format::Json, std::memory_order_relaxed);
         return;
     }
     if (value == kLogFormatTextValue) {
-        g_format = Format::Text;
+        g_format.store(Format::Text, std::memory_order_relaxed);
         return;
     }
     /* Unknown value: queue WARN to fire AFTER call_once returns so the
      * recursive emit() observes g_format already set to Text and does NOT
      * re-enter init_format. */
-    g_format             = Format::Text;
+    g_format.store(Format::Text, std::memory_order_relaxed);
     g_unknown_warn_value = value;
     g_emit_unknown_warn  = true;
 }
@@ -237,7 +242,7 @@ void emit(Level                              level,
     } catch (...) {
         /* call_once can theoretically throw on system_error (mutex failure);
          * silent-fallback to default Text. */
-        g_format = Format::Text;
+        g_format.store(Format::Text, std::memory_order_relaxed);
     }
 
     /* If lazy init flagged an unknown env value, fire the one-shot WARN now
@@ -261,7 +266,7 @@ void emit(Level                              level,
              warn_fields);
     }
 
-    if (g_format == Format::Json) {
+    if (g_format.load(std::memory_order_relaxed) == Format::Json) {
         emit_json(level, event, iface, msg, fields);
     } else {
         emit_text(msg);

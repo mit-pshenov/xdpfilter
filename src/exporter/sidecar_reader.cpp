@@ -12,6 +12,9 @@
  */
 #include "sidecar_reader.hpp"
 
+#include "common/logger.hpp"  // §5.62 (MVP-4.22) R-5 — observable graceful-degradation
+
+#include <exception>
 #include <fstream>
 #include <regex>
 #include <string>
@@ -98,10 +101,39 @@ std::vector<RuleMeta> parse_rule_index(std::string_view path) noexcept
             rm.ethertype = extract_axis(body, "ethertype");
             out.push_back(std::move(rm));
         }
+    } catch (const std::exception& e) {
+        /* §5.62 (MVP-4.22) R-5 / Q1-A2 + Q2-A2: make the graceful-degradation
+         * OBSERVABLE — emit a structured diagnostic instead of swallowing
+         * silently. Never-throw PRESERVED: emit() is noexcept and the trailing
+         * catch(...) below backstops any non-std throw (guard #30 /
+         * PI-mvp-4.22-NEVER-THROW). Caller still observes empty-or-partial
+         * vector and degrades labels to action="unknown" (PI-32-3.4b). */
+        const std::string what{e.what()};
+        const std::string path_s{path};
+        const xdpmf::logger::Field fs[] = {
+            xdpmf::logger::Field{"path",      std::string_view{path_s}},
+            xdpmf::logger::Field{"exception", std::string_view{what}},
+        };
+        xdpmf::logger::emit(
+            xdpmf::logger::Level::Warn,
+            "exporter.scrape.warn.sidecar_read_exception",
+            "xdpmacfilter: WARN: rule_index.json read failed; serving "
+            "degraded labels\n",
+            fs);
     } catch (...) {
-        /* Never-throw contract: any I/O or regex exception is swallowed;
-         * caller observes empty-or-partial vector and degrades labels to
-         * action="unknown" for affected rule_ids (PI-32-3.4b). */
+        /* Never-throw contract: any non-std exception is swallowed; caller
+         * observes empty-or-partial vector and degrades labels to
+         * action="unknown" for affected rule_ids (PI-32-3.4b). The diagnostic
+         * event is emitted with an unknown/non-std marker. */
+        const xdpmf::logger::Field fs[] = {
+            xdpmf::logger::Field{"exception", std::string_view{"unknown (non-std)"}},
+        };
+        xdpmf::logger::emit(
+            xdpmf::logger::Level::Warn,
+            "exporter.scrape.warn.sidecar_read_exception",
+            "xdpmacfilter: WARN: rule_index.json read failed; serving "
+            "degraded labels\n",
+            fs);
     }
     return out;
 }

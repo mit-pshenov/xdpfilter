@@ -21,6 +21,7 @@
 
 #include <cstdint>
 #include <format>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -84,6 +85,15 @@ namespace {
             throw_cfg("invalid integer", file, scalar_node.line, scalar_node.col,
                       std::format("{} contains non-digit '{}'", field, ch));
         }
+        // §5.62 (MVP-4.22) R-3 / D-mvp-4.22-INT-OVERFLOW-DEFENSE: pre-multiply
+        // overflow guard — reject explicitly AT the multiply, robust to a future
+        // wider bound / accumulator-type change. Cannot reject the in-range
+        // maximum (4294967295 ≪ this ceiling). Defense-in-depth, NOT a live-bug
+        // fix; the post-check below still enforces the exact u32 bound.
+        if (v > (std::numeric_limits<std::uint64_t>::max() - 9u) / 10u) {
+            throw_cfg("integer out of range", file, scalar_node.line, scalar_node.col,
+                      std::format("{} exceeds u32 max", field));
+        }
         v = v * 10u + static_cast<std::uint64_t>(ch - '0');
         if (v > 0xFFFFFFFFu) {
             throw_cfg("integer out of range", file, scalar_node.line, scalar_node.col,
@@ -137,6 +147,14 @@ namespace {
         if (ch < '0' || ch > '9') {
             throw_cfg("invalid integer", file, line, col,
                       std::format("{} contains non-digit '{}'", field, ch));
+        }
+        // §5.62 (MVP-4.22) R-3 / D-mvp-4.22-INT-OVERFLOW-DEFENSE: pre-multiply
+        // overflow guard (see parse_u32_or_throw). Robust to a future wider
+        // bound / accumulator-type change; cannot reject an in-range maximum.
+        // The post-check below still enforces the exact inclusive bound.
+        if (v > (std::numeric_limits<std::uint64_t>::max() - 9u) / 10u) {
+            throw_cfg("integer out of range", file, line, col,
+                      std::format("{} must be in [0,{}]", field, max_inclusive));
         }
         v = v * 10u + static_cast<std::uint64_t>(ch - '0');
         if (v > max_inclusive) {

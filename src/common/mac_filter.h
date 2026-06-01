@@ -8,6 +8,7 @@
 #pragma once
 
 #ifdef __cplusplus
+#include <cstddef>   /* offsetof — for the §5.62 (MVP-4.22) R-2 ABI static_asserts */
 extern "C" {
 #endif
 
@@ -341,5 +342,21 @@ struct allow_entry {
 #define XDPMF_SIDECAR_ROOT  "/run/xdpmacfilter"
 
 #ifdef __cplusplus
+/* §5.62 (MVP-4.22) R-2 / D-mvp-4.22-ABI-ASSERTSET: pin the BPF↔userspace ABI on
+ * the C++ side (the side that must match the on-wire/kernel layout). A green
+ * build IS the assertion; a red build IS a detected padding/layout drift. These
+ * are #ifdef __cplusplus-guarded → invisible to the BPF (-target bpf, C) compile,
+ * so the datapath object stays byte-identical (PI-mvp-4.22-DATAPATH-IDENTICAL).
+ * Packed structs need sizeof only (no padding); the two non-packed wide-field
+ * structs add an offsetof on the wide trailing field where drift could hide. */
+static_assert(sizeof(struct xdpmf_mac)        == 6,  "ABI: xdpmf_mac is 6 packed octets");
+static_assert(sizeof(struct xdpmf_cidr_v4)    == 8,  "ABI: u32 prefixlen + u32 addr, packed");
+static_assert(sizeof(struct xdpmf_cidr_v6)    == 20, "ABI: u32 prefixlen + 16 addr bytes, packed");
+static_assert(sizeof(struct xdpmf_port_range) == 16, "ABI: lo/hi/bit, 8-aligned u64 tail");
+static_assert(offsetof(struct xdpmf_port_range, bit) == 8, "ABI: u64 bit at offset 8");
+static_assert(sizeof(struct rule_entry)       == 4,  "ABI: present+action_id+_pad[2]");
+static_assert(sizeof(struct action_entry)     == 4,  "ABI: action_type+_pad[3]");
+static_assert(sizeof(struct allow_entry)      == 8,  "ABI: present+_pad[3]+u32 rule_id (vestigial — reshaped to __u64 at §5.43; layout pinned for history/reuse-safety)");
+static_assert(offsetof(struct allow_entry, rule_id) == 4, "ABI: rule_id at offset 4");
 }
 #endif
