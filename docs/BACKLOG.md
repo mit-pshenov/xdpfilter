@@ -6,6 +6,21 @@ Tracks pending documentation work. Created 2026-05-27 consolidating:
 
 This backlog is **manual prose work** — explicitly separated from `/mint-dev` slices per user direction. Owner: human.
 
+## ✅ Documentation pass — RESOLVED 2026-06-01
+
+The full doc bucket **B1–B13** was paid down in one prose pass (commit on `main`):
+
+- **B1, B3, B4, B6, B10, B11, B12** — `README.md` full rewrite: dropped MVP-1 framing; 9-axis match-model table; all 5 loader subcommands + `xdpmf-exporter`; exit codes 0–9; env-var table; CMake-options table; `ansible` apt line; `FLEET_DEPLOYMENT.md` install path; Operator/Contributor "Where docs live" split.
+- **B2** — `HANDOFF.md` → `docs/history/HANDOFF-mvp1.md` with an ARCHIVED banner (git mv).
+- **B5** — `ansible/templates/xdpfilter-config.yaml.j2`: `schema_version` 1→2, `action: {{ rule.action | default('pass') }}`, all 9 axes optionally rendered; playbook var-spec updated.
+- **B7** — `FLEET_DEPLOYMENT.md`: chose option (b) — honestly documented that the `xdpmacfilter_trust_model` metric is **NOT implemented / not scheduled** (the alert never fires; audit-log is the only trust-posture signal). Implementing the metric is a code slice, out of scope for the docs pass.
+- **B8** — `FLEET_DEPLOYMENT.md`: NEW "Environment variables" section (`XDPMF_TRUST_MODEL`, `XDPMF_LOG_FORMAT`, `XDPMF_BPFFS_ROOT`) + JSON-logging Drop-In recipe.
+- **B9** — chose option (a): NEW `mint/README.md` index/reading-order for the design corpus (no file moves — avoids breaking `design.md` cross-refs).
+- **B13** — chose option (a): NEW `docs/CONFIG_SCHEMA.md` — full schema_version-2 / 9-axis reference with per-axis grammar + worked example.
+- **B14** — meta-finding; this file is the tracking surface. No action (closed pre-pass).
+
+Remaining open in this file: **B16, B17** (test-infra, code-side) and **B15** (gitignore `.pyc`, code-side) — NOT docs; carry to a `/mint-dev` housekeeping cycle. Original B1–B14 entries below are retained for provenance.
+
 ## Status legend
 
 - **bucket** = was in the original CHANGELOG:245 13-item bucket

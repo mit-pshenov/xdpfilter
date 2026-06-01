@@ -1,4 +1,11 @@
-# Session handoff — mint MVP-1
+# Session handoff — mint MVP-1  ⚠️ ARCHIVED
+
+> **ARCHIVED — historical only.** This documents the *first* work session
+> (bootstrapping the `/mint` orchestrator). Everything below is 18+ cycles
+> obsolete: the mint command family (`/mint-dev`, `/mint-hld`, `/mint-review`,
+> `/mint-briefer`) shipped long ago and is used daily; the match model grew
+> from MAC-only to 9 axes. Kept for provenance, not as a how-to. For current
+> state see `README.md`, `mint/design.md`, and `CHANGELOG.md`.
 
 This is the first work session in `/home/user/mint-l2-mac-filter/`. The previous session (`/home/user/agent-teams-review/`) designed the mint multi-agent dev workflow; this session executes it.
 

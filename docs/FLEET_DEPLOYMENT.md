@@ -96,9 +96,14 @@ ALERT XDPMacFilterTrustModelDivergence
   }
 ```
 
-The `xdpmacfilter_trust_model` time series is **not yet shipped** —
-exporter implementation is the MVP-3.4 slice (per-rule counters +
-`xdpmf-exporter` binary). Until then, scrape the journal directly:
+> **Status: the `xdpmacfilter_trust_model` metric is NOT implemented and
+> is not currently scheduled.** The `xdpmf-exporter` binary shipped (it
+> emits `xdpfilter_packets_total`, `xdpfilter_rule_match_total`, and the
+> `xdpfilter_rule_info` gauge — see `src/exporter/prom_format.cpp`), but it
+> does **not** export a `trust_model` series, so the PromQL alert above will
+> never fire as written. The trust-model posture is observable today **only
+> via the audit log** (the `trust_model=<strict|fleet>` stderr line → journal).
+> Until/unless a `trust_model` metric is added, scrape the journal directly:
 
 ```sh
 ansible all -m shell -a "journalctl -u 'xdpmacfilter@*.service' --since '-1h' \
@@ -128,6 +133,27 @@ All four PI-2..PI-5 invariants hold in **both** strict and fleet
 postures. `fleet` is a **single-axis** relaxation, not a security mode
 selector.
 
+## Environment variables
+
+Both binaries are configured by a small set of environment variables.
+Set them in the systemd unit (or a Drop-In) for fleet rollout.
+
+| Variable | Values (default **bold**) | Consumed by | Effect |
+|---|---|---|---|
+| `XDPMF_TRUST_MODEL` | **`strict`** / `fleet` | loader (`xdpmacfilter`) | Selects the trust posture (see the decision matrix above). Garbage values fail closed → exit 9. NOT consumed by the exporter. |
+| `XDPMF_LOG_FORMAT` | **`text`** / `json` | loader **and** exporter | Selects the log line format. `json` emits one structured object per line — feed it to Loki / Splunk / ELK. An unknown value emits a WARN and falls back to `text`. Read once at first log call. |
+| `XDPMF_BPFFS_ROOT` | path (**`/sys/fs/bpf/xdpmacfilter`**) | exporter (`xdpmf-exporter`) | bpffs root scanned for per-iface stats pins. Overridden by `--bpffs-root` if both are given. |
+
+JSON logging via a systemd Drop-In, e.g.
+`/etc/systemd/system/xdpmacfilter@.service.d/log-format.conf`:
+
+```ini
+[Service]
+Environment=XDPMF_LOG_FORMAT=json
+```
+
+Then `sudo systemctl daemon-reload && sudo systemctl restart xdpmacfilter@eth0.service`.
+
 ## Quick operator checklist
 
 1. Decide trust-model posture per host (matrix above). Default to `strict`.
@@ -137,10 +163,12 @@ selector.
    /etc/systemd/system/xdpmacfilter@.service`. (The CMake build does this
    for you when `XDPMF_INSTALL_SYSTEMD_UNIT=ON` — default ON.)
 4. Write per-iface config to `/etc/xdpfilter/<iface>.yaml`
-   (`schema_version: 1` — see design §5.26 / §5.27 for the schema).
+   (`schema_version: 2` — see `docs/CONFIG_SCHEMA.md` for the full schema).
 5. If `fleet` posture: drop in the Drop-In file shown above.
 6. `sudo systemctl daemon-reload && sudo systemctl enable --now xdpmacfilter@<iface>.service`
 7. Verify: `journalctl -u xdpmacfilter@<iface>.service | grep '^xdpmacfilter: trust_model='`
    matches the intended posture.
-8. Add the fleet-wide divergence alert (above) to your monitoring once
-   the MVP-3.4 exporter lands.
+8. For trust-model divergence monitoring, aggregate the audit-log line
+   across the fleet (the journal grep above) — there is no `trust_model`
+   Prometheus metric (see the alert-semantic section). The shipped
+   `xdpmf-exporter` covers packet/rule counters, not trust posture.

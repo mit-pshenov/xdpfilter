@@ -18,8 +18,15 @@
 # Required vars (set via inventory or `-e key=value`):
 #   xdpfilter_iface            string  e.g. "eth0"
 #   xdpfilter_default_action   string  "pass" | "drop"
-#   xdpfilter_rules            list of {id, mac?, src_cidr?}
+#   xdpfilter_rules            list of rule mappings (see below)
 #   xdpfilter_trust_model      string  "strict" (default) | "fleet"
+#
+# Each rule mapping: {id, action?, <at-least-one match axis>}
+#   id         u32, required, range [0, 63]
+#   action     "pass" (default) | "drop"
+#   match axes (at least one required): mac, dst_cidr, src_cidr,
+#              dst_cidr6, src_cidr6, protocol, dst_port, vlan, ethertype
+#   See docs/CONFIG_SCHEMA.md for each axis's value grammar.
 
 - name: Deploy xdpmacfilter to fleet host
   hosts: xdpfilter_hosts
