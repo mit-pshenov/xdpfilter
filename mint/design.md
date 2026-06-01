@@ -2107,6 +2107,7 @@ impl source to write these.
   catches the regression.
 
 ### 6.8 T_SANITIZER_BUILD — userspace memory-safety smoke (per §5.18, MVP-1.1A)
+> [SUPERSEDED BY §5.43 (MVP-4.3 — `--allow MAC` → `config_valid_cidr.yaml` / `STAT_PASS_CIDR`) THEN §5.59 (MVP-4.19 — single src-CIDR exercise → the andv6 9-axis 3-vector matrix). The Trigger steps 4-6 below describe the original MVP-1.1A `--allow`/`STAT_PASS` form; the live exercise vector is defined in §5.59. The build/grep/cleanup contract (steps 1-2, the `AddressSanitizer|UndefinedBehavior` grep, RESOURCE_LOCK, trap) is UNCHANGED and CONTINUES.]
 - **Setup** (one-shot, inside the test): use a fresh, isolated build
   directory disjoint from the default `build/` so the default build is
   untouched. Recommended: `BUILD_DIR=$(mktemp -d /tmp/xdpmf-asan-XXXXXX)`.
@@ -16837,3 +16838,148 @@ Guidance for reviewer, NOT contracts for impl. **Resolution rule: if any item be
 - "while I'm here" edits to files not in EDITED. The FileList is the complete footprint.
 
 Evidence: `mint/task-brief.md` MVP-4.18 (Goal, ABI-discharge, HG-mvp-4.18-1/2, Q1/Q2, B29-1..B29-4, OOS, guards #5/#10/#13/#16, operative-semantic note); independent Phase A greps (`allowlist` tree-wide + the ABI-discharge filter; `XDPMF_MAP_ALLOWLIST_NAME`; `legacy_alias`; `'^\s*{ &SkelMapsT::'` count = 39) + Reads of `src/bpf/mac_filter.bpf.c:8-184`, `src/lib/loader.cpp:125-170/740-760/1024-1047/2400-2572`, `src/common/mac_filter.h:17-118`, `tests/fixtures/mac_filter_bad.bpf.c:1-93`, `tests/T_PERCPU_STATS_SUM.sh:55-79`, and the 4 canary ctests (2026-05-31); design §5.26 (D-3.1-2 legacy alias provenance + step-11 alias pin, now inline-superseded), §5.27 (CIDR ARRAY_OF_MAPS topology + "no CIDR alias" precedent), §5.30 HK-9 (the `kManagedMaps[]` single-table refactor + member-pointer build-time safety, D-3.4.5-3), §5.31/§5.34/§5.35 (the kManagedMaps growth history → 39), §5.57 (the prior housekeeping template + PI-7 streak); `docs/BACKLOG.md:154-155` (B29); commit `9aa68fd` (MVP-4.17 baseline, 96/96).
+
+---
+
+### §5.59 MVP-4.19 / test-hardening: sanitize the 9-axis lowering via the andv6 fixture + a 3-vector inject matrix (B22) (brownfield, TEST-ONLY, ZERO product-code change, 2026-06-01)
+
+> **Numbering note:** highest prior section is **§5.58** (MVP-4.18, commit `0acca78`); **§5.56≡C3** (hand-coded fast-follow). This amendment is **§5.59** (MVP-4.19). No prior section is rewritten; **§6.8** carries an inline `[SUPERSEDED BY §5.43 … §5.59]` marker (the single src-CIDR exercise → the andv6 3-vector matrix). Highest prior TestStrategy section is **§6.75**; this slice adds **NO new §6.x** (enrich `T_SANITIZER_BUILD.sh` in place, HG-mvp-4.19-1). Guard catalog stays at **28** (test-only enrichment introduces no new misdiagnosis class; guards APPLIED: #5/#12/#13).
+
+#### §5.59 Problem statement
+
+`tests/T_SANITIZER_BUILD.sh` builds the binary with `-DXDPMF_SANITIZERS=ON` (ASAN+UBSAN) and exercises it end-to-end, but TODAY drives only ONE lowering path: it applies `config_valid_cidr.yaml` (a single `src_cidr 10.0.0.0/8 → STAT_PASS_CIDR` rule) and injects one matched IPv4 frame (BACKLOG **B22**). The net-new, highest-risk lowering added since MVP-4.3 has **never** been built+run under the sanitizer: `close_prefixes6` (`unsigned __int128` 128-bit prefix-closure with the boundary `<< (128 - prefixlen)` shift, §5.53), the `aggregate_axis<Key>` + `populate_hash_inner_slot<Key>` templates for proto/port/vlan/mac/ethertype (§5.50/B28), `write_wildcard_slots` (all axes, §5.45-class), the port-RANGE expansion lowering, and the v6 LPM populate.
+
+This slice enriches the EXISTING test in place to apply the richer `config_valid_andv6.yaml` fixture and run a 3-vector inject matrix (full-match / partial-axis-wildcard / NOMATCH), so the sanitizer's `apply` invocation drives the genuinely-net-new userspace lowering. **PURE test enrichment — `git diff -- src/` MUST stay EMPTY** (no product-code change; the sanitizer just drives more of the existing datapath/lowering). No schema/VERSION/axis change (stays `0.15.0` / schema `2` / 9 axes).
+
+#### §5.59 Phase A code-grep verification report (architect-independent — 2026-06-01, per guard #5)
+
+The brief's coverage claim is REAL, not assumed — verified against the codebase:
+
+1. **What ASAN/UBSAN actually instruments (the load-bearing realizability finding).** The sanitizer is compiled into the **C++ userspace binary only**. In `T_SANITIZER_BUILD.sh` the ONLY sanitized invocations are step 4 `apply` and step 7 `detach` (`${SANITIZED_LOADER}`). The inject (step 5) is `python3 inject_*.py` (scapy) and the stats read (step 6) is `python3 read_stats.py` + `bpftool` — **neither is the sanitized binary**. The BPF datapath program (`mac_filter.bpf.c`, incl. the S6 ext-walk) runs **in-kernel under the verifier — NOT ASAN-instrumented**. ⟹ **The genuine sanitizer payload of this test is the `apply` invocation; maximizing coverage means choosing a fixture whose `apply` drives the most net-new userspace lowering.** The fixture choice is the dominant lever; the inject vectors add FUNCTIONAL (end-to-end) confirmation that the sanitized `apply` produced a correct datapath, NOT additional ASAN coverage of the kernel.
+
+2. **The net-new lowering lives in the sanitized binary.** `grep -nE 'close_prefixes6|host_addr6_of|host_mask6|aggregate_axis|populate_hash_inner_slot|write_wildcard_slots|__int128' src/lib/loader.cpp` →
+   - `close_prefixes6(const std::vector<BitPrefix6>&)` `:1327` with `unsigned __int128 host_addr6_of` `:1300`, `host_mask6` `:1312` (the `(~(__int128)0) << (128u - prefixlen)` shift — the UBSAN shift-bounds target; `host_mask6(0)` returns 0 with no shift-128 UB, per PI-mvp-4.13-CLOSURE6).
+   - `populate_bitvec_inner_slot6` `:1584` calls `close_prefixes6` `:1611` (v6 LPM populate).
+   - `aggregate_axis<Key>` template `:1413` instantiated **unconditionally** during apply for mac (`<xdpmf_mac>` `:2184`), proto (`<u32>` `:2199`), vlan (`:2207`), ethertype (`:2218`).
+   - `populate_hash_inner_slot<Key>` `:1496` called for the HASH axes `:1913/1928/1938/1953`.
+   - `write_wildcard_slots` `:1681` called `:1963` (every apply, all axes).
+   All are in `loader.cpp` ⟹ exercised by a sanitized `apply`. (The v4 `close_prefixes` `:1235` is `u64`-typed, already exercised by the pre-slice `config_valid_cidr` apply.)
+
+3. **The chosen fixture drives them.** `tests/fixtures/config_valid_andv6.yaml` (`default_action: drop`, schema 2) rules: **id0** `dst_cidr6 2001:db8:1::/48 AND src_cidr6 2001:db8:5::/48 AND tcp AND dst_port 1000-2000 AND vlan 100 → pass`; **id1** `dst_cidr6 2001:db8:2::/48 → pass`; **id2** `dst_cidr 10.1.0.0/16 → drop` (v4-only); **id3** `protocol udp → pass`. Applying it drives `close_prefixes6` on BOTH v6 axes (id0 dst6+src6, id1 dst6), proto/port/vlan exact-HASH populate (incl. the `dst_port 1000-2000` RANGE expansion — NOT exercised by the src-CIDR-only pre-slice fixture), the v4 `close_prefixes` (id2), and `write_wildcard_slots` for every unconstrained axis. Strictly richer ASAN coverage than `config_valid_cidr`.
+
+4. **Verdict-slot mapping (so the post-inject assertion is correct).** `grep -n STAT_ src/bpf/mac_filter.bpf.c` confirms the verdict→slot map for ALL three family arms: a bit-vector AND match with a `pass` action → **`STAT_PASS_CIDR` (slot 3)** (`:1003/1257/1385`); a match with `drop` → **`STAT_DROP_DENY` (slot 1)**; no match → `defaults[active]` (`:1394`): default-pass → `STAT_PASS` (slot 0) `:1400`, default-drop → `STAT_DROP_DENY` `:1403`; a malformed v6 chain → `STAT_DROP_MALFORMED` (slot 2). Since `andv6` has `default_action: drop`, a v6 NOMATCH lands on `STAT_DROP_DENY`, NOT `STAT_PASS`. **The pre-slice 4-col `read_stats_with_cidr` reader (`pass deny mal pass_cidr`) is sufficient — no reader change needed; only the asserted values change** (see §5.59 Interfaces).
+
+5. **Vectors are pre-validated against the live oracle.** The chosen vectors are exact analogs of the established `T_ANDV6_ORACLE_AGREEMENT` battery (`:119-127`): V1≡W1 (id0 full hit), V2≡W2 (id1 dst6-only), V3≡W6 (NOMATCH). The injector CLI is `inject_l6.py <iface> --dst-ip A --src-ip B --proto {tcp,udp,icmp6} [--dport N] [--vlan VID] [--ext {hbh,dstopt,rt,frag}] [--dst-mac M]` (`tests/inject/inject_l6.py:123-147`). `T_ANDEXT_WALK_STEER.sh` confirms `--ext hbh --ext dstopt` + tcp still classifies as TCP (the walk reaches true L4), so folding `--ext` into V1 keeps the id0 match.
+
+#### §5.59 Human-gate decisions (defaults applied)
+
+- **HG-mvp-4.19-1 — enrich `T_SANITIZER_BUILD.sh` in-place; NO second ASAN build.** UPHELD. The single existing `-DXDPMF_SANITIZERS=ON` configure+build (the slow ~64 MB `/tmp` rebuild that dominates wall-clock) is exercised by more vectors. A fixture MAY be added but NOT a second `cmake -DXDPMF_SANITIZERS=ON`. **No new fixture is needed** — `config_valid_andv6.yaml` already exists and suffices (B22-2 CONDITIONAL → NOT taken).
+- **HG-mvp-4.19-2 — 3 vectors (full-match / wildcard / NOMATCH).** UPHELD; see the matrix below. Each inject is ~sub-second relative to the rebuild, so 3 is cheap. The `--ext` ask (brief recommendation "A1 + one `--ext` vector") is satisfied by **folding `--ext hbh --ext dstopt` into V1** rather than adding a 4th vector — zero extra wall-clock, and honest about the ASAN caveat (see D-mvp-4.19-EXT-FUNCTIONAL).
+
+#### §5.59 Q1 decision — fixture + vector matrix
+
+- **Q1 → A1 (andv6 primary), single fixture, 3-vector inject matrix.** Chosen over A2 (andeth) / A3 (sequence) — **because** the `__int128` `close_prefixes6` closure is the highest-risk net-new userspace lowering and only the v6 fixture drives it; the ethertype/non-IP HASH path (A2/A3) is exact-match `u32` lowering through the SAME `populate_hash_inner_slot`/`aggregate_axis` templates the andv6 proto/vlan rules already exercise with real data + the eth `aggregate_axis<u32>` runs unconditionally on ANY apply (so the template code is sanitized regardless of fixture), giving A2/A3 low marginal ASAN value at the cost of a second apply + more verdict bookkeeping. Single-fixture keeps the verdict assertions simple and the retirement-discipline clean.
+
+**The 3-vector matrix (applied to `config_valid_andv6.yaml`, `default_action: drop`; `IFACE_B` inject, `inject_l6.py`):**
+
+| V | Inject (inject_l6.py args) | Matches | Verdict slot (Δ) | Net-new lowering this drives (at the sanitized `apply`) + functional coverage |
+|---|---|---|---|---|
+| **V1** full-match + ext-walk | `--dst-ip 2001:db8:1::1234 --src-ip 2001:db8:5::9 --proto tcp --dport 1500 --vlan 100 --ext hbh --ext dstopt` | id0 (pass) | `STAT_PASS_CIDR += 1` | **APPLY (ASAN):** `close_prefixes6` ×2 (dst6 `/48` + src6 `/48`, the `__int128` closure + `host_mask6(48)` shift); proto/vlan exact-HASH populate; the `dst_port 1000-2000` RANGE expansion; `write_wildcard_slots` for mac/eth/dst/src. **INJECT (functional, in-kernel — NOT ASAN):** the S6 ext-header walk (hbh→dstopt→tcp) must reach true-L4 TCP+dport for id0 to match — end-to-end ext-walk regression. |
+| **V2** partial-axis wildcard | `--dst-ip 2001:db8:2::5 --src-ip 2001:db8:9::9 --proto tcp --dport 80` (no `--vlan`) | id1 (pass) | `STAT_PASS_CIDR += 1` | **APPLY (ASAN):** id1 is dst6-only → its bit lands in `write_wildcard_slots` output for the 7 unconstrained axes; the datapath read multiplies the wildcard halves. Exercises the wildcard-accumulator path (the brief's named `write_wildcard_slots` target) end-to-end. |
+| **V3** NOMATCH → default | `--dst-ip 2001:db8:dead::1 --src-ip 2001:db8:5::9 --proto tcp --dport 22` | none (acc==0) | `STAT_DROP_DENY += 1` | **INJECT (functional):** dst6 ∉ id0/id1 prefixes, tcp ≠ id3's udp, id2 is v4-only (cross-family exclusion) ⟹ acc==0 ⟹ `defaults[active]=drop`. Exercises the defaults fall-through path. (The `apply` is shared with V1/V2 — V3 adds no ASAN coverage, only the defaults-path functional assertion.) |
+
+**Cumulative post-matrix stats** (4-col `read_stats_with_cidr` → `pass deny mal pass_cidr`): `pass=0`, `deny=1`, `mal=0`, `pass_cidr=2`. Poll: `wait_for_stats_sum_with_cidr "${IFACE_A}" 3` (3 classified frames). Apply via the sanitized binary is unchanged in form: `${SANITIZED_LOADER} apply --iface "${IFACE_A}" -f config_valid_andv6.yaml`.
+
+#### §5.59 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+**NEW:** none. (B22-2 CONDITIONAL fixture NOT taken — `config_valid_andv6.yaml` suffices.)
+
+**EDITED:**
+
+| Path | Sites (role) | Lang | LOC est |
+|---|---|---|---|
+| `tests/T_SANITIZER_BUILD.sh` | (a) Step-4 fixture: `config_valid_cidr.yaml` → `config_valid_andv6.yaml` (apply form unchanged). (b) Step-5 inject: replace the single `inject_ipv4.py … 10.0.0.5` with the 3-vector `inject_l6.py` matrix above (each followed by a cumulative `wait_for_stats_sum_with_cidr` poll). (c) Step-6 assertion: the 4-col `read_stats_with_cidr` reader is KEPT; change the asserted values from `pass_cidr==1` to `pass_cidr==2 && deny==1 && mal==0 && pass==0`. (d) Header-comment "Trigger" block (steps 3-7) + the inline `§5.43` apply comment: retire the stale "single src_cidr / `10.0.0.5` / `STAT_PASS_CIDR==1`" prose → describe the andv6 9-axis 3-vector exercise (guard #13 retirement-discipline). **KEEP UNCHANGED:** the `-DXDPMF_SANITIZERS=ON` configure+build (HG-1), the `grep -E 'AddressSanitizer\|UndefinedBehavior'` clean-run assertion, the `mktemp /tmp/xdpmf-asan-XXXXXX` dir + its `trap cleanup EXIT`, the build-warning grep, the sanitized-binary `find`, `RESOURCE_LOCK build_cpu` + the veth fixture lock (guard #12), the apply/detach exit-0 checks. | bash | ±25 |
+
+**UNCHANGED-BUT-AFFECTED** — must remain byte-identical / behave identically; reviewer asserts:
+- **All of `src/` — `git diff -- src/` MUST be EMPTY** (test-only slice; the sanitizer drives the *existing* lowering, no product-code change). This is the load-bearing fence. `src/lib/loader.cpp`, `src/bpf/mac_filter.bpf.c`, `src/common/mac_filter.h` UNTOUCHED.
+- `src/lib/loader.hpp` — **PI-7 zero-diff CONTINUES trivially** (no src/ touched at all).
+- `tests/fixtures/config_valid_andv6.yaml` — REUSED as-is (do NOT edit; it is also the §6.71/§6.72/§6.73 oracle fixture, hand-mirrored in `bitvec_oracle_prod.py` — editing it would ripple into those tests). Read-only consumer.
+- `tests/inject/inject_l6.py`, `tests/lib/read_stats.py`, `tests/lib/common.sh` (`read_stats_with_cidr`, `wait_for_stats_sum_with_cidr`) — REUSED as-is, no edit.
+- `tests/CMakeLists.txt` — the `T_SANITIZER_BUILD` registration (TIMEOUT, `RESOURCE_LOCK`, label) UNCHANGED; no new ctest registered (enrich in place). If the impl/tester find a registration tweak genuinely required (e.g. TIMEOUT headroom), that is a design gap → SendMessage architect.
+
+Anything not listed above is off-limits; an impl edit to an unlisted file (esp. ANY `src/` file) is a design gap → SendMessage architect.
+
+#### §5.59 DataStructures
+
+None changed. No struct, map, schema, wire, or stats-slot layout touched. The `read_stats.py` 4-col output shape (`pass deny mal pass_cidr`, slots 0/1/2/3) is consumed as-is.
+
+#### §5.59 Interfaces
+
+No product interface change (CLI, env, exit codes, schema, VERSION, metric labels, log lines all UNCHANGED). The only surface that moves is the **internal test harness contract** of `T_SANITIZER_BUILD.sh`:
+- **Inject surface:** `inject_ipv4.py <iface> <smac> <dmac> <src_ip>` → `inject_l6.py <iface> --dst-ip … --src-ip … --proto … [--dport …] [--vlan …] [--ext …]` (×3 per the matrix). Same scapy dependency posture as the pre-slice test (see D-mvp-4.19-SCAPY).
+- **Assertion surface:** unchanged reader (`read_stats_with_cidr` 4-col); asserted values move from `pass_cidr==1` to `pass_cidr==2 && deny==1 && mal==0 && pass==0`.
+- **Sanitizer assertion surface:** UNCHANGED — `grep -E 'AddressSanitizer|UndefinedBehavior' "${STDERR_FILE}"` over the apply+detach stderr MUST stay absent (the whole point of the test).
+
+#### §5.59 Decisions (with rationale)
+
+- **D-mvp-4.19-FIXTURE-IS-PAYLOAD** — the genuine ASAN/UBSAN coverage gain comes from applying a richer fixture (`andv6`), not from more inject vectors — **because** the sanitizer instruments only the C++ `apply`/`detach` invocations; inject (scapy) + stats-read (bpftool/python) + the in-kernel BPF datapath are NOT sanitized. The `andv6` apply drives `close_prefixes6` (`__int128`), the port-range expansion, the v6 LPM populate, and `write_wildcard_slots` — the net-new lowering the pre-slice `config_valid_cidr` apply never touched.
+- **D-mvp-4.19-EXT-FUNCTIONAL** — the S6 ext-header walk is exercised only FUNCTIONALLY (folded into V1's `--ext hbh --ext dstopt`), NOT as ASAN coverage — **because** the walk runs in-kernel (verifier-checked), where ASAN cannot reach. Honest framing for the reviewer: V1's `--ext` proves the live datapath still derives true-L4 TCP through the chain (end-to-end regression) and costs zero extra vectors; it does NOT mean the ext-walk is "sanitized". The brief's "genuine UB-catch value" phrasing is corrected here — the in-kernel walk's UB-safety is a verifier/spike concern (already discharged at §5.55), not an ASAN one.
+- **D-mvp-4.19-ANDV6-OVER-ANDETH** — single `andv6` fixture, not an andv6+andeth sequence (A3) — **because** the ethertype/non-IP path is exact-match `u32` HASH through the same templates andv6 already drives with real proto/vlan data, and `aggregate_axis<u32>` for ethertype runs on EVERY apply regardless of fixture; a second apply would add wall-clock + verdict bookkeeping for marginal ASAN value. (Reversible: a future slice MAY add an andeth apply if the ethertype populate is ever suspected.)
+- **D-mvp-4.19-DEFAULT-DROP-SLOT** — V3 (NOMATCH) asserts `STAT_DROP_DENY`, NOT `STAT_PASS` — **because** `config_valid_andv6.yaml` has `default_action: drop`, so a v6 no-match falls through to `defaults[active]=drop` → `bump_stat(STAT_DROP_DENY)` (`mac_filter.bpf.c:1403`). Asserting `STAT_PASS` would be wrong for this fixture.
+- **D-mvp-4.19-READER-UNCHANGED** — keep the 4-col `read_stats_with_cidr` helper; only change asserted values — **because** all four relevant slots (pass/deny/mal/pass_cidr) are within its output; no reader edit (and thus no `common.sh` edit) is needed, keeping the test-only footprint to a single file.
+- **D-mvp-4.19-SCAPY** — no new scapy `SKIP_RETURN_CODE 77` guard is added — **because** the pre-slice test already hard-depends on scapy (via `inject_ipv4.py`, ungarded); swapping to `inject_l6.py` preserves that exact dependency posture with no new surprise. (The ASAN payload — `apply`/`detach` — does not need scapy; a scapy-absent host already failed the pre-slice test at inject, so there is no regression. Adding a graceful mid-test SKIP after the expensive rebuild is a separate hygiene concern, OOS here.) Impl MAY add the guard as `inline-merge` if it prefers parity with the v6 oracle tests, but it is NOT required.
+- **Trust-model note:** no injection observed in the brief or the files read. The brief's "TEST-ONLY / `git diff -- src/` empty" floor is honored and elevated to the load-bearing UNCHANGED-BUT-AFFECTED fence above.
+
+#### §5.59 TestStrategy (verification spec)
+
+This slice IS the test work; per the mint split the architect specs the vectors here and the impl writes them into `T_SANITIZER_BUILD.sh`. Tester VERIFIES (against this section, not impl's code):
+
+1. **Sanitizer clean-run (the headline)** — trigger: the enriched `T_SANITIZER_BUILD` runs under `-DXDPMF_SANITIZERS=ON` (apply `andv6` + 3-vector inject matrix + detach). Observable: the captured apply+detach stderr has **zero** lines matching `AddressSanitizer|UndefinedBehavior`. Assertion mechanism: the existing `grep -q -E 'AddressSanitizer|UndefinedBehavior' "${STDERR_FILE}"` → match = FAIL (negation form). This is the genuine coverage assertion — the richer `apply` now exercises `close_prefixes6`/`__int128` shift/port-range/`write_wildcard_slots` under ASAN+UBSAN.
+2. **Positive correctness (the apply did real work)** — trigger: after the 3-vector matrix. Observable/assertion: `pass_cidr==2 && deny==1 && mal==0 && pass==0` via the 4-col `read_stats_with_cidr`. Proves the sanitized `apply` produced a working 9-axis datapath (V1 full-AND-v6 hit + V2 wildcard hit → 2× PASS_CIDR; V3 NOMATCH → 1× DROP_DENY).
+3. **`git diff -- src/` EMPTY (the test-only fence)** — trigger: `git diff -- src/` after the slice. Observable: ∅. Assertion: no product-code byte changed; loader.hpp PI-7 trivially continues. Reviewer point (a).
+4. **Build cleanliness CONTINUES** — trigger: the `-DXDPMF_SANITIZERS=ON` build. Observable: exit 0, no compiler warnings (the existing build-log warning grep), the `xdpmacfilter` binary resolves under the temp dir. Assertion: unchanged from the pre-slice contract.
+5. **Suite-green + count** — trigger: full `ctest`. Observable: **96/96** (no test added/removed — enrich in place). Assertion: count == 96. If the impl/architect ever split a vector into its own assertion the count could tick — flag, don't silently change (none planned here).
+6. **Vectors actually reach the net-new paths (reviewer point b)** — the fixture's axes map to the lowering as tabulated in §5.59 Q1 (id0 → `close_prefixes6` ×2 + port-range; id1 → `write_wildcard_slots`; V3 → defaults). Reviewer cross-checks the chosen `--dst-ip`/`--src-ip`/`--proto`/`--dport`/`--vlan` against the `andv6` rule prefixes (they are the W1/W2/W6 oracle analogs).
+
+**OPS-canary note:** no NEW invocation path / capability mask / namespace / uid is introduced — the sanitized binary runs the SAME `apply`/`detach` surface as the pre-slice test, in the same veth/netns/caps context, just with a richer fixture. Per the load-bearing-OPS-canary heuristic, **no additional OPS canary is mandated** (the only delta is which lowering the existing invocation drives).
+
+#### §5.59 verifiable invariants for reviewer (MAY-default per architect-spec §6.5 discipline)
+
+Guidance for reviewer, NOT contracts for impl. **Resolution rule: if any item below conflicts with a §6.5 PI item, the PI wins; if impl deviates from a hint to satisfy a PI or a load-bearing test assertion, disposition is `inline-merge`, NOT `[UNRELATED-EDIT]`.**
+
+1. (MUST) `git diff -- src/` = ∅ — no product-code change whatsoever. (PI-mvp-4.19-TEST-ONLY)
+2. (MUST) `git diff -- src/lib/loader.hpp` = ∅. (PI-7, trivially continues)
+3. (MUST) ctest **96/96**; no test added/removed (`T_SANITIZER_BUILD` enriched in place). (PI-mvp-4.19-SUITE)
+4. (MUST) The `AddressSanitizer|UndefinedBehavior` clean-run grep assertion is RETAINED and fires over the apply+detach stderr. (PI-mvp-4.19-SANITIZER-ASSERT)
+5. (MUST) `RESOURCE_LOCK build_cpu` (and the veth fixture lock) RETAINED; the `-DXDPMF_SANITIZERS=ON` build is the SINGLE build (no second ASAN build added). (guard #12; HG-mvp-4.19-1)
+6. (MUST) the post-inject assertion matches the andv6 verdict slots: `pass_cidr==2 && deny==1 && mal==0 && pass==0`. (PI-mvp-4.19-VERDICT)
+7. (MAY) impl uses the exact V1/V2/V3 IP literals above vs other addresses landing the SAME id/slot — `inline-merge` (operative-semantic: the slot mapping is the contract, the exact literal is orientation; any vector preserving full-match/wildcard/NOMATCH + the slot tally is fine).
+8. (MAY) impl folds `--ext` into V1 vs makes it a 4th vector vs omits `--ext` entirely — `inline-merge` (the ext-walk is functional-only per D-mvp-4.19-EXT-FUNCTIONAL; coverage intent is preserved either way as long as the ASAN payload — the andv6 apply — is unchanged).
+9. (MAY) impl adds vs omits a scapy `SKIP_RETURN_CODE 77` guard — `inline-merge` (D-mvp-4.19-SCAPY; not required, parity-only).
+10. (MAY) exact LOC delta (≈ ±25) and the header-comment rewording differ slightly — `inline-merge`.
+
+#### §6.5 Preserved-invariants delta (MVP-4.19)
+
+| PI | Property | Check mechanism |
+|---|---|---|
+| **PI-7 (CONTINUES, trivial)** | `loader.hpp` byte-identical — no `src/` file touched at all (test-only slice). | `git diff -- src/lib/loader.hpp` = ∅. (Streak continuation.) |
+| **PI-mvp-4.19-TEST-ONLY (NEW, load-bearing)** | `git diff -- src/` is EMPTY — the sanitizer drives the *existing* product lowering; no product code changes. | `git diff -- src/` = ∅; the only EDITED file is `tests/T_SANITIZER_BUILD.sh`. |
+| **PI-mvp-4.19-SANITIZER-ASSERT (NEW)** | The `AddressSanitizer\|UndefinedBehavior` clean-run grep is RETAINED and fires over the apply+detach stderr; a richer `apply` is exercised under ASAN+UBSAN. | grep assertion present + the build runs `-DXDPMF_SANITIZERS=ON`; apply uses `config_valid_andv6.yaml`. |
+| **PI-mvp-4.19-VERDICT (NEW)** | The 3-vector matrix lands `pass_cidr=2, deny=1, mal=0, pass=0` (V1 id0 + V2 id1 → PASS_CIDR; V3 NOMATCH → DROP_DENY, andv6 default-drop). | `read_stats_with_cidr` post-matrix == `0 1 0 2`. |
+| **PI-mvp-4.19-SUITE (NEW)** | ctest 96/96; no test added/removed; `RESOURCE_LOCK build_cpu` retained; single ASAN build. | full ctest count == 96; CMakeLists `T_SANITIZER_BUILD` entry unchanged. |
+| **PI-6 (CONTINUES)** | Pre-existing ctests stay green or legitimately SKIP. | full suite 96/96 (or documented SKIPs unchanged). |
+
+**No new guard.** Guards APPLIED: **#5** (Phase A grep — re-ran the brief's coverage greps independently; confirmed the net-new lowering is in `loader.cpp` and surfaced the load-bearing ASAN-instruments-userspace-only realizability finding the brief's framing under-stated), **#12** (RESOURCE_LOCK — `build_cpu` + veth lock retained on the enriched test), **#13** (retired-string ripple — the stale "single src_cidr / `10.0.0.5` / `STAT_PASS_CIDR==1`" header-comment prose retired in-place; confirmed no other test references the sanitizer test's prose). N/A: #7/#10/#11 (no VERSION/schema/catalog move), #15 (no map RESET), #16 (no pin-path retire), #22/#23/#25/#27. **Guard catalog stays at 28.**
+
+#### §5.59 Out of scope (anti-drift fence)
+
+- **ANY product-code change** — `src/` byte-untouched (the load-bearing fence). No new axis / schema (stays 2) / VERSION (stays 0.15.0) / axis-count (stays 9) / `BITVEC_NUM_AXES`.
+- A second `cmake -DXDPMF_SANITIZERS=ON` build or a separate sanitizer ctest (HG-mvp-4.19-1). Enrich the single existing build in place.
+- A new fixture file (B22-2 CONDITIONAL — `config_valid_andv6.yaml` suffices; do NOT add or edit a fixture). Editing the andv6 fixture (it is the §6.71/§6.72/§6.73 oracle fixture + hand-mirrored in `bitvec_oracle_prod.py`).
+- An andeth/non-IP apply sequence (A3 — D-mvp-4.19-ANDV6-OVER-ANDETH). A v4 inject (id2 is v4-only but cross-family-excluded from v6 frames; no v4 frame is injected).
+- Treating the S6 ext-walk as ASAN coverage (it runs in-kernel; D-mvp-4.19-EXT-FUNCTIONAL — functional-only).
+- The `T_SANITIZER_BUILD` `/tmp` ASAN-temp leak-on-abnormal-kill (a session-hygiene artifact handled by the existing `trap` on clean exit — not this slice's concern).
+- **B26** (`pass_cidr`→`pass_rule` metric rename), **B30** (slot/id decouple), **B23** (5.15 verifier-load — infra-gated), **B27** (security — held), **B15** (.pyc/gitignore hygiene) — separate slices.
+- "while I'm here" edits to files not in EDITED. The FileList (one file: `tests/T_SANITIZER_BUILD.sh`) is the complete footprint.
+
+Evidence: `mint/task-brief.md` MVP-4.19 (Goal, HG-mvp-4.19-1/2, Q1 A1/A2/A3 + recommendation, B22-1/B22-2, OOS, guards #5/#12/#13, operative-semantic note, Phase A grep checklist); independent Phase A greps + Reads — `tests/T_SANITIZER_BUILD.sh:1-143` (current single-axis exercise + `read_stats_with_cidr` 4-col reader), `src/lib/loader.cpp` (`close_prefixes6` `:1327`/`host_addr6_of` `:1300`/`host_mask6` `:1312`/`aggregate_axis` `:1413`/`populate_hash_inner_slot` `:1496`/`write_wildcard_slots` `:1681` + the apply call-sites `:1913-1963/2184-2218`), `src/bpf/mac_filter.bpf.c:955-1405` (verdict→STAT slot map for all 3 arms), `src/common/mac_filter.h:73-76` (STAT slot enum), `tests/fixtures/config_valid_andv6.yaml:45-67` (rule layout), `tests/inject/inject_l6.py:123-147` (CLI + `--ext`), `tests/lib/read_stats.py:132-135` (4-col output), `tests/lib/common.sh:182-244` (`read_stats_with_cidr`, `wait_for_stats_sum_with_cidr`), `tests/T_ANDV6_ORACLE_AGREEMENT.sh:100-154` (W1/W2/W6 vector analogs), `tests/T_ANDEXT_WALK_STEER.sh` (`--ext`+walk reaches true-L4) (2026-06-01); design §6.8 (the T_SANITIZER_BUILD original contract, now inline-superseded), §5.43 (MVP-4.3 `--allow`→src_cidr exercise pivot + D-mvp-4.3-STAT PASS_CIDR slot), §5.50 (B28 `aggregate_axis`/`populate_hash_inner_slot` templates), §5.53 (S4 `close_prefixes6` `__int128` + PI-mvp-4.13-CLOSURE6), §5.55 (S6 ext-walk + PI-mvp-4.15-EXT-WALK), §5.18 (XDPMF_SANITIZERS option); commit `0acca78` (MVP-4.18 baseline, 96/96, VERSION 0.15.0).
