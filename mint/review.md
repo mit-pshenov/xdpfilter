@@ -1,51 +1,57 @@
-# Review — MVP-4.21 B30 slot/id decouple (§5.61) (mint triangulation)
+# Review — MVP-4.22 robustness hardening batch (mint triangulation)
 
 ## Verdict
-`pass`  (round 1; 1 OOT resolved inline, 1 OOT deferred)
+`pass` (round-1, 0 findings, 0 out-of-triangulation)
+
+Base for all diffs: `f4f3308` (parent of the design commit; src-identical to HEAD~2).
 
 ## Triangulation matrix
 
 | Framework point | Findings | Tags |
 |---|---|---|
 | 1. Spec ↔ Code | 0 | — |
-| 2. Spec ↔ Tests | 0 | — (negation control present) |
-| 3. Code ↔ Tests | 0 functional | T_BUILD env-timeout under -j4 (re-run green in isolation — OOT-2) |
+| 2. Spec ↔ Tests | 0 | — |
+| 3. Code ↔ Tests | 0 | — |
 | 4. Out-of-Scope Drift | 0 | — |
-| 5. Behaviour preserved (brownfield) | 0 | — (PI-7 ∅, datapath byte-identical, no REGRESSION/UNRELATED-EDIT) |
+| 5. Behaviour preserved (brownfield) | 0 | — |
 
-## Load-bearing invariants — independently verified by the reviewer
+## Point 1 — Spec ↔ Code (all R-1..R-5 honor the §5.62 contract)
+- **R-1** ✓ `validate_iface_name(..., LoaderError::PathRefused)` is the FIRST statement of `detach` (`loader.cpp:2209`) AND `apply_request` (`loader.cpp:2322`); exit 8 / `refusing to operate` token reused. `attach` covered transitively (`attach`→`apply_request`). Doc-comment "Not retrofitted this slice" retired (`loader.cpp:514-517`). No `loader.hpp` symbol added.
+- **R-2** ✓ `mac_filter.h:345-362` — 7 `static_assert(sizeof)` (6/8/20/16/4/4/8) + 2 `offsetof` (`xdpmf_port_range.bit==8`, `allow_entry.rule_id==4`), inside `#ifdef __cplusplus extern "C"`, `#include <cstddef>`. Sizes match design DataStructures exactly. BPF (`-target bpf`, C) compile skips them → `mac_filter.bpf.o` rebuilt clean, xdp section **3658 insns** (unchanged). `allow_entry` honestly noted vestigial in the assert string.
+- **R-3** ✓ pre-multiply guard `v > (uint64_max - 9)/10` added to BOTH accumulators (`config.cpp:90` parse_u32_or_throw, `config.cpp:153` parse_bounded_uint); post-checks kept. Cannot reject in-range maxima. Honest defense-in-depth framing in comment. `config.hpp` zero-diff.
+- **R-4** ✓ `g_format` → `std::atomic<Format>` (`logger.cpp:44`), `#include <atomic>`; ALL sites consistent: stores at `:78/:82/:86/:92/:245` relaxed, load at `:268` relaxed. Recursive-emit queued-WARN guard preserved (still observes settled `Text`). No `logger.hpp` Format/g_format change.
+- **R-5** ✓ two-arm catches with trailing `catch(...)` backstop retained at both never-throw sites: `sidecar.cpp:556`+`:572` (reuses `sidecar.warn.write_exception`, std arm adds `e.what()`); `sidecar_reader.cpp:104`+`:123` (NEW `exporter.scrape.warn.sidecar_read_exception`, both arms). `emit()` is `noexcept` (logger.hpp:177/185) ⇒ no throw escapes the std arm. Inner `:81` stoul catch + logger `:224`/`:242` catches LEFT byte-identical (absent from diff).
 
-**(a) PI-mvp-4.21-DATAPATH-IDENTICAL — VERIFIED.** Compiled baseline `73e2964` + current `mac_filter.bpf.c` side-by-side (clang-19 `-target bpf -O2`), `llvm-objdump -d --section=xdp` → disassembly diff EMPTY (3658 insns each); `slot_rule_id` present ONLY in current's maps section, referenced by no instruction. The committed bpf.c diff = ONLY the one `SEC(".maps")` decl.
+## Point 2 — Spec ↔ Tests
+- §6.77 `T_IFACE_SHAPE_REJECT_APPLY_DETACH` — apply(a/b) + detach(c/d) → exit 8 + token; **negation (e)** valid name must NOT trip gate. Asserts stated outcome, not code-shape.
+- §6.78 `T_CONFIG_INT_OVERFLOW_REJECT` — oversized id/protocol/dst_port/vlan → exit 9 + overflow-message discriminator; **parity control** in-range maxima → `rc!=9` (uses `ID_PARITY_MAX=4294967294` per EDIT-1; plus separate B30 sentinel `0xFFFFFFFF→9` check). Root-free/lock-free via nonexistent iface (EDIT-3).
+- §6.79 `T_SIDECAR_READ_EXCEPTION_DIAGNOSTIC` — deterministic never-throw core (a: corrupt/missing/dir → /metrics 200, no crash) is load-bearing; **negation** baseline clean scrape emits 0 events. (b) event-fire DROPPED per EDIT-4 (the long-line lever is a SIGSEGV on OOS B27 DoS, not a catchable throw) — correctly NOT tested. Event existence pinned by catalog-stability test.
+- Catalog stability green at 38; no CIRCULAR-TEST; every suite carries a negation control → no NO-NEGATION-CONTROL.
 
-**(b) PI-3.4b-2 counter-by-id continuity — VERIFIED.** `copy_rule_counters_forward` (loader.cpp:~1930) is keyed-by-id (finds OLD slot where `old_slot_to_id[old]==new_slot_to_id[k]`, copies that counter, zeros new/empty ids, writes all [0,64)) — NOT a slot-indexed blanket copy. Reads OLD-active half before the flip; fresh-attach passes all-EMPTY. §6.76 negation ({rule_id=50}==0, would be 4 under blanket copy) is real and passed.
+## Point 3 — Code ↔ Tests
+Build: ZERO warnings on forced recompile of all 7 edited TUs (clang-19 -Wall -Wextra -Wpedantic -Wconversion -Wshadow). Targeted run 4/4 pass (`/tmp/mint-review-tests-mvp422.log`):
+```
+T_LOG_EVENT_CATALOG_STABILITY ......... Passed
+T_IFACE_SHAPE_REJECT_APPLY_DETACH ..... Passed
+T_CONFIG_INT_OVERFLOW_REJECT .......... Passed
+T_SIDECAR_READ_EXCEPTION_DIAGNOSTIC ... Passed
+100% tests passed, 0 failed out of 4
+```
+No new public export; `detach` exercised, R-2 asserts are compile-time (green build IS the assertion).
 
-**(c) §6.76 T_RULE_COUNTER_SURVIVES_REORDER** — asserts via exporter /metrics STABLE-ID labels (not raw slot → not circular): id100 counter survives slot 1→2 move, id50 new==0 (negation), monotonic, Q3 priority parity (lower id 50 wins overlap), Q2 sentinel/count-cap reject + large-u32 accept. PASSED.
+## Point 4 — Out-of-Scope Drift
+Footprint = exactly the FileList (7 src + 3 new tests + CMakeLists + fixture). No `src/bpf/` change, no B27 regex/DoS touch, no B26 `pass_cidr`, no schema/axis/map, no VERSION/CHANGELOG/root-CMakeLists change. §6.79(b) DoS lever explicitly dropped, not fed to a live exporter. No OOS-DRIFT.
 
-**(d) PI-7 — `git diff 73e2964 -- src/lib/loader.hpp src/lib/config.hpp` = ∅.** src/ diff = exactly the 7-file FileList footprint.
-
-**(e) PI-KMAPS — kManagedMaps = 39** (was 38); slot_rule_id row added; single table walked by all 3 clear/pin/reuse loops (HK-9 intact).
-
-**(f) PI-PRIORITY (Q3)** — `compute_id_to_slot` = id-sorted rank; all 4 lowering bit-shifts + populate_rules_inner_slot use `id_to_slot.at(r.id)` coherently; ffsll still returns lowest-id survivor.
-
-**(g) OOS / scope** — no most-specific-wins / N>64; VERSION 0.15.0, schema 2, 9 axes, BITVEC unchanged.
-
-**Exporter (Scope-4)** — rule_counters_reader.cpp reads slot_rule_id active half into slot_to_id[], read-only (PI-31), graceful-empty (PI-32); prom_format.cpp labels by stable id, skips EMPTY. Cluster-1 (8 by-id raw-map tests) use the id_to_slot remap (committed, EDIT-1 ruling A).
-
-## Test execution
-Reviewer `sudo ctest -j4` (log `/tmp/mint-review-tests-1780315746.log`): 99% passed, 1 failed = T_BUILD (Timeout 300s under -j4 contention) → re-ran T_BUILD in isolation → Passed 94.04s (environmental, NOT a build break). All slice-relevant tests passed. Effective = tester's 97/97 (95 pass + 2 env skips: T_DROP_MALFORMED, T_ANSIBLE_PLAYBOOK_SYNTAX).
-
-Final (b) shippable-tree confirmation (team-lead, post-OOT-1 restore, sole owner): `ctest -R 'T_CLI_RESET_COUNTERS|T_RULE_COUNTER_SURVIVES_REORDER'` → 4/4 passed (T_RULE_COUNTER_SURVIVES_REORDER 4.62s, T_CLI_RESET_COUNTERS, T_CLI_RESET_COUNTERS_RULE_ID, T_CLI_RESET_COUNTERS_NO_IFACE).
+## Point 5 — Behaviour preserved (brownfield)
+- **PI-7**: `git diff f4f3308 -- src/lib/loader.hpp src/lib/config.hpp` = ∅ ✓
+- **PI-DATAPATH-IDENTICAL**: `mac_filter.bpf.c` diff ∅; xdp insn count **3658** ✓
+- **PI-NEVER-THROW (guard #30)**: grep audit — every `catch(const std::exception&)` immediately followed by trailing `catch(...)`; inner stoul + both logger catches byte-identical ✓
+- **PI-CATALOG**: kEventNames 37→38, kEventCount 38, fixture 38 lines (sorted), catalog test green ✓
+- **PI-ABI / PI-10**: `mac_filter.h` diff = ONLY the additive assert block; no struct/enum/define body change ✓
+- **PI-LOGGER-HPP-FORMAT**: `logger.hpp` diff = ONLY the +1 catalog entry + 37→38 count bumps ✓
+- **REGRESSION fence**: tester's `test-run.log` = 98/100 (#48/#62 fail, 2 baseline skips). Reviewer reproduced #48/#62 — BOTH fail on the SAME pre-existing environmental cause: the HK-17 "all-interfaces-EACCES → exit 6" path is not inducible in this sandbox (`/sys/fs/bpf/xdpmacfilter` unmounted; exporter `Killed`/999 instead of self-exiting 6). The slice touched `sidecar_reader.cpp`, NOT the iface-discovery/exit-6 path → NOT a regression. No UNRELATED-EDIT, no INVARIANT-VIOLATED.
 
 ## Out-of-triangulation findings
+None.
 
-### OOT-1 [RESOLVED INLINE — disposition 1] — dirty working tree: Cluster-2 reset tests reverted (a) over committed (b)
-The committed slice (`dc964d1`) implements EDIT-1 Cluster-2 as ruling **(b)** (sparse fixture + id→slot remap + pass SLOT to --rule-id + audit `rule_id=<slot>`), which **matches design §5.61 EDIT-1 / D-mvp-4.21-RAWMAP-REMAP exactly**. The working tree had uncommitted edits reverting both reset tests to ruling (a) + an untracked `config_reset_counters_dense.yaml` — a coordination message-race artifact (architect↔tester crossed during the a→b→a churn; both (a) and (b) are design-sanctioned equivalents). **Resolution (team-lead, Phase 4.5):** disposition 1 — `git checkout dc964d1 -- tests/T_CLI_RESET_COUNTERS*.sh` + `rm tests/fixtures/config_reset_counters_dense.yaml`. Working tree now clean == dc964d1 (b); design(b) = committed-tests(b) = test-run.log(b), all consistent. Final (b) tree re-confirmed green (4/4 above). NOT a correctness defect.
-
-### OOT-2 [DEFERRED] — T_BUILD env-timeout under -j4
-T_BUILD (from-scratch cmake configure+build meta-test) timed out at 300s under -j4 concurrency (sanitizer + oracle compiles starved it); passed at 94s in isolation. Environmental, not a B30 defect. Deferred: consider bumping T_BUILD's ctest TIMEOUT or excluding it from -j parallel fixtures (test-infra, future slice).
-
-## Rework assignments
-None blocking. OOT-1 resolved inline by team-lead; OOT-2 deferred.
-
-## Process note (for retrospective)
-This slice's Phase-B saw heavy Cluster-2 coordination thrash (the reset-test mechanism flip-flopped (a)↔(b) ≥4× across architect/tester due to message-ordering races + one tester confabulation of a "clean (b)" tree that was actually (a)-dirty). The LOAD-BEARING product invariants (datapath byte-identity, counter-by-id continuity) were never in question — the thrash was confined to a design-sanctioned-equivalent test mechanism. Resolved deterministically via orchestrator git-restore to the reviewer-validated committed (b). Lesson: freeze ALL agents before issuing a convergence ruling on a contested point; verify working-tree claims on ground truth.
+All three artifacts agree. Clean round-1 pass.
