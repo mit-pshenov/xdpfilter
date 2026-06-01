@@ -1,0 +1,259 @@
+schema_version: 2
+default_action: drop
+rules:
+  - id: 0
+    action: pass
+    match:
+      dst_cidr: "10.0.0.0/24"
+  - id: 1
+    action: pass
+    match:
+      dst_cidr: "10.0.1.0/24"
+  - id: 2
+    action: pass
+    match:
+      dst_cidr: "10.0.2.0/24"
+  - id: 3
+    action: pass
+    match:
+      dst_cidr: "10.0.3.0/24"
+  - id: 4
+    action: pass
+    match:
+      dst_cidr: "10.0.4.0/24"
+  - id: 5
+    action: pass
+    match:
+      dst_cidr: "10.0.5.0/24"
+  - id: 6
+    action: pass
+    match:
+      dst_cidr: "10.0.6.0/24"
+  - id: 7
+    action: pass
+    match:
+      dst_cidr: "10.0.7.0/24"
+  - id: 8
+    action: pass
+    match:
+      dst_cidr: "10.0.8.0/24"
+  - id: 9
+    action: pass
+    match:
+      dst_cidr: "10.0.9.0/24"
+  - id: 10
+    action: pass
+    match:
+      dst_cidr: "10.0.10.0/24"
+  - id: 11
+    action: pass
+    match:
+      dst_cidr: "10.0.11.0/24"
+  - id: 12
+    action: pass
+    match:
+      dst_cidr: "10.0.12.0/24"
+  - id: 13
+    action: pass
+    match:
+      dst_cidr: "10.0.13.0/24"
+  - id: 14
+    action: pass
+    match:
+      dst_cidr: "10.0.14.0/24"
+  - id: 15
+    action: pass
+    match:
+      dst_cidr: "10.0.15.0/24"
+  - id: 16
+    action: pass
+    match:
+      dst_cidr: "10.0.16.0/24"
+  - id: 17
+    action: pass
+    match:
+      dst_cidr: "10.0.17.0/24"
+  - id: 18
+    action: pass
+    match:
+      dst_cidr: "10.0.18.0/24"
+  - id: 19
+    action: pass
+    match:
+      dst_cidr: "10.0.19.0/24"
+  - id: 20
+    action: pass
+    match:
+      dst_cidr: "10.0.20.0/24"
+  - id: 21
+    action: pass
+    match:
+      dst_cidr: "10.0.21.0/24"
+  - id: 22
+    action: pass
+    match:
+      dst_cidr: "10.0.22.0/24"
+  - id: 23
+    action: pass
+    match:
+      dst_cidr: "10.0.23.0/24"
+  - id: 24
+    action: pass
+    match:
+      dst_cidr: "10.0.24.0/24"
+  - id: 25
+    action: pass
+    match:
+      dst_cidr: "10.0.25.0/24"
+  - id: 26
+    action: pass
+    match:
+      dst_cidr: "10.0.26.0/24"
+  - id: 27
+    action: pass
+    match:
+      dst_cidr: "10.0.27.0/24"
+  - id: 28
+    action: pass
+    match:
+      dst_cidr: "10.0.28.0/24"
+  - id: 29
+    action: pass
+    match:
+      dst_cidr: "10.0.29.0/24"
+  - id: 30
+    action: pass
+    match:
+      dst_cidr: "10.0.30.0/24"
+  - id: 31
+    action: pass
+    match:
+      dst_cidr: "10.0.31.0/24"
+  - id: 32
+    action: pass
+    match:
+      dst_cidr: "10.0.32.0/24"
+  - id: 33
+    action: pass
+    match:
+      dst_cidr: "10.0.33.0/24"
+  - id: 34
+    action: pass
+    match:
+      dst_cidr: "10.0.34.0/24"
+  - id: 35
+    action: pass
+    match:
+      dst_cidr: "10.0.35.0/24"
+  - id: 36
+    action: pass
+    match:
+      dst_cidr: "10.0.36.0/24"
+  - id: 37
+    action: pass
+    match:
+      dst_cidr: "10.0.37.0/24"
+  - id: 38
+    action: pass
+    match:
+      dst_cidr: "10.0.38.0/24"
+  - id: 39
+    action: pass
+    match:
+      dst_cidr: "10.0.39.0/24"
+  - id: 40
+    action: pass
+    match:
+      dst_cidr: "10.0.40.0/24"
+  - id: 41
+    action: pass
+    match:
+      dst_cidr: "10.0.41.0/24"
+  - id: 42
+    action: pass
+    match:
+      dst_cidr: "10.0.42.0/24"
+  - id: 43
+    action: pass
+    match:
+      dst_cidr: "10.0.43.0/24"
+  - id: 44
+    action: pass
+    match:
+      dst_cidr: "10.0.44.0/24"
+  - id: 45
+    action: pass
+    match:
+      dst_cidr: "10.0.45.0/24"
+  - id: 46
+    action: pass
+    match:
+      dst_cidr: "10.0.46.0/24"
+  - id: 47
+    action: pass
+    match:
+      dst_cidr: "10.0.47.0/24"
+  - id: 48
+    action: pass
+    match:
+      dst_cidr: "10.0.48.0/24"
+  - id: 49
+    action: pass
+    match:
+      dst_cidr: "10.0.49.0/24"
+  - id: 50
+    action: pass
+    match:
+      dst_cidr: "10.0.50.0/24"
+  - id: 51
+    action: pass
+    match:
+      dst_cidr: "10.0.51.0/24"
+  - id: 52
+    action: pass
+    match:
+      dst_cidr: "10.0.52.0/24"
+  - id: 53
+    action: pass
+    match:
+      dst_cidr: "10.0.53.0/24"
+  - id: 54
+    action: pass
+    match:
+      dst_cidr: "10.0.54.0/24"
+  - id: 55
+    action: pass
+    match:
+      dst_cidr: "10.0.55.0/24"
+  - id: 56
+    action: pass
+    match:
+      dst_cidr: "10.0.56.0/24"
+  - id: 57
+    action: pass
+    match:
+      dst_cidr: "10.0.57.0/24"
+  - id: 58
+    action: pass
+    match:
+      dst_cidr: "10.0.58.0/24"
+  - id: 59
+    action: pass
+    match:
+      dst_cidr: "10.0.59.0/24"
+  - id: 60
+    action: pass
+    match:
+      dst_cidr: "10.0.60.0/24"
+  - id: 61
+    action: pass
+    match:
+      dst_cidr: "10.0.61.0/24"
+  - id: 62
+    action: pass
+    match:
+      dst_cidr: "10.0.62.0/24"
+  - id: 63
+    action: pass
+    match:
+      dst_cidr: "10.0.63.0/24"
