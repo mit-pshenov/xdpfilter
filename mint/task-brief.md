@@ -1,68 +1,85 @@
-# Task brief — MVP-4.19 / test-hardening: sanitize the 9-axis lowering + datapath (brownfield, TEST-ONLY)
+# Task brief — MVP-4.20 / test-honesty: stop T_BITVEC_VERIFIER_LOAD over-claiming the 5.15 floor (B23-min, brownfield, TEST+DOC ONLY)
 
 ## Goal
-Enrich `tests/T_SANITIZER_BUILD.sh` so the ASAN/UBSAN-built binary exercises the **9-axis** lowering + datapath, not just one axis (BACKLOG **B22**). The test currently applies a single-rule fixture (`config_valid_cidr.yaml`, src_cidr `10.0.0.0/8` → STAT_PASS_CIDR) + one matched inject — so under the sanitizer ONLY the src-CIDR lowering path is covered. The net-new / highest-risk lowering added since has NEVER been sanitized: `close_prefixes6` (`__int128` 128-bit prefix closure, S4), the `populate_hash_inner_slot<Key>` + `aggregate_axis<Key>` templates (proto/port/vlan/mac/ethertype, B28), `write_wildcard_slots` (all axes), the IPv6 ext-header walk (S6, bounded `#pragma unroll` with a variable per-hop advance — the sharpest UB-catch target), and the per-axis bounds reads.
+`tests/T_BITVEC_VERIFIER_LOAD.sh` claims more than it verifies. Its PASS line (`:159`) prints **"prototype verifies on the 5.15 floor"** and its header (`:7`) asks "VERIFY on the 5.15 floor?" — but the test actually (a) runs on whatever the dev kernel is (**6.1**, NOT 5.15 — `uname -r` = `6.1.0-44-cloud-amd64`), and (b) loads the **4-axis PROTOTYPE** object `bitvec_proto.bpf.o`, NOT the production 9-axis `mac_filter.bpf.c` (now dst/src/proto/port/vlan/mac/dst6/src6/ethertype + IPv6 ext-walk + variable IHL-offset L4 read). So the production object is untested on the stated floor, and the test's own output over-states its guarantee.
 
-**PURE test enrichment — NO product-code change** (`git diff -- src/` MUST be empty). The sanitizer just drives more of the existing datapath. Enrich the EXISTING test in-place — do NOT add a second `XDPMF_SANITIZERS=ON` build (that doubles the slow ~64 MB `/tmp` ASAN rebuild). Keep vectors minimal (each apply+inject adds wall-clock under the already-slow rebuild).
+**B23-min = the takeable, NO-INFRA slice**: reword the misleading prose so the test states what it ACTUALLY verifies (the prototype object loads/verifies on the **dev kernel**, NOT the prod object on a 5.15 floor), and add an honest gap-note in design.md recording that the production object remains unverified on the 5.15 floor → tracked as the **infra-gated full-B23** (a CI lane that `bpftool prog load`s the production `.o` on a real 5.15 image — explicitly OUT OF SCOPE here). Same spirit as MVP-4.19's correction that ASAN instruments the userspace binary only. PURE test+doc honesty — no datapath/loader logic change.
 
 ## Context: prior work
-- Prior briefs archived in `mint/task-brief-*.md` (latest: `task-brief-mvp-4.18.md` = B29, just shipped `0acca78`).
-- Match model = 9 axes (dst/src/proto/port/vlan/mac/dst6/src6/ethertype) across 3 family arms; IPv6 with ext-header L4 depth. Clean tree, main == origin/main.
-- Phase-2 grep verification (run — see footer): the current fixture is `config_valid_cidr.yaml` (NOT `and6` as the backlog note guessed); the 3 richer fixtures (and6/andv6/andeth) + both injectors (inject_ipv4, inject_l6 with `--ext`) all exist; T_SANITIZER_BUILD carries `RESOURCE_LOCK build_cpu`.
-- PI continuity: loader.hpp PI-7 trivially CONTINUES (untouched); no product PI moves (test-only).
+- Prior briefs archived in `mint/task-brief-*.md` (latest: `task-brief-mvp-4.19.md` = B22, shipped+pushed `5e339ac`).
+- Clean tree, `main == origin/main`. Match model = 9 axes across 3 family arms; VERSION 0.15.0, schema 2, guards catalog at #28.
+- **Phase-2 grep verification (run — see footer):**
+  - `T_BITVEC_VERIFIER_LOAD.sh` EXISTS; misleading strings at `:7` (comment) + `:159` (PASS message). Sanity-floor prose at `:22-28` also frames "the 5.15 floor".
+  - The test loads `bitvec_proto.bpf.o` (the prototype — `:43-57` find_proto_obj) and/or `bitvec_harness populate` (`:62-75`), NOT the production object. Confirmed.
+  - `uname -r` = `6.1.0-44-cloud-amd64` — the test runs on 6.1, not 5.15.
+  - design `§5.44` (bitvec axes 3-4) + `§5.47` (MAC axis) both EXIST → candidate homes for the honest note (architect picks; a NEW §5.60 is also fine).
+  - Guard #13 ripple: the literal "5.15 floor" is referenced by `T_BITVEC_VERIFIER_LOAD.sh`, `docs/BACKLOG.md:151` (the B23 entry itself), and **4 design-intent comments in `src/bpf/mac_filter.bpf.c` (`:578/:600/:641/:782`)**. The bpf.c comments are PROD design-rationale (constructs *designed* 5.15-safe: bounded `#pragma unroll`, no `bpf_loop`, FFS/ihl fallbacks) — NOT the test's over-claim. See Q1 for whether they're in-scope.
+  - Guard #12: `tests/CMakeLists.txt:1086+` gives `T_BITVEC_VERIFIER_LOAD` `RESOURCE_LOCK xdp_fixture` (harness populate attaches to veth) — retained (no ctest add).
+- **B15 (.pyc hygiene) is ALREADY SATISFIED — dropped from scope.** Phase-2 grep: `git ls-files` tracks NO `__pycache__`/`*.pyc`, and `.gitignore:33-34` already carries `__pycache__/` + `*.pyc`. The backlog B15 entry is stale (the artifact was removed earlier); nothing to do. Recorded in Out-of-scope.
+- PI continuity: loader.hpp PI-7 trivially CONTINUES (untouched); no product PI moves. **`git diff -- src/bpf/ src/lib/` MUST stay empty UNLESS the architect rules the bpf.c comments in-scope (Q1) — in which case the ONLY src change is comment text, zero datapath bytes.**
 
 ## Workflow rules (brownfield)
-- **Architect**: read design.md §5.43/§5.44/§5.45/§5.47 (axis lowering), §5.53 (close_prefixes6 `__int128`), §5.55 (S6 ext-walk), §5.50 (B28 templates), §6.8 (the T_SANITIZER_BUILD design). EDIT design.md in place; append §5.59 (MVP-4.19). Decide Q1 (fixture/vector matrix) — you own realizability (which fixture + which inject vectors actually drive `close_prefixes6`/`write_wildcard_slots`/the ext-walk; how the post-inject stats read must change vs the current 4-col `read_stats_with_cidr`).
-- **Impl**: FileList DIFF — Edit `tests/T_SANITIZER_BUILD.sh` (+ a fixture if the architect needs a new one, though the 3 existing ones likely suffice). `git diff -- src/` MUST stay EMPTY. NO product-code edit.
-- **Tester**: this slice IS test work — but per the mint split, the ARCHITECT specs the vectors in §5.59 and the IMPL writes them into T_SANITIZER_BUILD.sh; the tester VERIFIES the enriched sanitizer test runs clean (no ASAN/UBSAN diag) + the full suite stays green. No NEW ctest expected (enrich in place); if the architect splits a vector into its own assertion, ctest count may tick — flag it.
-- **Reviewer**: 5-point brownfield; **special attention**: (a) `git diff -- src/` EMPTY (test-only); (b) the enriched test ACTUALLY exercises the claimed net-new paths (the chosen fixture's axes map to `close_prefixes6`/`populate_hash_inner_slot`/`write_wildcard_slots`/ext-walk — not just a different single axis); (c) the sanitizer assertion (`grep -E 'AddressSanitizer|UndefinedBehavior'` → must be absent) still fires; (d) the post-inject stats read matches the chosen fixture's verdict slot; (e) build_cpu RESOURCE_LOCK retained (guard #12).
+- **Architect**: read design.md §5.44 + §5.47 (the bitvec verifier / axis lowering context) + §6.46 (the T_BITVEC_VERIFIER_LOAD design, if a §6.x block exists). EDIT design.md in place; append the honest gap-note (own §-number — §5.60 or a sub-note under §5.44; architect's call). Decide Q1 (bpf.c comment scope) + Q2 (where the design note lives + exact honest wording). You own realizability: the precise reworded strings must be ACCURATE (don't replace one over-claim with another — e.g. don't claim "verifies on 6.1" as if that were a guarantee of floor-safety).
+- **Impl**: FileList DIFF — Edit `tests/T_BITVEC_VERIFIER_LOAD.sh` (the reworded prose) + `docs/BACKLOG.md` (update the B23 entry: reword-shipped, fix stale "6 axes"→9, full CI-lane remains infra-gated) + (architect-gated) the 4 `mac_filter.bpf.c` comments. NO datapath/loader logic edit. Keep the test's load mechanism, assertions, and RESOURCE_LOCK byte-identical — ONLY the human-readable prose changes.
+- **Tester**: VERIFY the reworded test still PASSES (the load/verify assertion is unchanged — only message text differs) AND the new message is accurate (states "prototype" + "dev kernel", not "prod object" / "5.15 floor"). Full suite stays green (96/96). NO new ctest expected.
+- **Reviewer**: 5-point brownfield; **special attention**: (a) the reworded prose no longer over-claims (no "5.15 floor" guarantee, no "production object" implication) AND introduces no NEW over-claim; (b) the test's behavioral core (object find, `bpftool prog load` rc=0 assertion, harness populate path, RESOURCE_LOCK) is byte-unchanged — pure prose; (c) `git diff -- src/lib/` EMPTY and `git diff -- src/bpf/` EMPTY-or-comment-only (per Q1); (d) the design.md note honestly scopes the gap (prod object untested on 5.15 → infra-gated full-B23) without claiming the gap is closed; (e) docs/BACKLOG.md B23 entry reflects partial-completion, not full closure.
 
 ## Human-gate decisions (defaults applied — architect overrides at Phase A)
 
-### HG-mvp-4.19-1: enrich in-place vs new test → **enrich `T_SANITIZER_BUILD.sh` in-place**
-Do NOT add a second ASAN-build test (doubles the slow `/tmp` rebuild + disk). The single existing build, exercised by more vectors, gets the coverage. Architect MAY add a fixture file but NOT a second `cmake -DXDPMF_SANITIZERS=ON` build.
+### HG-mvp-4.20-1: scope = test+doc honesty ONLY, full CI-lane stays deferred → **reword + design-note + backlog-update; NO 5.15 CI lane**
+The production-object-on-5.15 verification needs a real 5.15 kernel image / CI lane (infra-gated) — explicitly OUT OF SCOPE. This slice only stops the over-claim and records the gap honestly.
 
-### HG-mvp-4.19-2: vector count → **3 (full-match, wildcard, NOMATCH)**
-Minimal set that hits the three datapath regions: the populated AND path (full-match), `write_wildcard_slots` / the wildcard accumulator (a rule omitting some axes + a frame that matches via wildcard), and the defaults path (NOMATCH). Architect MAY trim to 2 or add 1 if a specific net-new path needs a dedicated vector (e.g. an `--ext` frame to drive the ext-walk).
+### HG-mvp-4.20-2: keep the test's behavioral assertions byte-identical → **prose-only edit**
+Do NOT change what the test loads, how it asserts rc=0, the harness-populate fallback, or the RESOURCE_LOCK. The test's *verification* is fine; only its *description of what it verifies* is wrong. Prose-only.
 
-## Open mechanism questions (architect decides; document in §5.59)
+## Open mechanism questions (architect decides; document in the new note)
 
-### Q1: which fixture + vector matrix maximizes sanitized coverage of the net-new lowering, in the fewest vectors?
-- **A1 — andv6 primary**: `config_valid_andv6.yaml` drives `close_prefixes6` (`__int128`, the highest-risk net-new code) + the v6 LPM populate + proto/port/vlan; inject via `inject_l6.py`. Best single-fixture coverage of the v6 closure math.
-- **A2 — andeth primary**: `config_valid_andeth.yaml` drives the ethertype HASH + the non-IP `else` arm + mac; inject via `inject_l6.py`/raw eth. Best for the S5 non-IP path.
-- **A3 — sequence**: apply andv6 (closure + LPM) THEN andeth (ethertype + non-IP), 1-2 vectors each — broadest coverage, more wall-clock. Optionally an `inject_l6.py --ext` frame to sanitize the S6 ext-walk (a bounded loop with a data-dependent advance — genuine UB-catch value).
-- **Recommendation**: **A1 (andv6) + one `--ext` vector** — concentrates the sanitizer on the two genuinely-net-new sharp edges (the `__int128` closure and the ext-header walk) for the least wall-clock; the v4 HASH templates (proto/vlan/mac) are lower-risk (exact-match, no pointer math) and already partially exercised. Architect overrides if a fuller sweep is cheap.
+### Q1: are the 4 `mac_filter.bpf.c` 5.15 design-intent comments in scope?
+- **A1 — leave bpf.c untouched (RECOMMENDED)**: the `:578/:600/:641/:782` comments are PROD design-rationale (the constructs are *intended* 5.15-safe). They're not the test's runtime over-claim. Leaving them keeps the slice test+doc-only (`git diff -- src/` EMPTY). Capture the "designed-5.15-safe but UNVERIFIED on 5.15" caveat ONCE in the design.md note instead.
+- **A2 — lightly caveat bpf.c**: if the architect judges `:578` ("verifies on the 5.15 floor") itself over-claims (it asserts a property never tested), add a 1-word caveat ("*designed to* verify") at those sites. Cost: widens the diff into prod source (comment-only, zero datapath bytes) + a guard #13 ripple to keep wording consistent.
+- **Recommendation**: **A1** — concentrate the honesty fix in the test + one design note; treat bpf.c comments as accurate design-intent and caveat them collectively in the note. Architect overrides to A2 if `:578`'s specific wording reads as a test-result claim rather than a design goal.
+
+### Q2: where does the honest gap-note live + what's the exact wording?
+- **A1**: a NEW `§5.60` (MVP-4.20) block — clean, self-contained, mirrors the per-slice §-numbering.
+- **A2**: a sub-note appended under `§5.44` (the bitvec-verifier home) and/or `§5.47`.
+- **Recommendation**: architect's call (realizability — wherever the T_BITVEC_VERIFIER_LOAD guarantee is currently documented). The note MUST state: (1) the test verifies the PROTOTYPE object on the DEV kernel; (2) the production 9-axis object is UNVERIFIED on the 5.15 floor; (3) closing the gap = infra-gated full-B23 (CI lane on a 5.15 image). Operative-semantic: the wording is SHOULD-level orientation, not a literal contract.
 
 ## Scope (concrete items — FileList DIFF)
 
-### B22-1 — enrich the sanitizer exercise
-**Where**: `tests/T_SANITIZER_BUILD.sh` (EDIT)
-- Replace the single `config_valid_cidr.yaml` apply + single `10.0.0.5` inject with the architect's chosen fixture(s) + the 3-vector matrix (HG-2). Update the post-inject stats read to the verdict slot the chosen fixture produces (the current `read_stats_with_cidr` 4-col helper assumes a CIDR-axis PASS; a different fixture may land on STAT_PASS or STAT_DROP_DENY — architect/impl adjust the assertion accordingly).
-- The header-comment "Trigger" block (steps 3-7) must be updated to describe the enriched exercise (retirement-discipline on the now-stale "single src_cidr" prose).
-- Keep: the `XDPMF_SANITIZERS=ON` configure+build, the `grep -E 'AddressSanitizer|UndefinedBehavior'` clean-run assertion, the build_cpu RESOURCE_LOCK, the mktemp `/tmp` ASAN dir + its trap cleanup (the leak-on-kill is a session-fragility note, not this slice's concern).
+### B23-1 — reword the over-claiming prose
+**Where**: `tests/T_BITVEC_VERIFIER_LOAD.sh` (EDIT, prose-only)
+- `:159` PASS message: drop "prototype verifies on the 5.15 floor" → an accurate statement (the prototype object verifies/loads on the dev kernel; this is NOT a 5.15-floor nor a production-object guarantee).
+- `:7` header comment + `:22-28` sanity-floor prose: reframe from "the 5.15 floor" to what's actually exercised (prototype verifier acceptance on the dev kernel), with a pointer to the design note for the real-floor gap.
+- KEEP byte-identical: the object-find logic (`:43-80`), the `bpftool prog load` rc=0 assertion, the harness-populate fallback, `RESOURCE_LOCK xdp_fixture`, the SKIP guard.
 
-### B22-2 (CONDITIONAL) — new fixture only if needed
-**Where**: `tests/fixtures/` (NEW, only if the architect determines the 3 existing fixtures can't drive a required net-new path)
-- Default expectation: the existing and6/andv6/andeth suffice → NO new fixture. Flag if a new one is genuinely required (e.g. a wildcard-specific layout).
+### B23-2 — honest gap-note in design.md
+**Where**: `mint/design.md` (EDIT/APPEND, per Q2)
+- Record the prototype-vs-production + dev-kernel-vs-5.15-floor gap; scope closing it to the infra-gated full-B23.
+
+### B23-3 — update the backlog entry
+**Where**: `docs/BACKLOG.md` (EDIT, `:151` B23 block)
+- Mark B23-min reword as shipped; fix the stale "6 axes" → 9 axes; note the full CI-lane (prod `.o` on 5.15 image) remains the deferred/infra-gated remainder.
 
 ## Out of scope (explicit)
-- ANY product-code change (`src/` byte-untouched). ANY new axis / schema / VERSION change.
-- A second ASAN build / a separate sanitizer ctest (HG-1).
-- B26 (pass_cidr rename — deferred to a stat-enum slice), B30 (slot/id decouple — designed slice), B23 (5.15 verifier-load — infra-gated), B27 (security — held), B15 (.pyc/gitignore hygiene).
-- The T_SANITIZER_BUILD `/tmp` ASAN-temp leak-on-abnormal-kill (a session-hygiene artifact, not a product/test defect — the trap handles clean exits).
+- **B15 (.pyc + .gitignore hygiene) — ALREADY SATISFIED** (no tracked `__pycache__`/`*.pyc`; `.gitignore:33-34` already covers it). Nothing to do; the backlog B15 entry is stale and may be marked done.
+- ANY datapath / loader logic change; ANY new axis / schema / VERSION change.
+- The **full B23**: a CI lane that loads the PRODUCTION `mac_filter.bpf.c` object on a real 5.15 kernel image (infra-gated — needs a 5.15 image / CI runner).
+- B26 (pass_cidr rename — stat-enum slice), B30 (slot/id decouple — PO-gated designed slice), B27 (exporter DoS — security, HELD).
 
 ## Definition of done
-- §5.59 (MVP-4.19) amendment in design.md (the chosen fixture/vector matrix + rationale).
-- `git diff -- src/` EMPTY (test-only); loader.hpp PI-7 trivially continues.
-- The enriched T_SANITIZER_BUILD runs CLEAN under ASAN/UBSAN (no diag) AND drives the chosen net-new paths.
-- Full ctest stays green (96/96, or +N if the architect splits vectors into assertions — flagged).
+- design.md honest gap-note (per Q2) — prototype/dev-kernel vs prod/5.15 gap recorded, full-B23 scoped as infra-gated.
+- `tests/T_BITVEC_VERIFIER_LOAD.sh` reworded prose no longer over-claims; behavioral assertions byte-identical.
+- `docs/BACKLOG.md` B23 entry reflects partial completion.
+- `git diff -- src/lib/` EMPTY; `git diff -- src/bpf/` EMPTY (Q1=A1) or comment-only (Q1=A2). loader.hpp PI-7 trivially continues.
+- Full ctest stays green (96/96) — T_BITVEC_VERIFIER_LOAD still PASSES (reworded message, unchanged verdict).
 - NO schema/VERSION change (stays 0.15.0 / schema 2 / 9 axes).
 - `mint/review.md` round-1 verdict = pass.
 - One git commit per phase boundary.
 
 ## Dependencies
-- Build: clang-19/C++23, `XDPMF_SANITIZERS=ON` (ASAN+UBSAN) toolchain (existing). The ASAN rebuild is slow (~minutes) + mktemps a ~64 MB `/tmp` dir.
-- Runtime: veth + bpffs + sudo (existing fixture); python3 scapy for inject_l6 `--ext`.
+- Build: clang-19/C++23 + the bitvec prototype object (`bitvec_proto.bpf.o`) + `bitvec_harness` (existing).
+- Runtime: veth + bpffs + sudo (existing fixture, unchanged).
+- Kernel/platform: dev kernel 6.1 (existing). The full-B23 (deferred) would need a 5.15 image — NOT this slice.
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 ```yaml
@@ -77,17 +94,20 @@ packs:
 ---
 
 ## Pre-brief sanity check (per mint-hld-scope-discipline)
-**MECHANICAL-ish.** One design axis: the fixture/vector selection (Q1), which is an architect realizability call (which inject actually drives `close_prefixes6` / the ext-walk + how the stats read changes), NOT a multi-axis design fork or expensive-to-undo decision (it's a test; trivially revertable). No PO-tier value question (PO-filter: no external value to name — it's pure engineering coverage). **No /mint-hld, no spike.** Single-architect. Light path per [[feedback_band_by_default]].
+**MECHANICAL.** One small realizability axis (Q1: bpf.c comment scope — recommended A1=leave) + one placement axis (Q2: where the note lives — architect's call). Neither is multi-axis, expensive-to-undo, nor ≥3-viable-options design space — it's a prose-honesty fix on a test + a design note. No PO-tier value question (PO-filter: no external value to name — pure engineering/honesty coverage; the full-B23 CI-lane IS infra-gated but that's explicitly deferred, not a fork for this slice). **No /mint-hld, no spike.** Single-architect, light path per [[feedback_band_by_default]]. **Scope shrank during Phase 2**: B15 fell out (already done) → slice is B23-min solo.
 
 ## Notes for architect Phase A code-grep discipline
 Re-run (guard #5):
-- `grep -nE 'config_valid_cidr|read_stats_with_cidr|inject_ipv4|SANITIZERS' tests/T_SANITIZER_BUILD.sh` — confirm the current single-axis exercise + the stats-read helper that must change.
-- `grep -rn 'close_prefixes6\|populate_hash_inner_slot\|write_wildcard_slots\|MAX_EXT_HOPS' src/bpf/ src/lib/loader.cpp` — confirm the net-new lowering you intend the enriched vectors to exercise (so the brief's coverage claim is real, not assumed).
-- Inspect `tests/fixtures/config_valid_{andv6,andeth,and6}.yaml` + `tests/inject/inject_l6.py --ext` to confirm a vector that lands on the intended path.
-- Verify which STAT_* slot each candidate fixture's full-match produces (STAT_PASS vs STAT_PASS_CIDR vs STAT_DROP_DENY) so the post-inject assertion is correct.
+- `grep -nE '5\.15|floor|prototype verifies|VERIFY on' tests/T_BITVEC_VERIFIER_LOAD.sh` — confirm the exact over-claiming strings + line anchors (line numbers shift; anchor on the string).
+- `grep -nE 'bitvec_proto|mac_filter\.bpf|bpftool prog load|find_proto_obj|find_harness' tests/T_BITVEC_VERIFIER_LOAD.sh` — confirm WHAT the test loads (prototype, not prod) so the reworded message is accurate.
+- `grep -rln '5\.15 floor\|prototype verifies' tests/ docs/ src/` — confirm the guard #13 ripple set (test + BACKLOG:151 + bpf.c:578/600/641/782) before deciding Q1.
+- `uname -r` — confirm the dev kernel is NOT 5.15 (the core of the over-claim).
+- Confirm `git ls-files | grep -E '__pycache__|\.pyc'` is EMPTY and `.gitignore` already has the rules (B15 already-done; do not re-add).
+- Verify whichever §-section you attach the note to actually exists / is the right home (§5.44 / §5.47 / new §5.60).
 
 ### Anti-misdiagnosis guards applicable to this slice (per Phase 3)
-- **Guard #12 (RESOURCE_LOCK for shared host state)** — the enriched test still touches veth + does a full compile; the existing `build_cpu` + xdp_fixture locks MUST be retained (do not drop them when editing). If a NEW ctest is split out, it needs the same locks.
-- **Guard #5 (Phase A grep discipline)** — architect re-runs the coverage greps above to prove the chosen vectors actually reach the net-new paths.
-- **Operative-semantic discipline** — "3 vectors" / "9-axis" / the net-new-path list are SHOULD-level orientation; the architect's realizability call on fixture/vector count is authoritative, deviations preserving coverage intent are `inline-merge`.
-- **Guard #11 (VERSION-bump propagation)** — N/A (no bump). **Guard #13 (retired-string ripple)** — minor: the stale "single src_cidr" header-comment prose in T_SANITIZER_BUILD is retired/updated in-place (no fixture/test references it elsewhere — confirm).
+- **Guard #13 (retired-string ripple)** — the over-claiming "5.15 floor" prose is reworded in the test; check no OTHER consumer asserts the old PASS string (grep above: only the test + BACKLOG + bpf.c design-intent comments reference it; BACKLOG is updated in B23-3; bpf.c is Q1).
+- **Guard #12 (RESOURCE_LOCK for shared host state)** — the test keeps touching veth + bpffs; `RESOURCE_LOCK xdp_fixture` (CMakeLists:1086+) MUST be retained (prose-only edit; no ctest add/split).
+- **Guard #5 (Phase A grep discipline)** — architect re-runs the greps above to prove the reworded strings are accurate (prototype + dev-kernel) and not a new over-claim.
+- **Operative-semantic discipline** — the exact reworded wording + the design-note text are SHOULD-level orientation; the architect owns the precise accurate phrasing; deviations preserving the honesty intent are `inline-merge`.
+- **Guard #11 (VERSION-bump propagation)** — N/A (no bump).
