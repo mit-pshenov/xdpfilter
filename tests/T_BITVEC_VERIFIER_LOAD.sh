@@ -4,7 +4,10 @@
 # The empirical FEASIBILITY GATE (D-mvp-4.2-FFS-FEAS): does the bit-vector
 # prototype datapath — four map lookups, OR-with-wildcard, AND-compose,
 # a bounded #pragma-unroll port scan, and the `ffsll`-based first-match
-# lowering — VERIFY on the 5.15 floor?
+# lowering — load + VERIFY on the DEV kernel this test runs on (uname -r,
+# currently 6.1)? NOTE: this is the 4-axis PROTOTYPE object, NOT the
+# production mac_filter.bpf.c, and NOT a literal 5.15-floor check — see
+# design §5.60 (MVP-4.20) for the honest prototype-vs-production gap-note.
 #
 # Assertion: the prototype BPF object loads with rc=0 (verifier accepted).
 #   - PASS path: `__builtin_ffsll(acc)-1` lowered cleanly OR the documented
@@ -156,5 +159,5 @@ if (( ! loaded )); then
     fail=1
 fi
 
-[[ "${fail}" == 0 ]] && echo "PASS: T_BITVEC_VERIFIER_LOAD (prototype verifies on the 5.15 floor)"
+[[ "${fail}" == 0 ]] && echo "PASS: T_BITVEC_VERIFIER_LOAD (prototype object loads+verifies on the dev kernel $(uname -r); NOT a 5.15-floor nor a production-object guarantee — see design §5.60)"
 exit "${fail}"

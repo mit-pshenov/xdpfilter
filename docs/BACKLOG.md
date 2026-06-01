@@ -147,8 +147,9 @@ Shipped as the 9th axis `BV_AXIS_ETHERTYPE` (`mac_filter.bpf.c:376`): ARRAY_OF_M
 **Other Mediums:**
 ### B22 [MEDIUM, test] sanitize the 6-axis lowering path
 `tests/T_SANITIZER_BUILD.sh:84-95` runs only 1 src_cidr rule under ASAN/UBSAN → `close_prefixes`/`populate_{proto,port,vlan,mac}_inner_slot`/`write_wildcard_slots`/per-axis bounds never sanitized. Point a sanitizer test at `config_valid_and6.yaml` + 2-3 vectors (full-6 + wildcard + NOMATCH).
-### B23 [MEDIUM, test] 5.15-verifier load of the PRODUCTION object
-`tests/T_BITVEC_VERIFIER_LOAD.sh:7,159` verifies only the 4-axis PROTOTYPE on the dev (6.1) kernel yet prints "verifies on the 5.15 floor". The production `mac_filter.bpf.c` (6 axes + variable IHL-offset L4 read) is untested on the stated floor. Fix: CI lane that `bpftool prog load`s the production `.o` on a 5.15 image, or at minimum reword the misleading message + flag in design §5.44/§5.47.
+### B23 [MEDIUM, test, PARTIAL — B23-min reworded shipped MVP-4.20] 5.15-verifier load of the PRODUCTION object
+**B23-min DONE (MVP-4.20, §5.60):** the misleading "verifies on the 5.15 floor" over-claim in `tests/T_BITVEC_VERIFIER_LOAD.sh:7,159` is reworded to the accurate "prototype object loads+verifies on the dev kernel (uname -r, currently 6.1); NOT a 5.15-floor nor a production-object guarantee", and the honest prototype-vs-production gap-note is flagged in **design §5.60** (+ inline `[CLARIFIED BY §5.60]` on §6.46). The behavioral core (prototype load + rc=0 assertion) is byte-unchanged.
+**Remainder DEFERRED / infra-gated:** the test still verifies only the 4-axis PROTOTYPE on the dev (6.1) kernel. The production `mac_filter.bpf.c` (9 axes — dst/src/proto/port/vlan/mac/dst6/src6/ethertype + IPv6 ext-walk + variable IHL-offset L4 read) remains untested on the stated 5.15 floor. Full fix: a CI lane that `bpftool prog load`s the production `.o` on a real 5.15 image (needs a 5.15 kernel image in CI — infra-gated).
 ### B27 [MEDIUM, security] exporter single-threaded HTTP connection-hold DoS
 `src/exporter/http.cpp:421`+:465, 5s/conn budget, single sync acceptor → sequential attacker blacks out /metrics+/healthz (CWE-400). Mitigated by the loopback-default bind. Fix: lower per-conn read deadline (~1s) and/or per-source cap.
 ### B29 — ✅ SHIPPED MVP-4.18 (`194be4f`) — deleted the legacy `allowlist` alias map
