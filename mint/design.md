@@ -13791,6 +13791,7 @@ Two NEW ctests (§6.45, §6.46), both `RESOURCE_LOCK xdp_fixture` + `SKIP_RETURN
 - **TIMEOUT:** generous (multiple inject+dump cycles); `SKIP_RETURN_CODE 77` for absent-tool/rate-floor.
 
 ##### §6.46 T_BITVEC_VERIFIER_LOAD — the prototype verifies on the 5.15 floor (feasibility gate)
+> [CLARIFIED BY §5.60 (MVP-4.20) — this heading and the PI-mvp-4.2-VERIFIER "5.15 floor" wording are imprecise: the test loads the 4-axis PROTOTYPE object (`bitvec_proto.bpf.o`) and asserts rc=0 on the **DEV kernel** (uname -r, currently 6.1), NOT the PRODUCTION 9-axis `mac_filter.bpf.c` object on a literal 5.15 image. The "5.15 floor" is the documented design TARGET (the §5.42 spike cited at `mac_filter.bpf.c:578` itself ran on 6.1 per `architecture-l2l3-gate.md:208`), not an empirically verified floor. The MVP-4.20 prose reword + the honest gap-note live in §5.60; closing the gap = the infra-gated full-B23 CI lane on a real 5.15 image.]
 - **Trigger:** `bitvec_harness populate ${IFACE_A}` (or `bpftool prog load tests/bitvec/bitvec_proto.bpf.o …`) — exercises the full `ffsll`/AND/bounded-scan datapath through the verifier.
 - **Assertion:** rc=0 (verifier accepted). This is the D-mvp-4.2-FFS-FEAS empirical gate: if it FAILS on `__builtin_ffsll`, impl activates D-mvp-4.2-FFS-FALLBACK and this test passes with the bounded-scan lowering. Either way the SHIPPED prototype must make this green. Reviewer special-attention item (a).
 - **TIMEOUT/SKIP:** standard load test shape.
@@ -16983,3 +16984,146 @@ Guidance for reviewer, NOT contracts for impl. **Resolution rule: if any item be
 - "while I'm here" edits to files not in EDITED. The FileList (one file: `tests/T_SANITIZER_BUILD.sh`) is the complete footprint.
 
 Evidence: `mint/task-brief.md` MVP-4.19 (Goal, HG-mvp-4.19-1/2, Q1 A1/A2/A3 + recommendation, B22-1/B22-2, OOS, guards #5/#12/#13, operative-semantic note, Phase A grep checklist); independent Phase A greps + Reads — `tests/T_SANITIZER_BUILD.sh:1-143` (current single-axis exercise + `read_stats_with_cidr` 4-col reader), `src/lib/loader.cpp` (`close_prefixes6` `:1327`/`host_addr6_of` `:1300`/`host_mask6` `:1312`/`aggregate_axis` `:1413`/`populate_hash_inner_slot` `:1496`/`write_wildcard_slots` `:1681` + the apply call-sites `:1913-1963/2184-2218`), `src/bpf/mac_filter.bpf.c:955-1405` (verdict→STAT slot map for all 3 arms), `src/common/mac_filter.h:73-76` (STAT slot enum), `tests/fixtures/config_valid_andv6.yaml:45-67` (rule layout), `tests/inject/inject_l6.py:123-147` (CLI + `--ext`), `tests/lib/read_stats.py:132-135` (4-col output), `tests/lib/common.sh:182-244` (`read_stats_with_cidr`, `wait_for_stats_sum_with_cidr`), `tests/T_ANDV6_ORACLE_AGREEMENT.sh:100-154` (W1/W2/W6 vector analogs), `tests/T_ANDEXT_WALK_STEER.sh` (`--ext`+walk reaches true-L4) (2026-06-01); design §6.8 (the T_SANITIZER_BUILD original contract, now inline-superseded), §5.43 (MVP-4.3 `--allow`→src_cidr exercise pivot + D-mvp-4.3-STAT PASS_CIDR slot), §5.50 (B28 `aggregate_axis`/`populate_hash_inner_slot` templates), §5.53 (S4 `close_prefixes6` `__int128` + PI-mvp-4.13-CLOSURE6), §5.55 (S6 ext-walk + PI-mvp-4.15-EXT-WALK), §5.18 (XDPMF_SANITIZERS option); commit `0acca78` (MVP-4.18 baseline, 96/96, VERSION 0.15.0).
+
+---
+
+### §5.60 MVP-4.20 / test-honesty: stop `T_BITVEC_VERIFIER_LOAD` over-claiming the 5.15 floor (B23-min) (brownfield, TEST+DOC ONLY, ZERO product-code change, 2026-06-01)
+
+> **Numbering note:** highest prior Decisions section is **§5.59** (MVP-4.19, commit `5e339ac`); this amendment is **§5.60** (MVP-4.20). No prior section is rewritten in substance; **§6.46** (the T_BITVEC_VERIFIER_LOAD design block) carries a NEW inline `[CLARIFIED BY §5.60 …]` marker (the heading + PI-mvp-4.2-VERIFIER "5.15 floor" wording are imprecise — prototype-on-dev-kernel, not prod-on-5.15). This slice adds **NO new §6.x** TestStrategy block (the test's behavioral assertions are byte-unchanged; only its human-readable prose is reworded). Guard catalog stays at **28** (prose/doc-honesty fix introduces no new misdiagnosis class; guards APPLIED: #5/#12/#13).
+
+#### §5.60 Problem statement
+
+`tests/T_BITVEC_VERIFIER_LOAD.sh` is the §6.46 feasibility gate: it `bpftool prog load`s the **4-axis PROTOTYPE** object `bitvec_proto.bpf.o` (and/or runs `bitvec_harness populate`) and asserts rc=0 (verifier accepted). The assertion is sound, but two prose strings over-claim what it proves: the header question at `:7` ("… lowering — VERIFY on the **5.15 floor**?") and the PASS message at `:159` ("PASS: T_BITVEC_VERIFIER_LOAD (prototype **verifies on the 5.15 floor**)"). In reality the test (a) runs on whatever the **dev kernel** is (`uname -r` = `6.1.0-44-cloud-amd64`, NOT 5.15), and (b) loads the **PROTOTYPE** object, NOT the production 9-axis `mac_filter.bpf.c` (dst/src/proto/port/vlan/mac/dst6/src6/ethertype + IPv6 ext-walk + variable IHL-offset L4 read). So the production object on the stated floor is untested, and the test's own output overstates its guarantee.
+
+**B23-min = the takeable, NO-INFRA slice:** reword the misleading prose so the test states what it ACTUALLY verifies, record the prototype-vs-production + dev-kernel-vs-5.15-floor gap honestly in this design note, and update the BACKLOG B23 entry to partial-completion. **PURE test + doc honesty — `git diff -- src/` MUST stay EMPTY** (Q1=A1; no datapath/loader/comment change). No schema/VERSION/axis change (stays `0.15.0` / schema `2` / 9 axes). Same spirit as MVP-4.19's correction that ASAN instruments the userspace binary only — fix the over-claim, not the (working) verification.
+
+#### §5.60 Phase A code-grep verification report (architect-independent — 2026-06-01, per guard #5)
+
+The brief's over-claim claim is REAL and its ripple-set is verified against the codebase:
+
+1. **The over-claiming strings, exact + anchored.** `grep -nE '5\.15|floor|prototype verifies|VERIFY on' tests/T_BITVEC_VERIFIER_LOAD.sh` → exactly **two** literal "5.15 floor" occurrences: `:7` (`# lowering — VERIFY on the 5.15 floor?`) and `:159` (`echo "PASS: T_BITVEC_VERIFIER_LOAD (prototype verifies on the 5.15 floor)"`). **Brief correction (guard #5):** the brief's `:22-28` "sanity-floor prose also frames the 5.15 floor" is imprecise — `:22 "Sanity floor:"` is the test's **SMOKE/NEGATION taxonomy header** (the standard test-shape section), it does NOT mention 5.15 and is NOT an over-claim. The two literal "5.15 floor" sites are the entire reword surface inside the test. The internal FAIL messages (`:117/:155 "did not verify on this kernel"`) are already accurate and stay.
+
+2. **The test loads the PROTOTYPE, not prod — so the reworded message will be accurate.** `grep -nE 'bitvec_proto|mac_filter\.bpf|bpftool prog load|find_proto_obj|find_harness' tests/T_BITVEC_VERIFIER_LOAD.sh` → `find_proto_obj()` `:44` resolves `bitvec_proto.bpf.o` (`:50-57`), `find_harness()` `:62` resolves `bitvec_harness`, the load is `bpftool prog load "${PROTO_OBJ}" … type xdp` `:109` and `${HARNESS} populate` `:141`. **NO reference to `mac_filter.bpf` anywhere in the test** — it never touches the production object. ⟹ a reworded message saying "prototype object loads+verifies on the dev kernel" is ACCURATE, not a new over-claim.
+
+3. **Dev kernel is NOT 5.15.** `uname -r` = `6.1.0-44-cloud-amd64`. The "5.15 floor" claim is empirically wrong as a statement about where the test ran.
+
+4. **Guard #13 retired-string ripple set.** `grep -rn '5.15 floor' tests/ docs/ src/` → (i) the test (`:7`,`:159` — reworded by impl, B23-1); (ii) `docs/BACKLOG.md:151` (the B23 entry itself — updated by impl, B23-3); (iii) **four** `src/bpf/mac_filter.bpf.c` comments: `:578` ("spike §5.42 verdict ADOPT confirmed it verifies on the 5.15 floor"), `:600` ("the `#pragma unroll` … has no back-edge, so the 5.15 verifier sees straight-line code"), `:641` ("kernel floor 5.15 — no bpf_loop"), `:782` ("if the 5.15 verifier rejects the variable ihl*4 offset … fallback"). The bpf.c comments are PROD design-rationale, NOT the test's runtime over-claim → **Q1 decision below leaves them untouched** and caveats them collectively here. No OTHER consumer asserts the test's PASS string.
+
+5. **B15 already satisfied — confirmed, NOT re-touched.** `git ls-files | grep -E '__pycache__|\.pyc'` = ∅ (no tracked artifacts); `.gitignore` already carries `__pycache__/` + `*.pyc`. The BACKLOG B15 entry is stale; nothing to do (OOS).
+
+6. **Subtle finding that strengthens the honest note (guard #5 payoff):** even the `mac_filter.bpf.c:578` claim that the §5.42 spike "confirmed it verifies on the 5.15 floor" is itself an extrapolation — per `mint/architecture-l2l3-gate.md:208` that spike "ran on 6.1.0-44 (not the 5.15 floor), used a reduced … stub … and was externally uncorroborated." ⟹ across the whole tree, "5.15 floor" is a documented design **TARGET** reasoned from verifier-safe construct choices (bounded `#pragma unroll`, no `bpf_loop`, FFS/ihl fallbacks), NOT an empirically verified floor for ANY object, prototype or production. The honest note states this once.
+
+#### §5.60 Human-gate decisions (defaults applied; architect upheld)
+
+- **HG-mvp-4.20-1 — scope = test+doc honesty ONLY; full CI-lane stays deferred.** UPHELD. The production-object-on-5.15 verification needs a real 5.15 kernel image / CI lane (infra-gated) — explicitly OUT OF SCOPE. This slice only stops the over-claim and records the gap.
+- **HG-mvp-4.20-2 — keep the test's behavioral assertions byte-identical; prose-only edit.** UPHELD. The object-find logic, the `bpftool prog load` rc=0 assertion, the harness-populate fallback, the SKIP-77 guard, and `RESOURCE_LOCK xdp_fixture` are all byte-unchanged. Only human-readable comment + PASS-message text changes.
+
+#### §5.60 Q1 decision — bpf.c comment scope → **A1 (leave `src/bpf/mac_filter.bpf.c` untouched)**
+
+- **Q1 → A1.** The four `mac_filter.bpf.c` comments (`:578/:600/:641/:782`) are **PROD design-rationale** describing why the datapath constructs are *designed* 5.15-safe (bounded unroll, no `bpf_loop`, straight-line verifier shape, ihl/FFS fallbacks). They are NOT the test's runtime over-claim. **Because** (a) leaving them keeps the slice strictly test+doc-only → `git diff -- src/` EMPTY (the load-bearing fence, PI-7 continues trivially); (b) the "designed-5.15-safe but UNVERIFIED on a literal 5.15 image" caveat is captured ONCE, collectively, in the §5.60 honest gap-note below (cleaner than scattering a comment-edit ripple across four prod sites); (c) `:578`'s "spike … confirmed it verifies on the 5.15 floor" reads as a **spike-result design citation** (pointing at §5.42), not a claim that *this test* or *the production object at runtime* passes on 5.15 — the imprecision (the spike actually ran on 6.1) is design history, accurately corrected in the note's point about the TARGET-vs-verified distinction. **A2 NOT taken** (would widen the diff into prod source for marginal honesty gain already covered by the note). If a future slice ever rewrites those comments, it should cross-reference §5.60 (guard #13).
+
+#### §5.60 Q2 decision — note placement → **A1 (NEW self-contained §5.60 block)** + the exact honest gap-note text
+
+- **Q2 → A1.** A NEW self-contained §5.60 block (this one), mirroring the per-slice §-numbering, rather than a sub-note grafted under §5.44/§5.47. **Because** the gap spans the §6.46 test contract + the §5.42/§5.43/§5.53/§5.55 prod-lowering history (not just one axis section), so a dedicated block is the honest single home; §6.46 gets a lightweight inline `[CLARIFIED BY §5.60]` pointer (already applied). The note text below is the B23-2 deliverable.
+
+> **§5.60 honest gap-note (the B23-2 deliverable; SHOULD-level orientation, operative-semantic — the obligation is that all three facts are stated, not the exact wording):**
+> 1. **What `T_BITVEC_VERIFIER_LOAD` actually verifies:** the **4-axis PROTOTYPE** object (`bitvec_proto.bpf.o`, the §5.42 spike datapath) loads with rc=0 (verifier ACCEPTED) on the **DEV kernel the test runs on** (`uname -r`, currently `6.1.0-44-cloud-amd64`). It exercises the `ffsll`/AND/bounded-scan first-match lowering through the verifier on that kernel. It is a feasibility gate for the prototype shape, nothing more.
+> 2. **What it does NOT verify:** it does NOT load the **PRODUCTION 9-axis** object (`mac_filter.bpf.c` — dst/src/proto/port/vlan/mac/dst6/src6/ethertype + IPv6 ext-walk + variable IHL-offset L4 read), and it does NOT run on a literal **5.15 kernel image**. Therefore the production object's verifier-acceptance on the kernel **5.15 floor remains UNVERIFIED**. The "5.15 floor" throughout the codebase (the `mac_filter.bpf.c:578/600/641/782` comments, PI-mvp-4.2-VERIFIER, PI-mvp-4.3-VERIFIER, PI-mvp-4.11-5.15-FLOOR) is a documented design **TARGET** — reasoned from verifier-safe construct choices (bounded `#pragma unroll`, no `bpf_loop`, straight-line shape, ffsll/ihl fallbacks) and re-checked by per-slice impl-Phase-2.5 `bpftool prog load` smokes **on the 6.1 dev host** — NOT an empirically verified floor on a real 5.15 image (even the §5.42 spike cited at `:578` ran on 6.1 per `architecture-l2l3-gate.md:208`).
+> 3. **Closing the gap = infra-gated full-B23:** a CI lane that `bpftool prog load`s the PRODUCTION `mac_filter.bpf.o` on a real **5.15 kernel image** (a 5.15 CI runner / VM image). This is INFRA-GATED and explicitly OUT OF SCOPE for MVP-4.20; it is the deferred remainder of B23.
+
+#### §5.60 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+**NEW:** none.
+
+**EDITED:**
+
+| Path | Sites (role) | Lang | LOC est |
+|---|---|---|---|
+| `tests/T_BITVEC_VERIFIER_LOAD.sh` | **prose-only.** (a) `:7` header question: retire "VERIFY on the 5.15 floor?" → an accurate question about loading+verifying the PROTOTYPE object on the DEV kernel, with a pointer to design §5.60 for the real-floor gap (suggested orientation below). (b) `:159` PASS message: retire "prototype verifies on the 5.15 floor" → an accurate statement (prototype object loads+verifies on the dev kernel; NOT a 5.15-floor nor a production-object guarantee). **KEEP byte-identical:** `find_proto_obj`/`find_harness` (`:44-78`), the `bpftool prog load … rc=0` assertion (`:104-133`), the harness-populate fallback (`:138-152`), the libcall scan, the SKIP-77 guard (`:83-87`), the `:22 "Sanity floor:"` SMOKE/NEGATION header (NOT a 5.15 claim — leave it), the cleanup `trap`, and the CMakeLists `RESOURCE_LOCK xdp_fixture` registration. | bash | ±8 |
+| `docs/BACKLOG.md` | The B23 entry (`:150-151`): mark **B23-min reworded shipped (MVP-4.20)**; fix the stale "**6 axes**" → **9 axes** (dst/src/proto/port/vlan/mac/dst6/src6/ethertype + ext-walk + variable IHL-offset L4); re-point the "flag in design §5.44/§5.47" → **§5.60**; state the full CI-lane (prod `.o` on a 5.15 image) remains the **deferred/infra-gated** remainder. May optionally mark the stale **B15** entry done (already satisfied) — inline-merge, not required. | markdown | ±6 |
+| `mint/design.md` | THIS §5.60 block (B23-2, the honest gap-note) + the inline `[CLARIFIED BY §5.60]` marker on the §6.46 heading. **Done by the architect (this edit).** | markdown | n/a (this amendment) |
+
+**Suggested orientation strings for impl (SHOULD-level; the contract is "no 5.15-floor / no production-object over-claim AND no NEW over-claim", not the exact words — see §5.60 verifiable-invariants resolution rule):**
+- `:7` → e.g. `# lowering — load + VERIFY on the DEV kernel this test runs on (uname -r,` / `# currently 6.1)? NOTE: this is the 4-axis PROTOTYPE object, NOT the`  / `# production mac_filter.bpf.c, and NOT a literal 5.15-floor check — see` / `# design §5.60 (MVP-4.20) for the honest prototype-vs-production gap-note.`
+- `:159` → e.g. `[[ "${fail}" == 0 ]] && echo "PASS: T_BITVEC_VERIFIER_LOAD (prototype object loads+verifies on the dev kernel $(uname -r); NOT a 5.15-floor nor a production-object guarantee — see design §5.60)"`
+  - Using `$(uname -r)` is a nice accurate touch but optional; a literal "the dev kernel (6.1)" or simply "the dev kernel" is fine. **MUST NOT** say "5.15 floor" or imply the production object.
+
+**UNCHANGED-BUT-AFFECTED** — must remain byte-identical / behave identically; reviewer asserts:
+- **All of `src/` — `git diff -- src/` MUST be EMPTY** (Q1=A1; the load-bearing fence). `src/bpf/mac_filter.bpf.c` (incl. the four `:578/:600/:641/:782` 5.15-comments), `src/lib/loader.cpp`, `src/lib/loader.hpp`, `src/common/mac_filter.h` ALL UNTOUCHED.
+- The test's **behavioral core** — `bitvec_proto.bpf.o`/harness find logic, `bpftool prog load` rc=0 assertion, harness-populate fallback, libcall scan, SKIP-77, cleanup trap — byte-identical. Only comment + PASS-message prose moves.
+- `tests/CMakeLists.txt` — the `T_BITVEC_VERIFIER_LOAD` registration (TIMEOUT, `RESOURCE_LOCK xdp_fixture`, label) UNCHANGED (guard #12); no ctest add/split/remove.
+- `bitvec_proto.bpf.o`, `bitvec_harness`, `tests/bitvec/**`, `tests/lib/common.sh` — REUSED as-is, no edit.
+
+Anything not listed above is off-limits; an impl edit to an unlisted file (esp. ANY `src/` file) is a design gap → SendMessage architect.
+
+#### §5.60 DataStructures
+
+None. No struct, map, schema, wire, stats-slot, or CLI/exit-code surface touched. Pure prose.
+
+#### §5.60 Interfaces
+
+No product interface change (CLI, env, exit codes, schema, VERSION, metric labels, log lines, the test's own load mechanism + rc=0 assertion all UNCHANGED). The ONLY surface that moves is the **human-readable text** the test prints/comments — not a machine-consumed contract (no other test or tool greps `T_BITVEC_VERIFIER_LOAD`'s PASS string; verified guard #13).
+
+#### §5.60 Decisions (with rationale)
+
+- **D-mvp-4.20-Q1-LEAVE-BPF** — leave `src/bpf/mac_filter.bpf.c` untouched (Q1=A1); caveat the four 5.15-comments collectively in the §5.60 gap-note — **because** they are PROD design-rationale (constructs designed 5.15-safe), not the test's runtime over-claim, and leaving them keeps `git diff -- src/` EMPTY (the load-bearing fence + PI-7 trivial continuation). The honest "designed-5.15-safe but UNVERIFIED on a literal 5.15 image" framing is captured once in the note.
+- **D-mvp-4.20-Q2-NEW-SECTION** — the gap-note lives in a NEW self-contained §5.60 (Q2=A1) with an inline `[CLARIFIED BY §5.60]` pointer on §6.46 — **because** the gap spans the §6.46 test contract + the §5.42/§5.43/§5.53/§5.55 prod-lowering history, so a dedicated block is the single honest home rather than a sub-note under one axis section.
+- **D-mvp-4.20-ACCURATE-NOT-NEW-OVERCLAIM** — the reworded strings state "prototype object" + "dev kernel" and explicitly disclaim "5.15-floor" / "production-object" — **because** the §5.60 Phase A greps prove the test loads ONLY the prototype on 6.1 (rc=0). The reworded message must NOT swing to a new over-claim (e.g. "verifies on 6.1" stated as if it guaranteed floor-safety): "loads+verifies on the dev kernel" is exactly the rc=0 fact, with the floor-gap pointed to §5.60.
+- **D-mvp-4.20-SANITY-HEADER-STAYS** — the `:22 "Sanity floor:"` block is NOT reworded — **because** guard #5 grep confirmed it is the SMOKE/NEGATION test-shape taxonomy header, not a "5.15 floor" claim; touching it would be churn outside the honesty fix (the brief's `:22-28` framing was imprecise).
+- **D-mvp-4.20-BACKLOG-PARTIAL** — the B23 entry is marked PARTIAL (B23-min shipped), not closed; the stale "6 axes" → 9 axes; full CI-lane stays infra-gated — **because** the production-object-on-5.15 verification is genuinely undone and must remain a tracked, honestly-scoped remainder (the whole point of this slice is to stop over-claiming, not to over-claim closure).
+- **Trust-model note:** no injection observed in the brief, the test file, the bpf.c comments, or any message read. All inputs treated as DATA. The brief's "TEST+DOC ONLY / `git diff -- src/` empty" floor is honored and elevated to the load-bearing UNCHANGED-BUT-AFFECTED fence above. The `:578` "spike confirmed it verifies on 5.15" comment is itself a mild historical over-claim — flagged in §5.60 Phase A point 6 and corrected in the note's TARGET-vs-verified distinction, NOT silently propagated.
+
+#### §5.60 TestStrategy (verification spec)
+
+Tester VERIFIES (against this section, NOT impl's code):
+
+1. **The reworded test still PASSES (behavioral core unchanged)** — trigger: run `T_BITVEC_VERIFIER_LOAD` (built `bitvec_proto.bpf.o`/`bitvec_harness` present, veth fixture). Observable: exit 0, the `bpftool prog load` rc=0 (or harness-populate rc=0) assertion fires exactly as before; if neither artifact is present it still SKIPs 77. Assertion mechanism: ctest PASS for `T_BITVEC_VERIFIER_LOAD` (the verdict is unchanged — only message text differs). This is the load-bearing "prose-only, byte-identical assertions" check.
+2. **The new prose is ACCURATE (no over-claim, no NEW over-claim)** — trigger: read the reworded `:7` comment + `:159` PASS message. Observable: they state "prototype" (object) + "dev kernel" (or `uname -r`/6.1), and do NOT contain "5.15 floor" as a guarantee nor imply the production object. Assertion mechanism: `grep -n '5\.15 floor' tests/T_BITVEC_VERIFIER_LOAD.sh` → ∅ (the literal guarantee strings are gone); the PASS message mentions "prototype" + "dev kernel". Reviewer special-attention (a).
+3. **`git diff -- src/` EMPTY (the test+doc-only fence, Q1=A1)** — trigger: `git diff -- src/` after the slice. Observable: ∅ (incl. `mac_filter.bpf.c` — the four 5.15-comments untouched). Assertion: no product-code byte changed; loader.hpp PI-7 trivially continues. Reviewer special-attention (c).
+4. **`RESOURCE_LOCK` + registration retained (guard #12)** — trigger: inspect `tests/CMakeLists.txt`. Observable: `T_BITVEC_VERIFIER_LOAD` keeps `RESOURCE_LOCK xdp_fixture`, TIMEOUT, label; no ctest added/removed. Assertion: registration byte-unchanged.
+5. **Suite-green + count** — trigger: full `ctest`. Observable: **96/96** (no test added/removed — reword in place). Assertion: count == 96, `T_BITVEC_VERIFIER_LOAD` GREEN (or legit SKIP if artifacts absent — same SKIP condition as pre-slice).
+6. **BACKLOG honesty (reviewer special-attention e)** — trigger: read `docs/BACKLOG.md` B23. Observable: marked B23-min shipped / PARTIAL (NOT fully closed), "6 axes" → 9, full CI-lane noted infra-gated, design pointer → §5.60. Assertion: entry reflects partial completion, not full closure.
+7. **Design-note honesty (reviewer special-attention d)** — trigger: read §5.60 gap-note. Observable: states all three facts (prototype-on-dev-kernel verified; production-on-5.15 UNVERIFIED; closing = infra-gated full-B23) without claiming the gap is closed. Assertion: the three points are present.
+
+**OPS-canary note:** no NEW invocation path / capability mask / namespace / uid is introduced — the test runs the SAME `bpftool prog load` / `bitvec_harness populate` surface in the same veth/bpffs/sudo context as the pre-slice version, with only its printed/commented text changed. Per the load-bearing-OPS-canary heuristic, **no additional OPS canary is mandated** (zero behavioral delta).
+
+#### §5.60 verifiable invariants for reviewer (MAY-default per architect-spec §6.5 discipline)
+
+Guidance for reviewer, NOT contracts for impl. **Resolution rule: if any item below conflicts with a §6.5 PI item, the PI wins; if impl deviates from a hint to satisfy a PI or a load-bearing test assertion, disposition is `inline-merge`, NOT `[UNRELATED-EDIT]`.**
+
+1. (MUST) `git diff -- src/` = ∅ — no product-code change whatsoever (Q1=A1; incl. the four `mac_filter.bpf.c` 5.15-comments). (PI-mvp-4.20-TEST-DOC-ONLY)
+2. (MUST) `git diff -- src/lib/loader.hpp` = ∅. (PI-7, trivially continues)
+3. (MUST) `T_BITVEC_VERIFIER_LOAD`'s behavioral core is byte-unchanged: the `find_proto_obj`/`find_harness` logic, the `bpftool prog load` rc=0 assertion, the harness-populate fallback, the SKIP-77 guard, and the cleanup trap. Only the `:7` comment + `:159` PASS-message prose move. (PI-mvp-4.20-BEHAVIOR-IDENTICAL)
+4. (MUST) `grep -n '5\.15 floor' tests/T_BITVEC_VERIFIER_LOAD.sh` = ∅ AND the reworded prose mentions "prototype" + "dev kernel" and does NOT imply the production object. (PI-mvp-4.20-NO-OVERCLAIM)
+5. (MUST) `T_BITVEC_VERIFIER_LOAD` keeps `RESOURCE_LOCK xdp_fixture`; ctest **96/96**; no test added/removed. (guard #12; PI-mvp-4.20-SUITE)
+6. (MUST) `docs/BACKLOG.md` B23 marked PARTIAL (B23-min shipped), "6 axes"→9, full CI-lane infra-gated, pointer → §5.60. (PI-mvp-4.20-BACKLOG)
+7. (MAY) exact reworded wording of `:7` / `:159` differs from the suggested orientation strings, AND/OR uses `$(uname -r)` vs a literal "6.1" vs "the dev kernel" — `inline-merge` (the contract is "no 5.15-floor / no production-object over-claim AND no NEW over-claim", §5.60 D-mvp-4.20-ACCURATE-NOT-NEW-OVERCLAIM; the precise words are orientation).
+8. (MAY) impl additionally rewords the `:4-13` surrounding comment lines for flow, or adds a one-line `# see design §5.60` pointer elsewhere in the header — `inline-merge` (as long as the behavioral core stays byte-identical and no NEW over-claim appears).
+9. (MAY) impl marks the stale B15 BACKLOG entry done while editing BACKLOG — `inline-merge` (already-satisfied; not required).
+
+#### §6.5 Preserved-invariants delta (MVP-4.20)
+
+| PI | Property | Check mechanism |
+|---|---|---|
+| **PI-7 (CONTINUES, trivial)** | `src/lib/loader.hpp` byte-identical — no `src/` file touched at all (test+doc-only slice). | `git diff -- src/lib/loader.hpp` = ∅. (Streak continuation.) |
+| **PI-mvp-4.20-TEST-DOC-ONLY (NEW, load-bearing)** | `git diff -- src/` is EMPTY (Q1=A1) — incl. `src/bpf/mac_filter.bpf.c` (the four `:578/:600/:641/:782` 5.15-comments untouched). Only `tests/T_BITVEC_VERIFIER_LOAD.sh` + `docs/BACKLOG.md` + `mint/design.md` change. | `git diff -- src/` = ∅. |
+| **PI-mvp-4.20-BEHAVIOR-IDENTICAL (NEW)** | `T_BITVEC_VERIFIER_LOAD`'s behavioral core (object find, `bpftool prog load` rc=0 assertion, harness-populate fallback, SKIP-77, cleanup trap, CMakeLists `RESOURCE_LOCK xdp_fixture`) byte-unchanged; only `:7` comment + `:159` PASS-message prose reworded. | `git diff tests/T_BITVEC_VERIFIER_LOAD.sh` touches only comment/echo prose; `git diff -- tests/CMakeLists.txt` = ∅ for this entry. |
+| **PI-mvp-4.20-NO-OVERCLAIM (NEW)** | The reworded prose no longer claims a "5.15 floor" guarantee nor implies the production object; states "prototype" + "dev kernel"; introduces NO new over-claim. | `grep -n '5\.15 floor' tests/T_BITVEC_VERIFIER_LOAD.sh` = ∅; PASS message mentions prototype + dev kernel. |
+| **PI-mvp-4.20-SUITE (NEW)** | ctest 96/96; no test added/removed; `T_BITVEC_VERIFIER_LOAD` GREEN (or legit SKIP, same condition); `RESOURCE_LOCK` retained. | full ctest count == 96; CMakeLists entry unchanged. |
+| **PI-mvp-4.20-NO-VERSION-SCHEMA (NEW)** | No VERSION / schema / axis-count change (stays 0.15.0 / schema 2 / 9 axes). | `git diff -- CMakeLists.txt src/lib/config.hpp` = ∅ (no bump). |
+| **PI-6 (CONTINUES)** | Pre-existing ctests stay green or legitimately SKIP. | full suite 96/96 (or documented SKIPs unchanged). |
+
+**No new guard.** Guards APPLIED: **#5** (Phase A grep — re-ran the brief's greps independently; confirmed exactly two literal "5.15 floor" sites in the test, the prototype-not-prod load, the dev-kernel ≠ 5.15, the four bpf.c ripple comments, B15 already-satisfied; AND surfaced the brief's `:22-28` imprecision + the `:578` spike-ran-on-6.1 sub-finding), **#12** (RESOURCE_LOCK — `xdp_fixture` retained on the reworded test; no ctest add/split), **#13** (retired-string ripple — the over-claiming "5.15 floor" PASS string retired in the test; ripple set = test + BACKLOG (updated B23-3) + four bpf.c comments (left per Q1=A1, caveated collectively in the note); no other consumer asserts the PASS string). N/A: #7/#10/#11 (no VERSION/schema/catalog/map move), #15/#16 (no map RESET / pin-path retire), #22/#23/#25/#27/#28. **Guard catalog stays at 28.**
+
+#### §5.60 Out of scope (anti-drift fence)
+
+- **ANY product-code change** — `src/` byte-untouched (Q1=A1, the load-bearing fence). No datapath/loader/comment edit. No new axis / schema (stays 2) / VERSION (stays 0.15.0) / axis-count (stays 9).
+- **The full B23** — a CI lane that `bpftool prog load`s the PRODUCTION `mac_filter.bpf.o` on a real 5.15 kernel image. INFRA-GATED (needs a 5.15 image / CI runner) — the deferred remainder; explicitly NOT this slice.
+- Any change to the test's load mechanism, rc=0 assertion, harness-populate fallback, SKIP-77 guard, libcall scan, or `RESOURCE_LOCK` (HG-mvp-4.20-2 — prose-only).
+- Rewording the four `mac_filter.bpf.c` 5.15-comments (Q1=A2 NOT taken) — they are accurate PROD design-intent, caveated collectively in the §5.60 note.
+- Rewording the `:22 "Sanity floor:"` SMOKE/NEGATION taxonomy header (D-mvp-4.20-SANITY-HEADER-STAYS — not a 5.15 over-claim).
+- **B15** (.pyc + `.gitignore` hygiene) — ALREADY SATISFIED (no tracked `__pycache__`/`*.pyc`; `.gitignore` already covers it); the BACKLOG B15 entry is stale and MAY be marked done while in BACKLOG (inline-merge), nothing else to do.
+- **B26** (`pass_cidr`→`pass_rule` metric rename), **B30** (slot/id decouple, PO-gated), **B27** (exporter DoS — security, HELD) — separate slices.
+- "while I'm here" edits to files not in EDITED. The FileList (`tests/T_BITVEC_VERIFIER_LOAD.sh` + `docs/BACKLOG.md` + this design note) is the complete footprint.
+
+Evidence: `mint/task-brief.md` MVP-4.20 (Goal, Context/prior-work grep summary, HG-mvp-4.20-1/2, Q1 A1/A2 + recommendation, Q2 A1/A2 + recommendation, B23-1/B23-2/B23-3 scope, OOS incl. B15-already-done + full-B23 infra-gated, DoD, guards #5/#12/#13, operative-semantic note, Phase A grep checklist); independent Phase A greps + Reads — `tests/T_BITVEC_VERIFIER_LOAD.sh:1-161` (full read: `:7`/`:159` over-claims, `find_proto_obj`/`find_harness` load the PROTOTYPE not prod, rc=0 assertion, SKIP-77, `:22 "Sanity floor:"` taxonomy header), `src/bpf/mac_filter.bpf.c:578/600/641/782` (the four 5.15 design-intent comments — left per Q1=A1), `docs/BACKLOG.md:144-155` (B23 entry `:150-151` with stale "6 axes"; B15 stale), `mint/design.md` §6.46 (the T_BITVEC_VERIFIER_LOAD design block, now inline-clarified), §5.42 (the bitvec prototype/spike datapath + PI-mvp-4.2-VERIFIER), §5.43/§5.53/§5.55 (prod-lowering history), §5.59 (MVP-4.19, prior amendment + numbering predecessor), `mint/architecture-l2l3-gate.md:208` (the §5.42 spike ran on 6.1, not 5.15 — strengthens the honest note); `uname -r` = `6.1.0-44-cloud-amd64` (dev kernel ≠ 5.15); `git ls-files | grep __pycache__|.pyc` = ∅ (B15 satisfied) (2026-06-01); commit `5e339ac` (MVP-4.19 baseline, 96/96, VERSION 0.15.0, schema 2, 9 axes, guards 28).
