@@ -17619,3 +17619,143 @@ Guidance for the reviewer, NOT contracts for impl. **Resolution rule: if any ite
 - "while I'm here" edits to files not in NEW/EDITED. The FileList is the complete footprint; an impl edit to an unlisted file (esp. ANY `src/` change) is a design gap → SendMessage architect.
 
 Evidence: `mint/task-brief.md` MVP-4.23 (Goal, Context/prior-work Phase-A greps, Workflow rules, HG-mvp-4.23-1/2/3, Q1 A1/A2/A3 + recommendation, Scope C-1/C-2/C-3, OOS, DoD, Dependencies, guards #5/#11/#12 applicability, Notes-for-architect grep checklist); independent Phase A greps + Reads (guard #5) — `tests/T_BITVEC_VERIFIER_LOAD.sh` (standalone `bpftool prog load … type xdp` mechanism `:107-126`, object resolution under `BUILD_DIR` `:46-63`, SKIP-77 gating `:41/:86-90`, pin-cleanup trap `:92-100`), `tests/CMakeLists.txt` (`add_bpf_object(mac_filter_*)` precedent `:46-66`, `SKIP_RETURN_CODE 77` foreach pattern `:88-108`, `WILL_FAIL` canary `:120`, `T_BITVEC_VERIFIER_LOAD` registration + `BITVEC_BPF_OBJ` env + `xdp_fixture` lock `:1094-1123`), top-level `CMakeLists.txt:106` (`add_bpf_object(mac_filter src/bpf/mac_filter.bpf.c)`), `cmake/BpfBuild.cmake:25-26` (`add_bpf_object` emits `${CMAKE_BINARY_DIR}/<name>.bpf.o`), `tests/lib/common.sh:64-71` (`require_passwordless_sudo` → exit 77), confirmed `.github` absent (net-new `ci.yml`); design §5.60 (MVP-4.20 prototype-vs-production / unvalidated honesty precedent), §5.62 (MVP-4.22 baseline 98/100, 3658-insn datapath, guard #30, B27-OOS SIGSEGV note), §5.42/§6.46 (the FFS-FEAS verifier-load gate this clones); commit `e50a62d` (MVP-4.22 ship baseline — 98/100, VERSION 0.15.0, schema 2, 9 axes, kManagedMaps 39, datapath 3658 insns, guards #1..#30).
+
+---
+
+### §5.64 MVP-4.24: exporter scrape consistency — `active_idx`-as-seqlock in `rule_counters_reader` (brownfield amendment; EXPORTER read-side only; NO schema / axis / map / loader / datapath / VERSION change; datapath xdp section byte-identical at 3658 insns; 2026-06-02)
+
+#### §5.64 Problem statement
+
+`read_rule_counters()` (`src/exporter/rule_counters_reader.cpp`) selects which inner buffer to read by first reading `active_idx[0]` and THEN, in *separate* `bpf_obj_get`+`bpf_map_lookup_elem` syscalls, opening `rule_counters_<active>` (sum of 64 PERCPU slots) and `slot_rule_id` (half `active`). A loader atomic-swap (`apply -f`) that commits its single-`u32` `active_idx` store in the window between "read active_idx" and "read the buffers" makes that scrape report the **PRE-apply** generation — one scrape stale. This is the third and last of the three 2026-06 hardening slices (MVP-4.22 robustness + MVP-4.23 CI already shipped); it closes P1 from `mint/external-review-2026-06.md`.
+
+**Grounding (independently re-verified Phase A, guard #5 — 2026-06-02):** the loader write-side is **populate-INACTIVE-buffer → single `u32` store to `active_idx[0]` commits** (`loader.cpp` `write_active_idx` `:1785`; `copy_rule_counters_forward` `:1929` copies counters into the inactive inner BEFORE the flip; `slot_rule_id` is rewritten into its inactive half before the flip `:1851`). The active buffer is therefore **NEVER mutated in place**. Consequences that collapse the design space:
+- A single concurrent apply → the reader reads a **stable, internally-consistent** generation (counters + ids both from `active_pre`'s half) that is merely **one-apply stale** — NOT torn, NOT zero, NOT cross-generation.
+- A genuinely TORN/zero read would require reading a buffer mid-repopulation → **two `apply -f` within one sub-second scrape** → operationally impossible (an apply is a full multi-syscall BPF repopulation). Documented OOS (HG-3, §5.60 honesty precedent), not engineered for.
+
+So the fix is a **lightweight seqlock using `active_idx` itself as the sequence number**: snapshot `active_idx` → read both buffers from that snapshot → **re-read `active_idx`; if it changed, retry (bounded N)**. **NO new BPF map, NO loader change, NO `kManagedMaps` growth (stays 39), NO datapath change, NO `loader.hpp` diff.** The heavyweight original framing (a dedicated monotonic generation map + loader write-side bracketing) is **DOMINATED** — its only added coverage is the impossible X→Y→X double-flip. `stats_reader.cpp` reads the **single** `stats` PERCPU_ARRAY (`XDPMF_MAP_STATS_NAME`, STAT-enum-indexed, accumulates across applies, no `active_idx` indirection) → **NO TOCTOU → out of scope** (Q2). grep confirms `stats_reader.cpp` has exactly one `active`-free `pin += XDPMF_MAP_STATS_NAME` site.
+
+#### §5.64 Human-gate decisions (defaults from brief — architect resolution)
+
+- **HG-mvp-4.24-1 → `active_idx`-as-seqnum, NO new gen map.** ACCEPTED (grounding holds: grep of `loader.cpp` confirms populate-inactive-then-single-store-flip + `copy_rule_counters_forward`; no in-place active-buffer mutation exists). See D-mvp-4.24-SEQNUM.
+- **HG-mvp-4.24-2 → no VERSION bump.** ACCEPTED. The new diagnostic is a rare per-iface WARN with no operator-visible metric/label/API change. See D-mvp-4.24-VERSION.
+- **HG-mvp-4.24-3 → X→Y→X two-apply tear is a documented OOS limitation, not engineered.** ACCEPTED. See §5.64 OOS + D-mvp-4.24-TEAR-HONESTY.
+
+#### §5.64 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+**NEW**
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `tests/T_EXPORTER_SCRAPE_CONSISTENCY.sh` | §6.82 concurrency consistency + non-vacuity ctest: scrape concurrent with `apply -f` generation flips; asserts single-consistent-generation + generation-change observability. Sudo-gated, `xdp_fixture` lock, SKIP-77. | bash | ~140 |
+
+**EDITED**
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `src/exporter/rule_counters_reader.cpp` | Wrap the per-iface `active_idx`→`rule_counters_<active>`+`slot_rule_id` read in a bounded `active_idx`-seqlock retry loop (Item G-1); emit the new diagnostic on retry-exhaustion. PI-31 preserved (only added `bpf_obj_get`+lookup). | C++ | ~+45 |
+| `src/common/logger.hpp` | `kEventNames` **38→39** (+1 `exporter.scrape.warn.rule_counters_generation_unstable` in the exporter block); `kEventCount` comment 38→39 (Item G-2). | C++ | +2 |
+| `tests/fixtures/log_events_v1.txt` | +1 sorted line — inserted BEFORE `exporter.scrape.warn.rule_counters_open_failed` (`g` < `o`); file goes 38→39 lines (Item G-2). | text | +1 |
+| `tests/CMakeLists.txt` | Register `T_EXPORTER_SCRAPE_CONSISTENCY` with `RESOURCE_LOCK xdp_fixture` + `SKIP_RETURN_CODE 77` (guard #12), mirroring the existing exporter rule-counters tests. | cmake | ~+12 |
+| `mint/design.md` | THIS §5.64 block. | n/a | n/a |
+
+**UNCHANGED-BUT-AFFECTED** (reviewer asserts zero git-diff)
+
+| Path | Why affected / why untouched |
+|---|---|
+| `src/exporter/stats_reader.cpp` | Reads the single non-active `stats` map (no `active_idx` indirection) → no TOCTOU → Q2 exemption. ZERO diff. |
+| `src/lib/loader.cpp`, `src/lib/loader.hpp` | Write-side atomic-swap is the GROUNDING this slice relies on, but is NOT changed. PI-7 (loader.hpp+config.hpp byte-identical) holds trivially. ZERO diff. |
+| `src/bpf/mac_filter.bpf.c` | PI-DATAPATH-IDENTICAL (3658 xdp insns). ZERO diff. |
+| `src/common/mac_filter.h` | Map names/counts (`XDPMF_MAP_ACTIVE_IDX_NAME`, `XDPMF_RULESET_COUNT`, `XDPMF_ALLOWLIST_MAX`, inner-A/B names, `XDPMF_RULE_COUNTERS_MAX`, `XDPMF_SLOT_ID_EMPTY`). Consumed read-only; kManagedMaps=39 unchanged. ZERO diff. |
+| `src/exporter/rule_counters_reader.hpp` | Public `RuleCountersSample` + `read_rule_counters()` signature UNCHANGED. ZERO diff. |
+
+Anything not in one of the three tables above is off-limits; an impl edit to an unlisted file (esp. ANY `src/lib`/`src/bpf` change) is a design gap → SendMessage architect.
+
+#### §5.64 DataStructures
+
+- **New event-name string** (cross-boundary contract: emitted token ↔ catalog ↔ fixture): `"exporter.scrape.warn.rule_counters_generation_unstable"`. Added to `logger.hpp::kEventNames` (exporter block, alongside the other `exporter.scrape.warn.*`); fixture sorted-insert position is BEFORE `exporter.scrape.warn.rule_counters_open_failed`. `kEventCount` becomes 39.
+- **New retry-bound constant** (file-local, anon namespace in `rule_counters_reader.cpp`; named constexpr — no magic number): `kRuleCountersGenRetryMax` = **3** (`std::size_t`). Semantics: number of RE-READS after the initial attempt before the reader stops retrying and commits the last consistently-read generation. Max total buffer reads per iface ≤ 4 (1 initial + 3 retries).
+- **No on-disk/ABI/struct change.** `RuleCountersSample` (iface, `counters[64]`, `slot_to_id[64]`) UNCHANGED. No new map, no schema, no axis.
+
+#### §5.64 Interfaces
+
+- **`read_rule_counters(std::string_view bpffs_root) noexcept` — signature UNCHANGED** (PI). Behavior change is internal: the per-iface body becomes a bounded seqlock retry loop.
+- **Seqlock read-loop shape** (the contract impl implements; tester reads THIS, not impl's code):
+  ```
+  open active_idx pin once (bpf_obj_get).  If it fails → LEGACY single-shot path
+      (no seqlock; read with active=0 as today; PI-32 graceful) and continue.
+  candidate = <none>
+  for attempt in 0 .. kRuleCountersGenRetryMax (inclusive):
+      active_pre  = lookup(active_idx_fd)      // clamp <XDPMF_RULESET_COUNT, else 0 (existing rule)
+      sample      = read_generation(iface_dir, active_pre)
+                    // open rule_counters_<active_pre> + sum 64 PERCPU slots;
+                    // open slot_rule_id + read half base=active_pre*XDPMF_ALLOWLIST_MAX
+                    // (BOTH buffers keyed by the SAME active_pre → one generation)
+      active_post = lookup(active_idx_fd)
+      candidate   = sample                     // every sample is a consistent full generation
+      if active_pre == active_post:            // no flip during the read → fresh + consistent
+          commit candidate; break
+      // else: a flip landed mid-read; candidate is the (old) consistent generation → retry for freshness
+  if loop exhausted without break:
+      emit Warn "exporter.scrape.warn.rule_counters_generation_unstable"
+           fields { iface=<iface>, attempts=<kRuleCountersGenRetryMax+1> }
+      commit candidate     // last consistently-read generation: a SINGLE full gen, NEVER torn/zero
+  close active_idx_fd
+  ```
+  Key correctness invariant (the team-lead's note, made explicit): **the after-N fallback serves ONE consistent generation, never a tear.** The retry is about FRESHNESS, not tear-prevention — a tear cannot occur on the stable active buffer (it would need the OOS-impossible X→Y→X). The loop is BOUNDED (≤ N+1 reads) — no unbounded retry (decoupled from the B27 single-thread DoS surface).
+- **`rule_counters_open_failed` fall-through PRESERVED**: if `rule_counters_<active_pre>` open fails inside `read_generation`, the existing per-iface WARN (`exporter.scrape.warn.rule_counters_open_failed`) + `continue` path fires exactly as today (the seqlock does not suppress it).
+- **New diagnostic event** `exporter.scrape.warn.rule_counters_generation_unstable`: `Level::Warn`, emitted **at most once per iface per scrape** (only on retry-exhaustion). Fields: `iface` (string), `attempts` (int64). Emitted ONLY via `emit_json` token path (text-mode emits prose `msg` only — same as the other scrape WARNs; relevant to the test's `XDPMF_LOG_FORMAT=json` requirement).
+
+#### §5.64 Decisions (with rationale)
+
+- **D-mvp-4.24-SEQNUM** — use `active_idx` itself as the seqlock sequence number (re-read after the data read), NO dedicated generation map — *because* the write-side populates-inactive-then-atomic-flips and the active buffer is never mutated in place, so re-reading the selector fully detects every operationally-reachable race with zero new map / zero loader / zero datapath change. A dedicated gen map is dominated machinery (HG-1).
+- **D-mvp-4.24-Q1 (A1, N=3)** — bounded retry `kRuleCountersGenRetryMax=3`; after exhaustion serve the LAST consistently-read generation + emit the diagnostic — *because* a single apply needs exactly one retry to converge; N=3 is generous for the (rare) multi-apply burst; the fallback is still a consistent full generation (never a tear), and the diagnostic makes the rare event observable. A2 (skip the iface) rejected (creates a metrics gap); A3 (unbounded) rejected (ties into the B27 single-thread DoS surface).
+- **D-mvp-4.24-WINDOW** — the seqlock wraps BOTH the `rule_counters` read AND the `slot_rule_id` read (both keyed by `active_pre`), re-reading `active_idx` only AFTER both — *because* the committed sample must pair counters + ids from one generation. (The pre-existing code already used a single `active` for both, so it was internally consistent; the seqlock preserves that AND adds freshness.)
+- **D-mvp-4.24-FD-REUSE** — open the `active_idx` pin once per iface and re-`lookup` via the same fd for `active_pre`/`active_post` — *because* the loader reuses the same persistent pinned `active_idx` map object across applies (`active_idx_reused_fd`, `write_active_idx`), so one fd sees every flip; cheaper than re-`bpf_obj_get` and avoids pin re-resolution races. PI-31 preserved (still only `bpf_obj_get`+lookup; no update/delete/pin/link/prog_load).
+- **D-mvp-4.24-NOPIN-LEGACY** — if the `active_idx` pin fails to open, fall back to the existing single-shot read (no seqlock) — *because* half-attached / pre-§5.35 ifaces have no seqnum to compare; PI-32 graceful-empty discipline; this is exactly today's behavior, unchanged.
+- **D-mvp-4.24-VERSION (HG-2)** — no VERSION bump — *because* the change is exporter-internal read-consistency hardening; same metrics, just fresher under a concurrent apply; the new event is a rare internal WARN, not an operator-facing API/metric/label change.
+- **D-mvp-4.24-Q2** — seqlock scoped to `rule_counters_reader` only; `stats_reader.cpp` left byte-identical — *because* `stats` is a single non-active-indexed map (no TOCTOU). grep confirmed: one `active`-free `XDPMF_MAP_STATS_NAME` site.
+- **D-mvp-4.24-TEAR-HONESTY (HG-3 / §5.60 precedent)** — the design states plainly that the X→Y→X two-applies-within-one-scrape tear is NOT defended (operationally impossible: an apply is a full multi-syscall repopulation) — *because* claiming "total consistency" would be dishonest; the slice claims only "consistent + best-effort-fresh under every reachable (single-apply) race."
+- **No injection / adversarial input observed** in the brief or read files (trust-model check, clean).
+
+#### §5.64 TestStrategy (verification spec — tester writes against THIS, not impl's code)
+
+**§6.82 `T_EXPORTER_SCRAPE_CONSISTENCY` (Item G-3).** Sudo-gated (`require_passwordless_sudo` → SKIP-77), `RESOURCE_LOCK xdp_fixture` (attach + apply + scrape touch the veth pair; guard #12), trap-driven cleanup. Uses two configs that produce **distinguishable** generations — e.g. `config_gen_a.yaml` (a rule with stable id `RA`) and `config_gen_b.yaml` (a rule with stable id `RB ≠ RA`), each matching injected traffic so `rule_counters` are non-zero and `slot_to_id` resolves to `RA`/`RB` respectively (mirror the existing `T_EXPORTER_RULE_LABELS` / `config_per_rule_counters.yaml` precedent). Run the exporter under `XDPMF_LOG_FORMAT=json` if the diagnostic-event assertion is exercised. Three parts:
+
+1. **Generation-sensitivity control (non-vacuity backbone — deterministic, serial).** Attach `${IFACE_A}`. `apply -f config_gen_a` → scrape → assert the `rule_counters` block reports id `RA` (and NOT `RB`). `apply -f config_gen_b` → scrape → assert it now reports id `RB` (and NOT `RA`). *Trigger:* settled apply then scrape. *Observable:* the per-rule label/series in `/metrics` (or a direct rule_counters read). *Assertion:* the scrape reflects the CURRENT settled generation. This proves (i) the observable distinguishes generations and (ii) a reader that froze on a stale generation or ignored `active_idx` entirely (the strongest "broken generation logic" regression) is caught deterministically.
+2. **Concurrency consistency (the race).** Background loop alternating `apply -f config_gen_a` / `config_gen_b` (flipping generations) for a bounded duration; concurrently a foreground loop scraping as fast as possible, collecting every result. *Assertion (hard, every scrape):* each scrape's `rule_counters` block is a SINGLE consistent generation — its `slot_to_id` set ∈ exactly one of {`RA`-layout, `RB`-layout}, its counters non-zero (never zero-when-traffic-was-injected), NEVER a cross-generation mix (e.g. `RA` ids paired with `RB`'s slot layout) and NEVER a torn/partial value. *Mechanism hint:* parse each scrape into (ids-set, nonzero-slots) and match against the two known generation fingerprints; reject anything matching neither or both-mixed.
+3. **Generation-change observability guard (non-vacuity for the race).** *Assertion:* across part 2, BOTH generations appeared in the collected scrapes (some saw `RA`, some saw `RB`) AND `active_idx` was observed to transition during the window (read the pin before/after, or count distinct values seen). If only one generation ever appears, the apply/scrape loops never interleaved → the test FAILS as **"could not stage the race"** (NOT a vacuous pass). This is the negation control: it proves the test demonstrably exercised flip-during-scrape, so the consistency assertion in part 2 is meaningful.
+
+**Honesty note (write into the test comments, §5.60 discipline):** the per-overlap *freshness* (a scrape whose read window overlaps a flip preferring the NEW generation) is BEST-EFFORT after bounded retry (A1 fallback may legitimately serve the old consistent generation after N) — so part 2 does NOT hard-assert "overlapping scrape == newest gen"; the deterministic freshness contract is part 1 (settled scrape == current gen). The hard race assertion is **consistency** (single full generation, never torn/zero/cross-mix), which holds for every operationally-reachable (single-apply) race; the X→Y→X tear is OOS-impossible and NOT asserted.
+
+**Baseline:** the existing **100/102** MVP-4.23 baseline stays green (the 2 pre-existing environmental fails #48/#62 remain pre-existing); this slice adds exactly 1 new ctest. Catalog-stability test stays green after the 38→39 ripple.
+
+#### §5.64 Preserved invariants (brownfield — §6.5 continuation)
+
+| PI | Property | Check mechanism |
+|---|---|---|
+| **PI-7-mvp-4.24** | `src/lib/loader.hpp` + `src/lib/config.hpp` byte-identical (no `src/lib` change) — holds TRIVIALLY. | `git diff <base> -- src/lib/loader.hpp src/lib/config.hpp` = ∅. Any diff = `[INVARIANT-VIOLATED]`. |
+| **PI-DATAPATH-IDENTICAL-mvp-4.24** | `src/bpf/mac_filter.bpf.c` unchanged; xdp section 3658 insns — holds TRIVIALLY. | `git diff <base> -- src/bpf` = ∅; (optional) verifier-load insn-count == 3658. |
+| **PI-KMANAGEDMAPS-39-mvp-4.24** | No new BPF map; `kManagedMaps` table stays 39 entries — holds TRIVIALLY. | `git diff <base> -- src/common/mac_filter.h` = ∅; `kManagedMaps` count in `loader.cpp` unchanged (39). |
+| **PI-31-mvp-4.24** | `rule_counters_reader.cpp` touches ONLY `bpf_obj_get` + `bpf_map_lookup_elem` (the added `active_idx` re-reads are lookups) — NO `bpf_map_update_elem`/delete/pin/link/prog_load. | grep `rule_counters_reader.cpp` for write-side BPF syscalls = ∅. |
+| **PI-32-mvp-4.24** | Graceful-empty/partial preserved: missing `active_idx` pin → legacy single-shot path; missing inner pin → existing `rule_counters_open_failed` WARN + continue. | §6.82 + existing exporter WARN tests stay green. |
+| **PI-CATALOG-mvp-4.24** | `kEventCount` == `kEventNames.size()` == 39 == `wc -l tests/fixtures/log_events_v1.txt`; fixture sorted. | catalog-stability ctest (logger.hpp ↔ fixture lockstep) green. |
+| **PI-mvp-4.24-BASELINE** | MVP-4.23 100/102 baseline preserved + 1 new = 101/103 under sudo (2 pre-existing env-fails #48/#62 unchanged). | full `ctest` re-run + diff against prior `test-run.log`. |
+
+Reviewer's framework point 5 walks this list; report `[INVARIANT-VIOLATED]` per failed check.
+
+#### §5.64 Anti-misdiagnosis notes (candidate guard #32 — double-buffer read-side seqlock vs new generation map)
+
+- **Guard #32 (read-side TOCTOU across an atomically-flipped buffer selector → re-read-the-selector seqlock, NOT a new generation map — WHEN the write-side populates-inactive-then-atomic-flips):** when a reader selects one of N buffers via a single index that the write-side commits with one atomic store, and the write-side ALWAYS populates the INACTIVE buffer then flips (active buffer never mutated in place), the read-side TOCTOU is closed by **re-reading the selector after the data read and bounded-retrying for freshness** — the heavyweight "dedicated monotonic generation map + write-side bracketing" is DOMINATED (its only delta is the operationally-impossible two-flips-in-one-read-window tear). **Forward-defense:** a future cycle proposing a gen-map for a read-skew MUST first grep the write-side and prove an *in-place active-buffer mutation* actually exists; absent that, the lightweight selector-seqlock is correct and the gen-map is over-engineering. **Anti-misdiagnosis on the test:** because the buffer is stable, the existing code returns *consistent-but-stale* (NOT torn) for a single apply — so a consistency-only race test is near-vacuous; the test MUST carry a generation-change observability guard (both generations observed + selector transition confirmed) so it is provably non-vacuous, and a deterministic settled-generation control so a "frozen/ignored-selector" regression is caught. Cite §5.64 (this slice) as the audit trail.
+- **Operative-semantic discipline:** the constant value `N=3`, the event-name spelling, the test/config filenames, and the line-number anchors are SHOULD-level orientation; the authoritative contracts are the PI-mvp-4.24-* rows + the seqlock-loop invariant (re-read selector AFTER both buffer reads; bounded; fallback serves one consistent generation). **Prose-vs-invariants conflict rule: the PI row wins; if impl deviates from a hint to satisfy a PI or a load-bearing test assertion, disposition is `inline-merge`, NOT `[UNRELATED-EDIT]`.**
+
+#### §5.64 Out of scope (anti-drift fence)
+
+- **New generation BPF map + loader write-side bracketing** — DOMINATED by HG-1; not built (only delta = the impossible X→Y→X tear).
+- **`stats_reader.cpp` / any non-active-indexed reader** — no TOCTOU (single map); ZERO diff (Q2).
+- **X→Y→X two-apply-in-one-scrape tear** — operationally impossible; documented OOS, NOT engineered or test-asserted (HG-3 / D-mvp-4.24-TEAR-HONESTY).
+- **Per-overlap freshness as a HARD contract** — best-effort after bounded retry (A1 fallback); only settled-generation freshness is deterministically asserted.
+- **VERSION bump, schema, axis, map-count, datapath, loader, or operator-surface change** — none.
+- **B27 exporter single-thread DoS, B26 `pass_cidr`→`pass_rule`, ARCH-H1 datapath triplication, CQ-H1 dead `read_all_attached`** — separate slices; NO touch.
+- "while I'm here" edits to files not in NEW/EDITED. The FileList is the complete footprint; an impl edit to an unlisted file (esp. ANY `src/lib`/`src/bpf` change) is a design gap → SendMessage architect.
+
+Evidence: `mint/task-brief.md` MVP-4.24 (Goal + grounding correction, Context/prior-work Phase-A greps, Workflow rules, HG-mvp-4.24-1/2/3, Q1 A1/A2/A3 + rec, Q2, Scope G-1/G-2/G-3, OOS, DoD, Dependencies, guards #5/#10/#12/#13 applicability, Notes-for-architect grep checklist); independent Phase A greps + Reads (guard #5) — `src/exporter/rule_counters_reader.cpp` (`active_idx`-read `:168-182` → inner-open `:188-218` → 64-slot sum `:220-226` → `slot_rule_id` half-`active` read `:235-251`; existing `rule_counters_open_failed` WARN fall-through `:194-218`; PI-31 contract comment `:16-17`), `src/lib/loader.cpp` (`write_active_idx` single-u32 store `:1785`, `copy_rule_counters_forward` `:1929`, populate-inactive-then-flip comments `:1732-1734`/`:1851-1855`, reattach reuse `:2593-2684`, fresh-attach `:2760-2780`, `read_active_idx` `:2125`), `src/exporter/stats_reader.cpp` (single `XDPMF_MAP_STATS_NAME` site `:205`, no `active_idx`), `src/common/logger.hpp` (`kEventNames` 38 `:90`, exporter block `:114-131`, `kEventCount` comment `:134`), `tests/fixtures/log_events_v1.txt` (38 sorted lines; insert before `:18` `rule_counters_open_failed`), `tests/CMakeLists.txt` (exporter rule-counters tests + `RESOURCE_LOCK xdp_fixture` + `SKIP_RETURN_CODE 77` + `T_EXPORTER_RULE_LABELS`/`config_per_rule_counters.yaml` precedent `:561-693`); design §5.35 (PI-3.4d-EXPORTER active_idx-indirection), §5.61 (slot_rule_id half-`active` read + B30), §5.60 (prototype/honesty precedent), §5.62 (MVP-4.22 +1-event ripple precedent: logger.hpp + fixture lockstep), §5.63 (MVP-4.23 baseline 100/102, guards #1..#31); commit `3d0f3ad` (MVP-4.23 ship baseline — VERSION 0.15.0, schema 2, 9 axes, kManagedMaps 39, datapath 3658 insns).
