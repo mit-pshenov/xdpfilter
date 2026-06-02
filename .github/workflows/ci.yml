@@ -1,0 +1,82 @@
+# .github/workflows/ci.yml — design §5.63 (MVP-4.23, TEST-H1 / C-3).
+#
+# Continuous-integration gate for `main`: build the project under -Werror and
+# run the full ctest suite under sudo, DEMANDING full coverage so a runner
+# without passwordless sudo (which would silently SKIP-77 the entire datapath
+# suite incl. the T_NEGATION_CONTROL canary) goes RED via T_COVERAGE_FLOOR.
+#
+# ┌─ HONESTY NOTE (D-mvp-4.23-CI-UNVALIDATED, §5.60 precedent) ───────────────┐
+# │ This workflow is BEST-EFFORT and UNVALIDATED-until-first-push. A GitHub   │
+# │ Actions workflow cannot be executed in the authoring environment; it has  │
+# │ NOT been run against a live runner. `actionlint` (if available) provides  │
+# │ STATIC syntax validation ONLY — it does not prove the pipeline runs green │
+# │ (toolchain availability, kernel/XDP behaviour on the hosted runner, sudo  │
+# │ semantics are all unverified until the first push triggers this file).    │
+# │ Do NOT claim it "works" until a live run is observed. Expect to iterate.  │
+# └──────────────────────────────────────────────────────────────────────────┘
+#
+# BRANCH-PROTECTION INTENT (not configurable from a file in-tree): to make
+# this check REQUIRED for merge into `main`, a repo admin must enable branch
+# protection on `main` and mark the `build-and-test` check as required. That
+# is a GitHub repo-admin setting (Settings → Branches), NOT a tree artifact.
+
+name: ci
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Toolchain. NOTE: bpftool ships via the linux-tools-* packages on
+      # hosted runners; the project's prototype tests expect a `bpftool` on
+      # PATH (the dev box uses /usr/local/bin/bpftool). clang-19 matches the
+      # BPF target the build uses; libbpf-dev provides the userspace lib.
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang-19 llvm-19 \
+            libbpf-dev \
+            linux-tools-common linux-tools-generic \
+            python3 python3-scapy \
+            jq cmake make pkg-config
+
+      - name: Configure
+        run: cmake -S . -B build
+
+      # The build already enforces -Werror; a warning fails the build here.
+      - name: Build
+        run: cmake --build build
+
+      # Serial (no -j) per D-mvp-4.23-CI-SERIAL: the existing build_cpu /
+      # xdp_fixture RESOURCE_LOCKs already serialize the heavy tests, the suite
+      # is small, and serial avoids CPU-oversubscription SIGKILL/TIMEOUT flakes
+      # on a 2-vCPU hosted runner. ctest returns non-zero on any non-SKIP
+      # failure → the job fails → the gate works. XDPMF_REQUIRE_FULL_COVERAGE=1
+      # arms T_COVERAGE_FLOOR: if the runner lacks passwordless sudo (so the
+      # datapath suite + negation canary would all SKIP-77), the floor gate
+      # goes RED rather than letting a coverage-zero run report green.
+      - name: Test (full coverage required)
+        run: sudo -E env XDPMF_REQUIRE_FULL_COVERAGE=1 ctest --test-dir build --output-on-failure
+
+      # OPTIONAL defense-in-depth (D-mvp-4.23-Q1-NO-A3-IN-CTEST): a post-ctest
+      # skip-count sanity grep. UNVALIDATED and non-load-bearing — the A2
+      # coverage-floor ctest above is the primary gate. Left commented so it
+      # is not mistaken for a working check.
+      # - name: Skip-count sanity (informational, unvalidated)
+      #   run: |
+      #     skips=$(grep -c 'Skipped' build/Testing/Temporary/LastTest.log || true)
+      #     echo "ctest reported ${skips} skipped tests"
+
+# SELF-HOSTED-RUNNER ALTERNATIVE (for environments where the hosted runner's
+# veth/XDP support misbehaves): swap `runs-on: ubuntu-latest` for
+# `runs-on: [self-hosted, linux, x64]` on a box with a recent kernel,
+# passwordless sudo, clang-19 + libbpf + bpftool installed. The job steps are
+# otherwise identical. This alternative is UNVALIDATED here as well.

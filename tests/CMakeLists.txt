@@ -1520,3 +1520,44 @@ set_tests_properties(T_SIDECAR_READ_EXCEPTION_DIAGNOSTIC PROPERTIES
     TIMEOUT 90
     SKIP_RETURN_CODE 77
 )
+
+# ── §5.63 MVP-4.23 CI gate + coverage-floor guards (TEST-H2 / TEST-H3) ────
+# Two NEW ctests (§6.80 / §6.81). PURE test-infra — ZERO src/ footprint.
+#
+# §6.80 T_PROD_VERIFIER_LOAD (TEST-H3 / C-1): standalone `bpftool prog load`
+#   of the PRODUCTION mac_filter.bpf.o (the shipped 9-axis program) through the
+#   in-kernel verifier → rc=0. Closes the gap that the only pre-existing
+#   standalone verifier test loads the 4-axis PROTOTYPE. Resolves the object
+#   via PROD_BPF_OBJ (mirroring BITVEC_BPF_OBJ) → ${BUILD_DIR}/mac_filter.bpf.o.
+#   Verifier-ONLY: NO attach, NO veth, NO netns → NO RESOURCE_LOCK
+#   (D-mvp-4.23-H3-NOLOCK; the PID-unique bpffs-root pin is a sibling of, never
+#   inside, the project pin dir, so it races nothing). SKIP_RETURN_CODE 77 for
+#   the bpftool/object-built/passwordless-sudo (CAP_BPF) preconditions.
+add_test(
+    NAME T_PROD_VERIFIER_LOAD
+    COMMAND bash ${TEST_DIR}/T_PROD_VERIFIER_LOAD.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_PROD_VERIFIER_LOAD PROPERTIES
+    ENVIRONMENT "${TEST_ENV};PROD_BPF_OBJ=${CMAKE_BINARY_DIR}/mac_filter.bpf.o"
+    TIMEOUT 90
+    SKIP_RETURN_CODE 77
+)
+
+# §6.81 T_COVERAGE_FLOOR (TEST-H2 / C-2): the non-skipping coverage-floor gate
+#   (guard #31). Registered DELIBERATELY WITHOUT SKIP_RETURN_CODE 77 and the
+#   script never calls require_passwordless_sudo — it MUST never skip
+#   (PI-mvp-4.23-NO-SKIP-FLOOR), else it is theatre. Reads
+#   XDPMF_REQUIRE_FULL_COVERAGE: =1 + passwordless sudo absent → RED (exit 1);
+#   otherwise green no-op. Carries an intrinsic verdict-truth-table self-test
+#   so it is provably non-vacuous regardless of the live sudo state. Inspects
+#   env + `sudo -n true` only (no veth/bpffs) → NO RESOURCE_LOCK. TIMEOUT 15.
+add_test(
+    NAME T_COVERAGE_FLOOR
+    COMMAND bash ${TEST_DIR}/T_COVERAGE_FLOOR.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_COVERAGE_FLOOR PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    TIMEOUT 15
+)
