@@ -17727,7 +17727,7 @@ Anything not in one of the three tables above is off-limits; an impl edit to an 
 
 **Honesty note (write into the test comments, §5.60 discipline):** the per-overlap *freshness* (a scrape whose read window overlaps a flip preferring the NEW generation) is BEST-EFFORT after bounded retry (A1 fallback may legitimately serve the old consistent generation after N) — so part 2 does NOT hard-assert "overlapping scrape == newest gen"; the deterministic freshness contract is part 1 (settled scrape == current gen). The hard race assertion is **consistency** (single full generation, never torn/zero/cross-mix), which holds for every operationally-reachable (single-apply) race; the X→Y→X tear is OOS-impossible and NOT asserted.
 
-**Baseline:** the existing **100/102** MVP-4.23 baseline stays green (the 2 pre-existing environmental fails #48/#62 remain pre-existing); this slice adds exactly 1 new ctest. Catalog-stability test stays green after the 38→39 ripple.
+**Baseline:** the existing **100/102** MVP-4.23 baseline stays green (the 2 pre-existing environmental fails — by name `T_EXPORTER_EXITS_6_ALL_IFACES_EACCES` + `T_LOG_JSON_EXPORTER_EVENTS`, bpffs-root-unmounted — remain pre-existing); this slice adds exactly 1 new ctest. NOTE (post-review inline-merge): the new test inserts alphabetically and renumbers ctest indices, so `T_LOG_JSON_EXPORTER_EVENTS` shifts #62→#63 — identify the env-fails by NAME, not index. Catalog-stability test stays green after the 38→39 ripple.
 
 #### §5.64 Preserved invariants (brownfield — §6.5 continuation)
 
@@ -17739,7 +17739,7 @@ Anything not in one of the three tables above is off-limits; an impl edit to an 
 | **PI-31-mvp-4.24** | `rule_counters_reader.cpp` touches ONLY `bpf_obj_get` + `bpf_map_lookup_elem` (the added `active_idx` re-reads are lookups) — NO `bpf_map_update_elem`/delete/pin/link/prog_load. | grep `rule_counters_reader.cpp` for write-side BPF syscalls = ∅. |
 | **PI-32-mvp-4.24** | Graceful-empty/partial preserved: missing `active_idx` pin → legacy single-shot path; missing inner pin → existing `rule_counters_open_failed` WARN + continue. | §6.82 + existing exporter WARN tests stay green. |
 | **PI-CATALOG-mvp-4.24** | `kEventCount` == `kEventNames.size()` == 39 == `wc -l tests/fixtures/log_events_v1.txt`; fixture sorted. | catalog-stability ctest (logger.hpp ↔ fixture lockstep) green. |
-| **PI-mvp-4.24-BASELINE** | MVP-4.23 100/102 baseline preserved + 1 new = 101/103 under sudo (2 pre-existing env-fails #48/#62 unchanged). | full `ctest` re-run + diff against prior `test-run.log`. |
+| **PI-mvp-4.24-BASELINE** | MVP-4.23 100/102 baseline preserved + 1 new = 101/103 under sudo (2 pre-existing env-fails `T_EXPORTER_EXITS_6_ALL_IFACES_EACCES` + `T_LOG_JSON_EXPORTER_EVENTS` unchanged; the latter renumbers #62→#63 post-insert — by name, not index). | full `ctest` re-run + diff against prior `test-run.log`. |
 
 Reviewer's framework point 5 walks this list; report `[INVARIANT-VIOLATED]` per failed check.
 

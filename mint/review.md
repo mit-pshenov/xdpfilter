@@ -1,53 +1,54 @@
-# Review — MVP-4.23 CI gate + coverage-floor guards (mint triangulation)
+# Review — MVP-4.24 exporter scrape consistency (active_idx seqlock) (mint triangulation)
 
 ## Verdict
-`pass` (round-1, 0 findings, 0 out-of-triangulation)
+`pass` (round-1, 0 findings, 1 out-of-triangulation → inline-merge)
 
-Base for all diffs: `e50a62d` (MVP-4.22 final).
+Base for all diffs: `3d0f3ad` (MVP-4.23 final).
 
 ## Triangulation matrix (brownfield, 5-point)
 
 | Framework point | Findings | Tags |
 |---|---|---|
 | 1. Spec ↔ Code | 0 | — |
-| 2. Spec ↔ Tests | 0 | negation control PRESENT |
-| 3. Code ↔ Tests | 0 | all pass; no UNEXERCISED-EXPORT (zero new exports) |
+| 2. Spec ↔ Tests | 0 | — |
+| 3. Code ↔ Tests | 0 | both target tests pass; public export exercised |
 | 4. Out-of-Scope Drift | 0 | — |
-| 5. Behaviour preserved | 0 | zero-src, datapath identical, 0 regressions, VERSION held |
+| 5. Behaviour preserved | 0 | all PIs hold trivially |
 
-## Point 1 — Spec ↔ Code
-- `T_COVERAGE_FLOOR.sh:43-49` — pure `floor_verdict <require> <sudo_ok>` per §5.63 Interfaces; RED iff require==1 && sudo_ok==0 (D-mvp-4.23-Q1-A2).
-- `T_COVERAGE_FLOOR.sh:95-114` live gate reads `XDPMF_REQUIRE_FULL_COVERAGE`; flag=1+no-sudo→exit 1, else exit 0.
-- `T_PROD_VERIFIER_LOAD.sh:48,86` — `bpftool prog load <prod_obj> /sys/fs/bpf/xdpmf_prod_verifier_probe_$$ type xdp`, PID-unique bpffs-root pin, assert rc==0 (D-mvp-4.23-H3-PRODOBJ). PROD_BPF_OBJ→${BUILD_DIR}/mac_filter.bpf.o (`:53-64`). NO attach/veth/netns (verifier-only).
-- `tests/CMakeLists.txt:1541-1545` — T_PROD_VERIFIER_LOAD: SKIP_RETURN_CODE 77, TIMEOUT 90, NO RESOURCE_LOCK (D-H3-NOLOCK), `PROD_BPF_OBJ=${CMAKE_BINARY_DIR}/mac_filter.bpf.o`.
-- `tests/CMakeLists.txt:1560-1563` — T_COVERAGE_FLOOR: NO SKIP_RETURN_CODE, TIMEOUT 15, no lock (PI-NO-SKIP-FLOOR).
-- `ci.yml:25-67` — push(main)+PR; ubuntu-latest; checkout→toolchain→cmake build→`sudo -E env XDPMF_REQUIRE_FULL_COVERAGE=1 ctest --output-on-failure` (serial).
+## Point 1 — Spec ↔ Code (D-mvp-4.24-* honored)
+- **Seqlock shape** matches §5.64 Interfaces: open `active_idx` once (`rule_counters_reader.cpp:268`), loop `0..kRuleCountersGenRetryMax` (`:295`), `active_pre`=lookup (`:297`) → `read_generation` reads BOTH buffers (`:299`) → `active_post`=lookup (`:304`) → commit on `pre==post` (`:307-309`), retry on change.
+- **D-WINDOW** — `read_generation` (`:153-217`) reads `rule_counters_<active>` (`:160-193`) AND `slot_rule_id` half `base=active*XDPMF_ALLOWLIST_MAX` (`:205-214`) keyed by the SAME `active`; `active_post` re-read only AFTER both → window wraps the id↔counter pair, no torn cross-gen.
+- **Bounded, named constexpr** `kRuleCountersGenRetryMax = 3` (`:53`), ≤4 reads/iface, NO unbounded loop → decoupled from B27 DoS.
+- **D-TEAR-HONESTY** — after-N serves `candidate` (last consistently-read gen, never torn/zero) + emits `exporter.scrape.warn.rule_counters_generation_unstable` once/iface (`:320-338`); comments (`:283-290`,`:311-312`,`:321-324`) state retry = FRESHNESS not tear-prevention; X→Y→X not claimed fixed.
+- **D-FD-REUSE** (`:268`/`:132-141`), **D-NOPIN-LEGACY** (`:270-281`), **PI-31** (only `bpf_obj_get`+`bpf_map_lookup_elem`; grep update/delete/pin/link/prog_load = ∅).
+- **Catalog** — `logger.hpp:90` kEventNames `<...,39>`, new event `:130` BEFORE `rule_counters_open_failed`; `kEventCount` 38→39 (`:135`). Zero-warning rebuild. RAII fds, `[[nodiscard]]`, `constexpr`, enum-class Level, no magic number.
 
-## Point 2 — Spec ↔ Tests + negation control
-- §6.80 (TEST-H3): rc==0 contract; negation = verifier-reject path surfaces verifier log (`T_PROD_VERIFIER_LOAD.sh:86,102-108`).
-- §6.81 (TEST-H2): intrinsic self-test (`T_COVERAGE_FLOOR.sh:54-92`) asserts the full truth-table incl. load-bearing `verdict(1,0)==RED` (`:57-62`). NON-VACUITY PROVEN (D-Q1-SELFTEST).
-- Suite negation controls present (global `T_NEGATION_CONTROL` WILL_FAIL + the 2 intrinsic). No CIRCULAR-TEST.
+## Point 2 — Spec ↔ Tests (§6.82 parts 1/2/3)
+- Part 1 (gen-sensitivity control, frozen-reader catch) `T_EXPORTER_SCRAPE_CONSISTENCY.sh:186-251`: apply A→fp=={11}, apply B→fp=={22}.
+- Part 2 (concurrency consistency) `:253-316`: every 200-scrape fingerprint ∈ {RA}|{RB}, never cross-mix, never empty. Asserts spec OUTCOME (rule_id-set fingerprint), not impl internals → not circular.
+- Part 3 (non-vacuity/observability guard = negation control) `:318-346`: FAILs "could not stage the race" unless BOTH gens seen AND active_idx ≥2 distinct values.
+- Catalog test carries its own (c) negation control.
 
 ## Point 3 — Code ↔ Tests (reviewer re-ran)
-- `sudo -E env XDPMF_REQUIRE_FULL_COVERAGE=1 ctest -R 'T_PROD_VERIFIER_LOAD|T_COVERAGE_FLOOR' -V`: 2/2 passed. T_PROD: rc=0, verifier ACCEPTED prod 9-axis object on 6.1.0-49. T_COVERAGE_FLOOR: selftest OK + PASS (sudo present).
-- **Independent RED-path proof** (shimmed a failing `sudo` on PATH): flag=1+sudo-absent → exit 1 with masking-hole diagnostic ("guard #31"); flag unset → exit 0; flag=0 → exit 0. The gate genuinely goes RED on a live coverage-zero context — NOT theatre. The crux holds.
-- Log: /tmp/mint-review-tests-mvp423.log
+`sudo -E ctest -R 'T_EXPORTER_SCRAPE_CONSISTENCY|T_LOG_EVENT_CATALOG_STABILITY' -V` → 2/2 pass (`/tmp/mint-review-tests-mvp424.log`). **Non-vacuity proven at runtime**: 42 successful scrapes, distinct fingerprints {22,11}, distinct active_idx {1,0}, cross-mix=0, empty=0. `read_rule_counters` exercised via the exporter binary. No UNEXERCISED-EXPORT.
 
 ## Point 4 — Out-of-Scope Drift
-None. No src/ change; no B26/B27/datapath/schema/map touch; no VERSION bump; no CHANGELOG edit; ci.yml branch-protection is INTENT comment only (`:18-21`); A3 skip-% parser left COMMENTED OUT (`ci.yml:69-76`) per D-Q1-NO-A3-IN-CTEST.
+No new BPF map, no loader/datapath/schema/map-count/VERSION change; stats_reader.cpp byte-identical (Q2); no B26/B27/ARCH-H1/CQ-H1 touch. ∅.
 
 ## Point 5 — Behaviour preserved (brownfield)
-- `git diff e50a62d -- src/` = ∅ → PI-ZERO-SRC ✓. loader.hpp+config.hpp = ∅ → PI-7 streak continues ✓. mac_filter.bpf.c = ∅ → PI-DATAPATH-IDENTICAL ✓ (xdp 3658).
-- VERSION 0.15.0 unchanged (`CMakeLists.txt:13`) → PI-VERSION ✓.
-- No REGRESSION: full suite 100/102; the 2 fails (#48/#62) are pre-existing env-fails (bpffs root unmounted) red at the e50a62d baseline (98/100) — not introduced here.
-
-## Honesty note
-`ci.yml:8-16` carries the UNVALIDATED-until-first-push HONESTY block ("Do NOT claim it works"), §5.60 precedent (D-CI-UNVALIDATED). `actionlint` NOT installed → ci.yml reviewed STRUCTURALLY only; runtime behaviour on a live runner remains unverified by design.
-
-## Rework assignments
-None — `pass`.
+`git diff 3d0f3ad` → ZERO footprint outside exporter+test:
+- PI-7: loader.hpp+config.hpp ∅ • PI-DATAPATH-IDENTICAL: src/bpf ∅ (3658) • PI-KMANAGEDMAPS-39: mac_filter.h ∅, loader.cpp ∅ • stats_reader.cpp ∅ • rule_counters_reader.hpp ∅ • VERSION ∅ (0.15.0, HG-2).
+- PI-CATALOG: kEventCount 39 == kEventNames.size() 39 == `wc -l fixture` 39, sorted; catalog test green.
+- No REGRESSION: tester 101/103; the 2 fails `T_EXPORTER_EXITS_6_ALL_IFACES_EACCES` (#48) + `T_LOG_JSON_EXPORTER_EVENTS` (#63, renumbered from #62 by the new test's alphabetical insert) are pre-existing env-fails ("Killed" at the unprivileged exporter spawn; red since e50a62d). ∅ INVARIANT-VIOLATED / UNRELATED-EDIT / REGRESSION.
 
 ## Out-of-triangulation findings
-None.
 
-Candidate guard #31 (non-skipping coverage-floor) is well-founded and empirically demonstrated. Clean round-1 pass.
+### [OOT] design §6.82 baseline prose cited stale env-fail index "#48/#62"
+**Location**: `design.md` §6.82 Baseline + PI-mvp-4.24-BASELINE row.
+**Evidence**: after the alphabetically-inserted new test renumbered indices, `T_LOG_JSON_EXPORTER_EVENTS` is now #63 not #62. Cosmetic; the *set* of pre-existing fails is unchanged.
+**Disposition**: `inline-merge` (applied — see Post-review sweep below).
+
+## Post-review sweep — round 1
+- OOT (stale env-fail index #62→#63) → `mint/design.md` §6.82 Baseline + PI-mvp-4.24-BASELINE row edited: env-fails now identified BY NAME (`T_EXPORTER_EXITS_6_ALL_IFACES_EACCES` + `T_LOG_JSON_EXPORTER_EVENTS`) with a note that the index renumbers post-insert. Doc-clarity only; zero code/test impact.
+
+Candidate guard #32 (read-side selector-seqlock vs gen-map) well-grounded; the test's non-vacuity discipline is demonstrated, not asserted. Clean round-1 pass.
