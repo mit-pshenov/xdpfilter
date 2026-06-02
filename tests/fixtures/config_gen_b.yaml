@@ -1,0 +1,19 @@
+# config_gen_b.yaml — §6.82 (MVP-4.24 / §5.64) generation-B fixture.
+#
+# Generation B for T_EXPORTER_SCRAPE_CONSISTENCY. A SINGLE pass rule with
+# the stable operator id RB=22 (≠ RA=11), matching src 10.22.0.0/16. Single
+# rule ⟹ id-sorted rank 0 ⟹ slot 0; the `slot_rule_id` active half resolves
+# slot 0 → id 22, so the exporter labels its rule_match_total series
+# rule_id="22" for THIS generation (and id 22 ONLY).
+#
+# id 22 is absent from config_gen_a.yaml, so applying B after A drops id 11
+# entirely (copy-forward only carries ids present in BOTH generations) and
+# the active-half fingerprint becomes a clean {22}. See config_gen_a.yaml
+# for the full fingerprint contract.
+schema_version: 2
+default_action: drop
+rules:
+  - id: 22
+    action: pass
+    match:
+      src_cidr: "10.22.0.0/16"

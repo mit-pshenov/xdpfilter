@@ -87,7 +87,7 @@ struct Field {
  * (`sidecar.warn.iface_dir_symlink`) added per HG-3.4e-4 — per-iface
  * symlink at `/run/xdpmacfilter/<iface>` triggers WARN + skip (sidecar-
  * never-throws contract PRESERVED; PI-32-3.4b unchanged). */
-inline constexpr std::array<std::string_view, 38> kEventNames = {
+inline constexpr std::array<std::string_view, 39> kEventNames = {
     /* loader (xdpmacfilter) — 18 events (was 19 pre-§5.34) */
     "cli.usage_error",                       /* src/cli/main.cpp:100 */
     "cli.usage_text",                        /* src/cli/main.cpp:101 (multi-line usage dump) */
@@ -111,7 +111,7 @@ inline constexpr std::array<std::string_view, 38> kEventNames = {
     "sidecar.warn.write_failed",             /* src/lib/sidecar.cpp — §5.31 EDIT-1 */
     "sidecar.warn.write_exception",          /* src/lib/sidecar.cpp — §5.31 EDIT-1 */
 
-    /* exporter (xdpmf-exporter) — 17 events */
+    /* exporter (xdpmf-exporter) — 18 events */
     "exporter.usage_error",                  /* src/exporter/main.cpp:91, 100, 110, 143, 154 (5 sites share) */
     "exporter.fatal",                        /* src/exporter/main.cpp:176 */
     "exporter.error.all_ifaces_eacces",      /* src/exporter/main.cpp:187 — HK-17 */
@@ -127,11 +127,12 @@ inline constexpr std::array<std::string_view, 38> kEventNames = {
     "exporter.warn.bpffs_root_missing",      /* src/exporter/stats_reader.cpp:119 — HK-16 */
     "exporter.warn.cpu_count_invalid",       /* src/exporter/stats_reader.cpp:157 + rule_counters_reader.cpp:116 (2 sites share) */
     "exporter.scrape.warn.stats_open_failed",         /* src/exporter/stats_reader.cpp:194 */
+    "exporter.scrape.warn.rule_counters_generation_unstable", /* src/exporter/rule_counters_reader.cpp — §5.64 (MVP-4.24) active_idx-seqlock retry-exhaustion diagnostic */
     "exporter.scrape.warn.rule_counters_open_failed", /* src/exporter/rule_counters_reader.cpp:137 */
     "exporter.scrape.warn.sidecar_read_exception",    /* src/exporter/sidecar_reader.cpp — §5.62 (MVP-4.22) R-5/Q2-A2 observable graceful-degradation */
 };
 
-inline constexpr std::size_t kEventCount = kEventNames.size();   // = 38 (§5.62 MVP-4.22: 37 → 38; +1 exporter.scrape.warn.sidecar_read_exception per R-5/Q2-A2)
+inline constexpr std::size_t kEventCount = kEventNames.size();   // = 39 (§5.64 MVP-4.24: 38 → 39; +1 exporter.scrape.warn.rule_counters_generation_unstable per D-mvp-4.24-Q1 seqlock diagnostic)
 
 /*
  * emit() — write ONE log event to stderr.

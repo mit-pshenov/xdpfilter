@@ -1,0 +1,23 @@
+# config_gen_a.yaml — §6.82 (MVP-4.24 / §5.64) generation-A fixture.
+#
+# Generation A for T_EXPORTER_SCRAPE_CONSISTENCY. A SINGLE pass rule with
+# the stable operator id RA=11, matching src 10.11.0.0/16. Single rule ⟹
+# id-sorted rank 0 ⟹ slot 0; the `slot_rule_id` active half resolves
+# slot 0 → id 11, so the exporter labels its rule_match_total series
+# rule_id="11" for THIS generation (and id 11 ONLY).
+#
+# Companion config_gen_b.yaml carries the disjoint id RB=22 / src
+# 10.22.0.0/16. The two ids are the per-scrape generation fingerprint: a
+# consistent scrape reports exactly {11} or exactly {22}, never both, never
+# neither (the exporter emits a series per non-sentinel slot, so the id-set
+# is observable even at counter 0).
+#
+# default_action: drop — a frame matching no rule is dropped, so a matched
+# PASS verdict (and its per-id counter bump) is unambiguous.
+schema_version: 2
+default_action: drop
+rules:
+  - id: 11
+    action: pass
+    match:
+      src_cidr: "10.11.0.0/16"

@@ -766,6 +766,26 @@ set_tests_properties(T_SIDECAR_V6_ETH_KINDS PROPERTIES
     SKIP_RETURN_CODE 77
 )
 
+# §6.82 (MVP-4.24 / §5.64): exporter scrape consistency under concurrent
+# `apply -f` generation flips. Asserts each scrape's rule_counters block is a
+# SINGLE consistent generation (active_idx-seqlock; never torn/cross-mixed) +
+# a generation-change observability guard (both gens seen + active_idx
+# transition) so the consistency assertion is provably non-vacuous. Attaches
+# the veth fixture AND scrapes the exporter → BOTH xdp_fixture AND
+# exporter_port_9417 RESOURCE_LOCKs (like T_EXPORTER_RULE_LABELS). Sudo-gated
+# → SKIP_RETURN_CODE 77 (guard #12). Longer TIMEOUT for the bounded flip loop.
+add_test(
+    NAME T_EXPORTER_SCRAPE_CONSISTENCY
+    COMMAND bash ${TEST_DIR}/T_EXPORTER_SCRAPE_CONSISTENCY.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_EXPORTER_SCRAPE_CONSISTENCY PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK "xdp_fixture;exporter_port_9417"
+    TIMEOUT 120
+    SKIP_RETURN_CODE 77
+)
+
 # ─────────────────────────────────────────────────────────────────────────
 # MVP-3.4b cycle 2 additions (§5.34 / §6.NN–§6.NN+2 — rules atomic-swap
 # promotion + datapath dispatch via rules→action_table + schema cycle
