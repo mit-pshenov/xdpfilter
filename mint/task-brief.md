@@ -1,127 +1,143 @@
-# Task brief — MVP-4.23: CI gate + coverage-floor guards (brownfield)
+# Task brief — MVP-4.24: exporter scrape consistency (active_idx seqlock) (brownfield)
 
 ## Goal
 
-Close the TEST-dimension High findings from the 2026-06-01 hybrid review
-(`~/agent-teams-review/runs/mint-review-mint-l2-mac-filter-20260601213046/report.md`):
-the project has **no CI** (TEST-H1 — nothing gates `main`), a **green-on-SKIP**
-masking hole (TEST-H2 — 88/100 ctests SKIP-77 without passwordless sudo,
-INCLUDING the `T_NEGATION_CONTROL` sanity canary, so a coverage-zero run is
-indistinguishable from a healthy one), and **no standalone verifier coverage
-of the PRODUCTION BPF object** (TEST-H3 — the only verifier proof of the real
-9-axis `mac_filter.bpf.o` is the sudo-gated full attach; the standalone
-"verifier" test loads a 4-axis PROTOTYPE).
+Close the exporter scrape-consistency gap (P1 in `mint/external-review-2026-06.md`;
+the 2026-06-01 band's "dual-source coupling to watch" in the ARCH framework
+section): `rule_counters_reader` reads `active_idx` and then opens/reads the
+matching `rule_counters_<active>` inner pin in SEPARATE bpf syscalls, so a
+loader atomic-swap (`apply -f`) landing between those reads makes the scrape
+report the PRE-apply generation (one scrape stale). Third and last of the three
+hardening slices (MVP-4.22 robustness + MVP-4.23 CI already shipped).
 
-This is pure **test-infra + CI** — zero `src/` change, zero datapath change,
-no schema/axis/map. Second of three hardening slices (MVP-4.22 robustness
-batch shipped; exporter generation-counter is the third).
+**Grounding correction to the original framing (briefer Phase A — important).**
+The atomic-swap architecture is **populate-INACTIVE-buffer → single-u32 store to
+`active_idx[0]` commits** (loader.cpp `write_active_idx`; the active buffer is
+NEVER mutated in place; `copy_rule_counters_forward` copies counters into the
+inactive buffer BEFORE the flip). Consequently the reader only ever reads a
+**stable** buffer:
+- A single concurrent apply → the reader gets **consistent but one-apply-stale**
+  data (NOT torn, NOT zero — the old generation is fully valid).
+- A genuinely TORN/zero read would require reading a buffer mid-repopulation,
+  which needs **two `apply -f` within one sub-second scrape** (operationally
+  impossible; an apply is a full multi-syscall BPF repopulation).
+
+So the fix is a **lightweight seqlock using `active_idx` itself as the sequence
+number** — read `active_idx`, read the 64 slots, **re-read `active_idx`; if it
+changed, retry (bounded)**. This needs **NO new BPF map, NO loader change, NO
+`kManagedMaps` growth, NO datapath change**. The heavyweight options from the
+original ask (a new generation BPF map + loader write-side bracketing) are
+**dominated** — their only added coverage is the X→Y→X double-flip, which is the
+operationally-impossible two-applies-in-one-scrape case. That case is documented
+as a known OOS limitation (§5.60 honesty precedent), not engineered for.
 
 ## Context: prior work
 
-- Prior slice: **MVP-4.22** (`e50a62d`) — robustness batch; archived as `mint/task-brief-mvp-4.22.md`.
-- Existing design: `mint/design.md` (most recent §5.62); this slice appends §5.63.
+- Prior slice: **MVP-4.23** (`3d0f3ad`) — CI gate + coverage-floor; archived as `mint/task-brief-mvp-4.23.md`.
+- Existing design: `mint/design.md` (most recent §5.63); this slice appends §5.64.
 - Phase A code-grep verification (brief author, this slice):
-  - `ls .github` → does NOT exist (TEST-H1 `ci.yml` is net-new).
-  - `build/mac_filter.bpf.o` exists (144 KB production object, `xdp` section 3658 insns); source `src/bpf/mac_filter.bpf.c`. TEST-H3 LOADS this object (no rebuild of it, no src change).
-  - `T_BITVEC_VERIFIER_LOAD.sh` loads `bitvec_proto.bpf.o` (the 4-axis prototype) via `bpftool prog load <obj> <pin> type xdp` (lines 53-60, 107-109) — confirms TEST-H3's premise AND gives the exact reusable mechanism (clone the structure, point at `build/mac_filter.bpf.o`).
-  - `T_NEGATION_CONTROL.sh:18` calls `require_passwordless_sudo` → the canary itself SKIP-77s without sudo (TEST-H2's load-bearing premise). `set_tests_properties(T_NEGATION_CONTROL PROPERTIES WILL_FAIL TRUE)` at CMakeLists.txt:120.
-  - `grep -rl require_passwordless_sudo tests/T_*.sh | wc -l` → **88** of 100 T_*.sh (review said 86 — actual 88); `SKIP_RETURN_CODE 77` declared 66× in tests/CMakeLists.txt.
-  - `bpftool` at `/usr/local/bin/bpftool` (available for TEST-H3); `build_cpu` + `xdp_fixture` RESOURCE_LOCKs already exist in tests/CMakeLists.txt (B19 shipped — CI parallelism context).
-- PI continuity: **PI-7 (loader.hpp + config.hpp byte-identical)** holds trivially (no `src/lib` change). **PI-DATAPATH-IDENTICAL** holds trivially (no `src/bpf` change; TEST-H3 only LOADS the object). New tests are additive.
+  - `active_idx` = `ARRAY[1]` of `__u32` (mac_filter.h `XDPMF_MAP_ACTIVE_IDX_NAME`), `XDPMF_RULESET_COUNT=2` (A/B double-buffer). `write_active_idx` (loader.cpp) = single u32 store; loader comments confirm "writes BEFORE the active_idx flip" + "single active_idx u32 store commits".
+  - `src/exporter/rule_counters_reader.cpp` reads `active_idx` (`bpf_obj_get` + `bpf_map_lookup_elem`, the `iface_dir + XDPMF_MAP_ACTIVE_IDX_NAME` pin), then opens `rule_counters_<active>` and sums the 64 PERCPU slots — the two-syscall window this slice closes.
+  - `src/exporter/stats_reader.cpp` reads the **single** `stats` PERCPU_ARRAY (`XDPMF_MAP_STATS_NAME`, STAT-enum-indexed, NOT active-indexed, accumulates across applies) → **NO active_idx indirection → NO TOCTOU → out of scope** (architect confirms).
+  - Event catalog `src/common/logger.hpp` `kEventNames` currently **38** (`kEventCount = 38`), pattern `exporter.scrape.warn.*` (3 existing: stats_open_failed, rule_counters_open_failed, sidecar_read_exception). The MVP-4.22 +1-event ripple (logger.hpp count + `tests/fixtures/log_events_v1.txt`) is the exact precedent for the new diagnostic event.
+- PI continuity: **PI-7 (loader.hpp + config.hpp byte-identical)** holds trivially (no `src/lib` change). **PI-DATAPATH-IDENTICAL** (mac_filter.bpf.c ∅, xdp 3658) holds trivially. **kManagedMaps UNCHANGED (39)** — no new map.
 
 ## Workflow rules (brownfield)
 
-- **Architect**: read §5.62 tail + §6.5 invariants + guards #1..#30; EDIT `design.md` in place, append §5.63. Resolve Q1 (TEST-H2 coverage-floor mechanism). Run the Phase A grep discipline below.
-- **Impl**: FileList is NEW (`.github/workflows/ci.yml`, 2 new test scripts) + EDITED (`tests/CMakeLists.txt` registration). No `src/` files. The CI yaml is best-effort-unvalidated locally (see HG-2).
-- **Tester**: this slice IS mostly test-infra, so the line between impl and tester blurs — the 2 NEW ctests (TEST-H3, TEST-H2) are the deliverable that impl writes; tester's Phase B runs the full suite to confirm the 2 new tests pass with sudo, the coverage-floor gate behaves correctly (RED when it should be, green otherwise), and ZERO regressions vs the 98/100 MVP-4.22 baseline. Tester also validates `ci.yml` with `actionlint` IF available (else structural review + honest "unvalidated" note). Negation control: the coverage-floor gate must itself be proven non-vacuous (it must actually go RED in a simulated coverage-zero condition).
-- **Reviewer**: 5-point brownfield. Special attention: (a) TEST-H3 loads the PRODUCTION object (not the prototype) and is verifier-only (no attach/netns); (b) TEST-H2 gate runs WITHOUT requiring sudo (else it defeats itself) and is non-vacuous; (c) zero `src/` footprint (PI-7 + datapath trivially hold); (d) the `ci.yml` honesty note (unvalidated-until-first-push) is present; (e) no OOS drift into B27/B26/datapath.
+- **Architect**: read §5.63 tail + §6.5 invariants + guards #1..#31; EDIT `design.md` in place, append §5.64. Resolve Q1 (retry bound + after-N fallback). Run the Phase A grep discipline below. Confirm the grounding (single-buffer `stats` is exempt; active buffer never mutated in place).
+- **Impl**: FileList = EDITED `src/exporter/rule_counters_reader.cpp`, `src/common/logger.hpp` (catalog +1), `tests/fixtures/log_events_v1.txt` (catalog +1) + NEW ctest. NO `src/lib`, NO `src/bpf`, NO new map.
+- **Tester**: NEW concurrency ctest (§6.82) — drive a scrape concurrent with an `apply -f` and assert the reader never returns a torn/zero generation (it returns either the old or the new full generation, and after a bounded retry prefers current). Plus a negation/non-vacuity control (prove the test can actually observe a generation change — e.g. without the seqlock retry it would catch a stale read). The existing 100/102 baseline must stay green.
+- **Reviewer**: 5-point brownfield. Special attention: (a) the seqlock loop re-reads `active_idx` AFTER the data read and retries on change, bounded N; (b) the after-N fallback is consistent (serves one full generation, never a tear) + emits the diagnostic; (c) `stats_reader` correctly left untouched (single map, no TOCTOU); (d) PI-7 + datapath + kManagedMaps all trivially hold (zero `src/lib`+`src/bpf` footprint); (e) catalog arithmetic (38→39) + fixture ripple correct; (f) the X→Y→X two-apply tear is documented as OOS-impossible, not silently claimed fixed.
 
 ## Human-gate decisions (defaults applied — architect overrides at Phase A)
 
-### HG-mvp-4.23-1: CI platform → **GitHub Actions** (`.github/workflows/ci.yml`)
-The repo is `github.com/mit-pshenov/mint-filter`. Default runner: GitHub-hosted `ubuntu-latest` (has `sudo`/root via passwordless sudo, kernel ~6.x, can `apt-get install` clang-19 + libbpf-dev + bpftool + python3-scapy + jq, OR build bpftool). The workflow runs `cmake build` + `ctest`, fails on any non-SKIP failure, gates merges (branch protection is a repo setting, out of scope — document the intent). Architect may add a `# self-hosted runner alternative` comment block for environments where GitHub-hosted XDP/veth doesn't work.
+### HG-mvp-4.24-1: consistency mechanism → **`active_idx`-as-seqnum (re-read + bounded retry), NO new gen map**
+Per the grounding above, this fully covers every operationally-reachable race (single apply mid-scrape) with zero loader/map/datapath change. A dedicated monotonic generation map is REJECTED as dominated machinery (its only delta is the impossible X→Y→X case). Architect overrides only with evidence that an active-buffer in-place mutation exists (it does not — `copy_rule_counters_forward` + populate-inactive-then-flip).
 
-### HG-mvp-4.23-2: CI YAML validation → **best-effort-unvalidated until first push** (honest gap-note, §5.60 precedent)
-We cannot execute a GitHub Actions workflow in this environment. Validate with `actionlint` if present (impl/tester check `command -v actionlint`); otherwise structural review only. The design + a comment in `ci.yml` MUST state plainly that the workflow is unvalidated against a live runner until the first push triggers it (mirroring the §5.60 prototype-vs-production honesty precedent — do NOT claim it "works").
+### HG-mvp-4.24-2: VERSION → **no bump** (exporter-internal read-consistency hardening; same metrics, just fresher under a concurrent apply — no operator-visible API/metric/label change)
+Architect may bump if it judges the new diagnostic event operator-visible enough to warrant it.
 
-### HG-mvp-4.23-3: VERSION → **no bump** (test-infra/CI only; no operator-visible change)
+### HG-mvp-4.24-3: X→Y→X two-apply tear → **documented OOS limitation** (§5.60 honesty precedent)
+The fix does not claim to defend the two-rapid-applies-within-one-scrape tear (operationally impossible). Design states this plainly rather than implying total consistency.
 
-## Open mechanism questions (architect decides; document in §5.63)
+## Open mechanism questions (architect decides; document in §5.64)
 
-### Q1: TEST-H2 coverage-floor gate mechanism (the one real fork)
-The gate must turn a SHOULD-have-sudo run that silently SKIPs the datapath suite (incl. the negation canary) from near-all-green into RED — WITHOUT itself skipping (else it's theatre).
-- **A1** — standalone post-`ctest` parser script invoked by `ci.yml`: parses `Testing/Temporary/LastTest.log` for skip-count + asserts `T_NEGATION_CONTROL` actually ran (not SKIP). NOT a ctest itself; CI-only. Pro: no local-run friction. Con: invisible to a plain local `ctest`.
-- **A2** — a NEW ctest `T_COVERAGE_FLOOR` that does NOT call `require_passwordless_sudo` and FAILS (exit 1, not 77) when `sudo -n true` fails AND an opt-in env flag (e.g. `XDPMF_REQUIRE_FULL_COVERAGE=1`) is set. CI sets the flag → a sudo-less CI run goes RED; local userspace-only runs (flag unset) stay green. Self-contained in the same ctest invocation. **Recommended** — cleanly separates "CI demands full coverage" from "local userspace-only is legitimately fine," and it's a real ctest so `ci.yml` doesn't need a bespoke log-parser.
-- **A3** — both: the A2 floor ctest for the negation-skipped detection + `ci.yml` additionally asserts a skip-% threshold from ctest output.
-- **Recommendation**: A2 as the primary mechanism; `ci.yml` exports `XDPMF_REQUIRE_FULL_COVERAGE=1`. Architect refines the exact env-name + whether to also pin a skip-% ceiling (A3) for defense-in-depth.
+### Q1: retry bound N + after-N fallback
+- **A1** — N small (e.g. 2–3) + after-N serve the LAST consistently-read generation (best-effort, never a tear) + emit a NEW `exporter.scrape.warn.*` diagnostic event. **Recommended** — a single apply needs exactly one retry to converge; N=2–3 is generous; the fallback is still a consistent generation (just possibly stale), and the diagnostic makes the rare event observable.
+- **A2** — N + after-N skip that iface's rule_counters block for this scrape (serve nothing). More conservative but creates a metrics gap.
+- **A3** — unbounded retry until stable. Rejected — a pathological apply storm could stall the scrape (the exporter is single-threaded; ties into B27 DoS surface — do NOT introduce an unbounded loop).
+- **Recommendation**: A1. Architect picks the exact N and the diagnostic event name (`exporter.scrape.warn.rule_counters_generation_unstable` or similar).
+
+### Q2: scope of the seqlock — `rule_counters_reader` only?
+- Grounding says YES (only this reader has the active_idx-then-data pattern; `stats` is a single non-active map). Architect confirms via grep before finalizing; if `stats_reader` or any other reader shares the pattern, extend symmetrically (but grounding indicates it does not).
 
 ## Scope (cycle 1 — concrete items)
 
-### Item C-1 — TEST-H3: standalone verifier-load of the PRODUCTION object
-**Where**: NEW `tests/T_PROD_VERIFIER_LOAD.sh` (name architect's call) + `tests/CMakeLists.txt` registration.
-Clone the `T_BITVEC_VERIFIER_LOAD.sh` structure but point at the PRODUCTION `build/mac_filter.bpf.o` (resolve path like the prototype test does under `BUILD_DIR`). `bpftool prog load <prod_obj> <unique_pin> type xdp` → assert rc=0 (verifier accepts the shipped 9-axis program), then `bpftool prog del`/unpin in teardown. Verifier-only: NO attach, NO netns. Sudo-gated (CAP_BPF to load) → `require_passwordless_sudo` + `SKIP_RETURN_CODE 77` + a pin-cleanup trap. Optionally assert the loaded insn count (3658) if cheap, but the load-rc=0 is the contract. This makes a verifier-complexity/stack regression in the real program visible without a full attach.
+### Item G-1 — active_idx seqlock in rule_counters_reader
+**Where**: `src/exporter/rule_counters_reader.cpp`.
+Wrap the `active_idx`-read → open `rule_counters_<active>` → sum-64-slots sequence in a bounded retry loop: snapshot `active_idx`, do the read, re-read `active_idx`; if it changed, discard and retry up to N (Q1). Preserve the existing fall-through WARN paths (`rule_counters_open_failed`) and the PI-31-3.4b "only bpf_obj_get + PERCPU lookup" contract. On retry-exhaustion, the after-N fallback (Q1/A1) + the new diagnostic event.
 
-### Item C-2 — TEST-H2: coverage-floor gate (non-vacuous, sudo-free)
-**Where**: per Q1 (default A2) — NEW `tests/T_COVERAGE_FLOOR.sh` + `tests/CMakeLists.txt` registration (no `SKIP_RETURN_CODE 77`; it must not skip).
-The gate fails RED when the suite is running in a coverage-expected context (env flag set) but passwordless sudo is absent (→ the datapath suite + negation canary would all SKIP). Must be proven non-vacuous: a simulated coverage-zero condition (flag set + sudo unavailable) makes it FAIL; the normal local condition (flag unset) makes it PASS/no-op. Document the env contract.
+### Item G-2 — diagnostic event (catalog 38→39)
+**Where**: `src/common/logger.hpp` (`kEventNames` + the `kEventCount = 38` comment → 39) + `tests/fixtures/log_events_v1.txt` (+1 sorted line). NEW `exporter.scrape.warn.<name>` event for retry-exhaustion, emitted from G-1. Mirror the MVP-4.22 +1-event ripple exactly (guard #10 catalog arithmetic + guard #13 fixture cross-reference).
 
-### Item C-3 — TEST-H1: CI workflow
-**Where**: NEW `.github/workflows/ci.yml`.
-GitHub Actions workflow (HG-1): checkout → install toolchain (clang-19, libbpf-dev, bpftool, python3-scapy, jq, cmake) → `cmake -S . -B build` → `cmake --build build` (zero-warning `-Werror` already enforced by the build) → `sudo -E ctest --test-dir build --output-on-failure` with `XDPMF_REQUIRE_FULL_COVERAGE=1` (per Q1) → fail on any non-SKIP failure. Honesty comment per HG-2 (unvalidated until first push). Parallelism: respect the existing `build_cpu` / `xdp_fixture` RESOURCE_LOCKs (B16/B19 context) — a `-j` choice that doesn't starve `T_SANITIZER_BUILD` (architect picks; serial `ctest` or a conservative `-j` is safe).
+### Item G-3 — concurrency consistency ctest (§6.82)
+**Where**: NEW `tests/T_EXPORTER_SCRAPE_CONSISTENCY.sh` (name architect's call) + `tests/CMakeLists.txt` registration.
+Drive a `/metrics` scrape (or a direct rule_counters read) concurrent with an `apply -f` flip and assert the returned rule_counters are a single consistent generation (never torn/zero). Non-vacuity: demonstrate the test can observe a generation transition (so a regression that drops the retry would be caught). Sudo-gated (needs attach + apply) → `require_passwordless_sudo` + SKIP-77 + RESOURCE_LOCK as the existing exporter/xdp_fixture tests do (guard #12).
 
 ## Out of scope (explicit)
 
-- **Exporter generation-counter / TOCTOU P1** — the THIRD hardening slice (MVP-4.24); not here.
-- **`pass_cidr`→`pass_rule` (B26)**, **datapath triplication (ARCH-H1)**, **dead `read_all_attached` (CQ-H1)**, **B27 regex DoS** — separate slices; no touch.
-- **Branch-protection / merge-gating repo settings** — a GitHub repo-admin action, not a file in the tree; document the intent in `ci.yml`, do not attempt to configure it.
-- **Fixing the 2 pre-existing environmental fails (#48/#62, bpffs root unmounted)** — environmental, not this slice's job; the CI runner (with a proper bpffs mount) may make them pass, but do NOT change their test bodies here.
-- Any `src/` change, schema, axis, datapath, or VERSION bump.
+- **New generation BPF map + loader write-side bracketing** — dominated by HG-1; not built.
+- **`stats_reader` / any non-active-indexed reader** — no TOCTOU (single map); untouched.
+- **X→Y→X two-apply-in-one-scrape tear** — operationally impossible; documented OOS, not engineered (HG-3).
+- **B27 exporter single-thread DoS, B26 `pass_cidr`, ARCH-H1 datapath triplication, CQ-H1 dead read_all_attached** — separate slices.
+- Any `src/lib`, `src/bpf`, schema, axis, map-count, or datapath change.
 
 ## Definition of done
 
-- §5.63 amendment in `design.md` (the 3 items + Q1 resolution + any new guard candidate).
-- **PI-7 + PI-DATAPATH-IDENTICAL hold trivially** (zero `src/` footprint — verify `git diff <base> -- src/` is empty).
-- ctest: 98/100 MVP-4.22 baseline preserved + 2 NEW ctests (TEST-H3 + TEST-H2). The 2 pre-existing env-fails (#48/#62) remain pre-existing. Final ~100/102 with sudo.
-- `.github/workflows/ci.yml` present + honesty-note; `actionlint`-clean if the tool is available (else structural-review noted).
-- VERSION unchanged (no bump).
+- §5.64 amendment in `design.md` (G-1..G-3 + Q1 resolution + HG-3 OOS honesty note + any guard #32 candidate).
+- **PI-7 + PI-DATAPATH-IDENTICAL + kManagedMaps=39 hold trivially** (verify `git diff <base> -- src/lib src/bpf src/common/mac_filter.h` empty; `kManagedMaps` count unchanged).
+- ctest: 100/102 MVP-4.23 baseline preserved + 1 NEW concurrency ctest. The 2 pre-existing env-fails (#48/#62) remain pre-existing.
+- Event catalog 38→39 consistent across logger.hpp + fixture; catalog-stability test green.
+- VERSION per HG-2 (default no bump).
 - `mint/review.md` round-1 verdict = pass.
 - One git commit per phase boundary.
 
 ## Dependencies
 
-- Build/test: existing toolchain; `bpftool` (present) for TEST-H3; `actionlint` OPTIONAL (tester checks `command -v`).
-- Runtime: TEST-H3 needs root/CAP_BPF (sudo-gated like the prototype test). TEST-H2 must run sudo-FREE.
-- Platform: GitHub Actions for C-3 (cannot be exercised here — HG-2 honesty gap).
+- Build/test: existing toolchain; the concurrency ctest needs root (attach + apply) + the veth/xdp fixture; bpftool.
+- Runtime: exporter + loader as built.
+- Platform: unchanged.
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 ```yaml
 mode: brownfield
 packs:
-  architect:  [bpf]
-  impl:       [bpf]
-  tester:     [bpf-xdp]
-  reviewer:   []
+  architect:  [cpp]
+  impl:       [cpp]
+  tester:     [cpp, bpf-xdp]
+  reviewer:   [cpp]
 ```
 
 ---
 
 ## Pre-brief sanity check (per mint-hld-scope-discipline)
 
-**Mechanical — single-architect OK.** Goal fits one line ("close the 3 TEST-dimension High findings: CI + coverage-floor + production-verifier-load"). Not multi-axis: TEST-H3 is a mechanical clone of an existing test; TEST-H1 is a standard CI yaml; only TEST-H2 has a real mechanism fork (Q1) with a clear recommendation. Not expensive-to-undo (test-infra; deletable). The TEST-H1 "can't validate locally" is a known honesty caveat (HG-2), NOT a design-space uncertainty. No `/mint-hld` needed.
+**Mechanical — single-architect OK (after grounding collapsed the design space).** The original ask LOOKED borderline-HLD (seqlock-encoding × retry-policy × counter-location, ≥3 options, concurrency-correctness). But Phase A grounding REFUTED the heavyweight axes: because the loader populates-inactive-then-atomic-flips and the active buffer is never mutated in place, `active_idx`-as-seqnum (re-read + bounded retry) dominates the new-gen-map and full-seqlock options — same coverage of every reachable race, zero new map / zero loader change. The remaining decisions (retry bound, fallback, diagnostic name) are single-architect-tier (Q1). No expensive-to-undo concurrency subtlety survives (the read target is always a stable buffer). `/mint-hld` NOT needed — this is the same "grep collapses the apparent design space" outcome as the 2026-05-30 S4 re-grounding, in reverse.
 
 ## Notes for architect Phase A code-grep discipline (per architect spec rules)
 
 Brief author already ran these; architect re-verifies + extends:
-- `ls .github` — confirm net-new (no existing workflow to merge with).
-- `sed -n '40,120p' tests/T_BITVEC_VERIFIER_LOAD.sh` — read the prototype-load mechanism to clone for TEST-H3 (object path resolution under BUILD_DIR, `bpftool prog load … type xdp`, pin cleanup trap, SKIP-77 gating).
-- `grep -n 'require_passwordless_sudo' tests/T_NEGATION_CONTROL.sh` — confirm the canary skips without sudo (TEST-H2 premise).
-- `grep -c 'SKIP_RETURN_CODE 77' tests/CMakeLists.txt` (=66) + `grep -rl require_passwordless_sudo tests/T_*.sh | wc -l` (=88/100) — the masked-skip surface TEST-H2 addresses.
-- Confirm `build/mac_filter.bpf.o` is the path the build emits (and how the CMake `add_bpf_object` names it) so TEST-H3 resolves it the way the prototype test resolves `bitvec_proto.bpf.o`.
-- For TEST-H2 mechanism (Q1): grep how other tests read env vars + how `ctest` SKIP is wired, to pick the env-gate name + ensure the floor test is registered WITHOUT `SKIP_RETURN_CODE 77`.
+- `grep -n 'active_idx\|bpf_map_lookup\|rule_counters_' src/exporter/rule_counters_reader.cpp` — confirm the exact active_idx-read → inner-open → 64-slot-read sequence the seqlock wraps; preserve the existing fall-through WARN.
+- `grep -n 'write_active_idx\|active_idx flip\|copy_rule_counters_forward' src/lib/loader.cpp` — CONFIRM populate-inactive-then-single-store-flip + copy-forward (the grounding that makes the active buffer stable; if this is wrong, HG-1 must be revisited).
+- `grep -n 'active\|XDPMF_MAP_STATS' src/exporter/stats_reader.cpp src/common/mac_filter.h` — confirm `stats` is single/non-active (Q2 exemption).
+- `grep -nE 'kEventNames|kEventCount' src/common/logger.hpp` + `wc -l tests/fixtures/log_events_v1.txt` — confirm 38→39 arithmetic + the sorted-insert position for the new event (guard #10/#13).
+- For the new ctest (guard #12): grep how `T_EXPORTER_*` / `T_LOAD_ATTACH` tests take RESOURCE_LOCK (xdp_fixture / exporter_port) and gate on `require_passwordless_sudo` + `SKIP_RETURN_CODE 77`.
 
 ### Anti-misdiagnosis guards applicable to this slice (per Phase 3)
 
-- **Guard #5 (Phase A code-grep discipline)** — APPLIES (always). Architect repeats the greps above independently.
-- **Guard #12 (RESOURCE_LOCK for shared host state)** — APPLIES to TEST-H3: it loads/pins a BPF prog under bpffs (a shared host path), like `T_BITVEC_VERIFIER_LOAD` (which uses a unique probe-pin + cleanup). Use a unique pin name + teardown trap; assess whether a RESOURCE_LOCK is needed (the prototype test's pattern is the precedent). TEST-H2 touches NO shared state (it inspects env/sudo only) → no lock.
-- **Guard #11 (VERSION-bump test-literal propagation)** — N/A (no bump).
-- Operative-semantic note: the "88/100", "3658 insns", "66× SKIP_RETURN_CODE" counts are SHOULD-level orientation for the reviewer's grep checks, not literal-match contracts (impl/tester may find the exact registration count shifts by ±1 as they add the 2 new tests).
+- **Guard #5 (Phase A code-grep discipline)** — APPLIES (always).
+- **Guard #10 (catalogue arithmetic)** — APPLIES (G-2: kEventNames 38→39; recount + the `kEventCount` comment).
+- **Guard #13 (fixture cross-reference)** — APPLIES (G-2: `tests/fixtures/log_events_v1.txt` +1 sorted line; the catalog-stability test asserts logger.hpp ↔ fixture lockstep).
+- **Guard #12 (RESOURCE_LOCK for shared host state)** — APPLIES (G-3: the concurrency ctest attaches + applies + scrapes → needs xdp_fixture / exporter_port RESOURCE_LOCK like the existing exporter tests).
+- **Guard #11 (VERSION-bump test-literal propagation)** — N/A (default no bump per HG-2; re-activates if architect bumps).
+- **Guard #15 (PRESERVE-vs-RESET atomic-swap semantic)** — N/A here (no map promotion; this slice READS the existing atomic-swap, does not change its write-side semantic). But the architect MUST rely on the existing PRESERVE copy-forward as the grounding for active-buffer stability.
