@@ -1,8 +1,8 @@
 /*
  * sidecar_reader.cpp — line-oriented regex extraction of `rule_index.json`.
  *
- * D-3.4b-14: cycle-1 budget discipline avoids a full JSON parser. The
- * writer (src/lib/sidecar.cpp) emits one rule object per line of the form:
+ * D-3.4b-14: avoids a full JSON parser — the writer (src/lib/sidecar.cpp)
+ * emits one rule object per line of the form:
  *   {"rule_id": <N>, "match": {<KIND>: "<VAL>"[, <KIND2>: "..."]}, "action": "<ACT>"}
  * Our ERE captures `(rule_id, action)` per such line; the per-axis values
  * are extracted by key-anchored sub-scan (exporter does not emit the match

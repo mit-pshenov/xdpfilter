@@ -6,10 +6,7 @@
  * pre-§5.32 emission (PI-3.5-1 load-bearing canary). JSON mode emits one
  * NDJSON object per event with a fixed-order envelope per HG-3.5-2.
  *
- * §5.37 (MVP-3.4f): Theme B rule-of-three extraction — `json_escape` +
- * `format_timestamp_utc` MOVED to src/common/escape_util.{hpp,cpp} (D-3.4f-1
- * supersedes D-3.5-2's duplication directive). Call-sites use the
- * `xdpmf::escape_util::escape_json` / `::format_timestamp_utc` FQNs.
+ * JSON-escaping + timestamp formatting live in src/common/escape_util (§5.37).
  *
  * NO external build dependency (PI-3.5-7): stdlib only.
  */
@@ -29,7 +26,7 @@ namespace xdpmf::logger {
 
 namespace {
 
-/* §5.32 env-var constant. Mirrors §5.26's kTrustModelEnv at loader.cpp:1000. */
+/* §5.32 env-var constant (parallels §5.26's kTrustModelEnv pattern). */
 constexpr std::string_view kLogFormatEnv{"XDPMF_LOG_FORMAT"};
 constexpr std::string_view kLogFormatTextValue{"text"};
 constexpr std::string_view kLogFormatJsonValue{"json"};
@@ -48,14 +45,6 @@ std::once_flag g_init_once;
  * call_once would recurse into emit() before initialization completes. */
 bool        g_emit_unknown_warn = false;
 std::string g_unknown_warn_value;
-
-/* §5.37 (MVP-3.4f) D-3.4f-1: `json_escape` + `format_timestamp_utc`
- * extracted to src/common/escape_util.{hpp,cpp} under namespace
- * `xdpmf::escape_util`. D-3.5-2's "duplicate-don't-extract" directive
- * SUPERSEDED by the rule-of-three escape valve (3rd JSON emitter surfaced;
- * /mint-review Theme B 3-dim cross-validation). Call-sites use the
- * fully-qualified `xdpmf::escape_util::escape_json` / `::format_timestamp_utc`
- * — see render_field_value + build_json_line below. */
 
 [[nodiscard]] constexpr std::string_view level_str(Level lvl) noexcept
 {

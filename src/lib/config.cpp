@@ -295,10 +295,8 @@ namespace {
     return static_cast<std::uint16_t>(n);
 }
 
-// §5.47 (MVP-4.7) D-mvp-4.7-MAC-PARSER: a single hex nibble [0-9a-fA-F] → 0..15;
-// returns -1 for any non-hex char (caller rejects → exit 9). RE-ADDED this slice
-// (the §5.43 cutover DELETED the prior hex_nibble/parse_mac_canonical helpers —
-// Phase A FINDING-2; this is NOT a mere "remove the reject").
+// §5.47 D-mvp-4.7-MAC-PARSER: a single hex nibble [0-9a-fA-F] → 0..15; returns
+// -1 for any non-hex char (caller rejects → exit 9).
 [[nodiscard]] int hex_nibble(char c) noexcept
 {
     if (c >= '0' && c <= '9') return c - '0';
@@ -410,13 +408,11 @@ Config validate(const yaml::Node& root, std::string_view file)
                               "rule.id is required");
                 }
                 const std::uint32_t id = parse_u32_or_throw(*id_node, file, "rule.id");
-                /* §5.61 (MVP-4.21) B30 D-mvp-4.21-Q2: the operator `id` is now a
-                 * sparse stable identity decoupled from the internal `slot`
-                 * (id-sorted rank). The old `id < XDPMF_ALLOWLIST_MAX` value cap
-                 * is REMOVED — every u32 id is legal EXCEPT the reserved
-                 * slot_rule_id EMPTY sentinel (D-mvp-4.21-SENTINEL), so that
-                 * marker stays unambiguous. The ≤64 limit migrates to the slot
-                 * count cap below. */
+                /* §5.61 B30: the operator `id` is a sparse stable identity
+                 * decoupled from the internal `slot` (id-sorted rank). Every u32
+                 * id is legal EXCEPT the reserved slot_rule_id EMPTY sentinel
+                 * (D-mvp-4.21-SENTINEL), so that marker stays unambiguous; the
+                 * ≤64 limit is the slot-count cap below. */
                 if (id == XDPMF_SLOT_ID_EMPTY) {
                     throw_cfg("rule id reserved", file, id_node->line, id_node->col,
                               std::format("rule.id {} is reserved (XDPMF_SLOT_ID_EMPTY sentinel)",
@@ -516,26 +512,20 @@ Config validate(const yaml::Node& root, std::string_view file)
                         src_cidr_node->scalar, file,
                         src_cidr_node->line, src_cidr_node->col);
                 }
-                // §5.44 (MVP-4.4) D-mvp-4.4-PROTO-GRAMMAR: `protocol` accepts a
-                // name {tcp→6, udp→17, icmp→1} OR a numeric IP-protocol number
-                // ∈ [0,255]; exact-match. Unknown name / out-of-range → exit 9.
+                // §5.44: `protocol` grammar — see parse_protocol.
                 if (protocol_node != nullptr) {
                     r.match.protocol = parse_protocol(*protocol_node, file);
                 }
-                // §5.44 D-mvp-4.4-PORT-GRAMMAR: `dst_port` accepts an integer
-                // [0,65535] (→ {p,p}) OR a "lo-hi" string (inclusive range);
-                // both endpoints ∈ [0,65535], lo ≤ hi. → exit 9 otherwise.
+                // §5.44: `dst_port` grammar — see parse_dst_port.
                 if (dst_port_node != nullptr) {
                     r.match.dst_port = parse_dst_port(*dst_port_node, file);
                 }
-                // §5.45 D-mvp-4.5-VLAN-GRAMMAR: `vlan` accepts a single integer
-                // outer VID ∈ [0,4095]; exact-match. Out-of-range → exit 9.
+                // §5.45: `vlan` grammar — see parse_vlan.
                 if (vlan_node != nullptr) {
                     r.match.vlan = parse_vlan(*vlan_node, file);
                 }
-                // §5.53 (MVP-4.13) D-mvp-4.13-Q1: `dst_cidr6`/`src_cidr6` parse
-                // via cidr::parse_cidr_v6 (IPv6 CIDR; prefix [0,128]; host-bits-
-                // zero enforced). Mirrors the v4 dst_cidr/src_cidr blocks.
+                // §5.53: `dst_cidr6`/`src_cidr6` parse via cidr::parse_cidr_v6
+                // (IPv6 CIDR; prefix [0,128]; host-bits-zero enforced).
                 if (dst_cidr6_node != nullptr) {
                     if (dst_cidr6_node->kind != yaml::Node::Kind::Scalar) {
                         throw_cfg("rule match dst_cidr6", file,
@@ -556,11 +546,7 @@ Config validate(const yaml::Node& root, std::string_view file)
                         src_cidr6_node->scalar, file,
                         src_cidr6_node->line, src_cidr6_node->col);
                 }
-                // §5.54 (MVP-4.14) D-mvp-4.14-ETH-GRAMMAR: `ethertype` accepts a
-                // name {ipv4→0x0800, ipv6→0x86dd, arp→0x0806}, a hex literal
-                // (0x86dd), or a decimal in [0,65535]; exact-match (post-VLAN
-                // inner ethertype, host order). Unknown name / malformed hex /
-                // out-of-range → exit 9.
+                // §5.54: `ethertype` grammar — see parse_ethertype.
                 if (ethertype_node != nullptr) {
                     r.match.ethertype = parse_ethertype(*ethertype_node, file);
                 }
@@ -575,10 +561,9 @@ Config validate(const yaml::Node& root, std::string_view file)
 
                 out.rules.push_back(std::move(r));
             }
-            /* §5.61 (MVP-4.21) B30 D-mvp-4.21-Q2: the ≤64 limit migrates from
-             * the id VALUE to the slot COUNT — the loader assigns each rule a
-             * dense slot ∈ [0, count) and shifts `1ULL << slot`, so the rule
-             * count (not the id value) is what must stay ≤ XDPMF_ALLOWLIST_MAX
+            /* §5.61 B30: the ≤64 limit is on the slot COUNT, not the id value —
+             * the loader assigns each rule a dense slot ∈ [0, count) and shifts
+             * `1ULL << slot`, so the rule count must stay ≤ XDPMF_ALLOWLIST_MAX
              * to keep the bit-vector shift safe. */
             if (out.rules.size() > static_cast<std::size_t>(XDPMF_ALLOWLIST_MAX)) {
                 throw_cfg("too many rules", file, rs->line, rs->col,

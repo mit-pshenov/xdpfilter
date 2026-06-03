@@ -108,12 +108,6 @@ namespace {
     }
 }
 
-/* §5.37 (MVP-3.4f) D-3.4f-1: `format_timestamp_utc` + `json_escape`
- * extracted to src/common/escape_util.{hpp,cpp}. D-3.5-2's "duplicate"
- * directive SUPERSEDED by the rule-of-three escape valve. Call-sites
- * below use `xdpmf::escape_util::format_timestamp_utc` /
- * `xdpmf::escape_util::escape_json`. */
-
 /* Build the rule_index.json body for `cfg` under `iface`. Stable
  * source-order (matches Config::rules vector order). Per D-3.4b-20:
  * one rule object per line so the exporter's line-oriented regex can
@@ -154,7 +148,7 @@ namespace {
             parts.append(std::format("\"{}\": \"{}\"", key, value));
             match_first = false;
         };
-        if (r.match.mac.has_value()) {        // dead under v2; live again mvp-4.5
+        if (r.match.mac.has_value()) {        // §5.47 MAC axis (live)
             append_kind("mac", format_mac(*r.match.mac));
         }
         if (r.match.dst_cidr.has_value()) {
@@ -391,8 +385,7 @@ void write_rule_index(std::string_view iface,
             case SidecarRootFd::State::Ok:
                 break;
             case SidecarRootFd::State::RootSymlink: {
-                /* §5.32 (MVP-3.5): byte-equivalent text-mode (PI-3.5-1) +
-                 * JSON field `path`. Wording from §5.31 EDIT-1 PRESERVED. */
+                /* §5.32: byte-equivalent text-mode + JSON `path`. */
                 const std::string msg = std::format(
                     "xdpmacfilter: WARN: rule_index.json refusing "
                     "to write — sidecar root '{}' is a symlink\n",
@@ -532,12 +525,9 @@ void write_rule_index(std::string_view iface,
         const std::string body = build_body(iface, cfg);
         const int rc = atomic_write_file_at(root_fd.fd(), iface_str, body);
         if (rc != 0) {
-            /* D-3.4b-17: non-fatal degrade — single WARN line, no throw,
-             * no exit. Exporter will degrade to action="unknown" labels
-             * for this iface until the next successful apply.
-             *
-             * §5.32 (MVP-3.5): byte-equivalent text-mode (PI-3.5-1) + JSON
-             * surfaces errno + path. */
+            /* D-3.4b-17: non-fatal degrade — single WARN line, no throw, no
+             * exit. The exporter degrades to action="unknown" labels for this
+             * iface until the next successful apply. */
             const std::string errno_str = std::strerror(rc);
             const std::string final_path = root + "/" + iface_str
                                          + "/rule_index.json";

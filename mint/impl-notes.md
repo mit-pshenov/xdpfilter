@@ -748,3 +748,48 @@ every slot zeroed (harmless, fresh inner already zero).
 - Verifier: `bpftool prog loadall build/mac_filter.bpf.o` → rc=0.
 - Config Q2: id-value cap removed (reject only `id==0xFFFFFFFF` sentinel) +
   `rules.size() > 64` count cap added (exit 9 ConfigError).
+
+## §5.65 MVP-4.25 / B32 comment-collapse — impl notes (2026-06-03)
+
+Comment-ONLY editorial pass per the §5.65 rubric, reproducing the `42e7326`
+pilot. NO code/logic/whitespace-of-code token change. Verified: xdp section
+3658 insns (byte-identical), PI-7 (loader.hpp/config.hpp empty diff), full C++
+build zero-warning. All 11 EDITED files; net −274 comment lines.
+
+**Stale/LYING comments fixed (the rubric's inverse-failure catch — replaced with
+accurate current-state, not just deleted):**
+- `mac_filter.bpf.c` prog header: "MAC HASH maps are FROZEN / only IPv4 frames
+  classified" → false since §5.47 (MAC is a live axis) / §5.53+ (3 family arms).
+  Rewritten to the accurate 9-axis-AND-across-3-arms state.
+- `mac_filter.bpf.c` v6 arm: "symmetric 8-term AND" → actually 9 terms (post
+  §5.54 ethertype). Fixed to 9-term.
+- `mac_filter.h` §5.43 wildcard: "max_entries ... (= 4)" + "(axis 0=dst,1=src)"
+  → stale (BITVEC_NUM_AXES=9 now). Dropped the frozen-in-time literal.
+- `mac_filter.h` §5.29 rules: "Populated on apply; NOT consulted in datapath"
+  → false since §5.34 (datapath dispatches the rules→action_table chain).
+- `mac_filter.h` §5.31 allow_entry: described as the LIVE inner value the
+  datapath reads at offset 4 → vestigial since §5.43 (value reshaped to bare
+  __u64). Rewritten as vestigial/layout-pinned (matches the static_assert note).
+- `prom_format.cpp` §5.46: "5 match-axis values" + "7-label key set" → stale
+  (9 axes / 11 labels). Generalized to avoid the frozen counts.
+- `sidecar.cpp`: inline `// dead under v2; live again mvp-4.5` on the mac branch
+  → mac is live; replaced with `// §5.47 MAC axis (live)`. (NB: this is the one
+  changed line whose code prefix is byte-identical — comment-only.)
+
+**Biggest collapse:** `loader.cpp` kManagedMaps[] table — removed the net-delta
+arrow archaeology ("net +4 (17→21)", "Pre-§5.34: 13 entries (12 real+1 alias)",
+"4th consecutive cycle") and the 7× repeated "All three call-site loops walk
+this single table — HK-9 again" → one canonical HK-9 statement in the header +
+one-line §ref per axis row-group. `static_assert` lines in mac_filter.h left
+untouched (CODE). `escape_util` §5.37 refactor-narration deduped (logger.cpp +
+sidecar.cpp) to the single include-line pointer.
+
+**KEPT-MORE (per HG-3 bias-KEEP / PI rows):** `mac_filter.h` density drops least
+(ABI hub) — kept all map-layout / key-value / alignment / packed-member-UB
+rationale + every map-name const comment. Per-file KEEP verified present:
+guard #15 (loader copy_rule_counters_forward / populate-inactive-then-flip),
+guard #28 spike numbers (bpf.c MAX_EXT_HOPS), guard #30 never-throw
+(sidecar/sidecar_reader + logger "never throws" + http defensive), §5.64 seqlock
++ PI-31 (rule_counters_reader), §5.19/§5.22 security (loader/sidecar).
+
+No silent deviations; no design questions raised (rubric was unambiguous).

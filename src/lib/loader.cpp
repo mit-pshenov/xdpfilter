@@ -113,31 +113,13 @@ constexpr int kKernelFloorMinor = 15;
 constexpr std::string_view kBpfObjectPathEnv{"XDPMF_BPF_OBJECT_PATH"};
 #endif
 
-/* §5.30 HK-9 (MVP-3.4.5): consolidated `LIBBPF_PIN_BY_NAME` map table.
- *
- * Pre-HK-9, three call-sites in this TU each carried their own literal
- * array of (bpf_map*, pin-name) pairs: `open_skeleton_only`'s
- * `pinned_maps[]` clear-list, `internal::apply_request`'s `pin_specs[]`
- * per-iface pinning list, and `internal::apply_request`'s `reuse_specs[]`
- * state-b reattach list. A new pin-by-name map (rules / action_table in
- * MVP-3.4; CIDR axis in MVP-3.2) had to be lockstep-added to all three —
- * the MVP-3.4 EDIT-2 27/42 ctest failure ("libbpf: map already has pin
- * path") came from missing exactly that lockstep.
- *
- * The table below replaces the three literals. Member-pointer
- * representation (Q4 T1; D-3.4.5-3) catches a libbpf-skel rename at
- * BUILD time (compiler error) rather than at runtime (cryptic libbpf
- * NULL deref or pin-already-set EEXIST). All entries are "real" maps
- * (walked uniformly by all three callsites). §5.58 (MVP-4.18) retired the
- * vestigial `allowlist` alias row + its per-entry skip flag — the table is
- * now a clean 2-tuple walked without any per-entry guard.
- * Pre-§5.34: 13 entries (12 real + 1 alias). §5.34 D-3.4b-c2-1 net +2:
- * REMOVE the SHARED `rules` entry; ADD three (`rules_a`, `rules_b`,
- * `rules_outer`) — DIRECT MIRROR of the §5.27 CIDR axis triple. §5.35
- * D-3.4d-1 net +2: REMOVE the single `rule_counters` PERCPU entry; ADD
- * three (`rule_counters_a`, `rule_counters_b`, `rule_counters_outer`) —
- * DIRECT MIRROR of the §5.34 rules-axis triple (only inner type differs:
- * PERCPU_ARRAY vs ARRAY). */
+/* §5.30 HK-9: consolidated `LIBBPF_PIN_BY_NAME` map table — the SINGLE source
+ * of truth walked by all three call-site loops (clear / pin / reuse). Before
+ * HK-9 each site carried its own literal pair-array, and a new pin-by-name map
+ * had to be lockstep-added to all three (a missed lockstep caused the MVP-3.4
+ * "libbpf: map already has pin path" failure). The member-pointer representation
+ * (D-3.4.5-3) catches a libbpf-skel rename at BUILD time (compiler error) rather
+ * than at runtime. Adding an axis = adding rows here; no per-site churn. */
 using SkelMapsT = std::remove_reference_t<decltype(std::declval<mac_filter_bpf&>().maps)>;
 
 struct ManagedMapEntry {
@@ -158,93 +140,58 @@ constexpr ManagedMapEntry kManagedMaps[] = {
     { &SkelMapsT::cidr_allowlist_a, XDPMF_MAP_CIDR_INNER_A_NAME },
     { &SkelMapsT::cidr_allowlist_b, XDPMF_MAP_CIDR_INNER_B_NAME },
     { &SkelMapsT::cidr_rulesets,    XDPMF_MAP_CIDR_RULESETS_OUTER_NAME },
-    /* §5.43 (MVP-4.3) D-mvp-4.3-Q1/Q2 net +4 (17 → 21): the NEW dst-CIDR
-     * ARRAY_OF_MAPS trio (dst_bitmask_a/_b + dst_rulesets) mirroring the
-     * §5.27 CIDR-axis triple, plus the single combined `wildcard` ARRAY
-     * (D-mvp-4.3-Q2 — ONE indexed map, NOT two). The src-CIDR axis reuses
-     * the existing cidr_allowlist_a/_b/cidr_rulesets entries (value-only
-     * reshape, pin names unchanged — guard #16, so NO kManagedMaps churn
-     * there). All three call-site loops (clear, pin, reuse) walk this single
-     * table — HK-9 dividend collected again. */
+    /* §5.43 dst-CIDR ARRAY_OF_MAPS trio + the single combined `wildcard` ARRAY
+     * (D-mvp-4.3-Q2 — ONE indexed map). The src-CIDR axis reuses the existing
+     * cidr_allowlist_a/_b/cidr_rulesets entries (value-only reshape, pin names
+     * unchanged — guard #16). */
     { &SkelMapsT::dst_bitmask_a,    XDPMF_MAP_DST_INNER_A_NAME },
     { &SkelMapsT::dst_bitmask_b,    XDPMF_MAP_DST_INNER_B_NAME },
     { &SkelMapsT::dst_rulesets,     XDPMF_MAP_DST_RULESETS_OUTER_NAME },
     { &SkelMapsT::wildcard,         XDPMF_MAP_WILDCARD_NAME },
-    /* §5.44 (MVP-4.4) D-mvp-4.4-Q1/Q2 net +6 (21 → 27): the NEW proto axis
-     * ARRAY_OF_MAPS trio (proto_bitmask_a/_b + proto_rulesets, HASH inners)
-     * and the NEW dst_port axis ARRAY_OF_MAPS trio (port_ranges_a/_b +
-     * port_rulesets, ARRAY inners), each mirroring the §5.27/§5.43 AOM
-     * topology. The `wildcard` ARRAY is UNCHANGED here (its max_entries grows
-     * 4→8 via the BITVEC_NUM_AXES macro, not a new row). All three call-site
-     * loops (clear, pin, reuse) walk this single table — HK-9 again. */
+    /* §5.44 proto axis trio (proto_bitmask_a/_b + proto_rulesets, HASH) + port
+     * axis trio (port_ranges_a/_b + port_rulesets, ARRAY). `wildcard` unchanged
+     * (its max_entries grows via the BITVEC_NUM_AXES macro, not a new row). */
     { &SkelMapsT::proto_bitmask_a,  XDPMF_MAP_PROTO_INNER_A_NAME },
     { &SkelMapsT::proto_bitmask_b,  XDPMF_MAP_PROTO_INNER_B_NAME },
     { &SkelMapsT::proto_rulesets,   XDPMF_MAP_PROTO_RULESETS_OUTER_NAME },
     { &SkelMapsT::port_ranges_a,    XDPMF_MAP_PORT_INNER_A_NAME },
     { &SkelMapsT::port_ranges_b,    XDPMF_MAP_PORT_INNER_B_NAME },
     { &SkelMapsT::port_rulesets,    XDPMF_MAP_PORT_RULESETS_OUTER_NAME },
-    /* §5.45 (MVP-4.5) D-mvp-4.5-Q1 net +3 (27 → 30): the NEW vlan axis
-     * ARRAY_OF_MAPS trio (vlan_bitmask_a/_b + vlan_rulesets, HASH inners),
-     * byte-mirroring the §5.44 proto axis topology. The `wildcard` ARRAY is
-     * UNCHANGED here (its max_entries grows 8→10 via the BITVEC_NUM_AXES macro,
-     * not a new row). All three call-site loops (clear, pin, reuse) walk this
-     * single table — HK-9 again. */
+    /* §5.45 vlan axis trio (vlan_bitmask_a/_b + vlan_rulesets, HASH). */
     { &SkelMapsT::vlan_bitmask_a,   XDPMF_MAP_VLAN_INNER_A_NAME },
     { &SkelMapsT::vlan_bitmask_b,   XDPMF_MAP_VLAN_INNER_B_NAME },
     { &SkelMapsT::vlan_rulesets,    XDPMF_MAP_VLAN_RULESETS_OUTER_NAME },
-    /* §5.53 (MVP-4.13) D-mvp-4.13-Q1/MAP-NAMES net +6 (30 → 36): the NEW
-     * IPv6 dst6 + src6 axis ARRAY_OF_MAPS trios (dst6_bitmask_a/_b +
-     * dst6_rulesets, src6_bitmask_a/_b + src6_rulesets, LPM_TRIE inners keyed
-     * by struct xdpmf_cidr_v6) FORKED from the §5.43 dst-CIDR trio. The
-     * `wildcard` ARRAY is UNCHANGED here (its max_entries grows 12→16 via the
-     * BITVEC_NUM_AXES macro, not a new row). All three call-site loops (clear,
-     * pin, reuse) walk this single table — HK-9 dividend collected again. */
+    /* §5.53 IPv6 dst6 + src6 axis trios (LPM_TRIE inners keyed by xdpmf_cidr_v6),
+     * forked from the §5.43 dst-CIDR trio. */
     { &SkelMapsT::dst6_bitmask_a,   XDPMF_MAP_DST6_INNER_A_NAME },
     { &SkelMapsT::dst6_bitmask_b,   XDPMF_MAP_DST6_INNER_B_NAME },
     { &SkelMapsT::dst6_rulesets,    XDPMF_MAP_DST6_RULESETS_OUTER_NAME },
     { &SkelMapsT::src6_bitmask_a,   XDPMF_MAP_SRC6_INNER_A_NAME },
     { &SkelMapsT::src6_bitmask_b,   XDPMF_MAP_SRC6_INNER_B_NAME },
     { &SkelMapsT::src6_rulesets,    XDPMF_MAP_SRC6_RULESETS_OUTER_NAME },
-    /* §5.54 (MVP-4.14) D-mvp-4.14-Q1 net +3 (36 → 39): the NEW ethertype axis
-     * ARRAY_OF_MAPS trio (ethertype_bitmask_a/_b + ethertype_rulesets, HASH
-     * inners keyed by host-order u32 ethertype) CLONING the §5.44 proto axis
-     * topology. The `wildcard` ARRAY is UNCHANGED here (its max_entries grows
-     * 16→18 via the BITVEC_NUM_AXES macro, not a new row). All three call-site
-     * loops (clear, pin, reuse) walk this single table — HK-9 again. */
+    /* §5.54 ethertype axis trio (ethertype_bitmask_a/_b + ethertype_rulesets,
+     * HASH keyed by host-order u32 ethertype). */
     { &SkelMapsT::ethertype_bitmask_a, XDPMF_MAP_ETHERTYPE_INNER_A_NAME },
     { &SkelMapsT::ethertype_bitmask_b, XDPMF_MAP_ETHERTYPE_INNER_B_NAME },
     { &SkelMapsT::ethertype_rulesets,  XDPMF_MAP_ETHERTYPE_RULESETS_OUTER_NAME },
     { &SkelMapsT::active_idx,       XDPMF_MAP_ACTIVE_IDX_NAME },
     { &SkelMapsT::defaults,         XDPMF_MAP_DEFAULTS_NAME },
-    /* §5.61 (MVP-4.21) B30 D-mvp-4.21-Q1 net +1 (38 → 39): the NEW userspace-
-     * only `slot_rule_id` ARRAY (slot→id per ruleset half), mirroring the
-     * `defaults`/`wildcard` SINGLE-indexed-ARRAY shape (atomic-swap via the
-     * shared active_idx). Never referenced by mac_filter_prog (HG-mvp-4.21-1).
-     * All three call-site loops (clear, pin, reuse) walk this single table —
-     * HK-9 / guard #10 lockstep. */
+    /* §5.61 B30: the userspace-only `slot_rule_id` ARRAY (slot→id per ruleset
+     * half), single-indexed like defaults/wildcard. Never referenced by
+     * mac_filter_prog (HG-mvp-4.21-1). */
     { &SkelMapsT::slot_rule_id,     XDPMF_MAP_SLOT_RULE_ID_NAME },
     { &SkelMapsT::stats,            XDPMF_MAP_STATS_NAME },
-    /* §5.34 (MVP-3.4b cycle 2) D-3.4b-c2-1: REMOVE prior SHARED `rules`
-     * entry (the SHARED-ARRAY pin retired per HG-3.4b-c2-1); ADD three new
-     * entries `rules_a` / `rules_b` / `rules_outer` mirroring the §5.27
-     * CIDR-axis triple. Net 13 → 15 entries (12 → 14 real + 1 alias). All
-     * three call-site loops (clear, pin, reuse) walk this table — HK-9
-     * dividend collected for the 3rd consecutive cycle. */
+    /* §5.34 rules axis trio (rules_a/_b + rules_outer), mirroring the §5.27
+     * CIDR-axis triple. */
     { &SkelMapsT::rules_a,          XDPMF_MAP_RULES_INNER_A_NAME },
     { &SkelMapsT::rules_b,          XDPMF_MAP_RULES_INNER_B_NAME },
     { &SkelMapsT::rules_outer,      XDPMF_MAP_RULES_OUTER_NAME },
     { &SkelMapsT::action_table,     XDPMF_MAP_ACTION_TABLE_NAME },
-    /* §5.35 (MVP-3.4d) D-3.4d-1: REMOVE prior single `rule_counters`
-     * PERCPU_ARRAY entry (the single-PERCPU pin retired per HG-3.4d-4);
-     * ADD three new entries `rule_counters_a` / `rule_counters_b` /
-     * `rule_counters_outer` mirroring the §5.34 rules-axis triple
-     * (only inner type differs: PERCPU_ARRAY vs ARRAY). LIBBPF_PIN_BY_NAME
-     * + bpf_map__reuse_fd discipline preserves per-CPU counter values
-     * across apply per HG-3.4b-2 (Prometheus counter-monotonicity);
-     * combined with D-3.4d-3 copy_rule_counters_forward, PI-3.4b-2
-     * PRESERVE-across-apply held. All three call-site loops (clear, pin,
-     * reuse) walk this table — HK-9 dividend collected for the 4th
-     * consecutive cycle. */
+    /* §5.35 rule_counters axis trio (rule_counters_a/_b + rule_counters_outer,
+     * PERCPU_ARRAY inners). The LIBBPF_PIN_BY_NAME + bpf_map__reuse_fd discipline
+     * preserves per-CPU counter values across apply (Prometheus counter-
+     * monotonicity); combined with copy_rule_counters_forward (D-3.4d-3),
+     * PI-3.4b-2 PRESERVE-across-apply holds. */
     { &SkelMapsT::rule_counters_a,     XDPMF_MAP_RULE_COUNTERS_INNER_A_NAME },
     { &SkelMapsT::rule_counters_b,     XDPMF_MAP_RULE_COUNTERS_INNER_B_NAME },
     { &SkelMapsT::rule_counters_outer, XDPMF_MAP_RULE_COUNTERS_OUTER_NAME },
@@ -1006,10 +953,9 @@ private:
 }
 #endif  // XDPMF_ENABLE_BPF_OBJECT_OVERRIDE
 
-/* Open (no load) — used by both the direct-load path and the reuse_fd
- * path. Clears LIBBPF_PIN_BY_NAME pin paths for all 7 maps so libbpf's
- * load() does NOT auto-pin (we pin/reuse manually after the §5.4 state
- * machine). */
+/* Open (no load) — used by both the direct-load path and the reuse_fd path.
+ * Clears LIBBPF_PIN_BY_NAME pin paths for all managed maps so libbpf's load()
+ * does NOT auto-pin (we pin/reuse manually after the §5.4 state machine). */
 [[nodiscard]] BpfSkeleton open_skeleton_only()
 {
     BpfSkeleton skel;
@@ -1524,14 +1470,6 @@ struct PortLowering {
     return out;
 }
 
-/* §5.50 (MVP-4.10 B28-2): the §5.45 vlan-axis lowering (former `lower_vlan_axis`
- * + `VlanLowering`) and the §5.47 mac-axis lowering (former `lower_mac_axis` +
- * `MacLowering`) are now folded into the generic `aggregate_axis` template +
- * `AxisAggregate<Key>` above; their per-axis projector/equality lambdas live at
- * the apply_request call sites. The u16->__u32 vlan VID widening (D-mvp-4.5-VLAN-
- * VALUE-WIDTH) is done by the vlan projector lambda; the mac 6-octet memcmp
- * equality (network order) is the mac Eq functor (D-mvp-4.10-MAC-EQ). */
-
 /* §5.50 (MVP-4.10 B28-1) unify populate_inner_slot (mac, §5.47 D-mvp-4.7-Q1) /
  * populate_proto_inner_slot (§5.44) / populate_vlan_inner_slot (§5.45) into ONE
  * monomorphized template (rule-of-three OVERRIDES guard #9 per §5.37 /
@@ -1677,12 +1615,6 @@ void populate_bitvec6_inner_slot(int inner_fd, const std::vector<BitPrefix6>& pr
     }
 }
 
-/* §5.50 (MVP-4.10 B28-1): the §5.44 proto-axis populate (former
- * `populate_proto_inner_slot`) and the §5.45 vlan-axis populate (former
- * `populate_vlan_inner_slot`) are now folded into the generic
- * `populate_hash_inner_slot<Key>` template above (both instantiate Key=__u32);
- * call sites in populate_all_axes pass the "proto"/"vlan" diagnostic labels. */
-
 /* §5.44 (MVP-4.4) D-mvp-4.4-Q2 + D-mvp-4.4-PORT-ARRAY-CLEAR: populate one
  * dst_port-axis ARRAY inner (port_ranges_<a|b>). BPF ARRAY maps have no
  * delete, so clear by overwriting ALL XDPMF_ALLOWLIST_MAX slots with the
@@ -1793,25 +1725,15 @@ void write_active_idx(int active_idx_fd, std::uint32_t idx)
     }
 }
 
-/* §5.34 (MVP-3.4b cycle 2) L-2: populate the INACTIVE `rules` inner ARRAY
- * slot from the validated Config. Replaces the §5.29 populate_rules_skeleton
- * which operated on the SHARED `rules` map; now parallel to populate_inner_slot
- * / populate_cidr_inner_slot (per-axis inactive-slot pattern). The function
- * BODY is byte-identical to the prior populate_rules_skeleton — only the
- * fd-source semantic shifts (caller passes the inactive `rules_<a|b>` inner-fd,
- * NOT a shared `rules` fd). Caller writes BEFORE the active_idx flip so the
- * single u32 store at active_idx[0] atomically commits all 4 axes
- * (MAC + CIDR + defaults + rules) per HG-3.4b-c2-4 + D-3.4b-c2-8.
+/* §5.34 populate the INACTIVE `rules` inner ARRAY slot from the validated
+ * Config (per-axis inactive-slot pattern). The caller writes BEFORE the
+ * active_idx flip so the single u32 store commits rules with the other axes.
  *
- * Encoding: a Config.rules entry at id=k with action=Pass becomes
- * rules_inner[k] = {present=1, action_id=ACTION_PASS}; action=Drop becomes
- * rules_inner[k] = {present=1, action_id=ACTION_DROP}. Empty slots written
- * as {present=0, action_id=0} so a removed rule doesn't leave stale state.
- *
- * Schema cycle 3 (HG-3.4b-c2-2): the operator's `rules:` block carries BOTH
- * pass AND drop rules; this function writes BOTH faithfully (the action
- * discrimination happens downstream at the datapath's rules→action_table
- * lookup chain per HG-3.4b-c2-4). */
+ * Encoding: a Config.rules entry with action=Pass becomes {present=1,
+ * action_id=ACTION_PASS}; Drop becomes {present=1, action_id=ACTION_DROP}.
+ * Empty slots written as {present=0, action_id=0} so a removed rule doesn't
+ * leave stale state. BOTH pass and drop rules are written faithfully; the
+ * action discrimination happens downstream at the rules→action_table chain. */
 void populate_rules_inner_slot(int rules_inner_fd, const std::vector<Rule>& rules,
     const std::unordered_map<std::uint32_t, std::uint32_t>& id_to_slot)
 {
@@ -2432,14 +2354,6 @@ std::uint32_t apply_request(const ApplyRequest& req)
     const TrustModel trust_model = parse_trust_model_env();
     log_trust_model(trust_model);
 
-    // §5.34 (MVP-3.4b cycle 2) D-3.4b-c2-4: the §5.29 HG-3.4-1
-    // "rules: section parsed (...) but per-rule action dispatch deferred"
-    // WARN emission is RETIRED here. The contract it announced — `rules` +
-    // `action_table` populated but NOT consulted by datapath — is the
-    // operative thing this slice retires (datapath NOW consults the chain
-    // per HG-3.4b-c2-4). The `loader.warn.rules_skeleton_not_wired` event
-    // entry is REMOVED from `kEventNames` in lockstep (catalog 34 → 33).
-
     const int ifindex = resolve_ifindex(req.iface, LoaderError::AttachFailed);
 
     // §5.22 Item 2: BpffsRootFd guards the bpffs root via O_PATH|O_NOFOLLOW.
@@ -2704,9 +2618,6 @@ std::uint32_t apply_request(const ApplyRequest& req)
 
     // FRESH ATTACH path (state a / state d / state c-fleet).
     // §5.30 HK-9: per-iface pin loop walks every kManagedMaps[] entry.
-    // §5.58 (MVP-4.18): the legacy `allowlist` alias map + its special-pin
-    // step were retired (no consumer); the 4 MVP-2 canary ctests migrate to
-    // the live ${PIN_DIR}/allowlist_a pin created by this loop.
     for (const ManagedMapEntry& entry : kManagedMaps) {
         const std::string p = pin_dir + "/" + entry.name;
         const int rc = bpf_map__pin(skel->maps.*entry.member_ptr, p.c_str());

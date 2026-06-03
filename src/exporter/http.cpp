@@ -7,6 +7,9 @@
  *
  * Why hand-rolled (not microhttpd / cpp-httplib): D-3.4-3 "zero non-standard
  * deps" project value. Same reason cli.cpp hand-rolls its argv parser.
+ *
+ * §5.32 (MVP-3.5): every operator-facing line goes through xdpmf::logger::emit —
+ * byte-equivalent text-mode (PI-3.5-1) + structured JSON fields per event.
  */
 #include "http.hpp"
 
@@ -156,10 +159,7 @@ bool write_all(int fd, std::string_view data) noexcept
     return true;
 }
 
-/* §5.40 (MVP-3.4i) P-3 + D-3.4i-3: HTTP response header block for the two-step
- * `/metrics` write path. The format string below is build_response's literal
- * MINUS the trailing "{}" body placeholder, so build_headers(...) followed by
- * the body bytes is byte-identical to the old single-format build_response(...).
+/* §5.40 P-3: HTTP response header block for the two-step `/metrics` write path.
  * Content-Length MUST be body_size (load-bearing — a wrong length corrupts the
  * HTTP response). */
 [[nodiscard]] std::string build_headers(int                status,
@@ -181,11 +181,9 @@ bool write_all(int fd, std::string_view data) noexcept
                                           std::string_view   content_type,
                                           std::string_view   body)
 {
-    /* DRY: delegate the header block to build_headers (byte-identical to the
-     * prior single-format result) then append the body. The 5 small
-     * error/healthz call-sites keep this single-write path — their tiny
-     * literal bodies make the copy negligible and the unchanged path
-     * guarantees byte-stable error responses. */
+    /* DRY: delegate the header block to build_headers then append the body. The
+     * small error/healthz call-sites keep this single-write path — their tiny
+     * bodies make the copy negligible. */
     std::string resp = build_headers(status, status_text, content_type,
                                      body.size());
     resp.append(body);
@@ -255,12 +253,9 @@ void handle_connection(int conn_fd, std::string_view bpffs_root)
         }
 
         const std::string body = emit_metrics(samples, rule_samples, meta_by_iface);
-        /* §5.40 (MVP-3.4i) P-3 + D-3.4i-3: two-step write — headers then body —
-         * avoids copying the (potentially large) body into a build_response
-         * result. TCP is a byte stream, so two write_all calls on this
-         * `Connection: close` socket deliver the identical concatenated bytes
-         * a single write would (PI-3.4i-A). Content-Length is computed from
-         * body.size() BEFORE the headers are written. */
+        /* §5.40 P-3: two-step write (headers then body) avoids copying the large
+         * body. TCP is a byte stream, so two write_all calls deliver the same
+         * concatenated bytes as one (PI-3.4i-A); Content-Length is body.size(). */
         (void)write_all(conn_fd,
                         build_headers(200, "OK", "text/plain; version=0.0.4",
                                       body.size()));
@@ -322,7 +317,6 @@ int run(const HttpConfig& cfg)
 {
     struct in_addr bind_inaddr{};
     if (!parse_bind_addr(cfg.bind_addr, bind_inaddr)) {
-        /* §5.32 (MVP-3.5): byte-equivalent text-mode + bind_addr in JSON. */
         const std::string msg = std::format(
             "xdpmf-exporter: invalid --bind address: '{}'\n", cfg.bind_addr);
         const xdpmf::logger::Field fs[] = {
@@ -403,8 +397,7 @@ int run(const HttpConfig& cfg)
         return 1;
     }
 
-    /* §5.32 (MVP-3.5): the load-bearing operator startup signal. Byte-
-     * equivalent text-mode (PI-3.5-1); JSON exposes bind_addr + port. */
+    /* The load-bearing operator startup signal (§5.32). */
     const std::string listening_msg = std::format(
         "xdpmf-exporter: listening on {}:{}\n", cfg.bind_addr, cfg.port);
     const xdpmf::logger::Field listening_fields[] = {
@@ -425,7 +418,6 @@ int run(const HttpConfig& cfg)
         const int pr = ::poll(&pfd, 1, 1000 /* ms */);
         if (pr < 0) {
             if (errno == EINTR) continue;
-            /* §5.32 (MVP-3.5): byte-equivalent text-mode + errno in JSON. */
             const std::string errno_str = std::strerror(errno);
             const std::string msg = std::format(
                 "xdpmf-exporter: poll(): {}\n", errno_str);
@@ -450,7 +442,6 @@ int run(const HttpConfig& cfg)
             SOCK_CLOEXEC);
         if (conn_fd < 0) {
             if (errno == EINTR) continue;
-            /* §5.32 (MVP-3.5): byte-equivalent text-mode + errno in JSON. */
             const std::string errno_str = std::strerror(errno);
             const std::string msg = std::format(
                 "xdpmf-exporter: accept(): {}\n", errno_str);
@@ -467,8 +458,6 @@ int run(const HttpConfig& cfg)
     }
 
     (void)::close(listen_fd);
-    /* §5.32 (MVP-3.5): byte-equivalent text-mode (PI-3.5-1) for the
-     * shutdown signal. No fields. */
     xdpmf::logger::emit(xdpmf::logger::Level::Info,
                         "exporter.shutdown",
                         "xdpmf-exporter: shutdown\n");

@@ -83,12 +83,11 @@ namespace {
  * (caller logs once per iface, not once per key, to avoid flooding stderr
  * on a transient bpffs unmount).
  *
- * §5.40 (MVP-3.4i) P-1 + D-3.4i-1: the caller hoists `buf` above the per-iface
- * loop and reuses it for every (iface, key) read, so the scratch allocation is
- * O(1) per scrape instead of O(ifaces × STAT_MAX). No per-call zero-init is
- * needed: on rc==0 the kernel overwrites the FULL span (num_cpus * round_up_8(8)
- * bytes), so every byte summed is freshly written by THIS lookup; on rc<0 the
- * buffer is never read. PI-3.4i-A holds (output value-identical). */
+ * §5.40 P-1: the caller hoists `buf` above the per-iface loop and reuses it for
+ * every (iface, key) read, so the scratch allocation is O(1) per scrape. No
+ * per-call zero-init is needed: on rc==0 the kernel overwrites the FULL span (so
+ * every byte summed is freshly written by THIS lookup); on rc<0 the buffer is
+ * never read (PI-3.4i-A: output value-identical). */
 [[nodiscard]] std::uint64_t percpu_sum_u64(int stats_fd,
                                             std::uint32_t key,
                                             int num_cpus,
@@ -141,10 +140,8 @@ void validate_bpffs_root_or_warn(std::string_view bpffs_root) noexcept
 std::vector<StatsSample> read_all_attached(std::string_view bpffs_root) noexcept
 {
     /* §5.30 HK-17: the legacy single-arg entry-point trampolines through the
-     * accounting variant with a discarded out-param. This keeps every
-     * existing call site (notably http.cpp's /metrics handler) byte-
-     * equivalent while letting the accounting path land in stats_reader.cpp.
-     * Anywhere that needs the exit-6 trigger semantic uses
+     * accounting variant with a discarded out-param, keeping existing call sites
+     * byte-equivalent. Callers needing the exit-6 trigger semantic use
      * read_all_attached_with_acc directly. */
     DiscoveryAccounting discard;
     return read_all_attached_with_acc(bpffs_root, discard);
@@ -186,10 +183,9 @@ std::vector<StatsSample> read_all_attached_with_acc(std::string_view     bpffs_r
         return out;
     }
 
-    /* §5.40 (MVP-3.4i) P-1 + D-3.4i-1: hoist the PERCPU read scratch buffer
-     * above the per-iface loop and reuse it for every (iface, key) lookup.
-     * Sized once for the PERCPU map ABI (round_up_8(8) * num_cpus bytes); the
-     * kernel overwrites the full span on each successful lookup. */
+    /* §5.40 P-1: hoist + reuse the PERCPU read scratch buffer across the
+     * per-iface loop. Sized once for the PERCPU map ABI (round_up_8(8) *
+     * num_cpus bytes); see percpu_sum_u64 for the no-zero-init rationale. */
     std::vector<std::uint8_t> percpu_buf;
     percpu_buf.resize(round_up_8(sizeof(std::uint64_t))
                       * static_cast<std::size_t>(num_cpus));

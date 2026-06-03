@@ -62,20 +62,15 @@ struct xdpmf_cidr_v6 {
 } __attribute__((packed));
 
 /*
- * Index into the `stats` BPF_MAP_TYPE_PERCPU_ARRAY. Each invocation of
- * the XDP program bumps exactly one slot. STAT_MAX is the array
- * max_entries (sentinel; bumped 3 → 4 in §5.27 alongside STAT_PASS_CIDR).
- *
- * §5.27 PI-10-3.2 carve-out: enum slots 0/1/2 are byte-identical to
- * pre-§5.27; STAT_PASS_CIDR = 3 is additive; STAT_MAX is a derived
- * sentinel (allowed to grow with the enum).
+ * Index into the `stats` BPF_MAP_TYPE_PERCPU_ARRAY. Each invocation of the XDP
+ * program bumps exactly one slot; STAT_MAX is the array max_entries sentinel.
  */
 enum mac_filter_stat {
     STAT_PASS           = 0,
     STAT_DROP_DENY      = 1,
     STAT_DROP_MALFORMED = 2,
-    STAT_PASS_CIDR      = 3,  /* §5.27 NEW: frame passed via CIDR-axis match */
-    STAT_MAX            = 4,  /* §5.27 BUMP: 3 → 4 (sentinel = stats max_entries) */
+    STAT_PASS_CIDR      = 3,  /* §5.27: frame passed via CIDR-axis match */
+    STAT_MAX            = 4,  /* sentinel = stats max_entries */
 };
 
 /* Bpffs layout (see design §3.5). The per-interface subdir under this
@@ -111,33 +106,28 @@ enum mac_filter_stat {
 #define XDPMF_MAP_CIDR_INNER_A_NAME         "cidr_allowlist_a"  /* inner slot 0, LPM_TRIE */
 #define XDPMF_MAP_CIDR_INNER_B_NAME         "cidr_allowlist_b"  /* inner slot 1, LPM_TRIE */
 
-/* §5.43 (MVP-4.3) OR→AND bit-vector pivot — see design §5.43 Q1/Q2.
+/* §5.43 OR→AND bit-vector pivot — see design §5.43 Q1/Q2.
  *
- * Two LPM axes (dst_cidr NEW + src_cidr reshaped) composed by per-axis __u64
- * bitmask intersection; first-match by __builtin_ffsll(acc)-1. The src axis
- * REUSES the existing cidr_allowlist_a/_b/cidr_rulesets pins (value reshaped
- * from `struct allow_entry` → `__u64`; pin names UNCHANGED per guard #16).
- * The dst axis is a NEW ARRAY_OF_MAPS trio mirroring the §5.27 CIDR topology.
+ * Per-axis __u64 bitmask intersection; first-match by __builtin_ffsll(acc)-1.
+ * The dst axis is an ARRAY_OF_MAPS trio mirroring the §5.27 CIDR topology; the
+ * src axis REUSES the cidr_allowlist_a/_b/cidr_rulesets pins (pin names
+ * UNCHANGED per guard #16).
  *
- * BITVEC_NUM_AXES = number of LPM axes this slice (dst, src). The `wildcard`
- * map is ONE BPF_MAP_TYPE_ARRAY of __u64 with max_entries
- * XDPMF_RULESET_COUNT * BITVEC_NUM_AXES (= 4), indexed wildcard[active *
+ * The `wildcard` map is ONE BPF_MAP_TYPE_ARRAY of __u64 with max_entries
+ * XDPMF_RULESET_COUNT * BITVEC_NUM_AXES, indexed wildcard[active *
  * BITVEC_NUM_AXES + axis] — the realizable analog of the `defaults` precedent
- * (D-mvp-4.3-Q2; a runtime active_idx cannot select between two top-level map
- * symbols, only between slots of ONE indexed ARRAY). A rule that does NOT
+ * (D-mvp-4.3-Q2): a runtime active_idx cannot select between two top-level map
+ * symbols, only between slots of ONE indexed ARRAY. A rule that does NOT
  * constrain an axis has its bit set in that axis's wildcard half and is ABSENT
- * from the axis LPM map (mutual exclusion). */
+ * from the axis map (mutual exclusion). */
 #define XDPMF_MAP_DST_RULESETS_OUTER_NAME  "dst_rulesets"   /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] of LPM_TRIE fds */
 #define XDPMF_MAP_DST_INNER_A_NAME         "dst_bitmask_a"  /* inner slot 0, LPM_TRIE of __u64 */
 #define XDPMF_MAP_DST_INNER_B_NAME         "dst_bitmask_b"  /* inner slot 1, LPM_TRIE of __u64 */
 #define XDPMF_MAP_WILDCARD_NAME            "wildcard"       /* ARRAY[XDPMF_RULESET_COUNT*BITVEC_NUM_AXES] of __u64 */
 
-/* §5.44 (MVP-4.4) D-mvp-4.4-Q1/Q2/Q4: ADDITIVE +2 bit-vector axes — proto
- * (exact-match HASH) + dst_port (bounded range-scan) — extending the §5.43
- * two-LPM-axis (dst/src) AND classifier. BITVEC_NUM_AXES 2→4 (the ONE foreseen
- * value flip) auto-grows the `wildcard` ARRAY's max_entries 4→8 via the
- * XDPMF_RULESET_COUNT * BITVEC_NUM_AXES formula (no literal edit in the .bpf.c
- * decl). New axis indices BV_AXIS_PROTO=2 / BV_AXIS_PORT=3.
+/* §5.44 proto + dst_port axes (BV_AXIS_PROTO=2 / BV_AXIS_PORT=3). The `wildcard`
+ * ARRAY max_entries auto-grows via the XDPMF_RULESET_COUNT * BITVEC_NUM_AXES
+ * formula (no literal edit in the .bpf.c decl).
  *
  *   proto: ARRAY_OF_MAPS[2] of HASH inners (proto_bitmask_a/_b + proto_rulesets),
  *          key __u32 IP-protocol number, value __u64 rule-bitmask, NO closure.
@@ -154,11 +144,7 @@ enum mac_filter_stat {
  * [0,255] (D-mvp-4.4-Q1). */
 #define XDPMF_PROTO_HASH_MAX 256
 
-/* §5.45 (MVP-4.5) D-mvp-4.5-Q1: ADDITIVE +1 bit-vector axis — vlan (outer
- * 802.1Q tag VID, exact-match HASH) — byte-mirroring the §5.44 proto axis.
- * BITVEC_NUM_AXES 4→5 (the ONE foreseen value flip) auto-grows the `wildcard`
- * ARRAY's max_entries 8→10 via the XDPMF_RULESET_COUNT * BITVEC_NUM_AXES
- * formula (no literal edit in the .bpf.c decl). New axis index BV_AXIS_VLAN=4.
+/* §5.45 vlan axis — outer 802.1Q tag VID, exact-match HASH (BV_AXIS_VLAN=4):
  *
  *   vlan: ARRAY_OF_MAPS[2] of HASH inners (vlan_bitmask_a/_b + vlan_rulesets),
  *         key __u32 outer VID [0,4095], value __u64 rule-bitmask, NO closure. */
@@ -176,15 +162,10 @@ enum mac_filter_stat {
  * distinct key, so 0 cannot mean "no tag" (D-mvp-4.5-Q2). */
 #define XDPMF_VLAN_NONE 0xFFFF
 
-/* §5.53 (MVP-4.13) D-mvp-4.13-Q1/Q2: ADDITIVE +2 bit-vector axes — dst6 + src6
- * (IPv6 CIDR LPM_TRIE, mirroring the §5.43 dst/src v4 LPM trios). BITVEC_NUM_AXES
- * 6→8 auto-grows the `wildcard` ARRAY's max_entries 12→16 via the
- * XDPMF_RULESET_COUNT * BITVEC_NUM_AXES formula (no literal edit in the .bpf.c
- * decl). New axis indices BV_AXIS_DST6=6 / BV_AXIS_SRC6=7. Fresh ARRAY_OF_MAPS
- * trios (dst6_ and src6_ prefixes) of LPM_TRIE inners keyed by struct
- * xdpmf_cidr_v6, value __u64 rule-bitmask, WITH closure (close_prefixes6). Both
- * datapath arms AND all 8 axis terms; the other address family contributes
- * 0|wildcard (Q2). */
+/* §5.53 IPv6 dst6 + src6 CIDR LPM_TRIE axes (BV_AXIS_DST6=6 / BV_AXIS_SRC6=7),
+ * mirroring the §5.43 dst/src v4 LPM trios. ARRAY_OF_MAPS trios of LPM_TRIE
+ * inners keyed by struct xdpmf_cidr_v6, value __u64 rule-bitmask, WITH closure
+ * (close_prefixes6). The other address family contributes 0|wildcard (Q2). */
 #define XDPMF_MAP_DST6_RULESETS_OUTER_NAME "dst6_rulesets"  /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] of LPM_TRIE fds */
 #define XDPMF_MAP_DST6_INNER_A_NAME        "dst6_bitmask_a" /* inner slot 0, LPM_TRIE of __u64 */
 #define XDPMF_MAP_DST6_INNER_B_NAME        "dst6_bitmask_b" /* inner slot 1, LPM_TRIE of __u64 */
@@ -192,15 +173,10 @@ enum mac_filter_stat {
 #define XDPMF_MAP_SRC6_INNER_A_NAME        "src6_bitmask_a" /* inner slot 0, LPM_TRIE of __u64 */
 #define XDPMF_MAP_SRC6_INNER_B_NAME        "src6_bitmask_b" /* inner slot 1, LPM_TRIE of __u64 */
 
-/* §5.54 (MVP-4.14) D-mvp-4.14-Q1: ADDITIVE +1 bit-vector axis — ethertype (the
- * post-VLAN inner L2 EtherType, exact-match HASH) — a CLONE of the §5.44 proto
- * axis (only the keyed source differs: the inner ethertype, host order).
- * BITVEC_NUM_AXES 8→9 auto-grows the `wildcard` ARRAY's max_entries 16→18 via
- * the XDPMF_RULESET_COUNT * BITVEC_NUM_AXES formula (no literal edit in the
- * .bpf.c decl). New axis index BV_AXIS_ETHERTYPE=8. The ethertype lookup is
- * HOISTED once above the family dispatch (EtherType is the family selector,
- * family-independent) and the axis term is composed into ALL THREE arms (v4,
- * v6, and the NEW non-IP `else` arm) — see design §5.54 Q1. NO closure. */
+/* §5.54 ethertype axis — the post-VLAN inner L2 EtherType, exact-match HASH,
+ * host order (BV_AXIS_ETHERTYPE=8). The lookup is HOISTED once above the family
+ * dispatch (EtherType is the family selector) and the axis term is composed into
+ * ALL THREE arms (v4, v6, non-IP `else`) — see design §5.54 Q1. NO closure. */
 #define XDPMF_MAP_ETHERTYPE_RULESETS_OUTER_NAME "ethertype_rulesets"  /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] of HASH fds */
 #define XDPMF_MAP_ETHERTYPE_INNER_A_NAME        "ethertype_bitmask_a" /* inner slot 0, HASH of __u64 */
 #define XDPMF_MAP_ETHERTYPE_INNER_B_NAME        "ethertype_bitmask_b" /* inner slot 1, HASH of __u64 */
@@ -241,11 +217,9 @@ struct xdpmf_port_range {
     unsigned long long bit;  /* rule bit = 1ULL << rule_id; binary-compat with __u64 */
 };
 
-/* §5.29 (MVP-3.4): rules + action_table skeleton — see design §5.29 HG-3.4-1 + Q3.
- *
- * STRUCTURAL-ONLY this slice. Populated on apply; NOT consulted in datapath
- * (mac_filter_prog). MVP-3.4b will wire datapath consumption (gated on the
- * PI-13-3.1 adjudication of the inner-allowlist-value extension).
+/* §5.29 rules + action_table — see design §5.29 HG-3.4-1 + Q3. Per match the
+ * datapath dispatches rules_outer[active] → rules_inner[slot] →
+ * action_table[action_id] (wired since §5.34).
  *
  * `unsigned char` (not `__u8`) for the same reason as xdpmf_cidr_v4: this
  * header is included from BOTH BPF C (after vmlinux.h) AND userspace C++
@@ -269,49 +243,32 @@ enum xdpmf_action_type {
     ACTION_MAX  = 2,           /* sentinel; future MVP-3.8+ may extend (MIRROR/RL/TAG) */
 };
 
-/* §5.34 (MVP-3.4b cycle 2) HG-3.4b-c2-1: `rules` axis promoted to parallel
- * ARRAY_OF_MAPS — DIRECT MIRROR of §5.27 CIDR-axis shape. Inner template +
- * 2 pinned inners + outer; shared `active_idx` commits MAC + CIDR + defaults
- * + rules atomically with a single u32 store. The SHARED `rules` ARRAY pin
- * (and its `XDPMF_MAP_RULES_NAME` constant) is RETIRED — userspace no longer
- * sees a single `${PIN_DIR}/<iface>/rules` dentry. */
+/* §5.34 rules axis: ARRAY_OF_MAPS (inner template + 2 pinned inners + outer);
+ * the shared `active_idx` u32 store commits it atomically with the other axes. */
 #define XDPMF_MAP_RULES_OUTER_NAME    "rules_outer"     /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] of ARRAY fds */
 #define XDPMF_MAP_RULES_INNER_A_NAME  "rules_a"         /* inner slot 0, ARRAY of struct rule_entry */
 #define XDPMF_MAP_RULES_INNER_B_NAME  "rules_b"         /* inner slot 1, ARRAY of struct rule_entry */
 #define XDPMF_MAP_ACTION_TABLE_NAME   "action_table"    /* ARRAY[ACTION_MAX] of struct action_entry */
 
-/* §5.31 (MVP-3.4b): inner-allowlist-value extension carrying per-rule id.
- *
- * PI-13-3.4b adjudication = PASS as additive (HG-3.4b-1 + D-3.4b-1). Byte
- * layout is byte-by-byte explicit so the offset-0 `present` byte stays
- * byte-equivalent to PI-27's prior `__u8 present` reading (bpftool dump
- * `format c | head -c 1` still returns 0x01 for occupied slots — old
- * single-byte readers observe the SAME byte at the same offset). The
- * `_pad[3]` is explicit (not implicit ABI padding) so loader-side
- * memset-to-zero on the struct guarantees no uninitialised bytes go to
- * the verifier — pessimistic verifiers reject uninitialised stack reads.
- *
- * Used as INNER value for BOTH `xdpmf_allowlist_inner` (MAC HASH) AND
- * `xdpmf_cidr_inner` (CIDR LPM_TRIE) per T.5 OQ #3 — symmetric. Datapath
- * reads `rule_id` at offset 4 on every successful inner-map lookup and
- * passes it to `bump_rule()` (mac_filter.bpf.c §5.31). */
+/* §5.31 (MVP-3.4b): inner-map value layout carrying per-rule id. VESTIGIAL since
+ * §5.43 — the inner-map value was reshaped to a bare `__u64` rule-bitmask, so the
+ * datapath no longer reads this struct; its byte layout stays PINNED (static_assert
+ * below) for history / reuse-safety. The offset-0 `present` byte is byte-equivalent
+ * to PI-27's prior `__u8 present` reading, and the explicit `_pad[3]` (not implicit
+ * ABI padding) lets a loader-side memset-to-zero guarantee no uninitialised bytes —
+ * pessimistic verifiers reject uninitialised stack reads. */
 struct allow_entry {
     unsigned char present;     /* offset 0, size 1: 0x01 = occupied; 0x00 = empty */
     unsigned char _pad[3];     /* offsets 1-3, size 3: explicit u32 alignment padding */
     unsigned int  rule_id;     /* offsets 4-7, size 4: rule_id in [0, XDPMF_ALLOWLIST_MAX-1] */
 };                             /* total: 8 bytes */
 
-/* §5.31 (MVP-3.4b) + §5.35 (MVP-3.4d): per-rule packet counter map(s).
- *
- * §5.35 HG-3.4d-4 + D-3.4d-1: rule_counters axis promoted to parallel
- * ARRAY_OF_MAPS — DIRECT MIRROR of §5.34 rules-axis shape (only inner-map
- * type differs: PERCPU_ARRAY vs ARRAY). Single active_idx commits both
- * axes (and the other three) atomically. Inner PERCPU_ARRAYs each carry
- * XDPMF_RULE_COUNTERS_MAX (= 64) __u64 slots; bumped by `bump_rule(rule_id,
- * active)` at the MAC HASH-hit and CIDR LPM_TRIE-hit branches in
- * mac_filter_prog. Read by xdpmf-exporter (rule_counters_reader.cpp) via
- * the active inner pin for the
- * `xdpfilter_rule_match_total{iface, rule_id, action}` Prometheus series. */
+/* §5.31 + §5.35 per-rule packet counter maps: rule_counters axis as a parallel
+ * ARRAY_OF_MAPS with PERCPU_ARRAY inners, committed atomically with the other
+ * axes by the single active_idx store. Inner PERCPU_ARRAYs each carry
+ * XDPMF_RULE_COUNTERS_MAX __u64 slots, bumped by `bump_rule(slot, active)` per
+ * match. Read by xdpmf-exporter (rule_counters_reader.cpp) via the active inner
+ * pin for the `xdpfilter_rule_match_total{iface, rule_id, action}` series. */
 #define XDPMF_MAP_RULE_COUNTERS_OUTER_NAME    "rule_counters_outer"  /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] of PERCPU_ARRAY fds */
 #define XDPMF_MAP_RULE_COUNTERS_INNER_A_NAME  "rule_counters_a"      /* inner slot 0, PERCPU_ARRAY of __u64 */
 #define XDPMF_MAP_RULE_COUNTERS_INNER_B_NAME  "rule_counters_b"      /* inner slot 1, PERCPU_ARRAY of __u64 */
@@ -334,11 +291,9 @@ struct allow_entry {
  * is unambiguous. */
 #define XDPMF_SLOT_ID_EMPTY          0xFFFFFFFFu
 
-/* §5.31 EDIT-1 (Phase B Q3 P4 correction): sidecar lives on tmpfs under
- * /run because bpffs (kernel/bpf/inode.c) rejects regular-file creation via
- * EPERM at the inode_create hook. The initial design's Q3 P1 (under bpffs)
- * was retracted at impl Phase B with concrete platform-constraint evidence;
- * `/run` is the systemd-blessed tmpfs convention for ephemeral state. */
+/* §5.31: sidecar lives on tmpfs under /run because bpffs (kernel/bpf/inode.c)
+ * rejects regular-file creation with EPERM at the inode_create hook; `/run` is
+ * the systemd-blessed tmpfs convention for ephemeral state. */
 #define XDPMF_SIDECAR_ROOT  "/run/xdpmacfilter"
 
 #ifdef __cplusplus

@@ -8,10 +8,9 @@
  * bpf_map_lookup_elem() to sum each of the XDPMF_RULE_COUNTERS_MAX (= 64)
  * slots across CPUs.
  *
- * §5.35 PI-3.4d-EXPORTER carve-out: the single `${PIN_DIR}/<iface>/rule_counters`
- * pin no longer exists (replaced by `rule_counters_a`/`_b`/`_outer`). Exporter
- * adapts to the active_idx-indirection here; existing per-CPU read + per-rule-id
- * loop UNCHANGED.
+ * §5.35 PI-3.4d-EXPORTER: the rule_counters axis is split into
+ * `rule_counters_a`/`_b`/`_outer`; the exporter selects the live inner via
+ * active_idx-indirection (below), then per-CPU-sums each rule-id slot.
  *
  * PI-31-3.4b PRESERVED: the only BPF syscalls touched are bpf_obj_get + PERCPU
  * lookup — NO bpf_map_update_elem / delete / pin / link / prog_load.
@@ -59,11 +58,10 @@ inline constexpr std::size_t kRuleCountersGenRetryMax = 3;
     return (n + 7u) & ~static_cast<std::size_t>(7u);
 }
 
-/* List subdirectories under `root` (one level deep). Returns iface names
- * sorted lexicographically so the exporter output ordering is stable
- * across scrapes. Sister to stats_reader.cpp::list_iface_dirs — kept
- * duplicated rather than factored out per design's "default: keep
- * stats_reader.cpp byte-equivalent" guidance (§5.31 EDITED table). */
+/* List subdirectories under `root` (one level deep). Returns iface names sorted
+ * lexicographically so the exporter output ordering is stable across scrapes.
+ * Deliberately duplicated with stats_reader.cpp (NOT factored out — §5.31 keeps
+ * the two readers byte-equivalent). */
 [[nodiscard]] std::vector<std::string> list_iface_dirs(std::string_view bpffs_root)
 {
     std::vector<std::string> out;
@@ -96,13 +94,11 @@ inline constexpr std::size_t kRuleCountersGenRetryMax = 3;
  * error (caller logs once per iface, not once per key, to avoid flooding
  * stderr on a transient bpffs unmount).
  *
- * §5.40 (MVP-3.4i) P-1 + D-3.4i-1: the caller hoists `buf` above the per-iface
- * loop and reuses it for every (iface, key) read, so the scratch allocation is
- * O(1) per scrape instead of O(ifaces × XDPMF_RULE_COUNTERS_MAX). No per-call
- * zero-init is needed: on rc==0 the kernel overwrites the FULL span, so every
- * byte summed is freshly written by THIS lookup; on rc<0 the buffer is never
- * read. PI-3.4i-A holds (output value-identical). Kept independently per-TU
- * (the two readers stay duplicated per §5.31 guidance — NO factor-out). */
+ * §5.40 P-1: the caller hoists `buf` above the per-iface loop and reuses it for
+ * every (iface, key) read, so the scratch allocation is O(1) per scrape. No
+ * per-call zero-init is needed: on rc==0 the kernel overwrites the FULL span (so
+ * every byte summed is freshly written by THIS lookup); on rc<0 the buffer is
+ * never read. */
 [[nodiscard]] std::uint64_t percpu_sum_u64(int map_fd,
                                             std::uint32_t key,
                                             int num_cpus,
@@ -243,10 +239,9 @@ read_rule_counters(std::string_view bpffs_root) noexcept
         return out;
     }
 
-    /* §5.40 (MVP-3.4i) P-1 + D-3.4i-1: hoist the PERCPU read scratch buffer
-     * above the per-iface loop and reuse it for every (iface, key) lookup.
-     * Sized once for the PERCPU map ABI (round_up_8(8) * num_cpus bytes); the
-     * kernel overwrites the full span on each successful lookup. */
+    /* §5.40 P-1: hoist + reuse the PERCPU read scratch buffer across the
+     * per-iface loop. Sized once for the PERCPU map ABI (round_up_8(8) *
+     * num_cpus bytes); see percpu_sum_u64 for the no-zero-init rationale. */
     std::vector<std::uint8_t> percpu_buf;
     percpu_buf.resize(round_up_8(sizeof(std::uint64_t))
                       * static_cast<std::size_t>(num_cpus));

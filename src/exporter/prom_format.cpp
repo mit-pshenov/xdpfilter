@@ -70,9 +70,8 @@ std::string emit_metrics(
     for (const StatsSample& s : samples) {
         const std::string iface_escaped = escape_label_value(s.iface);
         for (std::uint32_t k = 0; k < STAT_MAX; ++k) {
-            /* §5.40 (MVP-3.4i) P-2 + D-3.4i-2: format directly into `out`'s
-             * (already-reserved) storage instead of materializing a temporary
-             * std::string per line. FMT literal byte-identical → PI-3.4i-A. */
+            /* §5.40 P-2: format directly into `out` (already reserved) instead
+             * of a temporary std::string per line (PI-3.4i-A: byte-identical). */
             std::format_to(std::back_inserter(out),
                 "xdpfilter_packets_total{{iface=\"{}\",verdict=\"{}\"}} {}\n",
                 iface_escaped,
@@ -97,15 +96,11 @@ std::string emit_metrics(
          * rather than globally so a sidecar-orphan in iface A doesn't
          * contaminate iface B's labels.
          *
-         * §5.40 (MVP-3.4i) P-4 + D-3.4i-4: a `rule_id`-sorted vector replaces
-         * the prior hash map (cache-friendly linear scan at ≤64 entries;
-         * ~500 fewer small allocs/scrape). FIRST-WINS dedup on duplicate
-         * rule_id is LOAD-BEARING — the prior hash-map emplace kept the first
-         * insert, so we skip a rule_id already present (NOT overwrite) to keep
-         * the emitted line-SET identical (PI-3.4i-B). The sort makes the
-         * known-rule emission order deterministic ascending-rule_id (was
-         * hash-order); Prometheus is order-insensitive so the oracle greps
-         * stay green. */
+         * §5.40 P-4: a `rule_id`-sorted vector (cache-friendly at ≤64 entries).
+         * FIRST-WINS dedup on duplicate rule_id is LOAD-BEARING — skip a rule_id
+         * already present (NOT overwrite) so the emitted line-SET is identical
+         * (PI-3.4i-B). The sort makes emission deterministic ascending-rule_id;
+         * Prometheus is order-insensitive so the oracle greps stay green. */
         std::vector<std::pair<std::uint32_t, std::string_view>> action_for_rule;
         const auto it = rule_meta_by_iface.find(s.iface);
         if (it != rule_meta_by_iface.end()) {
@@ -121,17 +116,14 @@ std::string emit_metrics(
         std::sort(action_for_rule.begin(), action_for_rule.end(),
                   [](const auto& a, const auto& b) { return a.first < b.first; });
 
-        /* §5.61 (MVP-4.21) B30 D-mvp-4.21-Q1: the BPF inner counters are
-         * SLOT-keyed; the stable operator id for each slot comes from the
-         * slot_rule_id map (s.slot_to_id[k]). Iterate slots ascending — because
-         * `slot` = id-sorted rank, this emits ascending-id order, BYTE-IDENTICAL
-         * to the prior sidecar-id-sorted emission under dense ids (slot==id).
-         * Skip unoccupied slots (EMPTY sentinel) — so an occupied slot is emitted
-         * even at count 0 (Prometheus "emit zeroes for known series"), and a
-         * pre-§5.61 iface (all-sentinel slot_to_id) yields no per-rule series
-         * (graceful-empty, PI-32). The `action` label is still looked up by the
-         * stable operator id from the sidecar; a slot whose id is absent from the
-         * sidecar emits action="unknown" (orphan tolerance, PI-32-3.4b). */
+        /* §5.61 B30: the BPF inner counters are SLOT-keyed; the stable operator
+         * id for each slot comes from slot_rule_id (s.slot_to_id[k]). Iterate
+         * slots ascending — `slot` = id-sorted rank, so this emits ascending-id
+         * order. Skip unoccupied slots (EMPTY sentinel): an occupied slot is
+         * emitted even at count 0 (known-series zeroes), and a pre-§5.61 iface
+         * (all-sentinel) yields no per-rule series (graceful-empty, PI-32). The
+         * `action` label is looked up by the stable id; a slot whose id is absent
+         * from the sidecar emits action="unknown" (PI-32-3.4b). */
         for (std::uint32_t k = 0; k < XDPMF_RULE_COUNTERS_MAX; ++k) {
             const std::uint32_t rule_id = s.slot_to_id[k];
             if (rule_id == XDPMF_SLOT_ID_EMPTY) continue;
@@ -145,16 +137,14 @@ std::string emit_metrics(
         }
     }
 
-    /* §5.46 (MVP-4.6) PI-mvp-4.6-EXPORTER-AXIS-AWARE: a THIRD family carrying
-     * each sidecar-known rule's 5 match-axis values as labels (info-metric:
-     * constant gauge value 1, joined to the counter on (iface,rule_id) in
-     * PromQL). D-mvp-4.6-BLOCK-ORDER: appended LAST so the two counter blocks
-     * above stay byte-identical (PI-mvp-4.6-COUNTER-CONTRACT). The 7-label key
-     * set is STABLE and ordered; an unconstrained axis emits an empty value
-     * (D-mvp-4.6-Q3). Sourced from `rule_meta_by_iface` (config-known rules),
-     * NOT rule_counters — a counter-orphan rule_id has unknown axes and gets
-     * NO series (D-mvp-4.6-METRIC-SOURCE). HELP+TYPE fire once unconditionally
-     * (PI-32 empty-scrape). */
+    /* §5.46 PI-mvp-4.6-EXPORTER-AXIS-AWARE: a THIRD family carrying each
+     * sidecar-known rule's match-axis values as labels (info-metric: constant
+     * gauge 1, joined to the counter on (iface,rule_id) in PromQL). Appended LAST
+     * so the two counter blocks above stay byte-identical
+     * (PI-mvp-4.6-COUNTER-CONTRACT). The label key set is STABLE and ordered; an
+     * unconstrained axis emits an empty value. Sourced from `rule_meta_by_iface`
+     * (config-known rules), NOT rule_counters — a counter-orphan rule_id gets NO
+     * series. HELP+TYPE fire once unconditionally (PI-32 empty-scrape). */
     out.append("# HELP xdpfilter_rule_info Per-rule match constraints (9-axis) by iface and rule_id; constant gauge value 1.\n");
     out.append("# TYPE xdpfilter_rule_info gauge\n");
 
@@ -178,14 +168,12 @@ std::string emit_metrics(
                   });
 
         for (const RuleMeta* rm : rules) {
-            /* §5.47 (MVP-4.7) D-mvp-4.7-Q3: `mac` is the 8th label key, appended
-             * after `vlan` so the older keys' order stays byte-stable; `""` for
-             * a MAC-unconstrained rule.
-             * §5.56 (MVP-4.16 C3) PI-mvp-4.16-EXPORTER-AXIS-AWARE: the v6-CIDR +
-             * EtherType axes are appended AFTER `mac` (keys 9/10/11) by the same
-             * append-at-end discipline — the existing 8 keys stay byte-identical
+            /* §5.47: `mac` is the 8th label key, appended after `vlan` so the
+             * older keys' order stays byte-stable. §5.56: the v6-CIDR + EtherType
+             * axes are appended AFTER `mac` (keys 9/10/11) by the same
+             * append-at-end discipline — the existing keys stay byte-identical
              * (PI-mvp-4.16-LABEL-CONTRACT), and a v6/ethertype rule no longer
-             * appears as all-empty (match-all) in the info-metric. */
+             * appears as all-empty in the info-metric. */
             std::format_to(std::back_inserter(out),
                 "xdpfilter_rule_info{{iface=\"{}\",rule_id=\"{}\",dst_cidr=\"{}\",src_cidr=\"{}\",protocol=\"{}\",dst_port=\"{}\",vlan=\"{}\",mac=\"{}\",dst_cidr6=\"{}\",src_cidr6=\"{}\",ethertype=\"{}\"}} 1\n",
                 iface_escaped,
