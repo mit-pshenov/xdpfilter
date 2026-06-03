@@ -1,42 +1,54 @@
-# Review — MVP-4.25 B32 comment-collapse (mint triangulation, brownfield 5-point)
+# Review — MVP-4.26 / B33 rename mac_filter/xdpmacfilter/mac_filter_prog → xdpfilter (mint triangulation)
 
 ## Verdict
-`pass` (round-1, 0 findings, 0 out-of-triangulation)
+`pass` (round-1, 0 findings, 1 out-of-triangulation → inline-merge)
 
-Base for all diffs: `daa8160` (design commit; src-identical to the pre-impl state).
+Base for all diffs: `7fdecda` (design commit; src = pre-rename state).
 
 ## Triangulation matrix
 | Framework point | Findings | Tags |
 |---|---|---|
-| 1. Spec ↔ Code (rubric + traceability) | 0 | — |
-| 2. Spec ↔ Tests | 0 | NO new ctest — correct per §5.65 (comment-only; existing suite IS the guard) |
-| 3. Code ↔ Tests | 0 | sample 4/4 pass; xdp 3658; zero-warning |
+| 1. Spec ↔ Code | 0 | — |
+| 2. Spec ↔ Tests | 0 | — |
+| 3. Code ↔ Tests | 0 | — |
 | 4. Out-of-Scope Drift | 0 | — |
-| 5. Behaviour preserved | 0 | PI-7 ∅, code-token diff 0, #48/#63 pre-existing env-fails (not REGRESSION) |
+| 5. Behaviour preserved | 0 | 1 OOT inline-merge (T7 KEEP wording) |
 
-## Point #1 — TRACEABILITY ANCHOR AUDIT (the crux)
-Method: `git show daa8160:<f> | grep -oE '§5\.[0-9]+|PI-[a-z0-9.-]+|guard #[0-9]+|D-mvp-[0-9.]+' | sort -u` vs working tree, per file, comment-lines.
+## Point 1 — Spec ↔ Code
+- **6 git mv** (history-preserving R-status): `mac_filter.bpf.c→xdpfilter.bpf.c` (R099), `mac_filter.h→xdpfilter.h` (R096), the 2 fixtures, `systemd/xdpmacfilter@→xdpfilter@.service`, `ansible/xdpmacfilter-deploy→xdpfilter-deploy.yml`.
+- **§5.19 security gate end-to-end consistent**: `kOwnedProgName{"xdpfilter_prog"}` (`loader.cpp:84`) == SEC `int xdpfilter_prog` (`xdpfilter.bpf.c:614`) == `skel->progs.xdpfilter_prog` (`loader.cpp:1026,2585,2676`) == fixtures' name-asserts. **ZERO `mac_filter_prog` survives.**
+- **VERSION 0.16.0** (HG-1): `CMakeLists.txt:13`; `grep '0\.15\.0'` → ∅ (guard #11).
+- **KEEPs**: `XDPMF_*` = 54 symbols (HG-4, unchanged; only path VALUES changed); `xdpfilter_*` metrics + `BITVEC_NUM_AXES`/`kManagedMaps`/schema untouched.
 
-**16 distinct anchors dropped across the 11 files — EVERY ONE a collapsed stack-duplicate or stale CUT-class narration; ZERO governing/last-pointer losses.** No [TRACEABILITY-LOSS], no [INVARIANT-DOC-LOSS]. Examples: bpf.c dropped PI-29-3.4b/§5.29/§5.3/§5.58 (all stale/net-delta/superseded) while keeping rules→§5.34/§5.35+PI-3.4b-2, counter-bump→§5.31, ethertype-no-closure→§5.54; loader.cpp dropped a stacked "HK-9 / guard #10" dup, kept HK-9 (~14 sites); prom_format dropped D-mvp-4.21/4.6/4.7 stacked dups, kept §5.46/§5.47/§5.61; mac_filter.h (highest-care) dropped only adjudication-history, kept every map/struct/ABI-layout WHY + byte-identical static_asserts.
+## Point 2 — Spec ↔ Tests
+NO new ctest (design-correct; canaries ARE the verification). Negation controls present (xdpfilter_bad/alt, T_NEGATION_CONTROL, T_SYSTEMD_UNIT_SYNTAX neg-arm, xdp_pass alien-refusal). T6 VERSION canaries green.
 
-Load-bearing KEEP list — all PRESENT: guard #15 (loader copy_rule_counters_forward PRESERVE), guard #28 spike numbers (bpf.c MAX_EXT_HOPS=8, 26548/1M insns, stack 280/512), guard #30 never-throw (sidecar_reader/http/logger), §5.64 seqlock+PI-31 (rule_counters_reader), §5.19/§5.22 O_PATH/O_NOFOLLOW security (loader/sidecar).
+## Point 3 — Code ↔ Tests (reviewer re-ran)
+Sample `/tmp/mint-review-mvp426.log` — **7/7 PASS**: T_LOAD_ATTACH, T_ATTACH_TAG_MISMATCH, T_VERIFIER_REJECT, T_BITVEC_VERIFIER_LOAD, T_PROD_VERIFIER_LOAD, T_CLI_HELP_VERSION, **T_SYSTEMD_UNIT_SYNTAX (#35 now GREEN** after the team-lead's `/usr/bin/xdpfilter` symlink fix). The 5 §5.19 canaries green with new prog name + object path = empirical proof of tag name-independence (D-Q1/A1). The 2 full-suite env-fails (#48/#63, bpffs-root unmounted — logs show the correct NEW path `/sys/fs/bpf/xdpfilter does not exist`) + #57 transient -j flake are NOT rename defects.
 
-Inverse-failure (no stale comment LEFT) — verified: all 7 impl-claimed fixes now accurate (bpf.c header "9-axis AND / 3 family arms" replacing the dead "MAC FROZEN / only-IPv4" lie, etc.); `grep` over src for stale markers (`dead under v2|FROZEN|only IPv4|8-term|NOT consulted|max_entries = 4|5 match-axis|7-label`) → only hit is the accurate `loader.cpp "MAC axis is UN-FROZEN"`. Surviving §-refs resolve to real design.md sections.
+## Point 4 — Out-of-Scope Drift
+Clean. `src/bpf/` = only `xdpfilter.bpf.c`; `src/common/` = only `xdpfilter.h` (+ pre-existing) → NO B34 split. No `XDPMF_*` symbol rename, no logic/schema/map change.
 
-## Points 2–5 evidence
-- **Code-token invariance:** comment-stripped before/after diff across all 11 files = **0 non-comment code-token lines** (the strongest behavior-preservation proof).
-- **PI-DATAPATH-IDENTICAL:** rebuilt object, `xdp` section = **3658** insns.
-- **PI-7:** `git diff daa8160 -- src/lib/loader.hpp src/lib/config.hpp` = ∅.
-- **PI-VERSION / PI-KMANAGEDMAPS:** VERSION ∅ (0.15.0); no map/schema/axis token change.
-- **Footprint:** `git diff daa8160 --name-only` = the 11 EDITED src files + impl-notes.md; no file outside FileList, no B33-rename/B34-split token, no new file.
-- **Build:** forced C++ recompile → zero warnings.
-- **Sample ctest:** T_LOAD_ATTACH, T_LOG_EVENT_CATALOG_STABILITY, T_SIDECAR_READ_EXCEPTION_DIAGNOSTIC, T_PROD_VERIFIER_LOAD → 4/4 PASS.
-- **Baseline:** tester's full run 101/103; the 2 fails (#48 T_EXPORTER_EXITS_6_ALL_IFACES_EACCES + #63 T_LOG_JSON_EXPORTER_EVENTS) are pre-existing env-fails by NAME (bpffs root unmounted), byte-impossible from a comment-only slice (code-token diff = 0). Not regressions.
+## Point 5 — Behaviour preserved (§6.5)
+- **PI-DATAPATH-IDENTICAL**: xdp section = **3658**; `git diff -M 7fdecda -- src/bpf/` non-rename-token lines = ZERO (pure token rename).
+- **PI-7-mvp-4.26-SUSPENDED** (HG-3 + EDIT-1): loader.hpp/config.hpp diff = exactly 4 line-pairs (2× include-path + 2× doc-prose); NO symbol/signature/body change → inline-merge per EDIT-1, NOT [INVARIANT-VIOLATED].
+- **PI-RENAME-COMPLETENESS**: grep → zero LIVE-surface survivors; only deliberate KEEPs (BACKLOG historical ledger + CHANGELOG migration note).
+- PI-SECURITY-GATE / PI-ENV-ABI / PI-SCHEMA-METRICS / PI-VERSION all ✓.
+
+## Completeness grep (T7 — load-bearing)
+ZERO hits in any LIVE surface (src/, tests/, systemd/, ansible/, CMakeLists.txt, cmake/, .github/, README.md, CONFIG_SCHEMA.md, FLEET_DEPLOYMENT.md). Surviving hits ONLY in: `CHANGELOG.md` 0.16.0 migration note (intentional — must name what it migrated from); `docs/BACKLOG.md` historical-ledger entries (B7/B18/B20/B26/B33/B34) citing past commits by their then-current filenames (renaming would falsify the shipped record). Both correct KEEPs.
+
+## Out-of-triangulation findings
+
+### [OOT] T7 KEEP wording narrower than the correct KEEP set → inline-merge (applied)
+**Location**: `design.md` §5.66 T7 row + PI-RENAME-COMPLETENESS row.
+**Evidence**: the design literally said "ONLY `docs/BACKLOG.md` B33 entry"; the actual & correct surviving set is the WHOLE BACKLOG historical ledger (every entry citing a past commit by its then-current filename). Tester + reviewer concur this is correct historical-ledger preservation.
+**Disposition**: `inline-merge` (applied — see Post-review sweep).
+
+## Post-review sweep — round 1
+- OOT (T7 KEEP wording too narrow) → `mint/design.md` §5.66 T7 row + PI-RENAME-COMPLETENESS row edited (EDIT-2): broadened the KEEP set from "B33 entry only" to "all `docs/BACKLOG.md` historical-ledger entries citing past commits by their then-current names + the CHANGELOG migration note". Design-prose correction to match reality; zero impl/behavior impact.
 
 ## Rework assignments
 None — `pass`.
 
-## Out-of-triangulation findings
-None.
-
-Net: −274 comment lines, traceability spine intact (zero governing-anchor loss), zero behavior change proven three ways (code-token strip + xdp 3658 + suite). The PO's dominant worry — over-cutting / "не стряхнуть traceability" — did NOT materialize. Candidate guard #33 (comment-collapse preserves grep-able anchors + leaves no stale comment) validated. Ship-ready.
+Net: rename complete + behavior-identical; security gate consistent (zero `mac_filter_prog`); xdp 3658; VERSION 0.16.0; XDPMF_=54; 6 git mv; #35 green post-symlink-fix; sample 7/7. Candidate guard #34 (operator-surface rename = minor bump + migration note + the CMake bpffs-extraction-assert is a high-miss site) validated. Ship-ready.
