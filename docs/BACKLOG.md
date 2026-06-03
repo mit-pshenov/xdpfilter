@@ -177,3 +177,24 @@ Removed the BPF alias map + the bespoke `legacy_alias` loader control-flow (kMan
 ## L2/L3 gate ladder + C3 — SHIPPED STATUS (2026-05-31)
 
 The S1→S6 gate ladder + C3 fast-follow are COMPLETE on origin/main. Match model = **9 axes** (dst/src/proto/port/vlan/mac/dst6/src6/ethertype) AND-composed across 3 family arms (IPv4/IPv6/non-IP), IPv6 with full ext-header L4 depth. Shipped: S4 cidr6 (`971f2fd`), S5 EtherType (`99eb17e`, closes B31), S6 ext-walk (`ce59a5e`), C3 sidecar v6/ethertype match-kinds on both observability surfaces (`9abb02d`). VERSION 0.15.0, 96/96 ctest.
+
+---
+
+## Architectural debt + cleanup workstream (2026-06-02/03 — PO: tidiness before mirror/redirect)
+
+Source: user's 5-point datapath review + the 2026-06-01 hybrid review (PERF-M1/ARCH-H1). Full planning context in memory `project_datapath_cleanup_workstream.md`. Sequence: comments-collapse → rename → MEASURE → datapath workstream. Mirror/redirect deferred behind this by PO choice ("чище будет; mirror не убежит").
+
+### B32 [hygiene, AGREED-NEXT] comment-collapse / archaeology pass
+`.bpf.c` 33% + `loader.cpp` 31% comment-lines. Pilot counts (cut-candidates): bpf.c ~136 (82 §-stacks + 42 D-mvp narration + 12 net-delta) of 477; loader.cpp ~301 (214+56+31) of 935. KEEP-tripwires: bpf.c 20 (14 PI + 6 guard), loader.cpp 20. Rubric: KEEP WHY + 1 canonical invariant-tripwire (PI-7/guard #N) + security rationale; CUT D-mvp decision-narration (lives in design.md), net-delta archaeology, WHAT-restatement, §-tag stacking. Behavior-preserving → bpf.c byte-identity (xdp 3658), .cpp ctest. Band slice under the byte-identity guard.
+
+### B33 [hygiene] rename `mac_filter`/`xdpmacfilter` → `xdpfilter` (+ repo align mint-filter→xdpfilter)
+Blast radius (greps 2026-06-02): A. internal source — 27 files (`mac_filter.bpf.c`/`.h`, prog, idents, includes); B. operator-surface `xdpmacfilter` — CMake binary (23), tests (45), systemd (2), ansible (1), docs (5), bpffs-root `XDPMF_BPFFS_ROOT="/sys/fs/bpf/xdpmacfilter"`; C. **security-coupled** `mac_filter_prog` (28 sites — §5.19 name-check literal + self-tag capture + `T_ATTACH_TAG_MISMATCH`/`T_VERIFIER_REJECT` fixtures); D. env `XDPMF_*` — **KEEP spelling, reinterpret acronym** (M=Match/Multi), zero operator-break. Ladder: (A+C source+prog+security-fixtures) → (B operator-surface+docs) → (repo). **byte-identity nuance**: renaming `mac_filter_prog` changes BTF symbol+self-tag BY DESIGN — instructions stay 3658, but prog name/tag in BTF change (don't false-alarm).
+
+### B34 [hygiene/structure] datapath de-monolith: helpers → module split
+#4+#5 = one workstream. (a) extract repeated lookup+null-check + verdict-dispatch idioms (ARCH-H1) into `static __always_inline` helpers (byte-identical); (b) helpers reveal module boundaries → split `mac_filter.bpf.c` + `mac_filter.h`(→`xdpfilter.h`) into `ipv4_match.h`/`ipv6_match.h`/`vlan.h`/`classifier.h`/`maps.h` included into ONE TU (verifier unaffected, byte-identical pure code-movement). #4 BEFORE #5 (split before extract = scattered spaghetti). After B32+B33.
+
+### B35 [perf, MEASURE-FIRST] wildcard+defaults → `ruleset_state` struct (= PERF-M1 promoted)
+~30 lookups/pkt IPv4. The collapsible class = VALUES: pack 9 per-axis `wildcard` u64 + `defaults` u32 into one `ruleset_state[active]` struct → 1 lookup (−9). The per-axis OUTER lookups are map-REFERENCES (ARRAY_OF_MAPS double-buffer) → NOT packable → hard ceiling. **MEASURE instructions/cycles per packet first** (BPF_PROG_TEST_RUN, commit `e9bb321`). **Only slice with real regression surface — map-layout change ⇒ verdict-identity test, not byte-identity.** Perf is NOT a fire (eBPF clears SLA#1 w/ 1-2 core headroom) — this is ceiling-lowering.
+
+### B36 [architectural DEBT, not-now] 64-rule ceiling (`__u64` bitmask)
+`acc` bitmask `1ULL<<slot`/`ffsll` → hard 64-rule ceiling (B30 noted as `N>64` OOS). Future 256/512 → `u64[N]` words + per-word ffs = serious datapath refactor. **Pay-trigger = a real GGSN-Gi config exceeding 64 rules** (product-dependent; may stay <64 for years). Record; do NOT pre-refactor. This is capacity, NOT the tidiness workstream.
