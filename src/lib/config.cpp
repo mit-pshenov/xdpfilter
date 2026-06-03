@@ -10,7 +10,7 @@
  * IPv6 strings rejected at the validator (§5.27 rule 9 / HG-3.2-1).
  *
  * Errors: std::system_error{LoaderError::ConfigError, ...}, stderr shape
- *   "xdpmacfilter: config error: <feature>: <file>:<line>:<col>[: <message>]"
+ *   "xdpfilter: config error: <feature>: <file>:<line>:<col>[: <message>]"
  * EXCEPT CIDR-validation failures, which use cidr::parse_cidr_v4()'s
  * §5.27-catalogue stderr shape (one of {malformed CIDR: ..., IPv6 CIDR not
  * supported until MVP-3.2.5: ...}).
@@ -40,9 +40,9 @@ namespace {
 {
     std::string what =
         message.empty()
-            ? std::format("xdpmacfilter: config error: {}: {}:{}:{}",
+            ? std::format("xdpfilter: config error: {}: {}:{}:{}",
                           feature, file, line, col)
-            : std::format("xdpmacfilter: config error: {}: {}:{}:{}: {}",
+            : std::format("xdpfilter: config error: {}: {}:{}:{}: {}",
                           feature, file, line, col, message);
     throw std::system_error(make_error_code(LoaderError::ConfigError), std::move(what));
 }

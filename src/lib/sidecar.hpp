@@ -13,7 +13,7 @@
  * a confused state ("apply reported error but the kernel filter changed").
  *
  * Schema_version emitted = 1 (Q2 S1 defaults-only shape).
- * Path: `<sidecar_root>/<iface>/rule_index.json` (Q3 P4 = `/run/xdpmacfilter/...`
+ * Path: `<sidecar_root>/<iface>/rule_index.json` (Q3 P4 = `/run/xdpfilter/...`
  * per §5.31 EDIT-1 Phase B platform-constraint correction — bpffs rejects
  * regular-file creation, so /run-tmpfs is the corrected target).
  * Atomic write idiom: write-to-tmp → fsync → rename-into-place; the
@@ -35,7 +35,7 @@ namespace xdpmf::sidecar {
  * loader runs as root, exporter as CAP_BPF-only).
  *
  * NEVER throws — sidecar-write failures degrade gracefully:
- *   - logs `xdpmacfilter: WARN: rule_index.json write failed: <errno>` on stderr
+ *   - logs `xdpfilter: WARN: rule_index.json write failed: <errno>` on stderr
  *   - returns silently (apply continues, exits 0)
  *   - exporter degrades to `action="unknown"` labels for the affected iface
  *     until the next successful apply (PI-32-3.4b orphan tolerance)

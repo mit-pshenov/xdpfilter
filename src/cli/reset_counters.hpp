@@ -1,5 +1,5 @@
 /*
- * reset_counters.hpp — `xdpmacfilter reset-counters` subcommand
+ * reset_counters.hpp — `xdpfilter reset-counters` subcommand
  * (§5.35 HG-3.4d-1..6, MVP-3.4d).
  *
  * Operator-facing primitive: zero the rule_counters PERCPU map(s) on an

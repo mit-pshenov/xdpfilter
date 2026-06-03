@@ -17,7 +17,7 @@
 #
 # Common assertions per sub-case (per §6.22 Observable outcome):
 #   - rc == 9 (LoaderError::ConfigError; exit-code-9 audit-grep target)
-#   - stderr contains 'xdpmacfilter: config error:' prefix
+#   - stderr contains 'xdpfilter: config error:' prefix
 #   - For sub-cases 1, 2, 3, 5: stderr contains the fixture path AND a
 #     <line>:<col> position (line:col regex)
 #   - For sub-case 4: stderr contains BOTH the file's declared interface
@@ -106,9 +106,9 @@ run_subcase() {
         sc_fail=1
     fi
 
-    # (b) stderr matches 'xdpmacfilter: config error:'.
-    if ! grep -qE -- 'xdpmacfilter: config error:' "${stderr_file}"; then
-        echo "  FAIL[${label}.b]: stderr missing 'xdpmacfilter: config error:' prefix" >&2
+    # (b) stderr matches 'xdpfilter: config error:'.
+    if ! grep -qE -- 'xdpfilter: config error:' "${stderr_file}"; then
+        echo "  FAIL[${label}.b]: stderr missing 'xdpfilter: config error:' prefix" >&2
         sc_fail=1
     fi
 

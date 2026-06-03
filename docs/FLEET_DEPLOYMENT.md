@@ -1,13 +1,13 @@
-# Fleet deployment guide — xdpmacfilter
+# Fleet deployment guide — xdpfilter
 
-Operator docs for running `xdpmacfilter` across a Linux host fleet via the
+Operator docs for running `xdpfilter` across a Linux host fleet via the
 shipped systemd template unit and the example Ansible playbook. Covers the
 **`XDPMF_TRUST_MODEL`** decision matrix, the audit story, and the
 Prometheus alert semantic. Scope: enough to make a fleet rollout sane;
 **not** a turnkey production recipe (operators adapt to their inventory,
 secrets, packaging, multi-iface variations).
 
-See also: `systemd/xdpmacfilter@.service`, `ansible/xdpmacfilter-deploy.yml`,
+See also: `systemd/xdpfilter@.service`, `ansible/xdpfilter-deploy.yml`,
 `mint/design.md §5.26` (config harness), `mint/design.md §5.27` (CIDR axis).
 
 ## Decision matrix: `XDPMF_TRUST_MODEL=strict` vs `XDPMF_TRUST_MODEL=fleet`
@@ -31,20 +31,20 @@ Every `attach` and `apply` invocation emits a single line to stderr (and
 therefore to the systemd journal when run via the shipped unit):
 
 ```
-xdpmacfilter: trust_model=<strict|fleet>
+xdpfilter: trust_model=<strict|fleet>
 ```
 
 This is the **exact verbatim stderr-log prefix** — grep it directly:
 
 ```sh
-journalctl -u xdpmacfilter@eth0.service | grep -E '^xdpmacfilter: trust_model='
+journalctl -u xdpfilter@eth0.service | grep -E '^xdpfilter: trust_model='
 ```
 
 Concrete examples — copy-pasteable greps the audit pipeline can use:
 
 ```
-xdpmacfilter: trust_model=strict
-xdpmacfilter: trust_model=fleet
+xdpfilter: trust_model=strict
+xdpfilter: trust_model=fleet
 ```
 
 The line is emitted **before** any libbpf call, so even a load failure
@@ -57,7 +57,7 @@ The shipped unit deliberately does **not** bake in an
 `Environment=XDPMF_TRUST_MODEL=...` line (D-3.3-2 — secure-by-default
 default = strict). Operators opt into `fleet` per-host via a Drop-In file:
 
-Create `/etc/systemd/system/xdpmacfilter@.service.d/trust-model.conf`:
+Create `/etc/systemd/system/xdpfilter@.service.d/trust-model.conf`:
 
 ```ini
 [Service]
@@ -68,9 +68,9 @@ Then:
 
 ```sh
 sudo systemctl daemon-reload
-sudo systemctl restart xdpmacfilter@eth0.service
-journalctl -u xdpmacfilter@eth0.service | grep '^xdpmacfilter: trust_model='
-# expect: xdpmacfilter: trust_model=fleet
+sudo systemctl restart xdpfilter@eth0.service
+journalctl -u xdpfilter@eth0.service | grep '^xdpfilter: trust_model='
+# expect: xdpfilter: trust_model=fleet
 ```
 
 Garbage values (`XDPMF_TRUST_MODEL=banana`) fail closed — the loader
@@ -87,16 +87,16 @@ trust-model values observed across the fleet):
 
 ```
 ALERT XDPMacFilterTrustModelDivergence
-  IF count(count by (trust_model) (xdpmacfilter_trust_model)) > 1
+  IF count(count by (trust_model) (xdpfilter_trust_model)) > 1
   FOR 5m
   LABELS { severity = "warning" }
   ANNOTATIONS {
-    summary = "xdpmacfilter trust_model differs across the fleet"
+    summary = "xdpfilter trust_model differs across the fleet"
     description = "Fleet-wide trust_model distribution is no longer uniform — investigate."
   }
 ```
 
-> **Status: the `xdpmacfilter_trust_model` metric is NOT implemented and
+> **Status: the `xdpfilter_trust_model` metric is NOT implemented and
 > is not currently scheduled.** The `xdpmf-exporter` binary shipped (it
 > emits `xdpfilter_packets_total`, `xdpfilter_rule_match_total`, and the
 > `xdpfilter_rule_info` gauge — see `src/exporter/prom_format.cpp`), but it
@@ -106,7 +106,7 @@ ALERT XDPMacFilterTrustModelDivergence
 > Until/unless a `trust_model` metric is added, scrape the journal directly:
 
 ```sh
-ansible all -m shell -a "journalctl -u 'xdpmacfilter@*.service' --since '-1h' \
+ansible all -m shell -a "journalctl -u 'xdpfilter@*.service' --since '-1h' \
     | grep -oE 'trust_model=(strict|fleet)' | sort -u"
 ```
 
@@ -118,7 +118,7 @@ ansible all -m shell -a "journalctl -u 'xdpmacfilter@*.service' --since '-1h' \
 — detach and proceed instead of refuse). It does **not** relax:
 
 - **§5.19** name-check (PI-2): the loader still demands `bpf_prog_info.name`
-  matches `mac_filter_prog`. A planted prog with the wrong name → refused.
+  matches `xdpfilter_prog`. A planted prog with the wrong name → refused.
 - **§5.22 Item 1** tag-check (PI-3): the loader still demands the
   kernel-computed `bpf_prog_info.tag` (SHA-1 of the post-libbpf bytecode)
   matches the self-tag captured at load time. A recompiled-with-altered-bytecode
@@ -140,33 +140,33 @@ Set them in the systemd unit (or a Drop-In) for fleet rollout.
 
 | Variable | Values (default **bold**) | Consumed by | Effect |
 |---|---|---|---|
-| `XDPMF_TRUST_MODEL` | **`strict`** / `fleet` | loader (`xdpmacfilter`) | Selects the trust posture (see the decision matrix above). Garbage values fail closed → exit 9. NOT consumed by the exporter. |
+| `XDPMF_TRUST_MODEL` | **`strict`** / `fleet` | loader (`xdpfilter`) | Selects the trust posture (see the decision matrix above). Garbage values fail closed → exit 9. NOT consumed by the exporter. |
 | `XDPMF_LOG_FORMAT` | **`text`** / `json` | loader **and** exporter | Selects the log line format. `json` emits one structured object per line — feed it to Loki / Splunk / ELK. An unknown value emits a WARN and falls back to `text`. Read once at first log call. |
-| `XDPMF_BPFFS_ROOT` | path (**`/sys/fs/bpf/xdpmacfilter`**) | exporter (`xdpmf-exporter`) | bpffs root scanned for per-iface stats pins. Overridden by `--bpffs-root` if both are given. |
+| `XDPMF_BPFFS_ROOT` | path (**`/sys/fs/bpf/xdpfilter`**) | exporter (`xdpmf-exporter`) | bpffs root scanned for per-iface stats pins. Overridden by `--bpffs-root` if both are given. |
 
 JSON logging via a systemd Drop-In, e.g.
-`/etc/systemd/system/xdpmacfilter@.service.d/log-format.conf`:
+`/etc/systemd/system/xdpfilter@.service.d/log-format.conf`:
 
 ```ini
 [Service]
 Environment=XDPMF_LOG_FORMAT=json
 ```
 
-Then `sudo systemctl daemon-reload && sudo systemctl restart xdpmacfilter@eth0.service`.
+Then `sudo systemctl daemon-reload && sudo systemctl restart xdpfilter@eth0.service`.
 
 ## Quick operator checklist
 
 1. Decide trust-model posture per host (matrix above). Default to `strict`.
-2. Install `/usr/bin/xdpmacfilter` (build via `cmake --install` from this
+2. Install `/usr/bin/xdpfilter` (build via `cmake --install` from this
    repo, or via your distro packager).
-3. Install the unit: `sudo install -D -m 0644 systemd/xdpmacfilter@.service \
-   /etc/systemd/system/xdpmacfilter@.service`. (The CMake build does this
+3. Install the unit: `sudo install -D -m 0644 systemd/xdpfilter@.service \
+   /etc/systemd/system/xdpfilter@.service`. (The CMake build does this
    for you when `XDPMF_INSTALL_SYSTEMD_UNIT=ON` — default ON.)
 4. Write per-iface config to `/etc/xdpfilter/<iface>.yaml`
    (`schema_version: 2` — see `docs/CONFIG_SCHEMA.md` for the full schema).
 5. If `fleet` posture: drop in the Drop-In file shown above.
-6. `sudo systemctl daemon-reload && sudo systemctl enable --now xdpmacfilter@<iface>.service`
-7. Verify: `journalctl -u xdpmacfilter@<iface>.service | grep '^xdpmacfilter: trust_model='`
+6. `sudo systemctl daemon-reload && sudo systemctl enable --now xdpfilter@<iface>.service`
+7. Verify: `journalctl -u xdpfilter@<iface>.service | grep '^xdpfilter: trust_model='`
    matches the intended posture.
 8. For trust-model divergence monitoring, aggregate the audit-log line
    across the fleet (the journal grep above) — there is no `trust_model`

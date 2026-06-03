@@ -72,8 +72,8 @@ run_reject() {
         [[ "${rc}" == 0 ]] && echo "         rc=0 means the cutover did NOT reject — grammar gate missing" >&2
         fail=1
     fi
-    if ! grep -qE -- 'xdpmacfilter: config error:' "${stderr_file}"; then
-        echo "  FAIL[${label}.prefix]: stderr missing 'xdpmacfilter: config error:'" >&2
+    if ! grep -qE -- 'xdpfilter: config error:' "${stderr_file}"; then
+        echo "  FAIL[${label}.prefix]: stderr missing 'xdpfilter: config error:'" >&2
         fail=1
     fi
     if ! grep -qiE -- "${require_substr_regex}" "${stderr_file}"; then

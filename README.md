@@ -1,8 +1,8 @@
-# xdpmacfilter — L2/L3 XDP traffic filter
+# xdpfilter — L2/L3 XDP traffic filter
 
 ## What it does
 
-`xdpmacfilter` is a Linux XDP packet filter for L2/L3 traffic selection.
+`xdpfilter` is a Linux XDP packet filter for L2/L3 traffic selection.
 It classifies inbound Ethernet frames on a network interface against a
 runtime-supplied rule set and renders a per-frame verdict (`XDP_PASS` /
 `XDP_DROP`). It is designed as a pre-filter that **selects and steers**
@@ -68,9 +68,9 @@ cmake -S . -B build
 cmake --build build -j"$(nproc)"
 ```
 
-Result: `build/xdpmacfilter` (loader binary), `build/xdpmf-exporter`
-(Prometheus exporter daemon), `build/mac_filter.bpf.o` (BPF object),
-`build/mac_filter.skel.h` (generated skeleton header). Zero warnings
+Result: `build/xdpfilter` (loader binary), `build/xdpmf-exporter`
+(Prometheus exporter daemon), `build/xdpfilter.bpf.o` (BPF object),
+`build/xdpfilter.skel.h` (generated skeleton header). Zero warnings
 expected under `-Werror`; a warning is a build failure.
 
 ### CMake options
@@ -94,15 +94,15 @@ built unmodified (`clang -target bpf` has no userspace ASAN runtime).
 
 ## Run
 
-### Loader CLI (`xdpmacfilter`)
+### Loader CLI (`xdpfilter`)
 
 ```sh
-sudo build/xdpmacfilter attach --iface <IFNAME> [--allow <MAC>[,<MAC>...] ...] [--mode <M>]
-sudo build/xdpmacfilter detach --iface <IFNAME>
-sudo build/xdpmacfilter apply  --iface <IFNAME> -f <PATH> [--mode <M>]
-sudo build/xdpmacfilter bypass --iface <IFNAME> [--unsafe] [--reason "<text>"]
-sudo build/xdpmacfilter reset-counters --iface <IFNAME> [--rule-id <N>]
-sudo build/xdpmacfilter --help | --version
+sudo build/xdpfilter attach --iface <IFNAME> [--allow <MAC>[,<MAC>...] ...] [--mode <M>]
+sudo build/xdpfilter detach --iface <IFNAME>
+sudo build/xdpfilter apply  --iface <IFNAME> -f <PATH> [--mode <M>]
+sudo build/xdpfilter bypass --iface <IFNAME> [--unsafe] [--reason "<text>"]
+sudo build/xdpfilter reset-counters --iface <IFNAME> [--rule-id <N>]
+sudo build/xdpfilter --help | --version
 ```
 
 - **`attach`** — load + attach with an inline source-MAC allow-list. `<MAC>`
@@ -140,7 +140,7 @@ sudo build/xdpmf-exporter [--port 9417] [--bind 127.0.0.1] [--bpffs-root <path>]
 ### Inspect counters directly
 
 ```sh
-sudo bpftool map dump pinned /sys/fs/bpf/xdpmacfilter/<IFNAME>/stats
+sudo bpftool map dump pinned /sys/fs/bpf/xdpfilter/<IFNAME>/stats
 ```
 
 ### Exit codes
@@ -164,21 +164,21 @@ sudo bpftool map dump pinned /sys/fs/bpf/xdpmacfilter/<IFNAME>/stats
 |---|---|---|---|
 | `XDPMF_TRUST_MODEL` | `strict` (default) / `fleet` | loader | `fleet` relaxes only the §5.4 alien-program refusal; all other identity gates hold. Garbage → exit 9. See `docs/FLEET_DEPLOYMENT.md`. |
 | `XDPMF_LOG_FORMAT` | `text` (default) / `json` | loader + exporter | Selects log line format; `json` suits Loki/Splunk/ELK pipelines. Unknown value → WARN + text fallback. |
-| `XDPMF_BPFFS_ROOT` | path | exporter | Default bpffs root scanned for stats pins (default `/sys/fs/bpf/xdpmacfilter`); overridden by `--bpffs-root`. |
+| `XDPMF_BPFFS_ROOT` | path | exporter | Default bpffs root scanned for stats pins (default `/sys/fs/bpf/xdpfilter`); overridden by `--bpffs-root`. |
 
 ## Production deployment
 
 The repo ships a systemd template unit and an example Ansible playbook
-for fleet rollout. The template unit `systemd/xdpmacfilter@.service` is
+for fleet rollout. The template unit `systemd/xdpfilter@.service` is
 template-instanced (`%i` = iface), runs as `Type=oneshot RemainAfterExit=yes`,
 and treats `systemctl reload` as an atomic hot-swap via
 `bpf_link__update_program` (no drop window). `cmake --install` drops it
 into `${CMAKE_INSTALL_PREFIX}/lib/systemd/system/` (gated on the default-ON
 `XDPMF_INSTALL_SYSTEMD_UNIT` option), and installs `FLEET_DEPLOYMENT.md`
-alongside it at `${PREFIX}/share/doc/xdpmacfilter/` (the `Documentation=`
+alongside it at `${PREFIX}/share/doc/xdpfilter/` (the `Documentation=`
 URI the units advertise).
 
-The example playbook `ansible/xdpmacfilter-deploy.yml` + Jinja2 config
+The example playbook `ansible/xdpfilter-deploy.yml` + Jinja2 config
 template `ansible/templates/xdpfilter-config.yaml.j2` are a minimal
 reference, not a full role/collection — operators adapt to their fleet.
 

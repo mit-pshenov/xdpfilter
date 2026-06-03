@@ -118,7 +118,7 @@ countcap_cfg=$(mktemp /tmp/xdpmf-reorder-countcap.XXXXXX.yaml)
 bigid_cfg=$(mktemp /tmp/xdpmf-reorder-bigid.XXXXXX.yaml)
 EXPORTER_PID=""
 
-SIDECAR_ROOT="/run/xdpmacfilter"
+SIDECAR_ROOT="/run/xdpfilter"
 SIDECAR_DIR="${SIDECAR_ROOT}/${IFACE_A}"
 
 cleanup_test() {

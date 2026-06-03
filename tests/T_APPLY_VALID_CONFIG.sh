@@ -3,7 +3,7 @@
 #
 # Minimal valid YAML config is parsed, validated, and applied:
 #   - apply exit 0
-#   - stderr contains 'xdpmacfilter: trust_model=strict' (audit log, §5.26)
+#   - stderr contains 'xdpfilter: trust_model=strict' (audit log, §5.26)
 #   - stderr does NOT contain 'config error:' or 'unsupported'
 #   - ${PIN_DIR}/link exists (P0a per HG2)
 #   - ${PIN_DIR}/active_idx exists; value ∈ {0,1}
@@ -65,8 +65,8 @@ if [[ "${rc}" -ne 0 ]]; then
 fi
 
 # (2) stderr contains trust_model=strict (mandatory audit log).
-if ! grep -qE -- 'xdpmacfilter: trust_model=strict' "${stderr_file}"; then
-    echo "FAIL[2]: stderr missing 'xdpmacfilter: trust_model=strict' audit line" >&2
+if ! grep -qE -- 'xdpfilter: trust_model=strict' "${stderr_file}"; then
+    echo "FAIL[2]: stderr missing 'xdpfilter: trust_model=strict' audit line" >&2
     fail=1
 fi
 

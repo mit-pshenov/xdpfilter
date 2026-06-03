@@ -3,7 +3,7 @@
  * (design §5.26 HG1 / Q-HG1). Rejects everything outside the accepted
  * subset (anchors, aliases, tags, flow-form, block scalars, booleans,
  * multi-doc, BOM, tabs in indentation, etc.) with a uniform stderr shape:
- *   xdpmacfilter: config error: <feature>: <file>:<line>:<col>[: <message>]
+ *   xdpfilter: config error: <feature>: <file>:<line>:<col>[: <message>]
  *
  * DoS guards enforced at parse time:
  *   - file size > 1 MiB → reject (caller-checked but parse() rechecks defensively)
@@ -54,13 +54,13 @@ struct Cursor {
     /* Stderr shape matches Q-HG1 contract: caller's std::system_error's
      * what() will be rendered by main()'s catch block as
      * "error: <what>" — we shape <what> so that splicing produces the
-     * canonical "xdpmacfilter: config error: <feature>: <file>:<line>:<col>"
+     * canonical "xdpfilter: config error: <feature>: <file>:<line>:<col>"
      * sentinel that ops scripts grep on. */
     std::string what =
         message.empty()
-            ? std::format("xdpmacfilter: config error: {}: {}:{}:{}",
+            ? std::format("xdpfilter: config error: {}: {}:{}:{}",
                           feature, c.file, c.line, c.col)
-            : std::format("xdpmacfilter: config error: {}: {}:{}:{}: {}",
+            : std::format("xdpfilter: config error: {}: {}:{}:{}: {}",
                           feature, c.file, c.line, c.col, message);
     throw std::system_error(make_error_code(LoaderError::ConfigError), std::move(what));
 }

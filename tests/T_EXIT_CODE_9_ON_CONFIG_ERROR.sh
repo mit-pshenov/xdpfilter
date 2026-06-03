@@ -13,7 +13,7 @@
 #
 # Observable outcome (per §6.27):
 #   - exit code EXACTLY 9
-#   - stderr starts with 'xdpmacfilter: config error:'
+#   - stderr starts with 'xdpfilter: config error:'
 #   - stderr contains 'unknown trust model' (specific message)
 #   - No XDP touched, no bpffs dir created (not asserted here — pure
 #     binary-invocation test; the §6.26 sub-case 4 covers that with veth.)
@@ -58,9 +58,9 @@ if [[ "${rc}" -ne 9 ]]; then
 fi
 
 # (b) Stderr STARTS with the expected prefix. The §5.26 stderr-discipline
-#     guarantees a single-line 'xdpmacfilter: config error:' opener.
-if ! grep -qE -- '^xdpmacfilter: config error:' "${stderr_file}"; then
-    echo "FAIL[b]: stderr does not start with 'xdpmacfilter: config error:'" >&2
+#     guarantees a single-line 'xdpfilter: config error:' opener.
+if ! grep -qE -- '^xdpfilter: config error:' "${stderr_file}"; then
+    echo "FAIL[b]: stderr does not start with 'xdpfilter: config error:'" >&2
     fail=1
 fi
 

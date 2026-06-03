@@ -19,7 +19,7 @@
 #include "stats_reader.hpp"
 
 #include "common/logger.hpp"          // §5.32 (MVP-3.5) structured-logging surface
-#include "common/mac_filter.h"        // §5.31 EDIT-1: XDPMF_SIDECAR_ROOT (/run/xdpmacfilter)
+#include "common/xdpfilter.h"        // §5.31 EDIT-1: XDPMF_SIDECAR_ROOT (/run/xdpfilter)
 
 #include <cerrno>
 #include <chrono>
@@ -240,7 +240,7 @@ void handle_connection(int conn_fd, std::string_view bpffs_root)
          * `action="unknown"` labels per Q4 A3 + PI-32-3.4b.
          *
          * §5.31 EDIT-1 + D-3.4b-21: sidecar lives under XDPMF_SIDECAR_ROOT
-         * = `/run/xdpmacfilter/` (tmpfs); rule_counters map lives under
+         * = `/run/xdpfilter/` (tmpfs); rule_counters map lives under
          * bpffs as before. Two roots; iface key is the join. */
         const auto rule_samples = read_rule_counters(bpffs_root);
         std::map<std::string, std::vector<RuleMeta>> meta_by_iface;

@@ -85,10 +85,10 @@ struct Field {
  *
  * §5.36 (MVP-3.4e): count 35 → 36. One NEW event
  * (`sidecar.warn.iface_dir_symlink`) added per HG-3.4e-4 — per-iface
- * symlink at `/run/xdpmacfilter/<iface>` triggers WARN + skip (sidecar-
+ * symlink at `/run/xdpfilter/<iface>` triggers WARN + skip (sidecar-
  * never-throws contract PRESERVED; PI-32-3.4b unchanged). */
 inline constexpr std::array<std::string_view, 39> kEventNames = {
-    /* loader (xdpmacfilter) — 18 events (was 19 pre-§5.34) */
+    /* loader (xdpfilter) — 18 events (was 19 pre-§5.34) */
     "cli.usage_error",                       /* src/cli/main.cpp:100 */
     "cli.usage_text",                        /* src/cli/main.cpp:101 (multi-line usage dump) */
     "cli.error",                             /* src/cli/main.cpp:136, 142, 146 (CliError + system_error + std::exception fallback) */

@@ -1,5 +1,5 @@
 /*
- * reset_counters.cpp — `xdpmacfilter reset-counters` subcommand impl
+ * reset_counters.cpp — `xdpfilter reset-counters` subcommand impl
  * (§5.35 HG-3.4d-1..6 MVP-3.4d; §5.36 MVP-3.4e KC-3 reset-counters limb).
  *
  * Post-§5.36 (D-3.4e-PROBE-PLACEMENT FINAL A.2) the CLI translation unit
@@ -65,7 +65,7 @@ int reset_counters_main(const ResetCountersConfig& cfg)
         xdpmf::logger::emit(xdpmf::logger::Level::Error,
                             "cli.usage_error",
                             std::nullopt,
-                            "xdpmacfilter: reset-counters: --iface is required\n");
+                            "xdpfilter: reset-counters: --iface is required\n");
         return 1;
     }
 
@@ -92,7 +92,7 @@ int reset_counters_main(const ResetCountersConfig& cfg)
         ? std::to_string(*cfg.rule_id)
         : std::string{"ALL"};
     const std::string audit_msg = std::format(
-        "xdpmacfilter: RESET-COUNTERS on {} by uid={} euid={} "
+        "xdpfilter: RESET-COUNTERS on {} by uid={} euid={} "
         "sudo_user=\"{}\" rule_id={}\n",
         cfg.iface,
         static_cast<unsigned int>(uid),

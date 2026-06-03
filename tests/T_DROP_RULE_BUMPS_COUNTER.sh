@@ -62,8 +62,8 @@ SRC_MAC="02:00:00:00:00:aa"  # 5.43: MAC deferred
 SRC_IP_DROP="10.17.0.1"   # id17 DROP (10.17.0.0/16)
 SRC_IP_PASS="10.5.0.1"    # id5 PASS (10.5.0.0/16)
 
-# §5.31 EDIT-1: sidecar path = /run/xdpmacfilter/<iface>/rule_index.json
-SIDECAR_ROOT="/run/xdpmacfilter"
+# §5.31 EDIT-1: sidecar path = /run/xdpfilter/<iface>/rule_index.json
+SIDECAR_ROOT="/run/xdpfilter"
 SIDECAR_DIR="${SIDECAR_ROOT}/${IFACE_A}"
 SIDECAR_PATH="${SIDECAR_DIR}/rule_index.json"
 

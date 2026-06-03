@@ -2,7 +2,7 @@
 # T_ATTACH_TAG_MISMATCH — design §6.14 (MVP-2 Sec / §5.22 Item 1).
 #
 # Closes the attacker-recompile vector: a BPF prog whose compile-time
-# SEC() function name is `mac_filter_prog` (so the §5.19 name-check
+# SEC() function name is `xdpfilter_prog` (so the §5.19 name-check
 # PASSES) but whose bytecode differs from our build (so the §5.22
 # tag-check FAILS) MUST be classified as alien and refused with
 #   - exit code 4 (LoaderError::AttachRefusedAlien, per §4.1)
@@ -18,15 +18,15 @@
 # Trigger (sequential):
 #   1. setup_veth.
 #   2. Tag-distinctness preflight (HYBRID per §5.31 EDIT-2 + D-3.4b-22):
-#      - real-fixture tag via real loader `xdpmacfilter attach` + bpftool
-#        prog show id + `xdpmacfilter detach` (bpftool standalone `prog load`
+#      - real-fixture tag via real loader `xdpfilter attach` + bpftool
+#        prog show id + `xdpfilter detach` (bpftool standalone `prog load`
 #        cannot parse the post-§5.31 ARRAY_OF_MAPS inner-template value_size=8
 #        because the BTF propagation isn't applied on its no-skeleton path);
 #      - alt-fixture tag via bpftool standalone `prog load` (alt fixture body
 #        is `return XDP_PASS;` — no inner-VALUE offset-4 load, still works);
 #      - compare tags; abort with explicit error if they match (silent
 #        fixture-regression catcher; defensive only).
-#   3. Pre-attach mac_filter_alt.bpf.o (same `mac_filter_prog` name,
+#   3. Pre-attach xdpfilter_alt.bpf.o (same `xdpfilter_prog` name,
 #      different bytecode → different tag) on ${IFACE_A} via xdpgeneric.
 #   4. Capture foreign prog id + foreign tag.
 #   5. Run our loader (`attach --iface ${IFACE_A} --allow ${MAC_GOOD}`),
@@ -35,7 +35,7 @@
 # Outcome — primary (ALL 6 must hold): see top-of-file list.
 #
 # Outcome — negation control (triangulation; same script, second pass):
-#   Same flow, but pre-attach the REAL mac_filter.bpf.o instead.
+#   Same flow, but pre-attach the REAL xdpfilter.bpf.o instead.
 #   Loader should detect "ours" (state b per §5.4) and idempotently
 #   reload — exit 0, no 'tag mismatch' in stderr, our prog attached,
 #   pin dir populated. This control proves the identity gate ACCEPTS
@@ -48,8 +48,8 @@ source "${TEST_DIR}/lib/common.sh"
 require_passwordless_sudo
 
 LOADER_BIN=$(find_loader)
-ALT_OBJ="${BUILD_DIR}/mac_filter_alt.bpf.o"
-REAL_OBJ="${BUILD_DIR}/mac_filter.bpf.o"
+ALT_OBJ="${BUILD_DIR}/xdpfilter_alt.bpf.o"
+REAL_OBJ="${BUILD_DIR}/xdpfilter.bpf.o"
 stderr_file=$(mktemp /tmp/xdpmf-tagmismatch-stderr.XXXXXX)
 
 # Bpftool scratch pins used by the tag-distinctness preflight (loaded,
@@ -73,7 +73,7 @@ cleanup_tagmismatch() {
     sudo -n rm -f "${ALT_PIN_TAG}" "${REAL_PIN_TAG}" 2>/dev/null
     # HK-13 §5.30: the preflight `bpftool prog load` (above) was invoked
     # WITHOUT `pinmaps <dir>`, so libbpf auto-pinned any LIBBPF_PIN_BY_NAME
-    # maps in mac_filter.bpf.o at /sys/fs/bpf/<map_name>. Remove those
+    # maps in xdpfilter.bpf.o at /sys/fs/bpf/<map_name>. Remove those
     # orphans before the test exits. We use the pre-test snapshot
     # diff captured at script start (BPFFS_PRE_SNAPSHOT) — anything in
     # /sys/fs/bpf root that was NOT there before the preflight is a
@@ -103,11 +103,11 @@ trap cleanup_tagmismatch EXIT INT TERM HUP
 # ── Fixture build-artifact sanity ────────────────────────────────────────
 [[ -f "${ALT_OBJ}" ]] \
     || { echo "FAIL: tag-mismatch fixture missing at ${ALT_OBJ}" >&2
-         echo "       (expected build artifact from add_bpf_object mac_filter_alt)" >&2
+         echo "       (expected build artifact from add_bpf_object xdpfilter_alt)" >&2
          exit 1; }
 [[ -f "${REAL_OBJ}" ]] \
     || { echo "FAIL: real BPF object missing at ${REAL_OBJ}" >&2
-         echo "       (expected build artifact from add_bpf_object mac_filter)" >&2
+         echo "       (expected build artifact from add_bpf_object xdpfilter)" >&2
          exit 1; }
 
 # ── setup_veth FIRST (real-fixture preflight needs a live iface) ────────
@@ -141,7 +141,7 @@ setup_veth
 # BEFORE the preflight loads — the cleanup trap will diff against this
 # to remove any orphan map pins that bpftool's libbpf auto-creates from
 # LIBBPF_PIN_BY_NAME maps. The alt fixture has NO maps (verified at
-# /tests/fixtures/mac_filter_alt.bpf.c), so this snapshot is defensive
+# /tests/fixtures/xdpfilter_alt.bpf.c), so this snapshot is defensive
 # / no-op for the alt-only bpftool path; the real-fixture path uses the
 # real loader which pins under PIN_DIR (cleaned by cleanup_veth).
 BPFFS_PRE_SNAPSHOT=$(mktemp /tmp/xdpmf-tagmismatch-bpffs-pre.XXXXXX)
@@ -149,7 +149,7 @@ sudo -n find /sys/fs/bpf -maxdepth 1 -mindepth 1 ! -type d 2>/dev/null \
     | sort > "${BPFFS_PRE_SNAPSHOT}"
 
 echo "=== preflight: real-fixture tag via real loader (§5.31 EDIT-2 hybrid)"
-# Real-fixture: xdpmacfilter attach → read prog id → bpftool prog show id → detach.
+# Real-fixture: xdpfilter attach → read prog id → bpftool prog show id → detach.
 set +e
 ${NSEXEC} "${LOADER_BIN}" attach --iface "${IFACE_A}" --allow "${MAC_GOOD}" >/dev/null 2>&1
 attach_rc=$?
@@ -199,7 +199,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────
 fail=0
 
-echo "=== PRIMARY: pre-attach mac_filter_alt.bpf.o on ${IFACE_A} via xdpgeneric"
+echo "=== PRIMARY: pre-attach xdpfilter_alt.bpf.o on ${IFACE_A} via xdpgeneric"
 ${NSEXEC} ip link set "${IFACE_A}" xdpgeneric obj "${ALT_OBJ}" sec xdp
 sleep 0.2
 
@@ -278,7 +278,7 @@ fi
 # NEGATION CONTROL — loader-twice idempotent-reload pattern.
 # (Reshaped per design-phase-b.md Section C, 2026-05-23.)
 #
-# Why not "pre-attach REAL mac_filter.bpf.o via ip link" as originally
+# Why not "pre-attach REAL xdpfilter.bpf.o via ip link" as originally
 # specified in §6.14: two independent problems make that path unable to
 # reach §5.4 state (b) — (1) `ip link set xdpgeneric obj` does NOT create
 # our pin_dir (state-b condition 2 fails regardless of identity), and

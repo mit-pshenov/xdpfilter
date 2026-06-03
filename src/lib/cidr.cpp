@@ -30,7 +30,7 @@ namespace {
                             std::string_view message)
 {
     std::string what =
-        std::format("xdpmacfilter: config error: {}: {}:{}:{}",
+        std::format("xdpfilter: config error: {}: {}:{}:{}",
                     message, file, line, col);
     throw std::system_error(make_error_code(LoaderError::ConfigError), std::move(what));
 }

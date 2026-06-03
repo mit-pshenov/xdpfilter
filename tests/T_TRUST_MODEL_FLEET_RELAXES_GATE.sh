@@ -87,7 +87,7 @@ if [[ "${rc_1}" -ne 4 ]]; then
     echo "FAIL[1.a]: expected rc=4 (AttachRefusedAlien), got ${rc_1}" >&2
     fail=1
 fi
-if ! grep -qE -- 'xdpmacfilter: trust_model=strict' "${stderr_file}"; then
+if ! grep -qE -- 'xdpfilter: trust_model=strict' "${stderr_file}"; then
     echo "FAIL[1.b]: stderr missing 'trust_model=strict' audit line" >&2
     fail=1
 fi
@@ -115,7 +115,7 @@ if [[ "${rc_2}" -ne 4 ]]; then
     echo "FAIL[2.a]: expected rc=4 (AttachRefusedAlien), got ${rc_2}" >&2
     fail=1
 fi
-if ! grep -qE -- 'xdpmacfilter: trust_model=strict' "${stderr_file}"; then
+if ! grep -qE -- 'xdpfilter: trust_model=strict' "${stderr_file}"; then
     echo "FAIL[2.b]: stderr missing 'trust_model=strict' audit line" >&2
     fail=1
 fi
@@ -143,7 +143,7 @@ if [[ "${rc_3}" -ne 0 ]]; then
     echo "FAIL[3.a]: expected rc=0 (fleet bypasses alien), got ${rc_3}" >&2
     fail=1
 fi
-if ! grep -qE -- 'xdpmacfilter: trust_model=fleet' "${stderr_file}"; then
+if ! grep -qE -- 'xdpfilter: trust_model=fleet' "${stderr_file}"; then
     echo "FAIL[3.b]: stderr missing 'trust_model=fleet' audit line" >&2
     fail=1
 fi
@@ -182,8 +182,8 @@ if [[ "${rc_4}" -ne 9 ]]; then
     echo "FAIL[4.a]: expected rc=9 (ConfigError), got ${rc_4}" >&2
     fail=1
 fi
-if ! grep -qE -- 'xdpmacfilter: config error:' "${stderr_file}"; then
-    echo "FAIL[4.b]: stderr missing 'xdpmacfilter: config error:' prefix" >&2
+if ! grep -qE -- 'xdpfilter: config error:' "${stderr_file}"; then
+    echo "FAIL[4.b]: stderr missing 'xdpfilter: config error:' prefix" >&2
     fail=1
 fi
 if ! grep -qE -- 'unknown trust model' "${stderr_file}"; then

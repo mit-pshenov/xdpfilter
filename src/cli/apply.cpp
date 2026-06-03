@@ -19,7 +19,7 @@
  *   - YAML parse / schema-validation failure of a file that DOES exist →
  *     throw `std::system_error{LoaderError::ConfigError}` (exit 9). Caught
  *     by main.cpp's existing system_error arm; the §5.26 sentinel prefix
- *     `xdpmacfilter: config error:` is preserved verbatim for the
+ *     `xdpfilter: config error:` is preserved verbatim for the
  *     T_EXIT_CODE_9_ON_CONFIG_ERROR ERE match.
  */
 #include "apply.hpp"
@@ -52,19 +52,19 @@ namespace {
     // §5.26 Q4 + §5.30 HK-1 (D-3.4.5-5): file-IO failure = CLI usage error
     // (exit 1) via CliError. Parse / schema failure = ConfigError (exit 9)
     // thrown by yaml::parse and config::validate respectively. Both flavours
-    // emit the unified `xdpmacfilter: config error:` stderr prefix so
+    // emit the unified `xdpfilter: config error:` stderr prefix so
     // operators / log scrapers grep on a single sentinel; the exit code is
     // the discriminator (1 = file-IO upstream of YAML; 9 = YAML/schema).
     // T_APPLY_EXITS_1_ON_MISSING_CONFIG asserts on the prefix + exit 1.
     std::ifstream ifs(path, std::ios::binary | std::ios::ate);
     if (!ifs) {
         throw CliError(std::format(
-            "xdpmacfilter: config error: open {}: No such file or directory", path));
+            "xdpfilter: config error: open {}: No such file or directory", path));
     }
     const std::streamsize sz = ifs.tellg();
     if (sz < 0) {
         throw CliError(std::format(
-            "xdpmacfilter: config error: tellg failed on {}", path));
+            "xdpfilter: config error: tellg failed on {}", path));
     }
     constexpr std::streamsize kMax = 1 * 1024 * 1024;  // 1 MiB
     if (sz > kMax) {
@@ -72,14 +72,14 @@ namespace {
         // Q-HG1 sentinel "config file exceeds 1 MiB limit" stderr.
         throw std::system_error(
             make_error_code(LoaderError::ConfigError),
-            std::format("xdpmacfilter: config error: config file exceeds 1 MiB limit: {}", path));
+            std::format("xdpfilter: config error: config file exceeds 1 MiB limit: {}", path));
     }
     ifs.seekg(0, std::ios::beg);
     std::string buf;
     buf.resize(static_cast<std::size_t>(sz));
     if (sz > 0 && !ifs.read(buf.data(), sz)) {
         throw CliError(std::format(
-            "xdpmacfilter: config error: short read on {}", path));
+            "xdpfilter: config error: short read on {}", path));
     }
     return buf;
 }
@@ -107,7 +107,7 @@ std::uint32_t apply_config(const ApplyConfig& cfg)
     if (parsed.iface.has_value() && *parsed.iface != cfg.iface) {
         throw std::system_error(
             make_error_code(LoaderError::ConfigError),
-            std::format("xdpmacfilter: config error: interface mismatch "
+            std::format("xdpfilter: config error: interface mismatch "
                         "(file declares '{}', --iface is '{}'): {}",
                         *parsed.iface, cfg.iface, cfg.config_path));
     }

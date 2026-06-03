@@ -1,7 +1,7 @@
 #!/bin/bash
 # T_RESET_COUNTERS_PATH_TRAVERSAL — design §5.36 T-1 (MVP-3.4e).
 #
-# `xdpmacfilter reset-counters --iface <bad-shape>` rejected at the
+# `xdpfilter reset-counters --iface <bad-shape>` rejected at the
 # §5.22 invariant layer (now extended to reset-counters per HG-3.4e-1)
 # with:
 #   - exit code 8 (LoaderError::PathRefused, per HG-3.4e-3)
@@ -195,8 +195,8 @@ if [[ "${rc_c}" -ne 0 ]]; then
 fi
 
 # (c2) Audit-log line present per HG-3.4d-6 (carry-forward from §5.35).
-# ERE matches: "xdpmacfilter: RESET-COUNTERS on <iface> by uid=NN .* rule_id=ALL".
-audit_ere="^xdpmacfilter: RESET-COUNTERS on ${IFACE_A} by uid=[0-9]+ .*rule_id=ALL\$"
+# ERE matches: "xdpfilter: RESET-COUNTERS on <iface> by uid=NN .* rule_id=ALL".
+audit_ere="^xdpfilter: RESET-COUNTERS on ${IFACE_A} by uid=[0-9]+ .*rule_id=ALL\$"
 if ! grep -qE -- "${audit_ere}" "${stderr_c}"; then
     echo "FAIL[c2]: NEGATION stderr missing audit-log line matching ERE:" >&2
     echo "          ${audit_ere}" >&2

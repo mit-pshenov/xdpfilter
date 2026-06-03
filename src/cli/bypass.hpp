@@ -1,5 +1,5 @@
 /*
- * bypass.hpp — `xdpmacfilter bypass` subcommand (§5.29 HG-3.4-2, MVP-3.4).
+ * bypass.hpp — `xdpfilter bypass` subcommand (§5.29 HG-3.4-2, MVP-3.4).
  *
  * Operator-facing primitive: detach the XDP filter on an interface with an
  * audit-stderr line + non-tty `--unsafe` gate. NO new BPF map flag, NO

@@ -12,10 +12,10 @@
  *   3. Open + load skeleton (no pin_root_path — pinning happens manually
  *      after the state-machine branch so state-(c) refusal can unwind via
  *      the BpfSkeleton dtor without leaving pinned maps behind).
- *   4. Capture self_tag from bpf_obj_get_info_by_fd(skel->progs.mac_filter_prog->fd).tag.
+ *   4. Capture self_tag from bpf_obj_get_info_by_fd(skel->progs.xdpfilter_prog->fd).tag.
  *   5. Probe the iface's XDP slot across ALL modes (HW > NATIVE > SKB) via
  *      bpf_xdp_query(), and — if a program is attached — verify its
- *      compile-time identity (name == "mac_filter_prog" AND tag == self_tag).
+ *      compile-time identity (name == "xdpfilter_prog" AND tag == self_tag).
  *   6. 4-state disposition (fd-relative for per-iface entry):
  *      (a) no prog, no pin_dir            → fresh attach
  *      (b) prog ours (SKB + name + tag)   → detach + clean + fresh attach
@@ -69,7 +69,7 @@
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
 
-#include "common/mac_filter.h"
+#include "common/xdpfilter.h"
 #include "raii.hpp"
 
 namespace xdpmf {
@@ -78,10 +78,10 @@ namespace {
 
 /* §5.19 identity gate: the BPF program's SEC()-exported function name as
  * kernel-reported via bpf_prog_info.name. MUST match
- * src/bpf/mac_filter.bpf.c's `int mac_filter_prog(...)` symbol; renaming
+ * src/bpf/xdpfilter.bpf.c's `int xdpfilter_prog(...)` symbol; renaming
  * that symbol without updating this constant silently breaks "ours"
  * classification. */
-constexpr std::string_view kOwnedProgName{"mac_filter_prog"};
+constexpr std::string_view kOwnedProgName{"xdpfilter_prog"};
 
 /* §5.22 Item 1: BPF program tag is the kernel-computed SHA1-truncated
  * hash of the loaded bytecode (UAPI: linux/bpf.h BPF_TAG_SIZE). Used as
@@ -106,7 +106,7 @@ constexpr int kKernelFloorMinor = 15;
  * messages are now compile-gated behind XDPMF_ENABLE_BPF_OBJECT_OVERRIDE.
  * In a default release build the env var has zero effect AND the literal
  * string "XDPMF_BPF_OBJECT_PATH" is absent from the binary (reviewer asserts
- * `nm $(which xdpmacfilter) | grep -c XDPMF_BPF_OBJECT_PATH` == 0). The
+ * `nm $(which xdpfilter) | grep -c XDPMF_BPF_OBJECT_PATH` == 0). The
  * in-tree test build forces this define ON via tests/CMakeLists.txt's
  * cache-FORCE, so T_VERIFIER_REJECT.sh continues to pass. */
 #ifdef XDPMF_ENABLE_BPF_OBJECT_OVERRIDE
@@ -120,11 +120,11 @@ constexpr std::string_view kBpfObjectPathEnv{"XDPMF_BPF_OBJECT_PATH"};
  * "libbpf: map already has pin path" failure). The member-pointer representation
  * (D-3.4.5-3) catches a libbpf-skel rename at BUILD time (compiler error) rather
  * than at runtime. Adding an axis = adding rows here; no per-site churn. */
-using SkelMapsT = std::remove_reference_t<decltype(std::declval<mac_filter_bpf&>().maps)>;
+using SkelMapsT = std::remove_reference_t<decltype(std::declval<xdpfilter_bpf&>().maps)>;
 
 struct ManagedMapEntry {
     /* Pointer-to-member into the libbpf-skel `maps` struct. Compile-time-
-     * checked: any rename in mac_filter.bpf.c → mac_filter.skel.h auto-
+     * checked: any rename in xdpfilter.bpf.c → xdpfilter.skel.h auto-
      * fails the build at this initializer. */
     ::bpf_map* SkelMapsT::* member_ptr;
     const char* name;       // pin file name under ${PIN_DIR}/<iface>/
@@ -178,7 +178,7 @@ constexpr ManagedMapEntry kManagedMaps[] = {
     { &SkelMapsT::defaults,         XDPMF_MAP_DEFAULTS_NAME },
     /* §5.61 B30: the userspace-only `slot_rule_id` ARRAY (slot→id per ruleset
      * half), single-indexed like defaults/wildcard. Never referenced by
-     * mac_filter_prog (HG-mvp-4.21-1). */
+     * xdpfilter_prog (HG-mvp-4.21-1). */
     { &SkelMapsT::slot_rule_id,     XDPMF_MAP_SLOT_RULE_ID_NAME },
     { &SkelMapsT::stats,            XDPMF_MAP_STATS_NAME },
     /* §5.34 rules axis trio (rules_a/_b + rules_outer), mirroring the §5.27
@@ -319,7 +319,7 @@ public:
             case LoaderError::AttachRefusedAlien: return "alien XDP program already attached";
             case LoaderError::DetachFailed:       return "detach failed";
             case LoaderError::Permission:         return "permission denied (need CAP_BPF / CAP_NET_ADMIN)";
-            case LoaderError::KernelUnsupported:  return "kernel version too old for xdpmacfilter";
+            case LoaderError::KernelUnsupported:  return "kernel version too old for xdpfilter";
             case LoaderError::PathRefused:        return "bpffs path refused (symlink or non-directory at the bpffs root or per-iface entry)";
             case LoaderError::ConfigError:        return "config error (YAML parse / schema / trust_model violation)";
         }
@@ -395,14 +395,14 @@ public:
  * Stderr discipline (load-bearing for §6.20 T_VERIFIER_REJECT siblings and
  * §5.24 stderr contract): on too-old kernel the thrown what() includes the
  * literals `kernel`, `too old`, the running `<maj>.<min>`, the floor `5.15`,
- * and the program name `xdpmacfilter`. */
+ * and the program name `xdpfilter`. */
 void kernel_version_probe()
 {
     struct utsname u{};
     if (::uname(&u) != 0) {
         const int e = errno;
         throw_loader(LoaderError::KernelUnsupported,
-                     std::format("xdpmacfilter: uname() failed: {} "
+                     std::format("xdpfilter: uname() failed: {} "
                                  "(need kernel ≥ {}.{})",
                                  std::strerror(e),
                                  kKernelFloorMajor, kKernelFloorMinor));
@@ -411,7 +411,7 @@ void kernel_version_probe()
     int min = 0;
     if (!parse_major_minor(u.release, &maj, &min)) {
         throw_loader(LoaderError::KernelUnsupported,
-                     std::format("xdpmacfilter: unable to parse kernel release '{}' "
+                     std::format("xdpfilter: unable to parse kernel release '{}' "
                                  "(need kernel ≥ {}.{})",
                                  u.release,
                                  kKernelFloorMajor, kKernelFloorMinor));
@@ -419,7 +419,7 @@ void kernel_version_probe()
     // Lexicographic compare via std::pair: maj first, then min on tie.
     if (std::pair{maj, min} < std::pair{kKernelFloorMajor, kKernelFloorMinor}) {
         throw_loader(LoaderError::KernelUnsupported,
-                     std::format("xdpmacfilter: kernel {}.{} too old, "
+                     std::format("xdpfilter: kernel {}.{} too old, "
                                  "need ≥ {}.{}",
                                  maj, min,
                                  kKernelFloorMajor, kKernelFloorMinor));
@@ -889,8 +889,8 @@ private:
 #ifdef XDPMF_ENABLE_BPF_OBJECT_OVERRIDE
 /* §5.24 Q4 fixture-path override: read the BPF object ELF from `path` into
  * an in-memory buffer, allocate the typed skeleton struct manually (mirrors
- * mac_filter_bpf__open_opts), substitute s->data/s->data_sz with the file
- * bytes (instead of the embedded mac_filter_bpf__elf_bytes), then open via
+ * xdpfilter_bpf__open_opts), substitute s->data/s->data_sz with the file
+ * bytes (instead of the embedded xdpfilter_bpf__elf_bytes), then open via
  * bpf_object__open_skeleton. libbpf's bpf_object__open_mem (under the hood)
  * completes ELF parsing before returning, so the local buffer's lifetime
  * only needs to cover this call. Returns an owning BpfSkeleton.
@@ -922,18 +922,18 @@ private:
                      std::format("XDPMF_BPF_OBJECT_PATH '{}': short read", path));
     }
 
-    auto* obj = static_cast<mac_filter_bpf*>(std::calloc(1, sizeof(mac_filter_bpf)));
+    auto* obj = static_cast<xdpfilter_bpf*>(std::calloc(1, sizeof(xdpfilter_bpf)));
     if (obj == nullptr) {
         throw_loader(LoaderError::LoadFailed,
-                     "calloc(mac_filter_bpf) failed (out of memory?)");
+                     "calloc(xdpfilter_bpf) failed (out of memory?)");
     }
     // Adopt ownership immediately so any throw below routes through dtor.
     BpfSkeleton holder{obj};
 
-    const int crc = mac_filter_bpf__create_skeleton(obj);
+    const int crc = xdpfilter_bpf__create_skeleton(obj);
     if (crc != 0) {
         throw_loader(classify(crc, LoaderError::LoadFailed),
-                     std::format("mac_filter_bpf__create_skeleton: {}",
+                     std::format("xdpfilter_bpf__create_skeleton: {}",
                                  std::strerror(-crc)));
     }
 
@@ -970,11 +970,11 @@ private:
     } else
 #endif
     {
-        skel = BpfSkeleton{mac_filter_bpf__open()};
+        skel = BpfSkeleton{xdpfilter_bpf__open()};
         if (!skel) {
             const int e = errno;
             throw_loader(classify(-e, LoaderError::LoadFailed),
-                         std::format("mac_filter_bpf__open: {}", std::strerror(e)));
+                         std::format("xdpfilter_bpf__open: {}", std::strerror(e)));
         }
     }
     /* §5.30 HK-9: clear LIBBPF_PIN_BY_NAME auto-pin for ALL managed maps.
@@ -994,16 +994,16 @@ private:
     return skel;
 }
 
-/* Finish-load: invokes mac_filter_bpf__load. Separate from open_skeleton_only
+/* Finish-load: invokes xdpfilter_bpf__load. Separate from open_skeleton_only
  * so the caller can interject bpf_map__reuse_fd between open and load (the
  * state-b idempotent-reattach path uses this hook to swap in the pinned
  * kernel maps). */
 void finish_load_skeleton(BpfSkeleton& skel)
 {
-    const int rc = mac_filter_bpf__load(skel.get());
+    const int rc = xdpfilter_bpf__load(skel.get());
     if (rc < 0) {
         throw_loader(classify(rc, LoaderError::LoadFailed),
-                     std::format("mac_filter_bpf__load: {}", std::strerror(-rc)));
+                     std::format("xdpfilter_bpf__load: {}", std::strerror(-rc)));
     }
 }
 
@@ -1023,10 +1023,10 @@ void finish_load_skeleton(BpfSkeleton& skel)
  * Load-bearing invariant: on the success path, returned tag is non-zero. */
 [[nodiscard]] TagArray capture_self_tag(const BpfSkeleton& skel)
 {
-    const int prog_fd = bpf_program__fd(skel->progs.mac_filter_prog);
+    const int prog_fd = bpf_program__fd(skel->progs.xdpfilter_prog);
     if (prog_fd < 0) {
         throw_loader(LoaderError::LoadFailed,
-                     "self_tag capture: mac_filter_prog fd unavailable");
+                     "self_tag capture: xdpfilter_prog fd unavailable");
     }
     struct bpf_prog_info info{};
     std::uint32_t info_len = sizeof(info);
@@ -1078,7 +1078,7 @@ enum class TrustModel : std::uint8_t { Strict, Fleet };
 
 /* §5.26 HG3: parse XDPMF_TRUST_MODEL. Unset/empty → Strict (default).
  * "strict" → Strict. "fleet" → Fleet. Anything else → ConfigError (exit 9)
- * with the canonical "xdpmacfilter: config error: unknown trust model: '<v>'"
+ * with the canonical "xdpfilter: config error: unknown trust model: '<v>'"
  * stderr shape. Caller MUST log the resolved mode at attach() entry. */
 [[nodiscard]] TrustModel parse_trust_model_env()
 {
@@ -1090,7 +1090,7 @@ enum class TrustModel : std::uint8_t { Strict, Fleet };
         return TrustModel::Fleet;
     }
     throw_loader(LoaderError::ConfigError,
-                 std::format("xdpmacfilter: config error: unknown trust model: '{}' "
+                 std::format("xdpfilter: config error: unknown trust model: '{}' "
                              "(expected: strict|fleet)", raw));
 }
 
@@ -1103,7 +1103,7 @@ enum class TrustModel : std::uint8_t { Strict, Fleet };
 void log_trust_model(TrustModel m) noexcept
 {
     const std::string model_str{to_string(m)};
-    const std::string msg = std::format("xdpmacfilter: trust_model={}\n",
+    const std::string msg = std::format("xdpfilter: trust_model={}\n",
                                         model_str);
     const xdpmf::logger::Field fs[] = {
         xdpmf::logger::Field{"trust_model", std::string_view{model_str}},
@@ -1629,7 +1629,7 @@ void populate_bitvec6_inner_slot(int inner_fd, const std::vector<BitPrefix6>& pr
  * contiguous after the bulk-clear) AND config.cpp parse_dst_port guarantees
  * every real range has lo<=hi (so no real slot can masquerade as a sentinel).
  * Do NOT introduce gaps/holes in the used-slot range or the break would skip
- * legit slots. Consumer note: port_scan in mac_filter.bpf.c — guard #26. */
+ * legit slots. Consumer note: port_scan in xdpfilter.bpf.c — guard #26. */
 void populate_port_inner_slot(int inner_fd, const std::vector<xdpmf_port_range>& ranges)
 {
     /* Clear all slots to the unused sentinel (lo>hi). */
@@ -1776,7 +1776,7 @@ void populate_rules_inner_slot(int rules_inner_fd, const std::vector<Rule>& rule
  * (mirrors write_wildcard_slots / populate_rules_inner_slot): the whole half
  * is rewritten so no stale id survives. The single active_idx u32 store commits
  * this swap together with all 9 axes + defaults + rules + rule_counters +
- * wildcard. NEVER read by mac_filter_prog — userspace-only (HG-mvp-4.21-1). */
+ * wildcard. NEVER read by xdpfilter_prog — userspace-only (HG-mvp-4.21-1). */
 void write_slot_rule_id(int slot_rule_id_fd, std::uint32_t inactive,
     const std::array<std::uint32_t, XDPMF_RULE_COUNTERS_MAX>& slot_to_id)
 {
@@ -1946,7 +1946,7 @@ int inactive_axis_fd(bpf_map* a, bpf_map* b, std::uint32_t slot, const char* wha
  * same populate_* callees, same order as before the refactor. wildcard +
  * defaults are SINGLE maps indexed BY slot (direct bpf_map__fd, not pair-select
  * — D-mvp-4.8-FD-HELPER-SCOPE). */
-void populate_all_axes(mac_filter_bpf* skel, std::uint32_t slot,
+void populate_all_axes(xdpfilter_bpf* skel, std::uint32_t slot,
                        const MacLowering&        mac_low,
                        const AxisLowering&       dst_low,
                        const AxisLowering&       src_low,
@@ -2412,7 +2412,7 @@ std::uint32_t apply_request(const ApplyRequest& req)
              * for JSON. Iface-scoped event. */
             const std::string mode_str{to_string(probe.mode)};
             const std::string fleet_msg = std::format(
-                "xdpmacfilter: trust_model=fleet — bypassing alien-program check; "
+                "xdpfilter: trust_model=fleet — bypassing alien-program check; "
                 "replacing prog id {} (mode={}, name='{}')\n",
                 probe.prog_id, mode_str, probe.name);
             const xdpmf::logger::Field fleet_fields[] = {
@@ -2582,7 +2582,7 @@ std::uint32_t apply_request(const ApplyRequest& req)
                                      link_pin_path_for(req.iface),
                                      std::strerror(-static_cast<int>(open_err))));
         }
-        const int upd_rc = bpf_link__update_program(link, skel->progs.mac_filter_prog);
+        const int upd_rc = bpf_link__update_program(link, skel->progs.xdpfilter_prog);
         if (upd_rc < 0) {
             bpf_link__disconnect(link);
             bpf_link__destroy(link);
@@ -2599,7 +2599,7 @@ std::uint32_t apply_request(const ApplyRequest& req)
 
         /* §5.32 (MVP-3.5): byte-equivalent text-mode + iface field for JSON. */
         const std::string replace_msg = std::format(
-            "xdpmacfilter: replacing existing program on {}\n", req.iface);
+            "xdpfilter: replacing existing program on {}\n", req.iface);
         xdpmf::logger::emit(xdpmf::logger::Level::Info,
                             "loader.attach.replace",
                             std::string_view{req.iface},
@@ -2673,9 +2673,9 @@ std::uint32_t apply_request(const ApplyRequest& req)
 
     // First attach: create+pin the XDP link with the operator-selected mode.
     {
-        const int prog_fd = bpf_program__fd(skel->progs.mac_filter_prog);
+        const int prog_fd = bpf_program__fd(skel->progs.xdpfilter_prog);
         if (prog_fd < 0) {
-            throw_loader(LoaderError::AttachFailed, "mac_filter_prog fd unavailable");
+            throw_loader(LoaderError::AttachFailed, "xdpfilter_prog fd unavailable");
         }
         const int link_fd = create_xdp_link(prog_fd, ifindex, req.mode);
         try {

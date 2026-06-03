@@ -46,7 +46,7 @@ if ! command -v systemctl >/dev/null 2>&1; then
 fi
 
 LOADER_BIN=$(find_loader)
-SYSTEMD_UNIT_SRC="${SYSTEMD_UNIT_SRC:-${SOURCE_DIR}/systemd/xdpmacfilter@.service}"
+SYSTEMD_UNIT_SRC="${SYSTEMD_UNIT_SRC:-${SOURCE_DIR}/systemd/xdpfilter@.service}"
 FIXTURE_DIR="${TEST_DIR}/fixtures"
 MALFORMED_FIX="${FIXTURE_DIR}/config_malformed_schema.yaml"
 
@@ -64,12 +64,12 @@ done
 SYSD_IFACE_A="xsd_a_$$"
 SYSD_IFACE_B="xsd_b_$$"
 SYSD_PIN_DIR="${PIN_ROOT}/${SYSD_IFACE_A}"
-UNIT_INSTALLED="/etc/systemd/system/xdpmacfilter@.service"
+UNIT_INSTALLED="/etc/systemd/system/xdpfilter@.service"
 CONFIG_INSTALLED="/etc/xdpfilter/${SYSD_IFACE_A}.yaml"
-UNIT_INSTANCE="xdpmacfilter@${SYSD_IFACE_A}.service"
+UNIT_INSTANCE="xdpfilter@${SYSD_IFACE_A}.service"
 
 NEED_USRBIN_RESTORE=""
-if [[ ! -e /usr/bin/xdpmacfilter ]]; then
+if [[ ! -e /usr/bin/xdpfilter ]]; then
     NEED_USRBIN_RESTORE=1
 fi
 
@@ -82,7 +82,7 @@ cleanup_restart() {
     sudo -n rm -f "${CONFIG_INSTALLED}"                2>/dev/null
     sudo -n systemctl daemon-reload                    2>/dev/null
     if [[ -n "${NEED_USRBIN_RESTORE}" ]]; then
-        sudo -n rm -f /usr/bin/xdpmacfilter           2>/dev/null
+        sudo -n rm -f /usr/bin/xdpfilter           2>/dev/null
     fi
     sudo -n ip link del "${SYSD_IFACE_A}"              2>/dev/null
     sudo -n rm -rf "${SYSD_PIN_DIR}"                   2>/dev/null
@@ -98,7 +98,7 @@ fail=0
 
 # ── Step 0 — install build binary at /usr/bin if needed ─────────────────
 if [[ -n "${NEED_USRBIN_RESTORE}" ]]; then
-    sudo -n ln -sf "${LOADER_BIN}" /usr/bin/xdpmacfilter
+    sudo -n ln -sf "${LOADER_BIN}" /usr/bin/xdpfilter
 fi
 
 # ── Step 1 — host-netns veth pair ───────────────────────────────────────

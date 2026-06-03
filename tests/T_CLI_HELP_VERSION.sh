@@ -7,7 +7,7 @@
 #
 # Sub-cases (both must pass — fail aggregator pattern from §6.9):
 #   1. ${LOADER_BIN} --help     → exit 0; stdout contains 'Usage:' AND 'attach' AND 'detach'.
-#   2. ${LOADER_BIN} --version  → exit 0; single line; contains 'xdpmacfilter'
+#   2. ${LOADER_BIN} --version  → exit 0; single line; contains 'xdpfilter'
 #                                 AND matches ERE [0-9]+\.[0-9]+\.[0-9]+
 set -euo pipefail
 source "${TEST_DIR}/lib/common.sh"
@@ -83,8 +83,8 @@ if [[ "${lines}" -gt 1 ]]; then
     echo "FAIL[--version]: expected ≤1 newline (single line), got ${lines}" >&2
     fail=1
 fi
-if ! grep -q -F -- 'xdpmacfilter' "${stdout_file}"; then
-    echo "FAIL[--version]: stdout missing 'xdpmacfilter' literal" >&2
+if ! grep -q -F -- 'xdpfilter' "${stdout_file}"; then
+    echo "FAIL[--version]: stdout missing 'xdpfilter' literal" >&2
     fail=1
 fi
 if ! grep -qE '[0-9]+\.[0-9]+\.[0-9]+' "${stdout_file}"; then

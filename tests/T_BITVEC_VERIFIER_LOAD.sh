@@ -6,7 +6,7 @@
 # a bounded #pragma-unroll port scan, and the `ffsll`-based first-match
 # lowering — load + VERIFY on the DEV kernel this test runs on (uname -r,
 # currently 6.1)? NOTE: this is the 4-axis PROTOTYPE object, NOT the
-# production mac_filter.bpf.c, and NOT a literal 5.15-floor check — see
+# production xdpfilter.bpf.c, and NOT a literal 5.15-floor check — see
 # design §5.60 (MVP-4.20) for the honest prototype-vs-production gap-note.
 #
 # Assertion: the prototype BPF object loads with rc=0 (verifier accepted).

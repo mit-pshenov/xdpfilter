@@ -1,16 +1,16 @@
-# Config schema reference — xdpmacfilter
+# Config schema reference — xdpfilter
 
 The `apply` subcommand loads a YAML config file driving the full 9-axis
 rule model:
 
 ```sh
-sudo xdpmacfilter apply --iface eth0 -f /etc/xdpfilter/eth0.yaml
+sudo xdpfilter apply --iface eth0 -f /etc/xdpfilter/eth0.yaml
 ```
 
 This is the authoritative reference for that file. Source of truth:
 `src/lib/config.hpp` (types) and `src/lib/config.cpp` (validation). All
 validation failures throw a config error and exit **9**, with a stderr
-message starting `xdpmacfilter: config error: ...` naming the offending
+message starting `xdpfilter: config error: ...` naming the offending
 field, line, and column. Max file size: 1 MiB.
 
 ## Top-level structure

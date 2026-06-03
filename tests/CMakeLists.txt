@@ -19,7 +19,7 @@ set(XDPMF_ENABLE_BPF_OBJECT_OVERRIDE ON CACHE BOOL
 set(TEST_DIR  ${CMAKE_CURRENT_SOURCE_DIR})
 # §5.25 P2: PINS_SH is the path to the CMake-generated tests/pins.sh
 # (configure_file output from tests/lib/pins.sh.in). common.sh sources
-# it to pick up PIN_ROOT (extracted from src/common/mac_filter.h's
+# it to pick up PIN_ROOT (extracted from src/common/xdpfilter.h's
 # XDPMF_BPFFS_ROOT). Runtime `:?` guard in common.sh exits if unset.
 set(TEST_ENV
     "BUILD_DIR=${CMAKE_BINARY_DIR}"
@@ -28,8 +28,8 @@ set(TEST_ENV
     "PINS_SH=${CMAKE_BINARY_DIR}/tests/pins.sh"
     # §5.28 / MVP-3.3 — paths for the systemd / Ansible / fleet-docs tests
     # to locate the shipped artefacts in the source tree.
-    "SYSTEMD_UNIT_SRC=${CMAKE_SOURCE_DIR}/systemd/xdpmacfilter@.service"
-    "ANSIBLE_PLAYBOOK=${CMAKE_SOURCE_DIR}/ansible/xdpmacfilter-deploy.yml"
+    "SYSTEMD_UNIT_SRC=${CMAKE_SOURCE_DIR}/systemd/xdpfilter@.service"
+    "ANSIBLE_PLAYBOOK=${CMAKE_SOURCE_DIR}/ansible/xdpfilter-deploy.yml"
     "FLEET_DOCS=${CMAKE_SOURCE_DIR}/docs/FLEET_DEPLOYMENT.md"
     # §5.29 / MVP-3.4 — paths for the exporter / bypass / skeleton tests
     # to locate the shipped artefacts in the build / source trees.
@@ -46,12 +46,12 @@ set(TEST_ENV
 add_bpf_object(xdp_pass ${CMAKE_SOURCE_DIR}/tests/fixtures/xdp_pass.bpf.c)
 
 # Tag-mismatch fixture for T_ATTACH_TAG_MISMATCH (design §6.14, MVP-2 Sec).
-# Same SEC function name `mac_filter_prog` as the real prog (so the §5.19
+# Same SEC function name `xdpfilter_prog` as the real prog (so the §5.19
 # name-check passes) but minimal body (`return XDP_PASS;`) so the
 # bytecode — and therefore bpf_prog_info.tag (SHA1 over bytecode) —
 # differs. Same sanitizer-isolation invariant; loaded via `ip link set
 # ... xdpgeneric obj …` from the test script.
-add_bpf_object(mac_filter_alt ${CMAKE_SOURCE_DIR}/tests/fixtures/mac_filter_alt.bpf.c)
+add_bpf_object(xdpfilter_alt ${CMAKE_SOURCE_DIR}/tests/fixtures/xdpfilter_alt.bpf.c)
 
 # Verifier-reject fixture for T_VERIFIER_REJECT (design §6.20, MVP-2 Robust).
 # Deliberate verifier violation: unbounded-shape loop bounded by a
@@ -61,9 +61,9 @@ add_bpf_object(mac_filter_alt ${CMAKE_SOURCE_DIR}/tests/fixtures/mac_filter_alt.
 # exactly the LoadFailed (exit 2) path T_VERIFIER_REJECT exercises in
 # the loader (via XDPMF_BPF_OBJECT_PATH env-var override per §5.24 Q4).
 # Same sanitizer-isolation invariant; output at
-# ${CMAKE_BINARY_DIR}/mac_filter_bad.bpf.o (consumed by both the
+# ${CMAKE_BINARY_DIR}/xdpfilter_bad.bpf.o (consumed by both the
 # SKIP-probe `bpftool prog load` and the active-branch loader invocation).
-add_bpf_object(mac_filter_bad ${CMAKE_SOURCE_DIR}/tests/fixtures/mac_filter_bad.bpf.c)
+add_bpf_object(xdpfilter_bad ${CMAKE_SOURCE_DIR}/tests/fixtures/xdpfilter_bad.bpf.c)
 
 # T_BUILD performs an isolated clean rebuild in /tmp and greps for warnings;
 # it does NOT need the veth fixture (no xdp_fixture lock). B19 (§5.49): it
@@ -190,7 +190,7 @@ set_tests_properties(T_CLI_CAPACITY PROPERTIES
 # T_DETACH_NOTHING needs passwordless sudo (calls bpf_xdp_query under root).
 # Per §5.22 amendment to §6.13: this entry takes RESOURCE_LOCK xdp_fixture
 # so it cannot race the destructive setup window of T_BPFFS_ROOT_SYMLINK
-# (§6.15) — that test transiently rmdir's /sys/fs/bpf/xdpmacfilter and a
+# (§6.15) — that test transiently rmdir's /sys/fs/bpf/xdpfilter and a
 # concurrent T_DETACH_NOTHING would either trip the new PathRefused exit 8
 # (failure) or observe a wrong post-state. Test logic itself unchanged.
 #
@@ -216,13 +216,13 @@ set_tests_properties(T_DETACH_NOTHING PROPERTIES
 #
 # T_ATTACH_TAG_MISMATCH (§6.14): same-name-different-bytecode alien
 # rejected with exit 4 + 'tag mismatch' + 16-char hex tag in stderr;
-# negation control re-runs with real mac_filter.bpf.o (rc==0, ours
+# negation control re-runs with real xdpfilter.bpf.o (rc==0, ours
 # reload).  Same RESOURCE_LOCK as the rest of the veth-fixture tests.
 #
 # T_BPFFS_ROOT_SYMLINK (§6.15): symlink at bpffs root and per-iface dir
 # refused with exit 8 + 'symlink' + path-token stderr discipline;
 # negation control with real bpffs root proves refusal is
-# symlink-specific.  DESTRUCTIVE to /sys/fs/bpf/xdpmacfilter for the
+# symlink-specific.  DESTRUCTIVE to /sys/fs/bpf/xdpfilter for the
 # test's duration; trap-driven cleanup mandatory; RESOURCE_LOCK
 # xdp_fixture serializes against ALL other tests that touch the bpffs
 # path (the §6.13 amendment above extends this lock to T_DETACH_NOTHING).
@@ -568,7 +568,7 @@ set_tests_properties(T_FLEET_DOCS_SUBSTRING PROPERTIES
 # T_EXPORTER_NO_ATTACHED_IFACE (§6.39): exporter against empty/missing
 #   bpffs root (PI-32 graceful-empty). 2 requests succeed; process stays
 #   alive. SKIP-77 if curl absent.
-# T_BYPASS_CMD_DETACHES (§6.40): `xdpmacfilter bypass --unsafe --reason X`
+# T_BYPASS_CMD_DETACHES (§6.40): `xdpfilter bypass --unsafe --reason X`
 #   detaches XDP + emits audit line (regex ERE); sub-case verifies the
 #   `reason="UNSPECIFIED"` default path. PI-30.
 # T_BYPASS_REQUIRES_UNSAFE_NONINTERACTIVE (§6.41): NEGATION CONTROL —
@@ -608,7 +608,7 @@ endforeach()
 #
 # T_APPLY_EXITS_1_ON_MISSING_CONFIG (§6.43): HK-1 exit-code triple drift
 #   fix — `apply -f /nonexistent --iface lo` exits 1 (kExitUsageErr); the
-#   `xdpmacfilter: config error:` stderr prefix is preserved verbatim.
+#   `xdpfilter: config error:` stderr prefix is preserved verbatim.
 #   Negation control: valid config does NOT exit 1. Primary case is
 #   pure-parser (config_open throws first), BUT the negation branch
 #   invokes `apply -f config_valid.yaml --iface lo` which reaches the
@@ -947,7 +947,7 @@ set_tests_properties(T_LOG_EVENT_CATALOG_STABILITY PROPERTIES
 # MVP-3.4d additions (§5.35 / §6.NN–§6.NN+3 — reset-counters CLI
 # subcommand + rule_counters axis atomic-swap promotion).
 #
-# T_CLI_RESET_COUNTERS          (§6.NN):   `xdpmacfilter reset-counters
+# T_CLI_RESET_COUNTERS          (§6.NN):   `xdpfilter reset-counters
 #   --iface X` (no --rule-id) zeros ALL 64 rule_counters slots; subsequent
 #   bumps work from a zero baseline. HG-3.4d-1/HG-3.4d-2/HG-3.4d-6.
 # T_CLI_RESET_COUNTERS_RULE_ID  (§6.NN+1): selective `--rule-id N` zeros
@@ -989,7 +989,7 @@ endforeach()
 # preserving the 4 argv-passable named escapes `\\` / `\"` / `\n` / `\r`).
 #
 # T_BYPASS_AUDIT_CONTROL_CHARS (§5.37 T-1): integration test via real
-#   `xdpmacfilter bypass --iface IFACE_A --unsafe --reason <bytes>` with
+#   `xdpfilter bypass --iface IFACE_A --unsafe --reason <bytes>` with
 #   3 sub-cases (a) control-char bytes → `\xHH`; (b) named escapes use
 #   named form (NOT `\xHH`); (c) NEGATION — printable ASCII produces no
 #   `\x` substring. PI-3.4f-2 + PI-3.4f-3 operational evidence.
@@ -1020,13 +1020,13 @@ set_tests_properties(T_BYPASS_AUDIT_CONTROL_CHARS PROPERTIES
 #   (a) `../foo` (path traversal), (b) 'invalid name with spaces' (shape
 #   reject), (c) NEGATION real iface → exit 0 + audit-log. PI-3.4e-1.
 # T_SIDECAR_IFACE_SYMLINK_REFUSAL (§5.36 T-2): per-iface symlink at
-#   `/run/xdpmacfilter/<iface>` detected by SidecarRootFd discipline;
+#   `/run/xdpfilter/<iface>` detected by SidecarRootFd discipline;
 #   apply exit 0 (PI-32-3.4b PRESERVED) + `sidecar.warn.iface_dir_symlink`
 #   event in stderr + NO write to attacker target dir. PI-3.4e-2.
 #
 # Both share RESOURCE_LOCK xdp_fixture per D-3.4e-T2-LOCK (no separate
 # `sidecar_root` lock domain — IFACE_A is PID-unique so per-iface state
-# under /run/xdpmacfilter cannot clash with concurrent tests).
+# under /run/xdpfilter cannot clash with concurrent tests).
 foreach(T IN ITEMS
     T_RESET_COUNTERS_PATH_TRAVERSAL
     T_SIDECAR_IFACE_SYMLINK_REFUSAL
@@ -1081,7 +1081,7 @@ set_tests_properties(T_EXPORTER_BIND_NON_LOOPBACK_WARN PROPERTIES
 # kManagedMaps[] and pin under the SEPARATE bpffs root /sys/fs/bpf/
 # xdpmf-bitvec-proto; the production datapath + its 70 ctests are untouched.
 #
-# (a) Prototype BPF object + skeleton (mirrors the mac_filter wiring). The
+# (a) Prototype BPF object + skeleton (mirrors the xdpfilter wiring). The
 #     add_bpf_object/add_bpf_skeleton helpers (cmake/BpfBuild.cmake) are reused
 #     verbatim — the sanitizer-isolation invariant holds (no flag splicing).
 add_bpf_object(bitvec_proto ${CMAKE_SOURCE_DIR}/tests/bitvec/bitvec_proto.bpf.c)
@@ -1545,10 +1545,10 @@ set_tests_properties(T_SIDECAR_READ_EXCEPTION_DIAGNOSTIC PROPERTIES
 # Two NEW ctests (§6.80 / §6.81). PURE test-infra — ZERO src/ footprint.
 #
 # §6.80 T_PROD_VERIFIER_LOAD (TEST-H3 / C-1): standalone `bpftool prog load`
-#   of the PRODUCTION mac_filter.bpf.o (the shipped 9-axis program) through the
+#   of the PRODUCTION xdpfilter.bpf.o (the shipped 9-axis program) through the
 #   in-kernel verifier → rc=0. Closes the gap that the only pre-existing
 #   standalone verifier test loads the 4-axis PROTOTYPE. Resolves the object
-#   via PROD_BPF_OBJ (mirroring BITVEC_BPF_OBJ) → ${BUILD_DIR}/mac_filter.bpf.o.
+#   via PROD_BPF_OBJ (mirroring BITVEC_BPF_OBJ) → ${BUILD_DIR}/xdpfilter.bpf.o.
 #   Verifier-ONLY: NO attach, NO veth, NO netns → NO RESOURCE_LOCK
 #   (D-mvp-4.23-H3-NOLOCK; the PID-unique bpffs-root pin is a sibling of, never
 #   inside, the project pin dir, so it races nothing). SKIP_RETURN_CODE 77 for
@@ -1559,7 +1559,7 @@ add_test(
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 set_tests_properties(T_PROD_VERIFIER_LOAD PROPERTIES
-    ENVIRONMENT "${TEST_ENV};PROD_BPF_OBJ=${CMAKE_BINARY_DIR}/mac_filter.bpf.o"
+    ENVIRONMENT "${TEST_ENV};PROD_BPF_OBJ=${CMAKE_BINARY_DIR}/xdpfilter.bpf.o"
     TIMEOUT 90
     SKIP_RETURN_CODE 77
 )

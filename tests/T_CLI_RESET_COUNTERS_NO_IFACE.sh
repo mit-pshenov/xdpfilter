@@ -1,7 +1,7 @@
 #!/bin/bash
 # T_CLI_RESET_COUNTERS_NO_IFACE — design §6.NN+2 (MVP-3.4d / §5.35).
 #
-# `xdpmacfilter reset-counters --iface X` on a NOT-attached iface fails
+# `xdpfilter reset-counters --iface X` on a NOT-attached iface fails
 # with exit 1 + stderr 'no rule_counters pin' substring (HG-3.4d-3
 # precondition). Negation control: same call on an attached iface
 # succeeds (proves the precondition probe doesn't always fail).
@@ -95,7 +95,7 @@ if [[ "${rc_b}" -ne 0 ]]; then
     fail=1
 fi
 # Audit-log must be present (HG-3.4d-6).
-audit_ere="^xdpmacfilter: RESET-COUNTERS on ${IFACE_A} by uid=[0-9]+ .*rule_id=ALL\$"
+audit_ere="^xdpfilter: RESET-COUNTERS on ${IFACE_A} by uid=[0-9]+ .*rule_id=ALL\$"
 if ! grep -qE -- "${audit_ere}" "${stderr_b}"; then
     echo "FAIL[b2]: NEGATION stderr missing audit-log line" >&2
     fail=1

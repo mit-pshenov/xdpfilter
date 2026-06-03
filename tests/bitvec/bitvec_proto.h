@@ -4,7 +4,7 @@
  * §5.42 (rule-model S2). PROTOTYPE-ONLY: this header is consumed by the
  * isolated prototype BPF datapath (tests/bitvec/bitvec_proto.bpf.c) and the
  * test-only populate/dump harness (tests/bitvec/bitvec_harness.cpp). It is
- * DELIBERATELY separate from production src/common/mac_filter.h — the spike's
+ * DELIBERATELY separate from production src/common/xdpfilter.h — the spike's
  * value depends on the production types/datapath staying byte-untouched
  * (D-mvp-4.2-ISOLATION). Do NOT include this from any production TU.
  *
@@ -32,7 +32,7 @@ typedef __u64 bv_u64;
 /*
  * §5.42 HG-mvp-4.2-4: N<=64, so the whole rule-match-set is a single u64 and
  * `id` is the bit position in [0, BITVEC_RULE_MAX-1]. Mirrors the production
- * XDPMF_ALLOWLIST_MAX=64 capacity WITHOUT depending on mac_filter.h.
+ * XDPMF_ALLOWLIST_MAX=64 capacity WITHOUT depending on xdpfilter.h.
  */
 #define BITVEC_RULE_MAX 64
 

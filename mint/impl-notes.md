@@ -793,3 +793,31 @@ guard #28 spike numbers (bpf.c MAX_EXT_HOPS), guard #30 never-throw
 + PI-31 (rule_counters_reader), §5.19/§5.22 security (loader/sidecar).
 
 No silent deviations; no design questions raised (rubric was unambiguous).
+
+---
+
+## MVP-4.26 / B33 — rename xdpmacfilter/mac_filter → xdpfilter
+
+### Deviation flag (escalated to architect — audit trail, NOT a silent deviation)
+
+**PI-7-SUSPENDED vs PI-RENAME-COMPLETENESS conflict on `loader.hpp`/`config.hpp`.**
+§6.5 PI-7-mvp-4.26-SUSPENDED says the ONLY permitted diff in these two headers is
+the include-path line. But both also carry the rename token in DOC COMMENTS
+(`loader.hpp`: `/sys/fs/bpf/xdpmacfilter/<iface>/`; `config.hpp`:
+`"xdpmacfilter: config error:"`). Those comments live in `src/`, which is in the
+T7 COMPLETENESS grep scope — leaving them fails T7 (a load-bearing MUST).
+
+**Resolution (per §5.66 prose-vs-invariants conflict rule → PI/load-bearing wins,
+disposition inline-merge):** renamed the comment-prose too. Net diff per file =
+include-path line + 1 comment-prose line, nothing else; no symbol/signature/
+enumerator/body change → honors PI-7's INTENT. Flagged to mint-dev-architect to
+amend the PI-7-SUSPENDED check wording ("ONLY the include-path line" → "ONLY
+rename-token lines: include path + prose comments").
+
+### HG-4 acronym note wording
+The HG-4 note added to `src/common/xdpfilter.h` was worded to AVOID spelling the
+literal old token (an earlier draft used `xdpmacfilter→xdpfilter`, which itself
+tripped the T7 grep since `src/` is in scope). Reworded to "after the B33 rename
+to xdpfilter" + "now under /sys/fs/bpf/xdpfilter". `CHANGELOG.md` (OUT of T7
+scope) keeps explicit `xdpmacfilter→xdpfilter` migration prose — a migration note
+must name the old surface.

@@ -1,5 +1,5 @@
 ---
-# Minimal example Ansible playbook for xdpmacfilter (MVP-3.3 / §5.28 HG-3.3-2).
+# Minimal example Ansible playbook for xdpfilter (MVP-3.3 / §5.28 HG-3.3-2).
 #
 # Scope: single playbook + 1 Jinja2 template + 2 handlers. NOT a role or
 # collection — operators adapt to their fleet (inventory, secrets,
@@ -11,7 +11,7 @@
 # a HANDLER (D-3.3-8) so it fires ONCE per play AND only when something
 # changed — not unconditionally on every run.
 #
-# Prereq: operator has built + installed /usr/bin/xdpmacfilter on the
+# Prereq: operator has built + installed /usr/bin/xdpfilter on the
 # target host (out of this playbook's scope — distro packager / image
 # pipeline / `cmake --install` is the operator's call).
 #
@@ -28,7 +28,7 @@
 #              dst_cidr6, src_cidr6, protocol, dst_port, vlan, ethertype
 #   See docs/CONFIG_SCHEMA.md for each axis's value grammar.
 
-- name: Deploy xdpmacfilter to fleet host
+- name: Deploy xdpfilter to fleet host
   hosts: xdpfilter_hosts
   # D-3.3-7: play-level become (every task touches root-owned paths or
   # systemctl); per-task become would be noisier with zero security gain.
@@ -54,20 +54,20 @@
         owner: root
         group: root
         mode: '0644'
-      notify: reload xdpmacfilter
+      notify: reload xdpfilter
 
     - name: Install systemd unit
       ansible.builtin.copy:
-        src: ../systemd/xdpmacfilter@.service
-        dest: /etc/systemd/system/xdpmacfilter@.service
+        src: ../systemd/xdpfilter@.service
+        dest: /etc/systemd/system/xdpfilter@.service
         owner: root
         group: root
         mode: '0644'
       notify: daemon-reload systemd
 
-    - name: Enable and start xdpmacfilter@{{ xdpfilter_iface }}
+    - name: Enable and start xdpfilter@{{ xdpfilter_iface }}
       ansible.builtin.systemd:
-        name: "xdpmacfilter@{{ xdpfilter_iface }}.service"
+        name: "xdpfilter@{{ xdpfilter_iface }}.service"
         enabled: true
         state: started
         daemon_reload: true
@@ -79,7 +79,7 @@
       ansible.builtin.systemd:
         daemon_reload: true
 
-    - name: reload xdpmacfilter
+    - name: reload xdpfilter
       ansible.builtin.systemd:
-        name: "xdpmacfilter@{{ xdpfilter_iface }}.service"
+        name: "xdpfilter@{{ xdpfilter_iface }}.service"
         state: reloaded

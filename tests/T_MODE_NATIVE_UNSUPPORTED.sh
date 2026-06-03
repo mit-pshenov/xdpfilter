@@ -22,7 +22,7 @@
 #       (impl-shape — the stderr should at least mention the rejected mode).
 #   (c) Post-test: xdp_prog_id lo still empty (loader did not leave a partial
 #       attach on lo).
-#   (d) No orphan pin dir: /sys/fs/bpf/xdpmacfilter/lo does NOT exist.
+#   (d) No orphan pin dir: /sys/fs/bpf/xdpfilter/lo does NOT exist.
 #
 # Cleanup (trap EXIT): belt-and-suspenders `ip link set lo xdpgeneric off`
 # in case some future kernel surprises us by accepting `xdpgeneric` on lo
@@ -41,7 +41,7 @@ cleanup_native() {
     # rejected the attach before any state change).
     sudo -n ip link set lo xdpgeneric off 2>/dev/null
     sudo -n ip link set lo xdp off       2>/dev/null
-    sudo -n rm -rf /sys/fs/bpf/xdpmacfilter/lo 2>/dev/null
+    sudo -n rm -rf /sys/fs/bpf/xdpfilter/lo 2>/dev/null
     rm -f "${stderr_file}"
     set -e
 }
@@ -54,8 +54,8 @@ if [[ -n "${pre_id}" ]]; then
     echo "       test environment is dirty; not the loader's fault." >&2
     exit 1
 fi
-if sudo -n test -e /sys/fs/bpf/xdpmacfilter/lo; then
-    echo "ERROR: /sys/fs/bpf/xdpmacfilter/lo already exists pre-test" >&2
+if sudo -n test -e /sys/fs/bpf/xdpfilter/lo; then
+    echo "ERROR: /sys/fs/bpf/xdpfilter/lo already exists pre-test" >&2
     echo "       test environment is dirty; cleanup expected." >&2
     exit 1
 fi
@@ -102,10 +102,10 @@ if [[ -n "${post_id}" ]]; then
     fail=1
 fi
 
-# (d) No orphan pin dir at /sys/fs/bpf/xdpmacfilter/lo.
-if sudo -n test -e /sys/fs/bpf/xdpmacfilter/lo; then
-    echo "FAIL: orphan pin dir /sys/fs/bpf/xdpmacfilter/lo remained after attach refusal" >&2
-    sudo -n ls -la /sys/fs/bpf/xdpmacfilter/lo >&2 || true
+# (d) No orphan pin dir at /sys/fs/bpf/xdpfilter/lo.
+if sudo -n test -e /sys/fs/bpf/xdpfilter/lo; then
+    echo "FAIL: orphan pin dir /sys/fs/bpf/xdpfilter/lo remained after attach refusal" >&2
+    sudo -n ls -la /sys/fs/bpf/xdpfilter/lo >&2 || true
     fail=1
 fi
 

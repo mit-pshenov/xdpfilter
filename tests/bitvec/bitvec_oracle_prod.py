@@ -10,7 +10,7 @@ THIS FILE IS THE TESTER-OWNED ORACLE. It is deliberately a *naive O(N)
 first-match scan* — there is NO bitmask, NO prefix-closure, NO ffsll, NO
 wildcard map, NO range table. Its whole reason to exist is to be
 algorithmically DIFFERENT from the production datapath under test
-(`src/bpf/mac_filter.bpf.c`'s bit-vector AND compose + `port_scan` + proto
+(`src/bpf/xdpfilter.bpf.c`'s bit-vector AND compose + `port_scan` + proto
 HASH + vlan HASH + `loader.cpp`'s `close_prefixes()`), so that any disagreement
 localises a closure / wildcard / range / vlan-capture / first-match bug in the
 datapath rather than masking it (§5.43 §6.61, §5.44 §6.66, §5.45 §6.69).

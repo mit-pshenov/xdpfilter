@@ -1,7 +1,7 @@
 #!/bin/bash
 # T_CLI_RESET_COUNTERS_RULE_ID — design §6.NN+1 (MVP-3.4d / §5.35).
 #
-# `xdpmacfilter reset-counters --iface X --rule-id N` zeros ONLY slot N;
+# `xdpfilter reset-counters --iface X --rule-id N` zeros ONLY slot N;
 # out-of-range / non-integer values are rejected at parse-time (Q1.A) with
 # exit 1 + stderr ERE. Maps to PI-3.4d-1, HG-3.4d-2 (--rule-id semantics +
 # range validation), Q1.A (parse-time validation).
@@ -139,7 +139,7 @@ if [[ "${rc_a}" -ne 0 ]]; then
     fail=1
 fi
 
-audit_ere_17="^xdpmacfilter: RESET-COUNTERS on ${IFACE_A} by uid=[0-9]+ .*rule_id=${slot17}\$"
+audit_ere_17="^xdpfilter: RESET-COUNTERS on ${IFACE_A} by uid=[0-9]+ .*rule_id=${slot17}\$"
 if ! grep -qE -- "${audit_ere_17}" "${stderr_a}"; then
     echo "FAIL[a2]: stderr missing audit-log ERE for rule_id=${slot17} (slot of id 17):" >&2
     echo "         ${audit_ere_17}" >&2

@@ -2,9 +2,9 @@
 # T_APPLY_EXITS_1_ON_MISSING_CONFIG — design §6.43 (MVP-3.4.5 / §5.30 HK-1).
 #
 # HK-1 exit-code triple drift fix:
-#   `xdpmacfilter apply -f /nonexistent/path --iface lo` MUST exit with
+#   `xdpfilter apply -f /nonexistent/path --iface lo` MUST exit with
 #   kExitUsageErr (= 1, per §4.1). Stderr MUST still carry the existing
-#   `xdpmacfilter: config error:` prefix (the §5.26 stderr-discipline is
+#   `xdpfilter: config error:` prefix (the §5.26 stderr-discipline is
 #   preserved — HK-1 only fixes the exit code, not the message format).
 #   The loader MUST exit BEFORE touching the kernel (no `bpf_prog_load`,
 #   no orphan pin dir).
@@ -59,11 +59,11 @@ if [[ "${rc}" -ne 1 ]]; then
     fail=1
 fi
 
-# (b) Stderr STILL carries the existing 'xdpmacfilter: config error:' prefix.
+# (b) Stderr STILL carries the existing 'xdpfilter: config error:' prefix.
 #     Per HK-1 Interfaces (§5.30 D-3.4.5-5): the message format is preserved
 #     verbatim; ONLY the exit code is relocated (9 → 1).
-if ! grep -qE -- '^xdpmacfilter: config error:' "${stderr_file}"; then
-    echo "FAIL[b]: stderr does not start with 'xdpmacfilter: config error:' (HK-1 preserves §5.26 message)" >&2
+if ! grep -qE -- '^xdpfilter: config error:' "${stderr_file}"; then
+    echo "FAIL[b]: stderr does not start with 'xdpfilter: config error:' (HK-1 preserves §5.26 message)" >&2
     fail=1
 fi
 

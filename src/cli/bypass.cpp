@@ -1,5 +1,5 @@
 /*
- * bypass.cpp — `xdpmacfilter bypass` subcommand impl (§5.29 HG-3.4-2).
+ * bypass.cpp — `xdpfilter bypass` subcommand impl (§5.29 HG-3.4-2).
  *
  * Flow:
  *   1. tty-check (isatty on stdin AND stderr); if either is non-tty AND
@@ -121,7 +121,7 @@ int bypass_main(const BypassConfig& cfg)
         xdpmf::logger::emit(xdpmf::logger::Level::Error,
                             "bypass.usage_error",
                             std::nullopt,
-                            "xdpmacfilter: bypass: --iface is required\n");
+                            "xdpfilter: bypass: --iface is required\n");
         return 1;
     }
 
@@ -138,7 +138,7 @@ int bypass_main(const BypassConfig& cfg)
         xdpmf::logger::emit(xdpmf::logger::Level::Error,
                             "bypass.refused.requires_unsafe",
                             std::string_view{cfg.iface},
-                            "xdpmacfilter: refusing to bypass in non-interactive context "
+                            "xdpfilter: refusing to bypass in non-interactive context "
                             "without --unsafe flag (audit safety)\n",
                             fs);
         return 1;
@@ -153,7 +153,7 @@ int bypass_main(const BypassConfig& cfg)
             xdpmf::logger::emit(xdpmf::logger::Level::Info,
                                 "bypass.cancelled",
                                 std::string_view{cfg.iface},
-                                "xdpmacfilter: bypass cancelled by operator\n");
+                                "xdpfilter: bypass cancelled by operator\n");
             return 0;
         }
     }
@@ -199,7 +199,7 @@ int bypass_main(const BypassConfig& cfg)
      *   jq 'select(.event=="bypass.activated" and .fields.sudo_user=="alice")'
      * without prose-grepping. */
     const std::string audit_msg = std::format(
-        "xdpmacfilter: BYPASS activated on {} by uid={} euid={} "
+        "xdpfilter: BYPASS activated on {} by uid={} euid={} "
         "sudo_user=\"{}\" reason=\"{}\"\n",
         cfg.iface,
         static_cast<unsigned int>(uid),

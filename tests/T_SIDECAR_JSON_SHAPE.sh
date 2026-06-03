@@ -2,7 +2,7 @@
 # T_SIDECAR_JSON_SHAPE — design §6.50 (MVP-3.4b cycle 1 / §5.31).
 #
 # rule_index.json sidecar correctness per Q2 S1 (defaults-only schema)
-# + Q3 P4 (sidecar lives at /run/xdpmacfilter/<iface>/rule_index.json
+# + Q3 P4 (sidecar lives at /run/xdpfilter/<iface>/rule_index.json
 # per §5.31 EDIT-1 — bpffs rejects regular-file creation EPERM, hence
 # the P1→P4 path correction; D-3.4b-21 supersedes D-3.4b-7) +
 # D-3.4b-10 (roll-your-own writer) + D-3.4b-20 (one-rule-per-line) +
@@ -10,12 +10,12 @@
 #
 # Trigger:
 #   1. setup_veth + apply config_per_rule_counters.yaml.
-#   2. Read /run/xdpmacfilter/<iface>/rule_index.json and validate via jq.
+#   2. Read /run/xdpfilter/<iface>/rule_index.json and validate via jq.
 #   3. Negation: apply malformed config; verify sidecar is NOT corrupted
 #      (still describes the previously-applied valid config).
 #
 # Observable outcome (ALL must hold):
-#   (a) File /run/xdpmacfilter/<iface>/rule_index.json exists, non-empty.
+#   (a) File /run/xdpfilter/<iface>/rule_index.json exists, non-empty.
 #   (b) File mode 0644 (operator + exporter readable per D-3.4b-21).
 #   (c) jq -e '.iface == "<iface>"' succeeds (iface matches --iface arg).
 #   (d) jq -e '.schema_version == 1' succeeds (literal 1 per Q2 S1).
@@ -53,9 +53,9 @@ FIXTURE_BAD="${TEST_DIR}/fixtures/config_malformed_yaml.yaml"
 [[ -f "${FIXTURE_BAD}" ]] || { echo "FAIL: missing fixture ${FIXTURE_BAD}" >&2; exit 1; }
 
 # §5.31 EDIT-1 (Phase B platform-constraint correction): sidecar lives at
-# /run/xdpmacfilter/<iface>/rule_index.json (tmpfs under systemd convention),
+# /run/xdpfilter/<iface>/rule_index.json (tmpfs under systemd convention),
 # NOT under bpffs ${PIN_DIR}. bpffs rejects regular-file creation EPERM.
-SIDECAR_ROOT="/run/xdpmacfilter"
+SIDECAR_ROOT="/run/xdpfilter"
 SIDECAR_DIR="${SIDECAR_ROOT}/${IFACE_A}"
 SIDECAR_PATH="${SIDECAR_DIR}/rule_index.json"
 stderr_file=$(mktemp /tmp/xdpmf-sidecar-stderr.XXXXXX)

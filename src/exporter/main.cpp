@@ -24,7 +24,7 @@
 #include <string_view>
 
 #include "common/logger.hpp"    // §5.32 (MVP-3.5) structured-logging surface
-#include "common/mac_filter.h"  // XDPMF_BPFFS_ROOT
+#include "common/xdpfilter.h"  // XDPMF_BPFFS_ROOT
 #include "http.hpp"
 #include "stats_reader.hpp"     // §5.30 HK-16: validate_bpffs_root_or_warn
 #include "version.h"            // XDPMF_VERSION_STRING

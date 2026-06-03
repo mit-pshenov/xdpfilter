@@ -8,7 +8,7 @@
 #
 # Trigger (sequential):
 #   1. setup_veth — standard fresh ${IFACE_A}/${IFACE_B} pair.
-#   2. xdpmacfilter attach --iface ${IFACE_A} --allow ${MAC_GOOD}
+#   2. xdpfilter attach --iface ${IFACE_A} --allow ${MAC_GOOD}
 #      (NO --mode flag — exercises the default).
 #   3. Probe attached mode via `ip -j link show ${IFACE_A}` + jq.
 #

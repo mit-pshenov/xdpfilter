@@ -1,6 +1,6 @@
 /*
  * loader.hpp — userspace control-plane API. Two operations:
- *   attach():  load BPF, pin maps under /sys/fs/bpf/xdpmacfilter/<iface>/,
+ *   attach():  load BPF, pin maps under /sys/fs/bpf/xdpfilter/<iface>/,
  *              populate allow-list, attach XDP in SKB (generic) mode.
  *   detach():  detach XDP from <iface> if attached, unpin maps, remove the
  *              per-iface bpffs dir.
@@ -15,7 +15,7 @@
 #include <system_error>
 #include <vector>
 
-#include "common/mac_filter.h"  // struct xdpmf_mac
+#include "common/xdpfilter.h"  // struct xdpmf_mac
 
 namespace xdpmf {
 

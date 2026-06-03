@@ -6,10 +6,10 @@
 # verifier-shaped stderr substring, AND that no XDP-attach side-effects
 # leak (no XDP attached to ${IFACE_A}, no orphan pin dir left behind).
 #
-# Bad fixture: tests/fixtures/mac_filter_bad.bpf.c (unbounded-shape loop
+# Bad fixture: tests/fixtures/xdpfilter_bad.bpf.c (unbounded-shape loop
 # bounded by `ctx->data_end - ctx->data`, NO `#pragma unroll`) —
 # clang-compiles cleanly; only the kernel verifier rejects it at
-# bpf()-syscall BPF_PROG_LOAD time. Path: ${BUILD_DIR}/mac_filter_bad.bpf.o
+# bpf()-syscall BPF_PROG_LOAD time. Path: ${BUILD_DIR}/xdpfilter_bad.bpf.o
 # (per existing `add_bpf_object` convention — outputs at
 # ${CMAKE_BINARY_DIR}/<name>.bpf.o; see cmake/BpfBuild.cmake).
 #
@@ -36,7 +36,7 @@
 #        discipline contract).
 #   (A4) No XDP attached to ${IFACE_A} — load-fail happens before attach,
 #        so the XDP slot must remain empty.
-#   (A5) No orphan pin dir at /sys/fs/bpf/xdpmacfilter/${IFACE_A} —
+#   (A5) No orphan pin dir at /sys/fs/bpf/xdpfilter/${IFACE_A} —
 #        either ensure_bpffs_dir wasn't reached or RAII rollback unwound
 #        it (per §4.3 partially-created pins MUST be cleaned up).
 #
@@ -58,7 +58,7 @@ source "${TEST_DIR}/lib/common.sh"
 require_passwordless_sudo
 
 LOADER_BIN=$(find_loader)
-BAD_OBJ="${BUILD_DIR}/mac_filter_bad.bpf.o"
+BAD_OBJ="${BUILD_DIR}/xdpfilter_bad.bpf.o"
 # Per design §6.20: literal pin path `/sys/fs/bpf/xdpmf_verifier_probe`.
 # RESOURCE_LOCK xdp_fixture in tests/CMakeLists.txt serializes this test,
 # so no PID-suffix collision risk; trap-driven cleanup wipes on EXIT.
@@ -81,11 +81,11 @@ trap cleanup_verifier_reject EXIT INT TERM HUP
 
 # ── Fixture build-artifact sanity ────────────────────────────────────────
 # Hard failure if the .bpf.o is missing — that means add_bpf_object
-# wiring (mac_filter_bad in tests/CMakeLists.txt) is broken; surface
+# wiring (xdpfilter_bad in tests/CMakeLists.txt) is broken; surface
 # loudly rather than letting bpftool error message lead the diagnosis.
 [[ -f "${BAD_OBJ}" ]] \
     || { echo "FAIL: bad fixture missing at ${BAD_OBJ}" >&2
-         echo "       (expected build artifact from add_bpf_object mac_filter_bad" >&2
+         echo "       (expected build artifact from add_bpf_object xdpfilter_bad" >&2
          echo "        in tests/CMakeLists.txt; cmake/BpfBuild.cmake places" >&2
          echo "        outputs at \${CMAKE_BINARY_DIR}/<name>.bpf.o)" >&2
          exit 1; }
@@ -110,7 +110,7 @@ echo "SKIP-probe rc=${skip_rc}"
 if [[ "${skip_rc}" -eq 0 ]]; then
     echo "SKIP: verifier on this kernel ACCEPTED the bad fixture — test inapplicable" >&2
     echo "      (the unbounded-loop violation may have been accepted by a newer" >&2
-    echo "       verifier; swap mac_filter_bad.bpf.c to OOB-deref backup pattern" >&2
+    echo "       verifier; swap xdpfilter_bad.bpf.c to OOB-deref backup pattern" >&2
     echo "       per §5.24 Q4 documented fallback — manual update, no auto-switch.)" >&2
     # Probe pin was created by the load; remove so it doesn't survive SKIP.
     sudo -n rm -f "${PROBE_PIN}" 2>/dev/null || true

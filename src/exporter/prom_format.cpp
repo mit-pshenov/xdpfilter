@@ -14,14 +14,14 @@
 #include <utility>
 #include <vector>
 
-#include "common/mac_filter.h"  // STAT_PASS / STAT_DROP_DENY / STAT_DROP_MALFORMED / STAT_PASS_CIDR / STAT_MAX / XDPMF_RULE_COUNTERS_MAX
+#include "common/xdpfilter.h"  // STAT_PASS / STAT_DROP_DENY / STAT_DROP_MALFORMED / STAT_PASS_CIDR / STAT_MAX / XDPMF_RULE_COUNTERS_MAX
 
 namespace xdpmf::exporter {
 
 namespace {
 
 /* Slot ordinal → verdict label. STAT_PASS_CIDR = 3 is the §5.27 NEW slot.
- * Order mirrors enum mac_filter_stat so the emit loop walks 0..STAT_MAX-1. */
+ * Order mirrors enum xdpfilter_stat so the emit loop walks 0..STAT_MAX-1. */
 [[nodiscard]] constexpr std::string_view verdict_label(std::uint32_t idx) noexcept
 {
     switch (idx) {

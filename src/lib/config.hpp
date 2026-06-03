@@ -15,7 +15,7 @@
  *         src_cidr: "10.0.0.0/8"   (§5.27 — IPv4 dotted-decimal CIDR; v6 rejected)
  *
  * All validation failures throw std::system_error{LoaderError::ConfigError, ...}
- * with stderr starting "xdpmacfilter: config error: ..." per §5.26/§5.27.
+ * with stderr starting "xdpfilter: config error: ..." per §5.26/§5.27.
  */
 #pragma once
 
@@ -25,7 +25,7 @@
 #include <string_view>
 #include <vector>
 
-#include "common/mac_filter.h"  // struct xdpmf_mac, struct xdpmf_cidr_v4, XDPMF_ALLOWLIST_MAX
+#include "common/xdpfilter.h"  // struct xdpmf_mac, struct xdpmf_cidr_v4, XDPMF_ALLOWLIST_MAX
 #include "yaml_subset.hpp"
 
 namespace xdpmf {

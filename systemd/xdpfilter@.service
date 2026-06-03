@@ -1,23 +1,23 @@
-# systemd template unit for xdpmacfilter (MVP-3.3 / design §5.28 PI-24).
+# systemd template unit for xdpfilter (MVP-3.3 / design §5.28 PI-24).
 #
 # One instance per network interface (multi-iface = multiple instance
-# names: xdpmacfilter@eth0.service, xdpmacfilter@eth1.service, ...).
+# names: xdpfilter@eth0.service, xdpfilter@eth1.service, ...).
 #
 # Operator workflow:
 #   1. Write per-iface config to /etc/xdpfilter/<iface>.yaml
 #      (schema_version: 1 per §5.26 / §5.27 — see docs/FLEET_DEPLOYMENT.md).
 #   2. systemctl daemon-reload (if unit file just changed).
-#   3. systemctl enable --now xdpmacfilter@<iface>.service
-#   4. On config change: systemctl reload xdpmacfilter@<iface>.service
+#   3. systemctl enable --now xdpfilter@<iface>.service
+#   4. On config change: systemctl reload xdpfilter@<iface>.service
 #      (atomic hot-swap via bpf_link__update_program — no drop window).
 #
 # Trust-model override (operator hardening; secure-by-default is strict —
-# see D-3.3-2): drop in a /etc/systemd/system/xdpmacfilter@.service.d/
+# see D-3.3-2): drop in a /etc/systemd/system/xdpfilter@.service.d/
 # trust-model.conf with `[Service]\nEnvironment=XDPMF_TRUST_MODEL=fleet`.
 
 [Unit]
 Description=XDP MAC/CIDR filter on %i
-Documentation=file:///usr/share/doc/xdpmacfilter/FLEET_DEPLOYMENT.md
+Documentation=file:///usr/share/doc/xdpfilter/FLEET_DEPLOYMENT.md
 # D-3.3-4: network-pre.target (NOT network-online) — XDP attaches BEFORE
 # IP layer comes up, so the first frame on the wire is already filtered.
 After=network-pre.target
@@ -39,14 +39,14 @@ StartLimitIntervalSec=300
 # instead of detach+reattach.
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/bin/xdpmacfilter apply -f /etc/xdpfilter/%i.yaml --iface %i
+ExecStart=/usr/bin/xdpfilter apply -f /etc/xdpfilter/%i.yaml --iface %i
 # PI-24 (and Q2 R1): ExecReload is BYTE-IDENTICAL to ExecStart. The
 # apply orchestrator detects the existing link pin and routes through
 # bpf_link__update_program (§5.26 Composite-6 atomic swap — no drop).
-ExecReload=/usr/bin/xdpmacfilter apply -f /etc/xdpfilter/%i.yaml --iface %i
+ExecReload=/usr/bin/xdpfilter apply -f /etc/xdpfilter/%i.yaml --iface %i
 # D-3.3-3: no `|| true` — §5.21 D4 already makes detach idempotent on
 # clean iface (exit 0); masking would hide real failures from systemd.
-ExecStop=/usr/bin/xdpmacfilter detach --iface %i
+ExecStop=/usr/bin/xdpfilter detach --iface %i
 Restart=on-failure
 RestartSec=5
 # Capability set (D-3.3-6, amended rework round 1 — 5 caps total):

@@ -33,9 +33,9 @@ fi
 
 # Sanity floor: the loader binary must actually exist after build (proves
 # the build did real work and produced the artefact under test).
-if ! find "${TMP_BUILD}" -maxdepth 5 -type f -executable -name xdpmacfilter \
+if ! find "${TMP_BUILD}" -maxdepth 5 -type f -executable -name xdpfilter \
         | grep -q .; then
-    echo "FAIL: xdpmacfilter binary not produced by build" >&2
+    echo "FAIL: xdpfilter binary not produced by build" >&2
     exit 1
 fi
 

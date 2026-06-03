@@ -194,7 +194,7 @@ cat "${cap_text}"
 echo "--- end ---"
 
 # At least one non-empty text-mode line must FAIL to parse as JSON
-# (text lines like `xdpmacfilter: trust_model=strict` are not JSON).
+# (text lines like `xdpfilter: trust_model=strict` are not JSON).
 any_non_json=0
 while IFS= read -r line; do
     [[ -z "${line}" ]] && continue

@@ -8,9 +8,9 @@ if(NOT CMAKE_CXX_COMPILER)
     set(CMAKE_CXX_COMPILER clang++-19 CACHE STRING "C++ compiler" FORCE)
 endif()
 
-project(xdpmacfilter
+project(xdpfilter
     LANGUAGES C CXX
-    VERSION   0.15.0
+    VERSION   0.16.0
     DESCRIPTION "MVP-4.7 L2/L3/L4 XDP filter (AND-compose: mac + dst-CIDR + src-CIDR + proto + dst-port + vlan bit-vector) + Prometheus exporter + per-rule counters + exporter per-axis rule_info labels + structured logging + explicit drop-rule action dispatch + reset-counters CLI + rule_counters atomic-swap"
 )
 
@@ -58,21 +58,21 @@ add_link_options(-stdlib=libc++)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LIBBPF REQUIRED IMPORTED_TARGET libbpf>=1.1)
 
-# §5.25 P2: extract XDPMF_BPFFS_ROOT from src/common/mac_filter.h so the
+# §5.25 P2: extract XDPMF_BPFFS_ROOT from src/common/xdpfilter.h so the
 # test fixture (tests/lib/common.sh) inherits the SAME pin root the loader
 # compiles in — no silent drift if the macro value is ever changed. The
-# extracted value MUST be exactly "/sys/fs/bpf/xdpmacfilter" today; future
+# extracted value MUST be exactly "/sys/fs/bpf/xdpfilter" today; future
 # renames here flow automatically into tests/pins.sh.
 execute_process(
     COMMAND sed -nE "s@^[ \\t]*#define[ \\t]+XDPMF_BPFFS_ROOT[ \\t]+\"([^\"]+)\".*@\\1@p"
-            ${CMAKE_SOURCE_DIR}/src/common/mac_filter.h
+            ${CMAKE_SOURCE_DIR}/src/common/xdpfilter.h
     OUTPUT_VARIABLE XDPMF_BPFFS_ROOT
     OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 if(NOT XDPMF_BPFFS_ROOT)
     message(FATAL_ERROR
         "§5.25 P2: failed to extract XDPMF_BPFFS_ROOT from "
-        "src/common/mac_filter.h — macro renamed or removed?")
+        "src/common/xdpfilter.h — macro renamed or removed?")
 endif()
 configure_file(
     ${CMAKE_SOURCE_DIR}/tests/lib/pins.sh.in
@@ -89,7 +89,7 @@ configure_file(
 # `add_subdirectory(tests)` is reached — but that runs AFTER the option line
 # below, so tests/CMakeLists.txt instead toggles the cache var which the
 # target_compile_definitions below reads. Reviewer asserts via
-# `nm $(which xdpmacfilter) | grep -c XDPMF_BPF_OBJECT_PATH` = 0 in release.
+# `nm $(which xdpfilter) | grep -c XDPMF_BPF_OBJECT_PATH` = 0 in release.
 option(XDPMF_ENABLE_BPF_OBJECT_OVERRIDE
        "Allow loader to honor XDPMF_BPF_OBJECT_PATH env var (testing-only)" OFF)
 
@@ -97,14 +97,14 @@ option(XDPMF_ENABLE_BPF_OBJECT_OVERRIDE
 # C++ loader. Default OFF — when OFF, the build is byte-identical to the
 # pre-amendment build (no flag injection, no extra link deps). When ON, the
 # flags are applied via target_compile_options/target_link_options scoped
-# to the xdpmacfilter binary ONLY (see below) — they MUST NOT propagate to
+# to the xdpfilter binary ONLY (see below) — they MUST NOT propagate to
 # the BPF object (clang -target bpf has no userspace sanitizer runtime).
 option(XDPMF_SANITIZERS "Build C++ loader with ASAN+UBSAN (test-only)" OFF)
 
 include(${CMAKE_SOURCE_DIR}/cmake/BpfBuild.cmake)
 
-add_bpf_object(mac_filter ${CMAKE_SOURCE_DIR}/src/bpf/mac_filter.bpf.c)
-add_bpf_skeleton(mac_filter)
+add_bpf_object(xdpfilter ${CMAKE_SOURCE_DIR}/src/bpf/xdpfilter.bpf.c)
+add_bpf_skeleton(xdpfilter)
 
 # §5.26 Q1 R1: internal STATIC library aggregates src/lib/*.cpp (loader +
 # config + yaml_subset). No installed headers; no SONAME; no public ABI
@@ -128,13 +128,13 @@ target_include_directories(xdpmf_internal SYSTEM PRIVATE
     ${CMAKE_BINARY_DIR}
 )
 target_link_libraries(xdpmf_internal PUBLIC PkgConfig::LIBBPF)
-add_dependencies(xdpmf_internal mac_filter_skel)
+add_dependencies(xdpmf_internal xdpfilter_skel)
 
 add_subdirectory(src/cli)
 
 # §5.29 (MVP-3.4) D-3.4-1 + D-3.4-2: xdpmf-exporter is a SEPARATE binary
 # living under src/exporter/, linking the same xdpmf_internal STATIC lib as
-# xdpmacfilter — no third-party HTTP library dep (D-3.4-3). Read-only by
+# xdpfilter — no third-party HTTP library dep (D-3.4-3). Read-only by
 # construction (PI-31): no map mutation / attach / detach. install() goes
 # alongside the loader under ${CMAKE_INSTALL_BINDIR}.
 add_executable(xdpmf-exporter
@@ -155,10 +155,10 @@ target_include_directories(xdpmf-exporter SYSTEM PRIVATE
     ${CMAKE_BINARY_DIR}
 )
 target_link_libraries(xdpmf-exporter PRIVATE xdpmf_internal)
-add_dependencies(xdpmf-exporter mac_filter_skel)
+add_dependencies(xdpmf-exporter xdpfilter_skel)
 
 include(GNUInstallDirs)
-install(TARGETS xdpmacfilter xdpmf-exporter
+install(TARGETS xdpfilter xdpmf-exporter
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
@@ -172,11 +172,11 @@ if(XDPMF_SANITIZERS)
         -fsanitize=address,undefined
         -fno-omit-frame-pointer
     )
-    target_compile_options(xdpmacfilter PRIVATE
+    target_compile_options(xdpfilter PRIVATE
         -fsanitize=address,undefined
         -fno-omit-frame-pointer
     )
-    target_link_options(xdpmacfilter PRIVATE
+    target_link_options(xdpfilter PRIVATE
         -fsanitize=address,undefined
     )
     target_compile_options(xdpmf-exporter PRIVATE
@@ -199,17 +199,17 @@ endif()
 option(XDPMF_INSTALL_SYSTEMD_UNIT "Install systemd unit template" ON)
 if(XDPMF_INSTALL_SYSTEMD_UNIT)
     install(FILES
-            ${CMAKE_SOURCE_DIR}/systemd/xdpmacfilter@.service
+            ${CMAKE_SOURCE_DIR}/systemd/xdpfilter@.service
             ${CMAKE_SOURCE_DIR}/systemd/xdpmf-exporter.service
         DESTINATION ${CMAKE_INSTALL_PREFIX}/lib/systemd/system/)
     # §5.30 HK-7: install FLEET_DEPLOYMENT.md alongside the units so the
-    # `Documentation=file:///usr/share/doc/xdpmacfilter/FLEET_DEPLOYMENT.md`
+    # `Documentation=file:///usr/share/doc/xdpfilter/FLEET_DEPLOYMENT.md`
     # URI declared by both units resolves post-install. Gated on the same
     # option as the units — operators handling units out-of-band don't get
     # an orphan docs file copy.
     install(FILES
             ${CMAKE_SOURCE_DIR}/docs/FLEET_DEPLOYMENT.md
-        DESTINATION ${CMAKE_INSTALL_PREFIX}/share/doc/xdpmacfilter/)
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/share/doc/xdpfilter/)
 endif()
 
 enable_testing()
@@ -229,7 +229,7 @@ endif()
 # `set(XDPMF_ENABLE_BPF_OBJECT_OVERRIDE ON CACHE BOOL "" FORCE)` is visible
 # in the variable lookup that resolves the genexp's inner ${VAR} ref
 # (CMake substitutes ${VAR} at call-time, not at generate-time). Reviewer
-# asserts via `nm $(which xdpmacfilter) | grep -c XDPMF_BPF_OBJECT_PATH` = 0
+# asserts via `nm $(which xdpfilter) | grep -c XDPMF_BPF_OBJECT_PATH` = 0
 # in a release-only build (build with BUILD_TESTING=OFF, no tests subdir).
 target_compile_definitions(xdpmf_internal PRIVATE
     $<$<BOOL:${XDPMF_ENABLE_BPF_OBJECT_OVERRIDE}>:XDPMF_ENABLE_BPF_OBJECT_OVERRIDE>)

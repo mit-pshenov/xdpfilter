@@ -1,7 +1,7 @@
 #!/bin/bash
 # T_LOAD_ATTACH — design §6.2: load+attach succeeds (acceptance #2).
 #
-# Trigger : set up veth pair; run `xdpmacfilter attach --iface veth_a
+# Trigger : set up veth pair; run `xdpfilter attach --iface veth_a
 #           --allow MAC_GOOD`.
 # Outcome : exit 0; xdp.prog.id is set on veth_a; both pinned maps exist.
 #

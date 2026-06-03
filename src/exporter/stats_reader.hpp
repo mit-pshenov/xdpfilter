@@ -25,13 +25,13 @@
 #include <string_view>
 #include <vector>
 
-#include "common/mac_filter.h"  // STAT_MAX, XDPMF_BPFFS_ROOT
+#include "common/xdpfilter.h"  // STAT_MAX, XDPMF_BPFFS_ROOT
 
 namespace xdpmf::exporter {
 
 struct StatsSample {
     std::string   iface;
-    std::uint64_t stats[STAT_MAX] = {0, 0, 0, 0};   // index ≡ enum mac_filter_stat
+    std::uint64_t stats[STAT_MAX] = {0, 0, 0, 0};   // index ≡ enum xdpfilter_stat
 };
 
 /* §5.30 HK-17 (MVP-3.4.5) — per-scrape discovery accounting populated by

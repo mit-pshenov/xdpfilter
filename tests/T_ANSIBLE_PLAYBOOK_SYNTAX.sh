@@ -1,7 +1,7 @@
 #!/bin/bash
 # T_ANSIBLE_PLAYBOOK_SYNTAX — design §6.35 (MVP-3.3 / §5.28).
 #
-# `ansible-playbook --syntax-check ansible/xdpmacfilter-deploy.yml` exits 0.
+# `ansible-playbook --syntax-check ansible/xdpfilter-deploy.yml` exits 0.
 # SKIP-77 if `ansible-playbook` not in PATH (per brief — ansible-core is
 # OPTIONAL test-time dep; PI-25 carve-out cited verbatim).
 #
@@ -25,7 +25,7 @@ if ! command -v ansible-playbook >/dev/null 2>&1; then
     exit 77
 fi
 
-ANSIBLE_PLAYBOOK="${ANSIBLE_PLAYBOOK:-${SOURCE_DIR}/ansible/xdpmacfilter-deploy.yml}"
+ANSIBLE_PLAYBOOK="${ANSIBLE_PLAYBOOK:-${SOURCE_DIR}/ansible/xdpfilter-deploy.yml}"
 
 # Sanity / smoke: the playbook file must exist.
 if [[ ! -f "${ANSIBLE_PLAYBOOK}" ]]; then
@@ -64,7 +64,7 @@ fi
 # accept either the literal substring "playbook:" (case-sensitive) OR
 # the playbook filename as a heuristic.
 if ! grep -qE 'playbook:' "${stdout_pos}" && \
-   ! grep -qF 'xdpmacfilter-deploy.yml' "${stdout_pos}"; then
+   ! grep -qF 'xdpfilter-deploy.yml' "${stdout_pos}"; then
     echo "FAIL[P2]: stdout missing 'playbook:' confirmation line or filename" >&2
     fail=1
 fi

@@ -2,7 +2,7 @@
 #
 # `mac` is RE-ACCEPTED in v2 (HG-mvp-4.7-2), but the canonical 17-char parser
 # (re-added per D-mvp-4.7-MAC-PARSER) rejects a malformed MAC with the §5.27
-# stderr-catalogue prefix `xdpmacfilter: config error:` and exit 9
+# stderr-catalogue prefix `xdpfilter: config error:` and exit 9
 # (PI-mvp-4.7-GRAMMAR). This fixture's MAC is too short / has a non-hex group.
 schema_version: 2
 default_action: drop

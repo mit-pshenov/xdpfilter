@@ -2,9 +2,9 @@
  * xdp_pass.bpf.c — foreign-XDP fixture for T_ATTACH_ALIEN_REFUSAL (design §6.9).
  *
  * Minimal XDP program returning XDP_PASS unconditionally. The function
- * name `xdp_pass_prog` MUST differ from `mac_filter_prog` (the entry
- * point in src/bpf/mac_filter.bpf.c): the §5.19 identity check compares
- * `bpf_prog_info.name` against `"mac_filter_prog"`; the mismatch here is
+ * name `xdp_pass_prog` MUST differ from `xdpfilter_prog` (the entry
+ * point in src/bpf/xdpfilter.bpf.c): the §5.19 identity check compares
+ * `bpf_prog_info.name` against `"xdpfilter_prog"`; the mismatch here is
  * the load-bearing differentiator that causes our loader to classify
  * this program as alien (state c, exit 4).
  *

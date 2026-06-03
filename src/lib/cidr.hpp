@@ -6,7 +6,7 @@
  * (anything containing ':') are rejected per HG-3.2-1.
  *
  * All failures throw std::system_error{LoaderError::ConfigError, ...} with
- * stderr starting "xdpmacfilter: config error: ..." per §5.27 §4.1
+ * stderr starting "xdpfilter: config error: ..." per §5.27 §4.1
  * message catalogue. Pure parser — no I/O, no kernel touch.
  */
 #pragma once
@@ -14,7 +14,7 @@
 #include <cstdint>
 #include <string_view>
 
-#include "common/mac_filter.h"  // struct xdpmf_cidr_v4
+#include "common/xdpfilter.h"  // struct xdpmf_cidr_v4
 
 namespace xdpmf::cidr {
 

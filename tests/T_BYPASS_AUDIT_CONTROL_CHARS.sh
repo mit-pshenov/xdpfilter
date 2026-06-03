@@ -3,7 +3,7 @@
 #
 # Operational evidence of the extended `escape_audit` policy: bytes in
 # {[0x01,0x08] ∪ {0x0B,0x0C} ∪ [0x0E,0x1F] ∪ {0x7F}} emit as `\xHH`
-# lowercase in the text-mode audit-line emitted by `xdpmacfilter bypass`
+# lowercase in the text-mode audit-line emitted by `xdpfilter bypass`
 # — AND the named escapes (`\\`, `\"`, `\n`, `\r`) continue to use the
 # named form (PI-3.4f-3 backward-compat fence; PI-3.4f-2 extended policy).
 # Closes Theme B / sec M1 from /mint-review 2026-05-27.

@@ -8,7 +8,7 @@
 #   1. `XDPMF_TRUST_MODEL`   (variable name appears verbatim)
 #   2. `trust_model=strict`  (stderr literal for strict mode)
 #   3. `trust_model=fleet`   (stderr literal for fleet mode)
-#   4. `xdpmacfilter: trust_model=`   (the exact stderr prefix from §5.26)
+#   4. `xdpfilter: trust_model=`   (the exact stderr prefix from §5.26)
 #   5. `XDPMF_TRUST_MODEL=fleet` inside a code block (Drop-In Environment= snippet)
 #   6. At least one PI-fence reference: §5.4 | §5.19 | §5.22 | §5.24
 #
@@ -63,10 +63,10 @@ fi
 
 # ── Substring 4: exact stderr prefix from §5.26 (audit-grep target) ──────
 # PI-23 verbatim: the loader's stderr-emit catalogue uses this exact prefix.
-if grep -qE 'xdpmacfilter: trust_model=' "${FLEET_DOCS}"; then
-    echo "  [4] OK: 'xdpmacfilter: trust_model=' present"
+if grep -qE 'xdpfilter: trust_model=' "${FLEET_DOCS}"; then
+    echo "  [4] OK: 'xdpfilter: trust_model=' present"
 else
-    echo "FAIL[4]: substring 'xdpmacfilter: trust_model=' (exact stderr prefix per §5.26) missing from ${FLEET_DOCS}" >&2
+    echo "FAIL[4]: substring 'xdpfilter: trust_model=' (exact stderr prefix per §5.26) missing from ${FLEET_DOCS}" >&2
     fail=1
 fi
 

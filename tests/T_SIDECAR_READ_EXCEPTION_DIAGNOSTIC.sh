@@ -89,8 +89,8 @@ EXPORTER_BIN=$(find_exporter) || { echo "FAIL: xdpmf-exporter not found under ${
 FIXTURE="${TEST_DIR}/fixtures/config_per_rule_counters.yaml"
 [[ -f "${FIXTURE}" ]] || { echo "FAIL: missing fixture ${FIXTURE}" >&2; exit 1; }
 
-# §5.31 EDIT-1: sidecar path = /run/xdpmacfilter/<iface>/rule_index.json
-SIDECAR_ROOT="/run/xdpmacfilter"
+# §5.31 EDIT-1: sidecar path = /run/xdpfilter/<iface>/rule_index.json
+SIDECAR_ROOT="/run/xdpfilter"
 SIDECAR_DIR="${SIDECAR_ROOT}/${IFACE_A}"
 SIDECAR_PATH="${SIDECAR_DIR}/rule_index.json"
 

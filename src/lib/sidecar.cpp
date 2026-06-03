@@ -16,7 +16,7 @@
  * §5.36 (MVP-3.4e) hardening: ALL filesystem ops route through the
  * `SidecarRootFd` (O_PATH|O_DIRECTORY|O_NOFOLLOW fd to XDPMF_SIDECAR_ROOT)
  * via fd-relative mkdirat / fstatat / openat / renameat. Mirrors the
- * §5.22 BpffsRootFd discipline. Per-iface symlink at /run/xdpmacfilter/<iface>
+ * §5.22 BpffsRootFd discipline. Per-iface symlink at /run/xdpfilter/<iface>
  * triggers NEW `sidecar.warn.iface_dir_symlink` event + return (HG-3.4e-4 —
  * WARN + skip; PI-32-3.4b PRESERVED).
  */
@@ -38,7 +38,7 @@
 
 #include "common/escape_util.hpp"  // §5.37 (MVP-3.4f) escape_json + format_timestamp_utc
 #include "common/logger.hpp"       // §5.32 (MVP-3.5) structured-logging surface
-#include "common/mac_filter.h"     // xdpmf_mac, xdpmf_cidr_v4
+#include "common/xdpfilter.h"     // xdpmf_mac, xdpmf_cidr_v4
 
 namespace xdpmf::sidecar {
 
@@ -387,7 +387,7 @@ void write_rule_index(std::string_view iface,
             case SidecarRootFd::State::RootSymlink: {
                 /* §5.32: byte-equivalent text-mode + JSON `path`. */
                 const std::string msg = std::format(
-                    "xdpmacfilter: WARN: rule_index.json refusing "
+                    "xdpfilter: WARN: rule_index.json refusing "
                     "to write — sidecar root '{}' is a symlink\n",
                     root);
                 const xdpmf::logger::Field fs[] = {
@@ -400,7 +400,7 @@ void write_rule_index(std::string_view iface,
             }
             case SidecarRootFd::State::RootNotDir: {
                 const std::string msg = std::format(
-                    "xdpmacfilter: WARN: rule_index.json refusing "
+                    "xdpfilter: WARN: rule_index.json refusing "
                     "to write — sidecar root '{}' is not a directory\n",
                     root);
                 const xdpmf::logger::Field fs[] = {
@@ -415,7 +415,7 @@ void write_rule_index(std::string_view iface,
                 const int         e         = root_fd.error_errno();
                 const std::string errno_str = std::strerror(e);
                 const std::string msg       = std::format(
-                    "xdpmacfilter: WARN: rule_index.json open of "
+                    "xdpfilter: WARN: rule_index.json open of "
                     "sidecar root '{}' failed: {}\n",
                     root, errno_str);
                 const xdpmf::logger::Field fs[] = {
@@ -444,7 +444,7 @@ void write_rule_index(std::string_view iface,
             const int         e         = errno;
             const std::string errno_str = std::strerror(e);
             const std::string msg       = std::format(
-                "xdpmacfilter: WARN: rule_index.json mkdirat "
+                "xdpfilter: WARN: rule_index.json mkdirat "
                 "of '{}/{}' failed: {}\n",
                 root, iface_str, errno_str);
             const xdpmf::logger::Field fs[] = {
@@ -471,7 +471,7 @@ void write_rule_index(std::string_view iface,
             const int         e         = errno;
             const std::string errno_str = std::strerror(e);
             const std::string msg       = std::format(
-                "xdpmacfilter: WARN: rule_index.json fstatat "
+                "xdpfilter: WARN: rule_index.json fstatat "
                 "'{}/{}' failed: {}\n",
                 root, iface_str, errno_str);
             const xdpmf::logger::Field fs[] = {
@@ -489,7 +489,7 @@ void write_rule_index(std::string_view iface,
              * XDPMF_SIDECAR_ROOT/<iface>. KC-3 sidecar limb closed.
              * WARN + skip; apply continues; PI-32-3.4b PRESERVED. */
             const std::string msg = std::format(
-                "xdpmacfilter: WARN: rule_index.json refusing "
+                "xdpfilter: WARN: rule_index.json refusing "
                 "to write — sidecar per-iface entry '{}/{}' is a symlink\n",
                 root, iface_str);
             const xdpmf::logger::Field fs[] = {
@@ -508,7 +508,7 @@ void write_rule_index(std::string_view iface,
              * "something blocked the iface dir creation". */
             const std::string errno_str = "not a directory";
             const std::string msg       = std::format(
-                "xdpmacfilter: WARN: rule_index.json refusing "
+                "xdpfilter: WARN: rule_index.json refusing "
                 "to write — sidecar per-iface entry '{}/{}' is not a directory\n",
                 root, iface_str);
             const xdpmf::logger::Field fs[] = {
@@ -532,7 +532,7 @@ void write_rule_index(std::string_view iface,
             const std::string final_path = root + "/" + iface_str
                                          + "/rule_index.json";
             const std::string msg = std::format(
-                "xdpmacfilter: WARN: rule_index.json write failed: {}\n",
+                "xdpfilter: WARN: rule_index.json write failed: {}\n",
                 errno_str);
             const xdpmf::logger::Field fs[] = {
                 xdpmf::logger::Field{"path",      std::string_view{final_path}},
@@ -556,7 +556,7 @@ void write_rule_index(std::string_view iface,
             xdpmf::logger::Level::Warn,
             "sidecar.warn.write_exception",
             std::string_view{iface},
-            "xdpmacfilter: WARN: rule_index.json write failed: "
+            "xdpfilter: WARN: rule_index.json write failed: "
             "exception during body construction\n",
             fs);
     } catch (...) {
@@ -567,7 +567,7 @@ void write_rule_index(std::string_view iface,
             xdpmf::logger::Level::Warn,
             "sidecar.warn.write_exception",
             std::string_view{iface},
-            "xdpmacfilter: WARN: rule_index.json write failed: "
+            "xdpfilter: WARN: rule_index.json write failed: "
             "exception during body construction\n");
     }
 }

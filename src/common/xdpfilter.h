@@ -1,5 +1,5 @@
 /*
- * mac_filter.h — types/constants shared between BPF C and C++23 userspace.
+ * xdpfilter.h — types/constants shared between BPF C and C++23 userspace.
  *
  * Includable from both sides because it uses only `unsigned char`
  * (guaranteed 1 byte everywhere) and the C preprocessor. In BPF C this
@@ -65,7 +65,7 @@ struct xdpmf_cidr_v6 {
  * Index into the `stats` BPF_MAP_TYPE_PERCPU_ARRAY. Each invocation of the XDP
  * program bumps exactly one slot; STAT_MAX is the array max_entries sentinel.
  */
-enum mac_filter_stat {
+enum xdpfilter_stat {
     STAT_PASS           = 0,
     STAT_DROP_DENY      = 1,
     STAT_DROP_MALFORMED = 2,
@@ -73,14 +73,20 @@ enum mac_filter_stat {
     STAT_MAX            = 4,  /* sentinel = stats max_entries */
 };
 
+/* HG-4 (MVP-4.26/B33): the `XDPMF_*` macro/env namespace is KEPT as an
+ * operator-ABI surface after the B33 rename to xdpfilter. Reinterpret the
+ * `MF` acronym as "Match/Multi-Filter" (no longer "MAC Filter") — the artifact
+ * is a 9-axis L2/L3/L4 classifier, not a MAC-only filter. Only the embedded
+ * path VALUES below changed (now under /sys/fs/bpf/xdpfilter); symbols stay. */
+
 /* Bpffs layout (see design §3.5). The per-interface subdir under this
  * root doubles as the ownership marker for idempotent reload (§5.4). */
-#define XDPMF_BPFFS_ROOT "/sys/fs/bpf/xdpmacfilter"
+#define XDPMF_BPFFS_ROOT "/sys/fs/bpf/xdpfilter"
 
 /* Allow-list capacity — see design Decision §5.1. */
 #define XDPMF_ALLOWLIST_MAX 64
 
-/* Map names — MUST match `SEC(".maps")` declarations in mac_filter.bpf.c
+/* Map names — MUST match `SEC(".maps")` declarations in xdpfilter.bpf.c
  * because libbpf auto-pins by map name under pin_root_path. */
 #define XDPMF_MAP_STATS_NAME     "stats"
 
@@ -283,7 +289,7 @@ struct allow_entry {
  * persists, per ruleset half, the operator `id` occupying each internal `slot`
  * (= id-sorted rank). Indexed `slot_rule_id[active * XDPMF_ALLOWLIST_MAX + slot]`.
  * Read by the loader copy-forward (old-slot recovery, keyed by id) AND the
- * exporter (stable-id counter labelling). NEVER referenced by mac_filter_prog
+ * exporter (stable-id counter labelling). NEVER referenced by xdpfilter_prog
  * (datapath instruction stream byte-identical — HG-mvp-4.21-1). */
 #define XDPMF_MAP_SLOT_RULE_ID_NAME  "slot_rule_id"  /* ARRAY[XDPMF_RULESET_COUNT*XDPMF_ALLOWLIST_MAX] of __u32 */
 /* §5.61 D-mvp-4.21-SENTINEL: the EMPTY marker written to unoccupied slots
@@ -294,7 +300,7 @@ struct allow_entry {
 /* §5.31: sidecar lives on tmpfs under /run because bpffs (kernel/bpf/inode.c)
  * rejects regular-file creation with EPERM at the inode_create hook; `/run` is
  * the systemd-blessed tmpfs convention for ephemeral state. */
-#define XDPMF_SIDECAR_ROOT  "/run/xdpmacfilter"
+#define XDPMF_SIDECAR_ROOT  "/run/xdpfilter"
 
 #ifdef __cplusplus
 /* §5.62 (MVP-4.22) R-2 / D-mvp-4.22-ABI-ASSERTSET: pin the BPF↔userspace ABI on

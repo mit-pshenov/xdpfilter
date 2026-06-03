@@ -1,7 +1,7 @@
 #!/bin/bash
 # T_CLI_RESET_COUNTERS — design §6.NN (MVP-3.4d / §5.35).
 #
-# `xdpmacfilter reset-counters --iface X` (no --rule-id) zeros ALL 64
+# `xdpfilter reset-counters --iface X` (no --rule-id) zeros ALL 64
 # rule_counters slots; subsequent bumps work normally from a zero baseline.
 # Maps to PI-3.4d-1 (CLI behavioural contract), HG-3.4d-1 (zero-write
 # mechanism), HG-3.4d-2 (no-flag = batch), HG-3.4d-6 (audit-stderr format).
@@ -12,7 +12,7 @@
 #   3. Inject 5 frames id=5, 3 frames id=17 (drop-but-still-bumps per §5.34),
 #      2 frames id=0 (PASS).
 #   4. Read baseline rule_counters → assert [0]=2, [5]=5, [17]=3, others=0.
-#   5. Run `xdpmacfilter reset-counters --iface ${IFACE_A}`.
+#   5. Run `xdpfilter reset-counters --iface ${IFACE_A}`.
 #   6. Read post-reset → assert ALL 64 slots = 0.
 #   7. Re-inject 1 frame id=5.
 #   8. Read final → assert [5]=1; all others (incl. [0], [17]) = 0.
@@ -20,7 +20,7 @@
 # Observable outcome (ALL):
 #   (a) reset-counters exits 0.
 #   (b) stderr matches ERE
-#       `^xdpmacfilter: RESET-COUNTERS on ${IFACE_A} by uid=[0-9]+ .*rule_id=ALL$`
+#       `^xdpfilter: RESET-COUNTERS on ${IFACE_A} by uid=[0-9]+ .*rule_id=ALL$`
 #       (HG-3.4d-6 audit-line shape; permissive middle for uid/euid/sudo_user).
 #   (c) All 64 PERCPU rule_counters slots read 0 post-reset (sum across CPUs).
 #   (d) Post-reset bump works: rule_counters[5]=1 after re-inject.
@@ -162,7 +162,7 @@ fi
 
 # (b) audit-log ERE — permissive middle for uid=/euid=/sudo_user= per §5.30 HK-4
 # precedent (the bypass tests use the same `.*` middle-fill pattern).
-audit_ere="^xdpmacfilter: RESET-COUNTERS on ${IFACE_A} by uid=[0-9]+ .*rule_id=ALL\$"
+audit_ere="^xdpfilter: RESET-COUNTERS on ${IFACE_A} by uid=[0-9]+ .*rule_id=ALL\$"
 if ! grep -qE -- "${audit_ere}" "${stderr_reset}"; then
     echo "FAIL[b]: stderr missing audit-log line matching ERE:" >&2
     echo "        ${audit_ere}" >&2

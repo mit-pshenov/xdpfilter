@@ -9,7 +9,7 @@
 #   1. cmake -S "${SOURCE_DIR}" -B "${ASAN_BUILD_DIR}" -DXDPMF_SANITIZERS=ON
 #   2. cmake --build "${ASAN_BUILD_DIR}" --parallel   (must exit 0, no warnings)
 #   3. setup_veth
-#   4. <sanitized_xdpmacfilter> apply --iface veth_a -f config_valid_andv6.yaml
+#   4. <sanitized_xdpfilter> apply --iface veth_a -f config_valid_andv6.yaml
 #      (stderr → file).  §5.59: this richer apply is the genuine ASAN/UBSAN
 #      payload — it drives the net-new userspace lowering (close_prefixes6's
 #      __int128 prefix-closure + host_mask6 shift, the dst_port 1000-2000 RANGE
@@ -27,7 +27,7 @@
 #        V3 NOMATCH frame (dst6 ∉ any prefix, tcp ≠ id3's udp, id2 is v4-only)
 #           → STAT_DROP_DENY  (andv6 default_action: drop → defaults fall-through)
 #   6. read stats (4-col read_stats_with_cidr helper)
-#   7. <sanitized_xdpmacfilter> detach --iface veth_a                    (stderr → same file)
+#   7. <sanitized_xdpfilter> detach --iface veth_a                    (stderr → same file)
 #   8. cleanup_veth (via trap)
 # Outcome  : ALL must hold
 #   - build exits 0 with no compiler warnings (§5.12 policy)
@@ -84,9 +84,9 @@ fi
 # binary lives at the same relative path the default build produces; we
 # search rather than hard-code to stay layout-agnostic.
 SANITIZED_LOADER=$(find "${ASAN_BUILD_DIR}" -maxdepth 5 -type f -executable \
-                        -name xdpmacfilter 2>/dev/null | head -1 || true)
+                        -name xdpfilter 2>/dev/null | head -1 || true)
 if [[ -z "${SANITIZED_LOADER}" || ! -x "${SANITIZED_LOADER}" ]]; then
-    echo "FAIL: sanitized xdpmacfilter binary not produced under ${ASAN_BUILD_DIR}" >&2
+    echo "FAIL: sanitized xdpfilter binary not produced under ${ASAN_BUILD_DIR}" >&2
     exit 1
 fi
 echo "sanitized loader = ${SANITIZED_LOADER}"

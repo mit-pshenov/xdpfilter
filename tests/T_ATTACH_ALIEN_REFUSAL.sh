@@ -12,7 +12,7 @@
 #   2. Pre-attach foreign XDP (xdp_pass.bpf.o, function name `xdp_pass_prog`)
 #      to veth_a in generic (SKB) mode via `ip link set … xdpgeneric obj …`.
 #   3. Capture the foreign prog id (xdp_prog_id helper).
-#   4. Run our loader: `xdpmacfilter attach --iface veth_a --allow MAC_GOOD`,
+#   4. Run our loader: `xdpfilter attach --iface veth_a --allow MAC_GOOD`,
 #      capturing exit code (rc) and stderr.
 #
 # Outcome (ALL four must hold — fail aggregator pattern from
@@ -24,7 +24,7 @@
 #   (c) Foreign program STILL attached, prog id unchanged — the
 #       safety-floor assertion (KC-A spoofed-ours blackhole did NOT fire;
 #       loader did not clobber the alien program).
-#   (d) No orphan pin dir at /sys/fs/bpf/xdpmacfilter/veth_a/ — refusal
+#   (d) No orphan pin dir at /sys/fs/bpf/xdpfilter/veth_a/ — refusal
 #       happens before ensure_bpffs_dir OR the RAII rollback unwinds it.
 #
 # Cleanup (trap EXIT, idempotent): detach foreign xdpgeneric, then

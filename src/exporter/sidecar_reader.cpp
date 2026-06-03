@@ -117,7 +117,7 @@ std::vector<RuleMeta> parse_rule_index(std::string_view path) noexcept
         xdpmf::logger::emit(
             xdpmf::logger::Level::Warn,
             "exporter.scrape.warn.sidecar_read_exception",
-            "xdpmacfilter: WARN: rule_index.json read failed; serving "
+            "xdpfilter: WARN: rule_index.json read failed; serving "
             "degraded labels\n",
             fs);
     } catch (...) {
@@ -131,7 +131,7 @@ std::vector<RuleMeta> parse_rule_index(std::string_view path) noexcept
         xdpmf::logger::emit(
             xdpmf::logger::Level::Warn,
             "exporter.scrape.warn.sidecar_read_exception",
-            "xdpmacfilter: WARN: rule_index.json read failed; serving "
+            "xdpfilter: WARN: rule_index.json read failed; serving "
             "degraded labels\n",
             fs);
     }

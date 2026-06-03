@@ -44,7 +44,7 @@
 #   (a) Step 4 exits 0 (bpftool accepts the single-CPU-worth byte stream).
 #   (b) Step 5 exits 0 and pass == nr_cpus * V.
 #
-# Cleanup (trap EXIT): xdpmacfilter detach + cleanup_veth + aggressive
+# Cleanup (trap EXIT): xdpfilter detach + cleanup_veth + aggressive
 # pin-path cleanup to prevent stale bpffs entries tripping subsequent
 # tests (per Phase B note from team-lead on T_ATTACH_TAG_MISMATCH).
 set -euo pipefail

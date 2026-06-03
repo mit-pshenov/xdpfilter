@@ -17,7 +17,7 @@
 #include <string_view>
 #include <vector>
 
-#include "common/mac_filter.h"  // XDPMF_RULE_COUNTERS_MAX
+#include "common/xdpfilter.h"  // XDPMF_RULE_COUNTERS_MAX
 
 namespace xdpmf::exporter {
 

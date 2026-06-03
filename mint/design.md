@@ -18041,13 +18041,25 @@ Reviewer's 5th framework point walks this list and reports `[INVARIANT-VIOLATED]
 | PI | Property | Check mechanism |
 |---|---|---|
 | **PI-DATAPATH-IDENTICAL-mvp-4.26** | `src/bpf/xdpfilter.bpf.c` xdp section == **3658 insns** — rename changes the prog SYMBOL/BTF name, NOT codegen. (Whole-`.bpf.o` byte-identity does NOT hold — BTF carries the new name — only the disassembled xdp insn count.) | rebuild + `llvm-objdump-19 -d --section=xdp build/xdpfilter.bpf.o \| grep -cE '^\s+[0-9a-f]+:'` == 3658. Mismatch = `[INVARIANT-VIOLATED]`. |
-| **PI-7-mvp-4.26-SUSPENDED** | `loader.hpp` + `config.hpp` PI-7 ZERO-diff streak is **EXPLICITLY SUSPENDED this slice** (HG-3): the ONLY permitted diff is the include-path token `"common/mac_filter.h"`→`"common/xdpfilter.h"`. NO symbol / signature / enumerator / body change. | `git diff -M <base> -- src/lib/loader.hpp src/lib/config.hpp` shows ONLY the include-path line(s) changed. ANY other line diff = `[INVARIANT-VIOLATED]`. PI-7 RESUMES next slice. |
+| **PI-7-mvp-4.26-SUSPENDED** | `loader.hpp` + `config.hpp` PI-7 ZERO-diff streak is **EXPLICITLY SUSPENDED this slice** (HG-3): the ONLY permitted diffs are **rename-token lines** — the include-path token `"common/mac_filter.h"`→`"common/xdpfilter.h"` AND any `xdpmacfilter`/`mac_filter` token in DOC-COMMENT prose (e.g. `loader.hpp:3` `/sys/fs/bpf/xdpmacfilter`, `config.hpp:18` `xdpmacfilter: config error:`). NO symbol / signature / enumerator / body change. **[AMENDED per Phase-B EDIT-1 — see note below].** | `git diff -M <base> -- src/lib/loader.hpp src/lib/config.hpp` shows ONLY rename-token lines changed (include path + prose comments). ANY non-rename-token line diff (symbol/signature/enumerator/body) = `[INVARIANT-VIOLATED]`. PI-7 RESUMES next slice. |
 | **PI-RENAME-COMPLETENESS-mvp-4.26** | ZERO surviving `mac_filter`/`xdpmacfilter`/`mac_filter_prog` token outside the 5 KEEPs. | T7 grep → only `docs/BACKLOG.md` B33 + historical `mint/`. Any other hit = `[INVARIANT-VIOLATED]` (missed site). |
 | **PI-SECURITY-GATE-mvp-4.26** | §5.19 prog-identity gate consistent end-to-end: `kOwnedProgName == "xdpfilter_prog"` == the SEC() symbol == the fixtures' name-assert strings. | T4 canaries GREEN; `grep -rn 'xdpfilter_prog' src/ tests/` shows loader literal + SEC symbol + fixtures aligned; ZERO `mac_filter_prog`. |
 | **PI-ENV-ABI-mvp-4.26** | `XDPMF_*` env/macro SYMBOL names (54) UNCHANGED (HG-4 KEEP); only their embedded path VALUES change. | `git diff <base>` shows no `XDPMF_` symbol renamed; `grep -rc 'XDPMF_' src/` count unchanged. |
 | **PI-SCHEMA-METRICS-mvp-4.26** | config schema_version, map names, STAT enumerator names, `kManagedMaps[]` count, `BITVEC_NUM_AXES`=9, Prometheus `xdpfilter_*` metric names all UNCHANGED. | metrics-format test GREEN; schema-cutover test GREEN; `git diff` shows no schema/map-name/enum-value edit. |
 | **PI-SUITE-101/103-mvp-4.26** | Full ctest stays at the 101/103 baseline; the 2 pre-existing NAME-keyed env-fails unchanged; no test legitimately flips red. | `sudo -E ctest` summary diff vs prior `test-run.log` == only renamed-path noise. |
 | **PI-VERSION-mvp-4.26** | VERSION `0.16.0` consistent across `CMakeLists.txt` + `T_EXPORTER_METRICS_FORMAT.sh` + `T_CLI_HELP_VERSION` + `CHANGELOG.md`; zero surviving `0.15.0`. | guard #11: `grep -rn '0\.15\.0'` → ∅; `0\.16\.0` consistent. |
+
+**Phase-B EDIT-1 (audit trail — PI-7-SUSPENDED ↔ COMPLETENESS reconciliation):** impl
+flagged that `loader.hpp:3` (`/sys/fs/bpf/xdpmacfilter` in a doc comment) and
+`config.hpp:18` (`xdpmacfilter: config error:` in a doc comment) carry rename tokens
+in PROSE — so the original "ONLY the include-path line" wording for PI-7-SUSPENDED
+conflicted with PI-RENAME-COMPLETENESS + T7 (zero surviving token in `src/`, a
+load-bearing MUST). **Resolution: PI-RENAME-COMPLETENESS wins; the comment-prose
+tokens ARE renamed.** A doc-comment is NOT a symbol/signature/enumerator/body change,
+so it honors PI-7's INTENT ("no API change"). Net permitted diff per header =
+include-path line + the rename-token prose line(s), nothing else. PI-7-SUSPENDED row
+re-worded above to "ONLY rename-token lines". Reviewer disposition for this header
+prose = `inline-merge`, NOT `[INVARIANT-VIOLATED]`.
 
 **Verification hints discipline (guidance for reviewer, NOT contracts for impl):**
 the 532/91 occurrence counts, the per-file EDITED-table line summaries, and the

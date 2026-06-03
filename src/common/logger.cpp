@@ -240,7 +240,7 @@ void emit(Level                              level,
     if (g_emit_unknown_warn) {
         g_emit_unknown_warn = false;
         const std::string warn_msg = std::format(
-            "xdpmacfilter: WARN: unknown XDPMF_LOG_FORMAT value '{}', "
+            "xdpfilter: WARN: unknown XDPMF_LOG_FORMAT value '{}', "
             "defaulting to 'text'",
             g_unknown_warn_value);
         const Field warn_fields[] = {

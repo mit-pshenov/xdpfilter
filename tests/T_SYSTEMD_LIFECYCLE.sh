@@ -11,16 +11,16 @@
 # Sequence per §6.33:
 #   PRE: assert XDP NOT attached on test iface (negation baseline).
 #   1. setup host veth pair (xdpmf_sysd_a_$$ / xdpmf_sysd_b_$$).
-#   2. install unit → /etc/systemd/system/xdpmacfilter@.service.
+#   2. install unit → /etc/systemd/system/xdpfilter@.service.
 #   3. install config → /etc/xdpfilter/${SYSD_IFACE_A}.yaml.
 #   4. systemctl daemon-reload.
-#   5. systemctl start xdpmacfilter@${SYSD_IFACE_A}.service.
+#   5. systemctl start xdpfilter@${SYSD_IFACE_A}.service.
 #      POST-START assertions:
 #        - is-active → "active".
 #        - XDP attached (prog_id non-empty); capture PROG_ID_START.
 #        - ${PIN_DIR}/link present.
 #        - active_idx == 0 (first apply per §5.26 invariant).
-#        - journalctl contains 'xdpmacfilter: trust_model=strict' (PI-23 verbatim).
+#        - journalctl contains 'xdpfilter: trust_model=strict' (PI-23 verbatim).
 #   6. modify config (swap to a different valid fixture).
 #   7. systemctl reload.
 #      POST-RELOAD assertions:
@@ -55,7 +55,7 @@ if ! command -v systemctl >/dev/null 2>&1; then
 fi
 
 LOADER_BIN=$(find_loader)
-SYSTEMD_UNIT_SRC="${SYSTEMD_UNIT_SRC:-${SOURCE_DIR}/systemd/xdpmacfilter@.service}"
+SYSTEMD_UNIT_SRC="${SYSTEMD_UNIT_SRC:-${SOURCE_DIR}/systemd/xdpfilter@.service}"
 FIXTURE_DIR="${TEST_DIR}/fixtures"
 FIX_A="${FIXTURE_DIR}/config_apply_swap_a.yaml"
 FIX_B="${FIXTURE_DIR}/config_apply_swap_b.yaml"
@@ -76,26 +76,26 @@ done
 # the iface name). Earlier draft was `xdpmf_sysd_*_$$` (20 chars with
 # 7-digit PID — `ip link add` rejects with "wrong: not a valid ifname").
 # `xsd_*_$$` collapses to 6+7=13 chars max — fits comfortably. Still
-# project-distinguishable (xdpmacfilter-systemd-test).
+# project-distinguishable (xdpfilter-systemd-test).
 SYSD_IFACE_A="xsd_a_$$"
 SYSD_IFACE_B="xsd_b_$$"
 SYSD_PIN_DIR="${PIN_ROOT}/${SYSD_IFACE_A}"
-UNIT_INSTALLED="/etc/systemd/system/xdpmacfilter@.service"
+UNIT_INSTALLED="/etc/systemd/system/xdpfilter@.service"
 CONFIG_INSTALLED="/etc/xdpfilter/${SYSD_IFACE_A}.yaml"
-UNIT_INSTANCE="xdpmacfilter@${SYSD_IFACE_A}.service"
+UNIT_INSTANCE="xdpfilter@${SYSD_IFACE_A}.service"
 
 # Make sure that:
-#   - /usr/bin/xdpmacfilter exists at the path the unit's ExecStart cites,
+#   - /usr/bin/xdpfilter exists at the path the unit's ExecStart cites,
 #     OR the test gracefully bridges via a /usr/local/bin or BUILD_DIR
-#     install. The shipped unit hardcodes /usr/bin/xdpmacfilter (per
+#     install. The shipped unit hardcodes /usr/bin/xdpfilter (per
 #     §5.28 directive catalogue) so we either (a) symlink the build
 #     binary to /usr/bin or (b) refuse to run. We choose (a) — fragile-
 #     but-functional for dev VM; cleanup restores prior state.
 #
-# Strategy: if /usr/bin/xdpmacfilter already exists (real install), leave
+# Strategy: if /usr/bin/xdpfilter already exists (real install), leave
 # it alone. Otherwise symlink our build binary; mark for removal in trap.
 NEED_USRBIN_RESTORE=""
-if [[ ! -e /usr/bin/xdpmacfilter ]]; then
+if [[ ! -e /usr/bin/xdpfilter ]]; then
     NEED_USRBIN_RESTORE=1
 fi
 
@@ -110,7 +110,7 @@ cleanup_lifecycle() {
     sudo -n systemctl reset-failed "${UNIT_INSTANCE}"  2>/dev/null
     # Remove our build-binary symlink IF we created it. Idempotent.
     if [[ -n "${NEED_USRBIN_RESTORE}" ]]; then
-        sudo -n rm -f /usr/bin/xdpmacfilter           2>/dev/null
+        sudo -n rm -f /usr/bin/xdpfilter           2>/dev/null
     fi
     # Tear down veth pair (idempotent) + bpffs pin dir.
     sudo -n ip link del "${SYSD_IFACE_A}"              2>/dev/null
@@ -128,7 +128,7 @@ fail=0
 
 # ── Step 0 — install build binary at /usr/bin if needed ─────────────────
 if [[ -n "${NEED_USRBIN_RESTORE}" ]]; then
-    sudo -n ln -sf "${LOADER_BIN}" /usr/bin/xdpmacfilter
+    sudo -n ln -sf "${LOADER_BIN}" /usr/bin/xdpfilter
 fi
 
 # ── Step 1 — create host-netns veth pair ────────────────────────────────
@@ -235,10 +235,10 @@ if [[ "${active_after_start}" != "0" ]]; then
     fail=1
 fi
 
-# (5e) journalctl contains 'xdpmacfilter: trust_model=strict' (PI-23 verbatim).
+# (5e) journalctl contains 'xdpfilter: trust_model=strict' (PI-23 verbatim).
 if ! sudo -n journalctl -u "${UNIT_INSTANCE}" --no-pager -n 200 2>/dev/null \
-        | grep -qE 'xdpmacfilter: trust_model=strict'; then
-    echo "FAIL[5e]: journalctl missing 'xdpmacfilter: trust_model=strict' (PI-23 verbatim format)" >&2
+        | grep -qE 'xdpfilter: trust_model=strict'; then
+    echo "FAIL[5e]: journalctl missing 'xdpfilter: trust_model=strict' (PI-23 verbatim format)" >&2
     sudo -n journalctl -u "${UNIT_INSTANCE}" --no-pager -n 100 >&2 || true
     fail=1
 fi

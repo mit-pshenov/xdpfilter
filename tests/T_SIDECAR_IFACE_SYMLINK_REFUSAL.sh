@@ -1,7 +1,7 @@
 #!/bin/bash
 # T_SIDECAR_IFACE_SYMLINK_REFUSAL — design §5.36 T-2 (MVP-3.4e).
 #
-# Per-iface symlink planted at `/run/xdpmacfilter/<iface>` (pointing to
+# Per-iface symlink planted at `/run/xdpfilter/<iface>` (pointing to
 # an attacker-controlled directory) MUST be:
 #   - DETECTED by the post-§5.36 fd-relative discipline
 #     (`SidecarRootFd` + `fstatat(AT_SYMLINK_NOFOLLOW)` /
@@ -11,7 +11,7 @@
 #   - NOT FATAL — `apply` MUST still exit 0 (PI-32-3.4b PRESERVED:
 #     sidecar never throws; exporter degrades to action="unknown").
 #
-# Closes KC-3 sidecar limb: attacker with write under `/run/xdpmacfilter/`
+# Closes KC-3 sidecar limb: attacker with write under `/run/xdpfilter/`
 # pre-creates `<iface>` as symlink → loader follows + writes
 # attacker-controlled JSON to chosen target (e.g. cron-executed path).
 #
@@ -22,13 +22,13 @@
 #   - §5.31 EDIT-1 SIDECAR_ROOT discipline event-name preservation
 #
 # Sub-cases:
-#   (a) Plant symlink `/run/xdpmacfilter/<iface>` → `/tmp/<attacker>`;
+#   (a) Plant symlink `/run/xdpfilter/<iface>` → `/tmp/<attacker>`;
 #       attach + apply → apply exit 0 + stderr contains the literal
 #       prose token `symlink` (impl emits `... is a symlink` in the
 #       per-iface-symlink branch msg) + iface name token + attacker
 #       target dir has NO `rule_index.json` AND no `rule_index.json.tmp`
 #       file.
-#   (b) NEGATION CONTROL: clean `/run/xdpmacfilter/<iface>` (no symlink,
+#   (b) NEGATION CONTROL: clean `/run/xdpfilter/<iface>` (no symlink,
 #       let sidecar create the iface subdir as a real dir);
 #       re-apply → exit 0 + `rule_index.json` materializes + stderr
 #       does NOT contain the `symlink` prose token (warn must be
@@ -70,8 +70,8 @@ LOADER_BIN=$(find_loader)
 FIXTURE="${TEST_DIR}/fixtures/config_valid.yaml"
 [[ -f "${FIXTURE}" ]] || { echo "FAIL: missing fixture ${FIXTURE}" >&2; exit 1; }
 
-# §5.31 EDIT-1: sidecar lives at /run/xdpmacfilter/<iface>/rule_index.json.
-SIDECAR_ROOT="/run/xdpmacfilter"
+# §5.31 EDIT-1: sidecar lives at /run/xdpfilter/<iface>/rule_index.json.
+SIDECAR_ROOT="/run/xdpfilter"
 SIDECAR_DIR="${SIDECAR_ROOT}/${IFACE_A}"
 SIDECAR_PATH="${SIDECAR_DIR}/rule_index.json"
 SIDECAR_TMP="${SIDECAR_DIR}/rule_index.json.tmp"
@@ -96,7 +96,7 @@ cleanup_sidesym() {
     sudo -n rm -f "${SIDECAR_DIR}" 2>/dev/null
 
     # If sub-case (b) left a real iface subdir, remove it (and any
-    # contents) — only the per-PID iface subdir, NOT all of /run/xdpmacfilter
+    # contents) — only the per-PID iface subdir, NOT all of /run/xdpfilter
     # (other concurrent tests may use it).
     if sudo -n test -d "${SIDECAR_DIR}"; then
         sudo -n rm -rf "${SIDECAR_DIR}"
@@ -114,7 +114,7 @@ trap cleanup_sidesym EXIT INT TERM HUP
 
 # Defensive: clean any leftover state from a crashed prior run.
 sudo -n rm -rf "${PIN_DIR}" 2>/dev/null || true
-# /run/xdpmacfilter/<iface> entry from a prior cycle — kill it whether
+# /run/xdpfilter/<iface> entry from a prior cycle — kill it whether
 # symlink, dir, or regular file.
 if sudo -n test -e "${SIDECAR_DIR}" || sudo -n test -L "${SIDECAR_DIR}"; then
     sudo -n rm -rf "${SIDECAR_DIR}" 2>/dev/null || true

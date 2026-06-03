@@ -91,7 +91,7 @@ int exit_code_from(const std::system_error& e) noexcept
 }
 
 /* §5.26 stderr-shape contract: ConfigError messages MUST start with the
- * literal sentinel `xdpmacfilter: config error:` (Q-HG1 + Q5 + HG3 shape).
+ * literal sentinel `xdpfilter: config error:` (Q-HG1 + Q5 + HG3 shape).
  * Our what() already embeds that sentinel; suppress the generic "error: "
  * prefix so the prefix matches the sentinel exactly. Other LoaderError
  * values keep the legacy "error: " prefix (unchanged stderr for MVP-2 tests). */

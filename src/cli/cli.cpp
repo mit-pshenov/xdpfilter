@@ -20,7 +20,7 @@ namespace xdpmf {
 
 namespace {
 
-constexpr std::string_view kProgName = "xdpmacfilter";
+constexpr std::string_view kProgName = "xdpfilter";
 
 /* Hex nibble → 0..15 or -1 on invalid. */
 [[nodiscard]] constexpr int hex_nibble(char c) noexcept

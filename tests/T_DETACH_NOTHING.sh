@@ -13,7 +13,7 @@
 #   - rc == 0  (per §5.21 D4 amendment to §5.4 state (a))
 #   - stderr does NOT contain literal substring 'error:' (matches the
 #     'error: ' prefix used by main.cpp for thrown errors)
-#   - post-state clean: xdp_prog_id lo empty AND /sys/fs/bpf/xdpmacfilter/lo
+#   - post-state clean: xdp_prog_id lo empty AND /sys/fs/bpf/xdpfilter/lo
 #     does not exist
 #
 # Depends on impl: src/loader/loader.cpp:401 throw drop (D4 impl scope).
@@ -38,8 +38,8 @@ if [[ -n "${pre_id}" ]]; then
     echo "       this fixture precondition is dirty; not the loader's fault." >&2
     exit 1
 fi
-if sudo -n test -e /sys/fs/bpf/xdpmacfilter/lo; then
-    echo "ERROR: /sys/fs/bpf/xdpmacfilter/lo already exists" >&2
+if sudo -n test -e /sys/fs/bpf/xdpfilter/lo; then
+    echo "ERROR: /sys/fs/bpf/xdpfilter/lo already exists" >&2
     echo "       this fixture precondition is dirty; cleanup expected." >&2
     exit 1
 fi
@@ -82,8 +82,8 @@ if [[ -n "${post_id}" ]]; then
     echo "FAIL: detach somehow attached/left XDP on lo (prog_id=${post_id})" >&2
     fail=1
 fi
-if sudo -n test -e /sys/fs/bpf/xdpmacfilter/lo; then
-    echo "FAIL: /sys/fs/bpf/xdpmacfilter/lo exists after no-op detach" >&2
+if sudo -n test -e /sys/fs/bpf/xdpfilter/lo; then
+    echo "FAIL: /sys/fs/bpf/xdpfilter/lo exists after no-op detach" >&2
     fail=1
 fi
 

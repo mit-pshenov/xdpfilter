@@ -18,7 +18,7 @@
 #include <bpf/libbpf.h>
 
 extern "C" {
-#include "mac_filter.skel.h"
+#include "xdpfilter.skel.h"
 }
 
 namespace xdpmf {
@@ -28,7 +28,7 @@ namespace xdpmf {
 class BpfSkeleton {
 public:
     BpfSkeleton() noexcept = default;
-    explicit BpfSkeleton(mac_filter_bpf* raw) noexcept : skel_(raw) {}
+    explicit BpfSkeleton(xdpfilter_bpf* raw) noexcept : skel_(raw) {}
 
     BpfSkeleton(const BpfSkeleton&)            = delete;
     BpfSkeleton& operator=(const BpfSkeleton&) = delete;
@@ -49,17 +49,17 @@ public:
 
     void reset() noexcept {
         if (skel_) {
-            mac_filter_bpf__destroy(skel_);
+            xdpfilter_bpf__destroy(skel_);
             skel_ = nullptr;
         }
     }
 
-    [[nodiscard]] mac_filter_bpf* get() const noexcept { return skel_; }
-    [[nodiscard]] mac_filter_bpf* operator->() const noexcept { return skel_; }
+    [[nodiscard]] xdpfilter_bpf* get() const noexcept { return skel_; }
+    [[nodiscard]] xdpfilter_bpf* operator->() const noexcept { return skel_; }
     [[nodiscard]] explicit operator bool() const noexcept { return skel_ != nullptr; }
 
 private:
-    mac_filter_bpf* skel_ = nullptr;
+    xdpfilter_bpf* skel_ = nullptr;
 };
 
 }  // namespace xdpmf

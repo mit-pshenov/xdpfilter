@@ -12,7 +12,7 @@
 #   3. Confirm XDP slot occupied: xdp_prog_id returns non-empty.
 #   4. (apply already exited — no loader process to kill.)
 #   5. Wait 1 s (defensive — give kernel any async settle).
-#      Belt-and-suspenders: pkill -9 -f xdpmacfilter to assert NO zombie.
+#      Belt-and-suspenders: pkill -9 -f xdpfilter to assert NO zombie.
 #   6. Inject 1 packet from MAC_X → STAT_PASS += 1 (filter alive).
 #   7. Inject 1 packet from MAC_Y → STAT_DROP_DENY += 1 (default drop alive).
 #   8. Re-invoke apply config_apply_swap_b.yaml (exercises
@@ -42,13 +42,13 @@ stderr_apply_b=$(mktemp /tmp/xdpmf-persist-apply-b-stderr.XXXXXX)
 cleanup_persist() {
     set +e
     # Per §6.25 cleanup + HK-10 §5.30 fix: pkill any zombie that matches
-    # OUR iface's argv (NOT a broad `-f xdpmacfilter` which would clobber
-    # any concurrent xdpmacfilter invocation belonging to a parallel test
+    # OUR iface's argv (NOT a broad `-f xdpfilter` which would clobber
+    # any concurrent xdpfilter invocation belonging to a parallel test
     # session). Iface-scoped match: the loader's argv always carries
-    # `--iface ${IFACE_A}`, so the regex `xdpmacfilter.*${IFACE_A}` matches
+    # `--iface ${IFACE_A}`, so the regex `xdpfilter.*${IFACE_A}` matches
     # only our own loader processes. Unlink the link pin (last reference
     # drop should trigger kernel-side XDP detach).
-    sudo -n pkill -9 -f "xdpmacfilter.*${IFACE_A}" 2>/dev/null
+    sudo -n pkill -9 -f "xdpfilter.*${IFACE_A}" 2>/dev/null
     sudo -n rm -f "${PIN_DIR}/link" 2>/dev/null
     cleanup_veth
     rm -f "${stderr_apply_a}" "${stderr_apply_b}"
@@ -77,8 +77,8 @@ echo "--- end stderr ---"
 
 # Per §5.26 trust_model stderr sub-decision: apply ALWAYS logs `trust_model=<mode>` at attach entry.
 # §6.25 asserts the format here per design.md:4370-4371. [POST-REVIEW SWEEP round 1]
-if ! grep -qE 'xdpmacfilter: trust_model=strict' "${stderr_apply_a}"; then
-    echo "FAIL[1b]: stderr missing 'xdpmacfilter: trust_model=strict' log line" >&2
+if ! grep -qE 'xdpfilter: trust_model=strict' "${stderr_apply_a}"; then
+    echo "FAIL[1b]: stderr missing 'xdpfilter: trust_model=strict' log line" >&2
     fail=1
 fi
 
@@ -112,10 +112,10 @@ echo "prog_id after apply = '${prog_after_apply}'"
 # Apply exited foreground; nothing to kill. But assert no zombie tied to
 # OUR iface (HK-10 §5.30: iface-scoped pgrep/pkill to avoid clobbering a
 # parallel session's loader processes).
-if pgrep -f "xdpmacfilter.*${IFACE_A}" >/dev/null 2>&1; then
-    echo "WARN: found a running xdpmacfilter process targeting ${IFACE_A} — apply should have exited" >&2
+if pgrep -f "xdpfilter.*${IFACE_A}" >/dev/null 2>&1; then
+    echo "WARN: found a running xdpfilter process targeting ${IFACE_A} — apply should have exited" >&2
     # Belt-and-suspenders kill per §6.25 step 10 (optional), iface-scoped.
-    sudo -n pkill -9 -f "xdpmacfilter.*${IFACE_A}" 2>/dev/null || true
+    sudo -n pkill -9 -f "xdpfilter.*${IFACE_A}" 2>/dev/null || true
     sleep 0.2
 fi
 

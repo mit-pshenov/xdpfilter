@@ -118,7 +118,7 @@ cleanup_test() {
         wait "${EXPORTER_PID}" 2>/dev/null
     fi
     cleanup_veth
-    sudo -n rm -rf "/run/xdpmacfilter/${IFACE_A}" 2>/dev/null
+    sudo -n rm -rf "/run/xdpfilter/${IFACE_A}" 2>/dev/null
     rm -f "${body}" "${exp_log}" "${stderr_file}" "${apply_log}"
     set -e
 }

@@ -1,5 +1,5 @@
 /*
- * mac_filter.bpf.c — XDP classifier: 9-axis bit-vector AND match.
+ * xdpfilter.bpf.c — XDP classifier: 9-axis bit-vector AND match.
  *
  * Per frame, AND-compose up to 9 axes (dst/src CIDR v4+v6, proto, dst_port,
  * vlan, mac, ethertype) into `acc`; the matched rule = __builtin_ffsll(acc)-1
@@ -23,7 +23,7 @@
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>     /* §5.27: bpf_htons for ETH_P_IP compare */
-#include "common/mac_filter.h"
+#include "common/xdpfilter.h"
 
 /* §5.30 HK-5 (MVP-3.4.5): leaf-null-check / bounds-check branch hint. All
  * six call sites below mark verifier-MANDATED checks that are expected NOT
@@ -366,7 +366,7 @@ struct {
  * Persists, per ruleset half, the operator `id` occupying each internal
  * `slot` (= id-sorted rank): slot_rule_id[active*XDPMF_ALLOWLIST_MAX + slot].
  * The loader writes it (copy-forward old-slot recovery + exporter stable-id
- * labelling); mac_filter_prog NEVER references it, so the per-packet
+ * labelling); xdpfilter_prog NEVER references it, so the per-packet
  * instruction stream is byte-identical (HG-mvp-4.21-1) — only the .o maps
  * section gains this one entry.
  */
@@ -611,7 +611,7 @@ static __always_inline __u16 l3_after_vlan(void *eth, void *data_end, void **l3h
 }
 
 SEC("xdp")
-int mac_filter_prog(struct xdp_md *ctx)
+int xdpfilter_prog(struct xdp_md *ctx)
 {
     void *data     = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;

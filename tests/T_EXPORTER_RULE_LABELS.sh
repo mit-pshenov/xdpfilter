@@ -36,7 +36,7 @@
 # SKIP conditions: curl absent → exit 77.
 #
 # Note: per §5.31 EDIT-1 (Phase B platform-constraint correction), the
-# sidecar lives at /run/xdpmacfilter/<iface>/rule_index.json (NOT under
+# sidecar lives at /run/xdpfilter/<iface>/rule_index.json (NOT under
 # bpffs ${PIN_DIR}). The orphan-tolerance sub-test deletes the file at
 # the corrected path; the BPF map `rule_counters` still lives under
 # bpffs at ${PIN_DIR}/<iface>/rule_counters.
@@ -94,8 +94,8 @@ metrics_body2=$(mktemp /tmp/xdpmf-rulelabel-body2.XXXXXX)
 metrics_body3=$(mktemp /tmp/xdpmf-rulelabel-body3.XXXXXX)
 EXPORTER_PID=""
 
-# §5.31 EDIT-1: sidecar path = /run/xdpmacfilter/<iface>/rule_index.json
-SIDECAR_ROOT="/run/xdpmacfilter"
+# §5.31 EDIT-1: sidecar path = /run/xdpfilter/<iface>/rule_index.json
+SIDECAR_ROOT="/run/xdpfilter"
 SIDECAR_DIR="${SIDECAR_ROOT}/${IFACE_A}"
 SIDECAR_PATH="${SIDECAR_DIR}/rule_index.json"
 

@@ -1,3 +1,3 @@
-xdpmacfilter: trust_model=strict
-xdpmacfilter: trust_model=strict
-xdpmacfilter: replacing existing program on IFACE_A_PLACEHOLDER
+xdpfilter: trust_model=strict
+xdpfilter: trust_model=strict
+xdpfilter: replacing existing program on IFACE_A_PLACEHOLDER

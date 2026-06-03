@@ -1,5 +1,5 @@
 /*
- * mac_filter_bad.bpf.c — verifier-reject fixture for T_VERIFIER_REJECT
+ * xdpfilter_bad.bpf.c — verifier-reject fixture for T_VERIFIER_REJECT
  * (design §6.20, MVP-2 Robust / §5.24 Q4 Option (c)).
  *
  * Deliberately contains an unbounded-shape loop (bounded only by a
@@ -11,24 +11,24 @@
  *
  * Skeleton-compatibility constraints (load-bearing for §5.24 Q4):
  *   The loader's XDPMF_BPF_OBJECT_PATH override re-opens THIS .bpf.o
- *   into the skeleton generated from src/bpf/mac_filter.bpf.c. libbpf's
+ *   into the skeleton generated from src/bpf/xdpfilter.bpf.c. libbpf's
  *   skeleton-populate step looks up maps and programs BY NAME; if the
  *   override .bpf.o is missing any expected name, populate fails with
  *   -ENOENT BEFORE BPF_PROG_LOAD is ever called — surfacing as
  *   "failed to find skeleton map 'allowlist'" stderr instead of the
  *   verifier-shaped diagnostic §6.20 A3 asserts. To reach the verifier:
  *
- *   - Program SEC("xdp") name `mac_filter_prog` MUST match the real
+ *   - Program SEC("xdp") name `xdpfilter_prog` MUST match the real
  *     prog (matches the skeleton's prog field).
  *   - Map names `allowlist` and `stats` MUST be present (skeleton
  *     populate looks them up by name).
  *   - Map shapes (types/key-size/value-size/max_entries) match the real
- *     declarations in src/bpf/mac_filter.bpf.c so the skeleton's typed
+ *     declarations in src/bpf/xdpfilter.bpf.c so the skeleton's typed
  *     accessors don't trip subtype mismatches; verifier-reject is
  *     orthogonal to map shape — the program rejection fires on its
  *     own bytecode regardless of map types.
  *
- * The function name `mac_filter_prog` is irrelevant for the
+ * The function name `xdpfilter_prog` is irrelevant for the
  * verifier-reject path (the verifier fires before any name-based
  * identity gate could run on this never-loaded program), but
  * skeleton-populate's prog-lookup also matches by name — so the
@@ -38,18 +38,18 @@
  * SKIP probe catches it and exits 77 (ctest SKIP); manual swap to an
  * OOB-deref backup pattern is the §5.24 Q4 documented fallback.
  *
- * Built via `add_bpf_object(mac_filter_bad …)` in tests/CMakeLists.txt;
+ * Built via `add_bpf_object(xdpfilter_bad …)` in tests/CMakeLists.txt;
  * the .bpf.o is loaded by our C++ loader at runtime when the test sets
- * XDPMF_BPF_OBJECT_PATH=${BUILD_DIR}/mac_filter_bad.bpf.o.
+ * XDPMF_BPF_OBJECT_PATH=${BUILD_DIR}/xdpfilter_bad.bpf.o.
  */
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
-#include "common/mac_filter.h"
+#include "common/xdpfilter.h"
 
 char LICENSE[] SEC("license") = "GPL";
 
 /*
- * Allowlist map — name + shape mirrors src/bpf/mac_filter.bpf.c so the
+ * Allowlist map — name + shape mirrors src/bpf/xdpfilter.bpf.c so the
  * skeleton's populate step succeeds. NOT pinned (LIBBPF_PIN_BY_NAME is
  * omitted) — this object is never reached past the verifier; pinning
  * intent is irrelevant.
@@ -73,7 +73,7 @@ struct {
 } stats SEC(".maps");
 
 SEC("xdp")
-int mac_filter_prog(struct xdp_md *ctx)
+int xdpfilter_prog(struct xdp_md *ctx)
 {
     void *data     = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;

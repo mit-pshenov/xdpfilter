@@ -2,7 +2,7 @@
 #
 # Single-instance daemon (NOT @-templated): scans ${XDPMF_BPFFS_ROOT}/*/stats
 # at every Prometheus scrape and emits per-iface labels — operators add or
-# remove ifaces via xdpmacfilter@<iface>.service; the exporter picks them up
+# remove ifaces via xdpfilter@<iface>.service; the exporter picks them up
 # dynamically (Q4 E1 direct read on scrape).
 #
 # Capability set is INTENTIONALLY MINIMAL — CAP_BPF only (D-3.4-6):
@@ -17,7 +17,7 @@
 
 [Unit]
 Description=XDP MAC/CIDR filter Prometheus exporter
-Documentation=file:///usr/share/doc/xdpmacfilter/FLEET_DEPLOYMENT.md
+Documentation=file:///usr/share/doc/xdpfilter/FLEET_DEPLOYMENT.md
 After=network-pre.target
 Wants=network-pre.target
 StartLimitBurst=5

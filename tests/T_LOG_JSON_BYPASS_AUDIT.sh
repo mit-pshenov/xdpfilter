@@ -6,7 +6,7 @@
 #
 # Trigger (PRIMARY):
 #   - setup_veth + attach (default mode) on IFACE_A allow=MAC_GOOD.
-#   - `xdpmacfilter bypass --iface IFACE_A --unsafe --reason T_LOG_JSON_test`
+#   - `xdpfilter bypass --iface IFACE_A --unsafe --reason T_LOG_JSON_test`
 #     under XDPMF_LOG_FORMAT=json (non-tty via setsid).
 #   - Capture stderr.
 #
@@ -182,7 +182,7 @@ if [[ "${rc_text}" -ne 0 ]]; then
 fi
 
 # Pre-§5.32 HK-4 audit-line ERE (mirrors T_BYPASS_INTERACTIVE_PROMPT line 309).
-audit_ere="xdpmacfilter: BYPASS activated on ${IFACE_A} by uid=[0-9]+ euid=[0-9]+ sudo_user=\"[^\"]*\" reason=\"T_LOG_JSON_text\"\$"
+audit_ere="xdpfilter: BYPASS activated on ${IFACE_A} by uid=[0-9]+ euid=[0-9]+ sudo_user=\"[^\"]*\" reason=\"T_LOG_JSON_text\"\$"
 if ! grep -qE -- "${audit_ere}" "${cap_text}"; then
     echo "FAIL[h]: text-mode HK-4 audit-line missing — PI-3.5-1 byte-equivalence violation" >&2
     echo "        expected ERE: ${audit_ere}" >&2
@@ -192,7 +192,7 @@ else
 fi
 
 # Text-mode line is NOT JSON.
-if grep -m1 'xdpmacfilter:' "${cap_text}" | jq -e '.' >/dev/null 2>&1; then
+if grep -m1 'xdpfilter:' "${cap_text}" | jq -e '.' >/dev/null 2>&1; then
     echo "FAIL[h2]: text-mode HK-4 line unexpectedly parses as JSON" >&2
     fail=1
 fi

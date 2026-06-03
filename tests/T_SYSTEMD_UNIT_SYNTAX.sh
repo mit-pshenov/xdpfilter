@@ -1,7 +1,7 @@
 #!/bin/bash
 # T_SYSTEMD_UNIT_SYNTAX — design §6.32 (MVP-3.3 / §5.28).
 #
-# `systemd-analyze verify systemd/xdpmacfilter@.service` accepts the unit
+# `systemd-analyze verify systemd/xdpfilter@.service` accepts the unit
 # (positive case) AND rejects a deliberately-broken copy (negation control).
 #
 # Per §6.32 Observable outcome:
@@ -28,7 +28,7 @@ fi
 
 # §5.28 tests/CMakeLists.txt amendment: SYSTEMD_UNIT_SRC carries the source
 # path. Fallback for ad-hoc invocation.
-SYSTEMD_UNIT_SRC="${SYSTEMD_UNIT_SRC:-${SOURCE_DIR}/systemd/xdpmacfilter@.service}"
+SYSTEMD_UNIT_SRC="${SYSTEMD_UNIT_SRC:-${SOURCE_DIR}/systemd/xdpfilter@.service}"
 
 # Sanity / smoke: the unit file must exist.
 if [[ ! -f "${SYSTEMD_UNIT_SRC}" ]]; then
@@ -41,7 +41,7 @@ trap 'rm -rf "${TMPDIR}"' EXIT
 
 # Per §6.32 trigger: stage the unit into TMPDIR preserving the canonical
 # template name; verify via instance form (arbitrary iface name).
-stage_unit="${TMPDIR}/xdpmacfilter@.service"
+stage_unit="${TMPDIR}/xdpfilter@.service"
 cp "${SYSTEMD_UNIT_SRC}" "${stage_unit}"
 
 fail=0
@@ -51,7 +51,7 @@ echo "=== POSITIVE: systemd-analyze verify on canonical unit"
 stdout_pos="${TMPDIR}/stdout.pos"
 stderr_pos="${TMPDIR}/stderr.pos"
 set +e
-systemd-analyze verify "${TMPDIR}/xdpmacfilter@verifycheck.service" \
+systemd-analyze verify "${TMPDIR}/xdpfilter@verifycheck.service" \
     >"${stdout_pos}" 2>"${stderr_pos}"
 rc_pos=$?
 set -e
@@ -99,7 +99,7 @@ echo
 echo "=== NEGATION: systemd-analyze verify on deliberately-broken copy ([Service] removed)"
 broken_dir=$(mktemp -d /tmp/xdpmf-systemd-broken.XXXXXX)
 trap 'rm -rf "${TMPDIR}" "${broken_dir}"' EXIT
-broken_unit="${broken_dir}/xdpmacfilter@.service"
+broken_unit="${broken_dir}/xdpfilter@.service"
 # awk state-machine: skip lines starting at "[Service]" up to (but
 # excluding) the next "[..." section header.
 awk '
@@ -125,7 +125,7 @@ fi
 stdout_neg="${broken_dir}/stdout.neg"
 stderr_neg="${broken_dir}/stderr.neg"
 set +e
-systemd-analyze verify "${broken_dir}/xdpmacfilter@verifycheck.service" \
+systemd-analyze verify "${broken_dir}/xdpfilter@verifycheck.service" \
     >"${stdout_neg}" 2>"${stderr_neg}"
 rc_neg=$?
 set -e

@@ -2,8 +2,8 @@
 # T_BPFFS_ROOT_SYMLINK — design §6.15 (MVP-2 Sec / §5.22 Item 2).
 #
 # Closes the symlink-vortex vector: a symlink placed at
-#   /sys/fs/bpf/xdpmacfilter            (bpffs root)         OR
-#   /sys/fs/bpf/xdpmacfilter/<iface>    (per-iface dir)
+#   /sys/fs/bpf/xdpfilter            (bpffs root)         OR
+#   /sys/fs/bpf/xdpfilter/<iface>    (per-iface dir)
 # MUST cause the loader to refuse with:
 #   - exit code 8 (LoaderError::PathRefused, per §4.1 + §5.22 Q3)
 #   - stderr containing literal substring 'symlink'
@@ -15,13 +15,13 @@
 # attach MUST succeed (rc==0) and detach succeeds (rc==0) — proves the
 # refusal is symlink-specific, not a permanent break.
 #
-# DESTRUCTIVE — corrupts /sys/fs/bpf/xdpmacfilter for the test's
+# DESTRUCTIVE — corrupts /sys/fs/bpf/xdpfilter for the test's
 # duration. Cleanup is mandatory and trap-driven (EXIT/INT/TERM/HUP).
 # CMake registers this test with RESOURCE_LOCK xdp_fixture; §6.13
 # T_DETACH_NOTHING was amended (per §5.22) to take the SAME lock so it
 # can't race the destructive setup window.
 #
-# Per design §6.15 Setup pre-check: if /sys/fs/bpf/xdpmacfilter is a
+# Per design §6.15 Setup pre-check: if /sys/fs/bpf/xdpfilter is a
 # real directory AND non-empty, abort early (exit 1 — NOT 77) — we
 # refuse to corrupt an in-use bpffs path. Empty real dir: snapshot
 # (record so cleanup re-creates) then rmdir before placing the symlink.
@@ -31,7 +31,7 @@ source "${TEST_DIR}/lib/common.sh"
 require_passwordless_sudo
 
 LOADER_BIN=$(find_loader)
-BPFFS_ROOT="/sys/fs/bpf/xdpmacfilter"
+BPFFS_ROOT="/sys/fs/bpf/xdpfilter"
 FAKE_ROOT="/tmp/xdpmf-fake-bpffs"
 FAKE_IFACE_DIR="/tmp/xdpmf-fake-iface"
 stderr_file=$(mktemp /tmp/xdpmf-symlink-stderr.XXXXXX)

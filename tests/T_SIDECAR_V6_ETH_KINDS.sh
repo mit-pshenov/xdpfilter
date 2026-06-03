@@ -81,7 +81,7 @@ ETH_FIXTURE="${TEST_DIR}/fixtures/config_valid_andeth.yaml"
 PORT=$(( 9417 + ($$ % 1000) ))
 echo "EXPORTER_PORT=${PORT}"
 
-SIDECAR_ROOT="/run/xdpmacfilter"
+SIDECAR_ROOT="/run/xdpfilter"
 SIDECAR_DIR="${SIDECAR_ROOT}/${IFACE_A}"
 SIDECAR_PATH="${SIDECAR_DIR}/rule_index.json"
 

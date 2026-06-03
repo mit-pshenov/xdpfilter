@@ -15,8 +15,8 @@
 # assertions would fail (post-state would show XDP gone).
 #
 # Pty-driver mechanics (per impl Phase 2.5 feedback): the naive
-# `script -qc 'echo y | xdpmacfilter bypass …'` pattern does NOT work —
-# the pipe between `echo` and `xdpmacfilter` makes the loader's stdin
+# `script -qc 'echo y | xdpfilter bypass …'` pattern does NOT work —
+# the pipe between `echo` and `xdpfilter` makes the loader's stdin
 # a pipe, NOT a pty, so `isatty(STDIN_FILENO)` returns false and the
 # loader treats the context as non-interactive. The fix: use python3's
 # `pty.openpty()` to make a real master/slave pair; feed the slave to
@@ -96,7 +96,7 @@ drive_pty() {
 import os, sys, pty, select, time, termios, tty, errno
 
 input_str = sys.argv[1]      # e.g. "y\n" or "n\n" or ""
-cmd = sys.argv[2:]           # full argv: nsenter ... xdpmacfilter bypass ...
+cmd = sys.argv[2:]           # full argv: nsenter ... xdpfilter bypass ...
 
 if not cmd:
     sys.stderr.write("drive_pty: no command given\n")
@@ -302,11 +302,11 @@ fi
 # either real user or <none>.
 # NOTE on regex anchoring: NO leading `^` — under our pty driver the
 # y/N prompt (no trailing newline) and the audit line end up sharing
-# the same captured line (`Continue? [y/N]: xdpmacfilter: BYPASS ...`).
+# the same captured line (`Continue? [y/N]: xdpfilter: BYPASS ...`).
 # The structural-field match against the substring is what HK-4 contracts;
 # anchoring to line-start would require coordinating the prompt's
 # newline behaviour, which is not HK-4 scope.
-audit_ere_pos="xdpmacfilter: BYPASS activated on ${IFACE_A} by uid=[0-9]+ euid=[0-9]+ sudo_user=\"[^\"]*\" reason=\"T_BYPASS_prompt\"\$"
+audit_ere_pos="xdpfilter: BYPASS activated on ${IFACE_A} by uid=[0-9]+ euid=[0-9]+ sudo_user=\"[^\"]*\" reason=\"T_BYPASS_prompt\"\$"
 if ! grep -qE -- "${audit_ere_pos}" "${stderr_pos}"; then
     echo "FAIL[1c]: positive prompt: audit-log missing or wrong shape" >&2
     echo "          expected ERE: ${audit_ere_pos}" >&2
@@ -345,7 +345,7 @@ if [[ -z "${post_id_neg}" ]]; then
 fi
 
 # (2c) Cancellation message present.
-if ! grep -qE -- 'xdpmacfilter: bypass cancelled by operator' "${stderr_neg}"; then
+if ! grep -qE -- 'xdpfilter: bypass cancelled by operator' "${stderr_neg}"; then
     echo "FAIL[2c]: negative prompt: stderr missing 'bypass cancelled by operator'" >&2
     fail=1
 fi
@@ -388,7 +388,7 @@ if [[ -z "${post_id_eof}" ]]; then
 fi
 
 # (3c) Cancellation message present.
-if ! grep -qE -- 'xdpmacfilter: bypass cancelled by operator' "${stderr_eof}"; then
+if ! grep -qE -- 'xdpfilter: bypass cancelled by operator' "${stderr_eof}"; then
     echo "FAIL[3c]: EOF prompt: stderr missing 'bypass cancelled by operator'" >&2
     fail=1
 fi
