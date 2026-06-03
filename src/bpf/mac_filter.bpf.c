@@ -1,34 +1,24 @@
 /*
- * mac_filter.bpf.c — XDP program with L3 dst-CIDR AND src-CIDR bit-vector match.
+ * mac_filter.bpf.c — XDP classifier: 9-axis bit-vector AND match.
  *
- * §5.43 (MVP-4.3): OR→AND structural pivot. The prior two independent OR
- * branches (MAC HASH + standalone src-CIDR LPM) are REPLACED by a single
- * bit-vector AND classification over two LPM axes (dst_cidr AND src_cidr):
- * acc = (lpm(dst_bitmask[active], /32 daddr) | wildcard[active*2+0])
- *     & (lpm(cidr_allowlist[active], /32 saddr) | wildcard[active*2+1]);
- * the matched rule id = __builtin_ffsll(acc)-1 (lowest-id survivor). MAC
- * matching is DEFERRED (HG-mvp-4.3-2) — the MAC maps stay declared + pinned
- * but UNCONSULTED (frozen); they return as a bit-vector axis in mvp-4.5.
+ * Per frame, AND-compose up to 9 axes (dst/src CIDR v4+v6, proto, dst_port,
+ * vlan, mac, ethertype) into `acc`; the matched rule = __builtin_ffsll(acc)-1
+ * (lowest internal slot wins). Three family arms (IPv4 / IPv6 / non-IP); the
+ * IPv6 arm walks extension headers to the true L4 (§5.55). Each axis term is
+ * (per-axis lpm/hash lookup) | wildcard[active*BITVEC_NUM_AXES + axis].
+ * Verdicts surface via the `stats` PERCPU_ARRAY (STAT_PASS / DROP_DENY /
+ * DROP_MALFORMED / PASS_CIDR).
  *
- * §5.27 (MVP-3.2): two-axis match per Q2 OR1 (MAC HASH first, short-circuit;
- * then on IPv4 frames lookup src_ip in the CIDR LPM_TRIE). On miss-both,
- * consult defaults[active_idx]. Non-IPv4 ethertypes (ARP, IPv6, VLAN-tagged,
- * ...) bypass the CIDR branch entirely — preserves the MVP-3.1 MAC-only
- * semantic for non-IP traffic. Decisions exposed via `stats` (4-slot
- * PERCPU_ARRAY now: STAT_PASS, STAT_DROP_DENY, STAT_DROP_MALFORMED,
- * STAT_PASS_CIDR).
+ * Atomic apply (§5.26): every axis is an ARRAY_OF_MAPS[2] indexed by a shared
+ * active_idx[0]; one userspace u32 store flips all axes at once (the inner-map
+ * TYPE is shared via named structs so &inner_a/&inner_b match the outer
+ * __array pointer-type contract). Internal slot is decoupled from the operator
+ * rule id (§5.61).
  *
- * §5.26 (MVP-3.1): atomic apply via ARRAY_OF_MAPS[2] + active_idx ARRAY[1] +
- * defaults ARRAY[2] (Q2 A1 + Q2-extension). §5.27 extends to a PARALLEL
- * cidr_rulesets_outer ARRAY_OF_MAPS[2] of LPM_TRIE inners — both outers
- * read the SAME active_idx snapshot at the head of the datapath, so a
- * single userspace u32 store at active_idx[0] is the atomic commit for
- * BOTH axes (Q1 AS1 — Composite-6 swap promise byte-equivalent to MVP-3.1).
- *
- * Inner-map TYPE shape is shared via the named `xdpmf_allowlist_inner` /
- * `xdpmf_cidr_inner` structs so &inner_a / &inner_b satisfy the outer
- * `__array(values, struct ...)` pointer-type contract without warning.
- * Runtime ruleset data lives ONLY in allowlist_a/_b / cidr_allowlist_a/_b.
+ * Lineage (full history in design.md / CHANGELOG, not restated here): MAC-only
+ * (§5.26) → +src-CIDR OR (§5.27) → OR→AND 2-axis pivot (§5.43) → +proto/port
+ * (§5.44) → vlan (§5.45) → mac axis (§5.47) → cidr6 (§5.53) → ethertype (§5.54)
+ * → IPv6 ext-walk (§5.55) → slot/id decouple (§5.61).
  */
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -45,54 +35,34 @@
 #define unlikely(x) __builtin_expect(!!(x), 0)
 #endif
 
-/* §5.27: ETH_P_IP (0x0800) is a CPP macro from linux/if_ether.h — that
- * header is not available in the BPF-target build (we get types from
- * vmlinux.h, but vmlinux.h is BTF-derived so contains only types, no
- * macros). Define inline; matches the IANA EtherType value byte-equivalently. */
+/* Protocol / EtherType constants defined inline: vmlinux.h is BTF-derived
+ * (types only, no CPP macros) and linux/if_ether.h + linux/in.h are unavailable
+ * in the BPF-target build. All values are byte-equivalent to their IANA /
+ * IEEE 802.1Q assignments. Trace: §5.27 (ETH_P_IP), §5.51/S1 (ETH_P_IPV6),
+ * §5.41/MVP-4.1 (VLAN TPIDs), §5.44 (IPPROTO_TCP/UDP), §5.55/S6 (ext-hdr protos). */
 #ifndef ETH_P_IP
 #define ETH_P_IP 0x0800
 #endif
-
-/* §5.51 (MVP-4.11 / S1) D-mvp-4.11-IPV6-DEFINE: ETH_P_IPV6 (0x86DD) inline —
- * same rationale as ETH_P_IP above (vmlinux.h is BTF-derived, types only, no
- * CPP macros; linux/if_ether.h is unavailable in the BPF-target build).
- * Byte-equivalent to the IANA IPv6 EtherType. */
 #ifndef ETH_P_IPV6
 #define ETH_P_IPV6 0x86DD
 #endif
-
-/* §5.41 (MVP-4.1) D-mvp-4.1-MACROS: VLAN TPIDs + tag-walk depth cap. Same
- * rationale as ETH_P_IP above — vmlinux.h is BTF-derived (types only, no CPP
- * macros) and linux/if_ether.h is unavailable in the BPF-target build. Values
- * are byte-equivalent to the IEEE 802.1Q (C-TAG) / 802.1AD (S-TAG) TPIDs.
- * XDPMF_VLAN_MAX_DEPTH is the single source of truth for the #pragma unroll
- * count (HG-mvp-4.1-1: 802.1Q + one stacked QinQ tag = depth 2). */
 #ifndef ETH_P_8021Q
 #define ETH_P_8021Q 0x8100
 #endif
 #ifndef ETH_P_8021AD
 #define ETH_P_8021AD 0x88A8
 #endif
+/* §5.41: 802.1Q (C-TAG) + one stacked QinQ (S-TAG) ⇒ walk depth 2; the single
+ * source of truth for the #pragma unroll count (HG-mvp-4.1-1). */
 #define XDPMF_VLAN_MAX_DEPTH 2
-
-/* §5.44 (MVP-4.4) D-mvp-4.4-Q3: IP-protocol numbers for the L4 dport extract.
- * Same rationale as ETH_P_IP / the VLAN TPIDs above — vmlinux.h is BTF-derived
- * (types only, no CPP macros) and linux/in.h is unavailable in the BPF-target
- * build. Values are byte-equivalent to the IANA-assigned IP protocol numbers. */
 #ifndef IPPROTO_TCP
 #define IPPROTO_TCP 6
 #endif
 #ifndef IPPROTO_UDP
 #define IPPROTO_UDP 17
 #endif
-
-/* §5.55 (MVP-4.15 / S6) D-mvp-4.15-EXT-CONSTS: IPv6 extension-header protocol
- * numbers for the bounded ext-header walk. Same rationale as the IPPROTO_TCP/UDP
- * and ETH_P_* inline-defines above — vmlinux.h is BTF-derived (types only, no
- * CPP macros) and linux/in.h is unavailable in the BPF-target build. Values are
- * byte-equivalent to the IANA-assigned IP protocol numbers. HOPOPTS/ROUTING/
- * DSTOPTS use struct ipv6_opt_hdr (length (hdrlen+1)*8); FRAGMENT uses struct
- * frag_hdr (fixed 8B); NONE is a terminal no-next-header. */
+/* §5.55: IPv6 ext-hdr protos for the bounded walk. HOPOPTS/ROUTING/DSTOPTS use
+ * ipv6_opt_hdr (len (hdrlen+1)*8); FRAGMENT = frag_hdr (fixed 8B); NONE terminal. */
 #ifndef IPPROTO_HOPOPTS
 #define IPPROTO_HOPOPTS 0
 #endif
