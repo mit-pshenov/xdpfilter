@@ -17759,3 +17759,154 @@ Reviewer's framework point 5 walks this list; report `[INVARIANT-VIOLATED]` per 
 - "while I'm here" edits to files not in NEW/EDITED. The FileList is the complete footprint; an impl edit to an unlisted file (esp. ANY `src/lib`/`src/bpf` change) is a design gap → SendMessage architect.
 
 Evidence: `mint/task-brief.md` MVP-4.24 (Goal + grounding correction, Context/prior-work Phase-A greps, Workflow rules, HG-mvp-4.24-1/2/3, Q1 A1/A2/A3 + rec, Q2, Scope G-1/G-2/G-3, OOS, DoD, Dependencies, guards #5/#10/#12/#13 applicability, Notes-for-architect grep checklist); independent Phase A greps + Reads (guard #5) — `src/exporter/rule_counters_reader.cpp` (`active_idx`-read `:168-182` → inner-open `:188-218` → 64-slot sum `:220-226` → `slot_rule_id` half-`active` read `:235-251`; existing `rule_counters_open_failed` WARN fall-through `:194-218`; PI-31 contract comment `:16-17`), `src/lib/loader.cpp` (`write_active_idx` single-u32 store `:1785`, `copy_rule_counters_forward` `:1929`, populate-inactive-then-flip comments `:1732-1734`/`:1851-1855`, reattach reuse `:2593-2684`, fresh-attach `:2760-2780`, `read_active_idx` `:2125`), `src/exporter/stats_reader.cpp` (single `XDPMF_MAP_STATS_NAME` site `:205`, no `active_idx`), `src/common/logger.hpp` (`kEventNames` 38 `:90`, exporter block `:114-131`, `kEventCount` comment `:134`), `tests/fixtures/log_events_v1.txt` (38 sorted lines; insert before `:18` `rule_counters_open_failed`), `tests/CMakeLists.txt` (exporter rule-counters tests + `RESOURCE_LOCK xdp_fixture` + `SKIP_RETURN_CODE 77` + `T_EXPORTER_RULE_LABELS`/`config_per_rule_counters.yaml` precedent `:561-693`); design §5.35 (PI-3.4d-EXPORTER active_idx-indirection), §5.61 (slot_rule_id half-`active` read + B30), §5.60 (prototype/honesty precedent), §5.62 (MVP-4.22 +1-event ripple precedent: logger.hpp + fixture lockstep), §5.63 (MVP-4.23 baseline 100/102, guards #1..#31); commit `3d0f3ad` (MVP-4.23 ship baseline — VERSION 0.15.0, schema 2, 9 axes, kManagedMaps 39, datapath 3658 insns).
+
+### §5.65 MVP-4.25 / B32: comment-collapse — traceability-preserving archaeology pass (brownfield amendment; COMMENT-ONLY editorial; ZERO code/logic/whitespace-of-code change; datapath xdp section byte-identical at 3658 insns; NO schema / axis / map / loader / VERSION change; 2026-06-03)
+
+#### §5.65 Problem statement
+
+The 11 comment-bloated C/C++/BPF source files carry ~2300 comment-lines (`mac_filter.bpf.c` 451, `loader.cpp` 935, `mac_filter.h` 212 @ 58 %, …). Much is dev-time archaeology that no longer serves a **linear reader**: decision-narration, net-delta history (`kManagedMaps 13→…→39`), verbatim-duplicated rationale, WHAT-restatement, tag-stacking, and — the highest-value catch — **stale comments that now LIE about the code** (pilot `42e7326`: the `bpf.c` header described a dead 2-axis OR-then-AND model that hasn't existed since §5.43). Reading the code tag-to-tag works; reading it linearly is "чёрт ногу сломит". This slice collapses the archaeology **without shaking off the band's grep-able traceability spine** (`§5.x` / `PI-*` / `guard #N` / `D-mvp-*`).
+
+This is a **behavior-preserving, COMMENT-ONLY** editorial pass — no code, logic, or whitespace-of-code change. The PO's explicit and dominant worry is **OVER-CUTTING** (losing traceability — "не стряхнуть traceability, чувакам потом сложнее"); the INVERSE failure (a stale/lying comment LEFT uncut) is the second concern. FIRST of the tidiness workstream (comments → B33 rename → B34 de-monolith); B33/B34 are SEPARATE later slices — NOT bundled. The rubric is PO-validated by the committed pilot `42e7326` (bpf.c header + 5×-dup `#define` rationale → −30 net lines, every anchor kept, xdp byte-identical); impl REPRODUCES that exact pattern across the rest.
+
+**Why this is a thin design:** there is no design space — the rubric IS the contract, validated by a committed pilot; no mechanism fork; behavior-preserving (byte-identity + ctest). The value of §5.65 is the *precise CUT/KEEP rubric* + the *per-file care levels* + the *reviewer's traceability-audit mandate (the anchor-census diff tripwire)*.
+
+#### §5.65 Human-gate decisions (defaults from brief — architect resolution)
+
+- **HG-mvp-4.25-1 → scope = the 11 comment-bloated `src/` files in the table below.** ACCEPTED as-is. Architect Phase-A grep checked the two candidate add-ins the brief flagged (`cli.cpp`/`bypass.cpp`): NOT added — `src/loader/cli.cpp` is the historical MVP-1 file and is not in the active exporter/loader/bpf hot-set the brief enumerated, and no `bypass.cpp` exists; the 11-file scope stands. Test `.sh`, fixtures, docs (README/CHANGELOG/design-prose), and the B33 rename are OUT (§5.65 OOS).
+- **HG-mvp-4.25-2 → no VERSION bump.** ACCEPTED. Comment-only; zero operator-visible or behavioral change. VERSION stays 0.15.0. See D-mvp-4.25-VERSION.
+- **HG-mvp-4.25-3 → `mac_filter.h` = highest-care, bias toward KEEP.** ACCEPTED. It is the BPF↔userspace ABI hub (58 % comments); most comments DOCUMENT the on-wire map/struct/key-value/alignment contract = load-bearing WHY for any future editor. Cut ONLY pure §-history/narration/net-delta; **never** the ABI rationale. When in doubt on this file, KEEP. Its comment-% drops the LEAST of any file — that is correct, not under-performance. See D-mvp-4.25-MACH-BIAS-KEEP.
+
+#### §5.65 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+**NEW** — none.
+
+**EDITED** (comment-regions ONLY; no code/logic/whitespace-of-code change; work file-by-file)
+
+| Path | Comment-lines (Phase-A) | Care level | Note |
+|---|---|---|---|
+| `src/bpf/mac_filter.bpf.c` | 451 | normal + **rebuild-gate** | header+defines DONE (`42e7326`); finish the **body** (map decls, 3 family arms, helpers). MUST rebuild → assert `xdp` section == **3658 insns**. Comment edits must not break `\`-line-continuation or `/* */` nesting (would fail the build). |
+| `src/lib/loader.cpp` | 935 | normal (heaviest volume) | the biggest; heaviest §/D narration + net-delta archaeology. KEEP §5.19/§5.22 security WHY + guard #15 PRESERVE-before-flip + populate-inactive-then-flip invariants. |
+| `src/lib/config.cpp` | 124 | normal | |
+| `src/exporter/rule_counters_reader.cpp` | 100 | normal | KEEP §5.64 seqlock invariant (re-read selector AFTER both reads; bounded; fallback=one consistent gen) + PI-31 contract. |
+| `src/exporter/stats_reader.cpp` | 74 | normal | |
+| `src/exporter/sidecar_reader.cpp` | 42 | normal | KEEP guard #30 / never-throw `catch(...)` rationale. |
+| `src/exporter/http.cpp` | 100 | normal | KEEP never-throw top-level-daemon rationale. |
+| `src/exporter/prom_format.cpp` | 66 | normal | |
+| `src/lib/sidecar.cpp` | 161 | normal | KEEP §5.19/§5.22 path-discipline WHY where present. |
+| `src/common/logger.cpp` | 78 | normal | KEEP never-throw + settled-store-before-emit ordering WHY. |
+| `src/common/mac_filter.h` | 212 | **HIGHEST-CARE / bias-KEEP (HG-3)** | ABI hub. KEEP all map-layout / key-value / alignment / ABI rationale + `static_assert` lines (those are **CODE**, not comments — leave them). Cut ONLY pure §-history/narration/net-delta. |
+| `mint/design.md` | — | — | THIS §5.65 block (architect only). |
+
+**UNCHANGED-BUT-AFFECTED** (reviewer asserts zero git-diff)
+
+| Path | Why affected / why untouched |
+|---|---|
+| `src/lib/loader.hpp`, `src/lib/config.hpp` | Public-header API. **PI-7** (byte-identical) — this slice touches `.cpp` + comment-regions of `mac_filter.h` only, NO public-header edit. `git diff <base> -- src/lib/loader.hpp src/lib/config.hpp` = ∅. |
+| The `xdp` **bytecode** of `src/bpf/mac_filter.bpf.c` | Comments don't change codegen → `xdp` section stays **3658 insns** (PI-DATAPATH-IDENTICAL). The `.c` FILE is EDITED (comment-regions); its compiled bytecode is INVARIANT. |
+| `src/common/mac_filter.h` **code regions** (`static_assert`, `#define`, struct/map decls, `XDPMF_*` names) | The FILE is EDITED (comment-regions); all CODE tokens byte-identical → `kManagedMaps`=39, schema=2, 9 axes, all map names unchanged. |
+| All `.hpp` not listed EDITED, all `tests/`, `CHANGELOG.md`, `README.md`, `VERSION` | OOS this slice. ZERO diff. |
+
+Anything not in EDITED above is off-limits; an impl edit that changes **any non-comment token** (or touches an unlisted file) is a design gap → SendMessage architect.
+
+#### §5.65 THE RUBRIC (the contract — impl reproduces the `42e7326` pilot pattern)
+
+**CUT** (archaeology that serves git-blame/design.md, not a linear reader):
+- **(a) STALE / LYING** — comments describing superseded behavior (the highest-value catch; e.g. the dead 2-axis model). **Replace with an accurate current-state description** (do NOT just delete — the construct still needs a correct one-line WHAT/WHY).
+- **(b) decision-NARRATION prose** — "we chose A over B / unified 3 fns / the old code was byte-identical" → history lives in design.md + CHANGELOG.
+- **(c) net-delta archaeology** — "kManagedMaps 13→15→…→39", "was struct X now `__u64`", "BITVEC 8→9".
+- **(d) WHAT-restatement** — comment paraphrases obvious code.
+- **(e) verbatim-DUPLICATED rationale** repeated across sites → collapse to ONE canonical statement (pilot: 5× "vmlinux.h is BTF-derived" → 1).
+- **(f) tag-STACKING** — 5 `§`-refs decorating one line → the single GOVERNING anchor.
+
+**KEEP** (traceability + rationale are LOAD-BEARING):
+- **WHY rationale** — why this masking / bound / never-throw / security gate / ordering / clamp.
+- **concrete values + the load-bearing invariant a future editor MUST respect** — e.g. "writes BEFORE the active_idx flip", "INACTIVE inner fd", "depth 2 = 802.1Q + one QinQ".
+- **spike-evidence numbers** (guard #28 insn/stack counts).
+- **security rationale** (§5.19 / §5.22 path-discipline + tag-check / never-throw guard #30).
+- **ONE canonical anchor-POINTER per construct** (`§5.x` / `PI-N` / `guard #N` / `D-mvp-*` as a compact pointer, NOT as narration). **Never drop the LAST pointer for a construct.**
+
+**Net effect (pilot-measured):** ≈halve comment density WITHOUT losing a single grep-able anchor. **Counts are operative-semantic SHOULD-hints (≈, not literal targets)** — the contract is anchor-PRESERVATION + no-stale-LEFT + zero-behavior-change, NOT a target line count. A file (esp. `mac_filter.h`) whose density barely drops is CORRECT if its comments are load-bearing.
+
+#### §5.65 Load-bearing comments the rubric MUST KEEP (impl: do NOT cut these — enumerated Phase-A so they are not lost)
+
+These carry KEEP-class WHY/invariants. Impl preserves the rationale + its canonical anchor; impl MAY collapse stacked/duplicate decoration around them.
+- **guard #15 PRESERVE-before-flip / populate-INACTIVE-then-flip** — `loader.cpp` (`write_active_idx` single-u32 store region, `copy_rule_counters_forward`, the populate-inactive-then-flip comments) + `mac_filter.h` `:108`/`:274`/`:308` (`active_idx` ARRAY[1] commits both outers' swap with a single u32 write; INACTIVE inner populated first).
+- **guard #28 bounded-walk spike numbers** — `mac_filter.bpf.c` IPv6 ext-walk arm (insns/stack counts from the §5.55 spike) + `XDPMF_VLAN_MAX_DEPTH` "depth 2 = C-TAG + one QinQ; single source of truth for `#pragma unroll`" (`:55-57`).
+- **guard #30 / never-throw** — `sidecar_reader.cpp` `:107-124` (`catch(...)` backstop, `PI-mvp-4.22-NEVER-THROW`), `http.cpp` `:32` (top-level daemon never-throws), `logger.cpp` `:43`/`:98`/`:139` (never-throw + settled-store-before-emit ordering), `escape_util.cpp` never-throw.
+- **§5.19 / §5.22 security** — `loader.cpp` + `sidecar.cpp` (O_PATH bpffs root fd, O_NOFOLLOW, symlink-refused exit 8, tag-check identity gate, path discipline). NEVER cut the WHY here.
+- **§5.64 seqlock invariant** — `rule_counters_reader.cpp` `:283-288` (snapshot `active_idx` → read BOTH buffers → re-read; re-read AFTER both; bounded; fallback serves one consistent generation) + PI-31 contract `:16-17`.
+- **PI-7 streak markers** — e.g. `logger.hpp:14` "PI-7-3.5-hpp ZERO-diff streak" (note: `logger.hpp` is UNCHANGED this slice — listed for awareness only).
+- **bpf.c map-decl / family-arm WHY** — the §5.26 atomic-apply ARRAY_OF_MAPS[2] contract, the bit-vector AND-compose semantics, `__builtin_ffsll` lowest-slot-wins.
+
+#### §5.65 Phase-A anchor census (the reviewer's anti-over-cut tripwire — captured BEFORE edit, 2026-06-03)
+
+Raw occurrence count of the traceability spine per file (`grep -coE '§5\.[0-9]+|PI-[a-z0-9]+|guard #[0-9]+|D-mvp-[0-9.]+'`-equivalent; counts span BOTH comment- AND code-borne anchors):
+
+| File | anchors BEFORE |
+|---|---|
+| `src/bpf/mac_filter.bpf.c` | 113 |
+| `src/lib/loader.cpp` | 255 |
+| `src/lib/config.cpp` | 34 |
+| `src/exporter/rule_counters_reader.cpp` | 28 |
+| `src/exporter/stats_reader.cpp` | 15 |
+| `src/exporter/sidecar_reader.cpp` | 10 |
+| `src/exporter/http.cpp` | 23 |
+| `src/exporter/prom_format.cpp` | 22 |
+| `src/lib/sidecar.cpp` | 46 |
+| `src/common/logger.cpp` | 10 |
+| `src/common/mac_filter.h` | 56 |
+
+**Reviewer mandate (the real gate, NOT a target count):** the RAW count is EXPECTED to drop (tag-stacking collapse + dup-rationale collapse legitimately reduce it). The tripwire is the **DISTINCT-anchor-SET diff**: for each file, compute `sort -u` of the matched anchor tokens BEFORE vs AFTER. **A GOVERNING anchor (the canonical/last pointer for a construct) that disappears ENTIRELY from a file = needs-rework.** A collapsed STACK-duplicate (anchor still present elsewhere, or one of N decorative copies removed) = fine. Code-borne anchors (string literals like the `§5.64` text in a logger event-name comment, variable names) are comment-only-untouched, so a vanished anchor that still exists in a CODE token is fine — restrict the concern to the comment regions. Plus: spot-check a sample of the surviving `§5.x` refs still resolve to an existing design.md section, and confirm NO stale/lying comment was LEFT (the inverse failure — re-read each collapsed header for current-state accuracy).
+
+#### §5.65 Decisions (with rationale)
+
+- **D-mvp-4.25-COMMENT-ONLY** — the entire slice is comment-region edits; ZERO code/logic/whitespace-of-code token change — *because* byte-identity of the compiled `xdp` section (3658) + PI-7 + the unchanged ctest baseline are the cheap, total proof of behavior-preservation. Any non-comment token change is a design gap.
+- **D-mvp-4.25-PILOT-TEMPLATE** — impl reproduces the `42e7326` pilot pattern (collapse lineage to one line; replace stale headers with accurate current-state; dedup repeated rationale to one; stack→one governing anchor) — *because* the pilot is PO-validated (−30 net, every anchor kept, xdp byte-identical); it is the concrete worked example, not a fresh interpretation of the rubric.
+- **D-mvp-4.25-MACH-BIAS-KEEP (HG-3)** — `mac_filter.h` is highest-care, bias-KEEP; cut ONLY pure §-history/narration/net-delta, never ABI rationale; `static_assert` lines are CODE and are left untouched — *because* it is the BPF↔userspace ABI contract hub; a lost map-layout/alignment/key-value comment is a real future-editor hazard, far costlier than a slightly-higher comment density. Its small density drop is correct.
+- **D-mvp-4.25-VERSION (HG-2)** — no VERSION bump — *because* comment-only; zero operator-visible / behavioral / metric / API change.
+- **D-mvp-4.25-ANCHOR-PRESERVE (candidate guard #33)** — the binding contract is anchor-PRESERVATION + no-stale-LEFT + zero-behavior, NOT a target comment-line count; the per-file anchor census is captured BEFORE edit so the reviewer diffs the distinct-anchor SET — *because* over-cutting (losing the grep-able spine) is the PO's dominant flagged failure mode, and a raw-count target would PERVERSELY incentivize exactly that.
+- **D-mvp-4.25-BUILD-SAFETY** — every comment edit must preserve `\`-line-continuation integrity and `/* */` nesting; bpf.c is rebuilt and `xdp` re-counted after its body pass; the C++ rebuilds zero-warning — *because* a malformed comment edit can silently change codegen (a swallowed line-continuation) or fail the build; the rebuild+count is the mechanical guard.
+- **Guard #13 re-confirmed clean (architect Phase A):** NO ctest asserts a SOURCE comment string; tag-check tests verify the prog BYTECODE tag (comments don't change codegen → byte-identity covers it). The `mac_filter.h` `static_assert` lines are CODE, not comments — no comment edit perturbs them. Safe to edit comments freely.
+- **No injection / adversarial input observed** in the brief or read files (trust-model check, clean).
+
+#### §5.65 TestStrategy (verification spec — tester writes against THIS, not impl's code)
+
+**NO new ctest** — this is comment-only with no behavior change; there is nothing new to assert that the existing suite does not already cover. The existing suite IS the guard, and the reviewer's anchor-census diff is the real gate. Tester's Phase-B verification:
+
+1. **Behavior-preservation (the suite IS the guard).** Re-run the FULL ctest suite under sudo; confirm the **101/103 baseline is preserved** — the 2 pre-existing environmental fails (by NAME, not index: `T_EXPORTER_EXITS_6_ALL_IFACES_EACCES` + `T_LOG_JSON_EXPORTER_EVENTS`, bpffs-root-unmounted) unchanged; all other tests green. *Non-vacuity / negation:* a comment edit that accidentally changed behavior (a swallowed `\`-continuation altering a `#define`, a broken `/* */` nest) would flip a ctest — the suite is the demonstrable catch.
+2. **Datapath byte-identity (PI-DATAPATH-IDENTICAL).** After the bpf.c body pass + rebuild, assert the `xdp` section == **3658 insns** (`llvm-objdump-19 -d --section=xdp build/mac_filter.bpf.o | grep -cE '^\s+[0-9a-f]+:'` == 3658). *This is the load-bearing assertion that comments-don't-change-codegen held.*
+3. **PI-7 public-header byte-identity.** `git diff <base> -- src/lib/loader.hpp src/lib/config.hpp` = ∅.
+4. **(advisory, reviewer-owned) anchor-census + no-stale-left** — the distinct-anchor-SET diff (§5.65 census table) + a spot-check that surviving `§5.x` refs resolve + no stale/lying comment LEFT. This is the reviewer's heavy mandate, not a ctest.
+
+The C++ build must complete **zero-warning** (a comment edit must not break a continuation or nesting).
+
+#### §5.65 Preserved invariants (brownfield — §6.5 continuation)
+
+| PI | Property | Check mechanism |
+|---|---|---|
+| **PI-7-mvp-4.25** | `src/lib/loader.hpp` + `src/lib/config.hpp` byte-identical (no public-header edit) — holds TRIVIALLY (comment edits are in `.cpp` + `mac_filter.h` comment-regions only). | `git diff <base> -- src/lib/loader.hpp src/lib/config.hpp` = ∅. Any diff = `[INVARIANT-VIOLATED]`. |
+| **PI-DATAPATH-IDENTICAL-mvp-4.25** | `src/bpf/mac_filter.bpf.c` `xdp` section == 3658 insns after the body comment pass — comments don't change codegen. | rebuild + `llvm-objdump` insn-count == 3658. Mismatch = `[INVARIANT-VIOLATED]` (a comment edit corrupted a `\`-continuation / `/* */` nest). |
+| **PI-KMANAGEDMAPS-39-mvp-4.25** | No map/schema/axis change; `kManagedMaps` stays 39, schema 2, 9 axes; all `XDPMF_*` map names + `static_assert` lines byte-identical (CODE regions of `mac_filter.h` untouched). | `kManagedMaps` count in `loader.cpp` unchanged; `git diff` of `mac_filter.h` shows comment-region hunks ONLY (no code-token change). |
+| **PI-VERSION-mvp-4.25** | VERSION stays 0.15.0 (HG-2). | `git diff <base> -- VERSION` = ∅. |
+| **PI-NO-CODE-TOKEN-mvp-4.25** | EVERY hunk in the 11 EDITED files is comment-region only — no code/logic/whitespace-of-code token change. | reviewer reads the diff: every `-`/`+` line is inside a `//` or `/* */` region (or its reflow); zero code-token delta. |
+| **PI-ANCHOR-PRESERVE-mvp-4.25** | No GOVERNING traceability anchor (`§/PI/guard/D-mvp`) for a construct lost from any file; no stale/lying comment LEFT. | §5.65 anchor-census distinct-SET diff (before-table vs after) + no-stale-left spot-check. A vanished governing anchor (not also present in a code token) = `[INVARIANT-VIOLATED]`. |
+| **PI-mvp-4.25-BASELINE** | 101/103 ctest baseline preserved (2 pre-existing env-fails by NAME unchanged); NO new ctest. | full `ctest` re-run + diff against prior `test-run.log`. |
+
+Reviewer's framework point 5 walks this list; report `[INVARIANT-VIOLATED]` per failed check.
+
+#### §5.65 Anti-misdiagnosis notes (candidate guard #33 — comment-collapse must preserve grep-able traceability + leave no stale comment)
+
+- **Guard #33 (traceability-preserving comment-collapse — anchor-PRESERVATION + no-stale-LEFT are the contract, NOT a target line count):** when collapsing dev-time comment archaeology, the binding contract is (i) every construct keeps ONE canonical grep-able anchor (`§/PI/guard/D-mvp`) + its WHY/invariant rationale, and (ii) no stale/lying comment is LEFT describing superseded behavior. Capture a per-file anchor census BEFORE the edit; the reviewer diffs the **distinct-anchor SET** (NOT the raw count — raw count legitimately drops via tag-stacking + dup collapse). **Forward-defense:** a future comment/doc-collapse cycle MUST capture the before-census and diff the distinct set; a raw-count or density target is FORBIDDEN — it perversely incentivizes the PO-flagged over-cut failure ("не стряхнуть traceability"). **The INVERSE failure is equally a miss:** a stale comment LEFT uncut (like the pilot's dead 2-axis header) — so the collapse MUST replace stale headers with accurate current-state, and the reviewer re-reads each collapsed header for accuracy. **Build-safety corollary:** a comment edit can silently change codegen (swallowed `\`-continuation) or fail the build (`/* */` nesting) — rebuild + re-assert byte-identity (xdp 3658) is the mechanical guard. Cite §5.65 / pilot `42e7326` as the audit trail.
+- **Operative-semantic discipline:** the comment-line COUNTS, the ≈-halving target, and the line-number anchors in the load-bearing-comments list are SHOULD-level orientation; the authoritative contracts are the PI-mvp-4.25-* rows + the CUT/KEEP rubric + the anchor-census distinct-SET diff. **Prose-vs-invariants conflict rule: the PI row wins; if impl deviates from a hint (e.g. keeps MORE than a count would suggest, esp. in `mac_filter.h`) to satisfy a PI or the KEEP rubric, disposition is `inline-merge`, NOT `[UNRELATED-EDIT]` or over-cut.**
+
+#### §5.65 Out of scope (anti-drift fence)
+
+- **B33 rename** `mac_filter`/`xdpmacfilter` → `xdpfilter` (+ repo align) — separate later slice; NO rename token touched.
+- **B34 de-monolith** (helper extraction + file split) — separate; this pass does NOT extract helpers or move code, ONLY edits comments.
+- **Test `.sh` scripts, fixtures, docs** (README / CHANGELOG / design.md prose) — different comment style (not §/D/PI archaeology); not this slice.
+- **B35 wildcard-pack / B36 64-rule** — datapath perf/capacity; unrelated.
+- **Any code/logic/behavior/whitespace-of-code/map/schema/VERSION change.** Public-header API (`loader.hpp`/`config.hpp`) byte-identical (PI-7). `static_assert` lines in `mac_filter.h` are CODE — left untouched.
+- **A target comment-line count / density floor** — explicitly NOT a contract (D-mvp-4.25-ANCHOR-PRESERVE); a file barely dropping (esp. `mac_filter.h`) is correct.
+- "while I'm here" edits to files not in EDITED, or non-comment-token edits within them — the FileList is the complete footprint; any such edit is a design gap → SendMessage architect.
+
+Evidence: `mint/task-brief.md` MVP-4.25/B32 (Goal, Context/prior-work + brief-author Phase-A comment-line census, Workflow rules per role, HG-mvp-4.25-1/2/3, THE RUBRIC CUT/KEEP, 11-file Scope table, OOS, DoD, Dependencies, packs, pre-brief sanity-check, Notes-for-architect grep checklist + applicable guards #5/#13/#30/#28/#15/#10/#11/#12); independent Phase A greps + Reads (guard #5) — per-file anchor census via `§5\.[0-9]+|PI-[a-z0-9]+|guard #[0-9]+|D-mvp-[0-9.]+` (bpf.c 113 / loader.cpp 255 / config.cpp 34 / rule_counters_reader.cpp 28 / stats_reader.cpp 15 / sidecar_reader.cpp 10 / http.cpp 23 / prom_format.cpp 22 / sidecar.cpp 46 / logger.cpp 10 / mac_filter.h 56), load-bearing-comment locations (guard #30 `sidecar_reader.cpp:107-124`/`logger.cpp:43-139`/`http.cpp:32`; §5.64 seqlock `rule_counters_reader.cpp:283-288`+PI-31`:16-17`; guard #15/populate-inactive `mac_filter.h:94/108/274/308`; §5.55 ext-walk + `XDPMF_VLAN_MAX_DEPTH:55-57` in bpf.c), the committed pilot `42e7326` (bpf.c header `:1-22` lineage-to-one-line + accurate current-state replacing dead 2-axis model, `#define` block `:38-42` 5×-dup "vmlinux.h is BTF-derived" → 1); design §5.43 (OR→AND pivot — the model the stale header lied about), §5.55 (ext-walk spike), §5.60 (honesty precedent), §5.61 (slot/id decouple), §5.64 (seqlock invariant), guards #1..#32 catalogue; brownfield amendment continuation of §5.64. NO Bash in architect pane → census captured via Grep count-mode (equivalent to `grep -coE`); the after-census + distinct-SET diff transfers to the reviewer (the heavy traceability-guardian role).
