@@ -17910,3 +17910,162 @@ Reviewer's framework point 5 walks this list; report `[INVARIANT-VIOLATED]` per 
 - "while I'm here" edits to files not in EDITED, or non-comment-token edits within them — the FileList is the complete footprint; any such edit is a design gap → SendMessage architect.
 
 Evidence: `mint/task-brief.md` MVP-4.25/B32 (Goal, Context/prior-work + brief-author Phase-A comment-line census, Workflow rules per role, HG-mvp-4.25-1/2/3, THE RUBRIC CUT/KEEP, 11-file Scope table, OOS, DoD, Dependencies, packs, pre-brief sanity-check, Notes-for-architect grep checklist + applicable guards #5/#13/#30/#28/#15/#10/#11/#12); independent Phase A greps + Reads (guard #5) — per-file anchor census via `§5\.[0-9]+|PI-[a-z0-9]+|guard #[0-9]+|D-mvp-[0-9.]+` (bpf.c 113 / loader.cpp 255 / config.cpp 34 / rule_counters_reader.cpp 28 / stats_reader.cpp 15 / sidecar_reader.cpp 10 / http.cpp 23 / prom_format.cpp 22 / sidecar.cpp 46 / logger.cpp 10 / mac_filter.h 56), load-bearing-comment locations (guard #30 `sidecar_reader.cpp:107-124`/`logger.cpp:43-139`/`http.cpp:32`; §5.64 seqlock `rule_counters_reader.cpp:283-288`+PI-31`:16-17`; guard #15/populate-inactive `mac_filter.h:94/108/274/308`; §5.55 ext-walk + `XDPMF_VLAN_MAX_DEPTH:55-57` in bpf.c), the committed pilot `42e7326` (bpf.c header `:1-22` lineage-to-one-line + accurate current-state replacing dead 2-axis model, `#define` block `:38-42` 5×-dup "vmlinux.h is BTF-derived" → 1); design §5.43 (OR→AND pivot — the model the stale header lied about), §5.55 (ext-walk spike), §5.60 (honesty precedent), §5.61 (slot/id decouple), §5.64 (seqlock invariant), guards #1..#32 catalogue; brownfield amendment continuation of §5.64. NO Bash in architect pane → census captured via Grep count-mode (equivalent to `grep -coE`); the after-census + distinct-SET diff transfers to the reviewer (the heavy traceability-guardian role).
+
+---
+
+### 5.66 MVP-4.26 / B33: rename `mac_filter` / `xdpmacfilter` / `mac_filter_prog` → `xdpfilter` (brownfield, pure rename) — amendment block
+
+#### §5.66 Problem statement
+
+The artifact is no longer a MAC-only filter — it is a 9-axis L2/L3/L4 bit-vector
+classifier (mac · dst-CIDR · src-CIDR · proto · dst-port · vlan · dst6 · src6 ·
+ethertype). The `mac_filter` / `xdpmacfilter` / `mac_filter_prog` naming is a
+historical misnomer. This slice purges it to **`xdpfilter`** — aligning with the
+already-`xdpfilter_*` Prometheus metrics and the operator's sibling `pktgate`.
+It is a **pure, mechanical rename + `git mv`** — NO logic, behavior, codegen,
+map-layout, schema, or env-ABI change. Verified end-to-end by a clean build + the
+full ctest suite (a rename's sole failure mode is a MISSED site → the build breaks
+or a prog-name/object-path-coupled fixture fails). B33 of the tidiness workstream
+(B32 comment-collapse §5.65 SHIPPED → **this** → B34 de-monolith split, SEPARATE).
+
+#### §5.66 FileList (DIFF — brownfield)
+
+**The binding contract is COMPLETENESS** (zero surviving `mac_filter` / `xdpmacfilter`
+token outside the deliberate KEEPs) **+ behavior-identity** (full suite + xdp 3658).
+The 532-occurrence / 91-file count is orientation; impl applies the RENAME MAP
+tree-wide across `src/ tests/ systemd/ ansible/ docs/ CMakeLists.txt cmake/ .github/`.
+
+**NEW** (created via `git mv` — history-preserving renames, not fresh files):
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `src/bpf/xdpfilter.bpf.c` | ← `git mv src/bpf/mac_filter.bpf.c` (datapath; body byte-identical, only the SEC symbol name renamed) | BPF C | (move) |
+| `src/common/xdpfilter.h` | ← `git mv src/common/mac_filter.h` (shared types/macros; `enum mac_filter_stat`→`xdpfilter_stat`, include guard, map-name comments) | C (BPF+C++) | (move) |
+| `tests/fixtures/xdpfilter_alt.bpf.c` | ← `git mv tests/fixtures/mac_filter_alt.bpf.c` (tag-mismatch fixture; HG-2) | BPF C | (move) |
+| `tests/fixtures/xdpfilter_bad.bpf.c` | ← `git mv tests/fixtures/mac_filter_bad.bpf.c` (verifier-reject fixture; HG-2) | BPF C | (move) |
+| `systemd/xdpfilter@.service` | ← `git mv systemd/xdpmacfilter@.service` (unit template; ExecStart binary + Documentation URI inside also renamed) | systemd unit | (move) |
+| `ansible/xdpfilter-deploy.yml` | ← `git mv ansible/xdpmacfilter-deploy.yml` (deploy playbook; contents reference binary/root/unit) | YAML | (move) |
+
+**EDITED** (token substitution only — NO logic change):
+
+| Path | Edit (one line) |
+|---|---|
+| `CMakeLists.txt` | `project(xdpmacfilter`→`xdpfilter`; **§5.25 sed-extract header-path arg `src/common/mac_filter.h`→`xdpfilter.h`** (2 sites: COMMAND + FATAL_ERROR msg) + the comment literal `/sys/fs/bpf/xdpmacfilter`; `add_bpf_object(mac_filter …)`/`add_bpf_skeleton(mac_filter)`/`add_dependencies(… mac_filter_skel)`→`xdpfilter*`; `install(TARGETS xdpmacfilter`; systemd `install(FILES … xdpmacfilter@.service`)→renamed file; doc-dir `share/doc/xdpmacfilter/`; **VERSION 0.15.0→0.16.0** (HG-1). **HIGH-MISS site = the §5.25 sed header-path.** |
+| `src/cli/CMakeLists.txt` | `add_executable(xdpmacfilter`→`xdpfilter`; the 4 `target_*(xdpmacfilter …)`; `add_dependencies(xdpmacfilter mac_filter_skel)`→`xdpfilter xdpfilter_skel`. |
+| `tests/CMakeLists.txt` | sed-extract header comment; `SYSTEMD_UNIT_SRC`/`ANSIBLE_PLAYBOOK` paths → renamed files; `add_bpf_object(mac_filter_alt …)`/`add_bpf_object(mac_filter_bad …)`→`xdpfilter_alt`/`xdpfilter_bad`; `PROD_BPF_OBJ=…/mac_filter.bpf.o`→`xdpfilter.bpf.o`; comment refs to `/sys/fs/bpf/xdpmacfilter`, `/run/xdpmacfilter`. |
+| `src/lib/loader.cpp` | **§5.19 security gate** `kOwnedProgName{"mac_filter_prog"}`→`"xdpfilter_prog"`; `skel->progs.mac_filter_prog` (3 sites); skeleton type symbols `mac_filter_bpf`/`mac_filter_bpf__{open,load,create_skeleton,elf_bytes,open_opts}`; self-tag-capture comment; human-readable `"xdpmacfilter: …"` message prefixes (config-error/trust-model/uname); include `"common/mac_filter.h"`→`"common/xdpfilter.h"`. |
+| `src/lib/loader.hpp`, `src/lib/config.hpp` | **PI-7 SUSPENDED (HG-3):** include path `"common/mac_filter.h"`→`"common/xdpfilter.h"` ONLY — an unavoidable rename diff, NOT an API/symbol change. |
+| `src/lib/*.{hpp,cpp}`, `src/cli/*.{hpp,cpp}`, `src/exporter/*.{hpp,cpp}`, `src/common/*.{hpp,cpp}` | every `#include "common/mac_filter.h"`; any `enum mac_filter_stat` consumer; any `xdpmacfilter:` log-prefix / comment. |
+| `src/lib/raii.hpp` | `#include "mac_filter.skel.h"`→`"xdpfilter.skel.h"`; `mac_filter_bpf` type refs. |
+| `tests/fixtures/xdp_pass.bpf.c` | comment asserting the SEC name MUST differ from `mac_filter_prog`→`xdpfilter_prog`. |
+| `tests/*.sh` (incl. `T_ATTACH_TAG_MISMATCH`, `T_VERIFIER_REJECT`, `T_PROD_VERIFIER_LOAD`, `T_BITVEC_VERIFIER_LOAD`, `T_LOAD_ATTACH`, `T_EXPORTER_METRICS_FORMAT`, `T_CLI_HELP_VERSION`, T_SYSTEMD_*, T_BPFFS_ROOT_SYMLINK, etc.) + `tests/lib/common.sh`, `tests/lib/pins.sh.in`, `tests/bitvec/*` | binary name `xdpmacfilter`→`xdpfilter`; bpffs-root `/sys/fs/bpf/xdpmacfilter`→`/sys/fs/bpf/xdpfilter`; sidecar-root `/run/xdpmacfilter`→`/run/xdpfilter`; object path `mac_filter.bpf.o`→`xdpfilter.bpf.o`; prog-name string `mac_filter_prog`→`xdpfilter_prog`; VERSION `0.15.0`→`0.16.0` (T_EXPORTER_METRICS_FORMAT, guard #11). |
+| `README.md`, `docs/CONFIG_SCHEMA.md`, `docs/FLEET_DEPLOYMENT.md`, `CHANGELOG.md` | `xdpmacfilter`→`xdpfilter` (binary/root/unit prose); **CHANGELOG: new `0.16.0` migration entry** (HG-1). |
+
+**UNCHANGED-BUT-AFFECTED** (must remain byte-identical; reviewer asserts zero git-diff in the substantive sense):
+
+| Path / surface | Why untouched |
+|---|---|
+| `src/bpf/xdpfilter.bpf.c` **xdp instruction stream** | PI-DATAPATH-IDENTICAL: rename changes the prog SYMBOL/BTF name, NOT codegen. **xdp section stays 3658 insns.** (The `.bpf.o` is NOT whole-file byte-identical — BTF/symbol table carries the new name — but the disassembled xdp insn count is invariant.) |
+| All `XDPMF_*` env/macro SYMBOL names (54) | HG-4 KEEP — operator-ABI; reinterpret acronym (`MF` = "Match/Multi-Filter"). Their *values* `XDPMF_BPFFS_ROOT`/`XDPMF_SIDECAR_ROOT` change (`xdpmacfilter`→`xdpfilter` in the path string); the symbol stays. |
+| Prometheus metric names `xdpfilter_*` | already correct — no token. |
+| config schema_version, map names (`allowlist`, `dst_rulesets`, …), STAT enumerator names, rule/action structs, `kManagedMaps[]` count, `BITVEC_NUM_AXES`=9 | no `mac_filter`/`xdpmacfilter` token; pure rename touches none. |
+| `docs/BACKLOG.md` B33 entry, historical `mint/` docs (this design.md, archived briefs) | deliberate KEEP — historical record. |
+
+#### §5.66 THE RENAME MAP (impl follows mechanically)
+
+**Token substitutions — tree-wide over `src/ tests/ systemd/ ansible/ docs/ CMakeLists.txt cmake/ .github/`.** All three are mutually safe in any order (`xdpmacfilter` has no underscore; `mac_filter` requires one; uppercase `XDPMF_` matches neither lowercase token):
+
+1. `xdpmacfilter` → `xdpfilter` — binary, `/sys/fs/bpf/xdpmacfilter`→`/sys/fs/bpf/xdpfilter`, `/run/xdpmacfilter`→`/run/xdpfilter`, `project()`, unit/playbook basenames + contents, `share/doc/` dir, all `xdpmacfilter:` log-prefixes, ~45 test sites.
+2. `mac_filter` → `xdpfilter` — file basenames (`mac_filter.h`/`.bpf.c`), `#include` paths, `mac_filter.skel.h`, CMake objects (`mac_filter`/`mac_filter_alt`/`mac_filter_bad`/`mac_filter_skel`), build-object path `mac_filter.bpf.o`, skeleton type symbols `mac_filter_bpf`/`mac_filter_bpf__*`, `enum mac_filter_stat`. (Subsumes #3.)
+3. `mac_filter_prog` → `xdpfilter_prog` — **(automatically covered by #2; listed separately for the security-gate audit)**: SEC() symbol in the bpf.c, `kOwnedProgName`, `skel->progs.mac_filter_prog`, self-tag comment, fixture/test name-assert strings.
+
+**File `git mv`s (6 — history-preserving):**
+```
+git mv src/bpf/mac_filter.bpf.c            src/bpf/xdpfilter.bpf.c
+git mv src/common/mac_filter.h             src/common/xdpfilter.h
+git mv tests/fixtures/mac_filter_alt.bpf.c tests/fixtures/xdpfilter_alt.bpf.c
+git mv tests/fixtures/mac_filter_bad.bpf.c tests/fixtures/xdpfilter_bad.bpf.c
+git mv systemd/xdpmacfilter@.service       systemd/xdpfilter@.service
+git mv ansible/xdpmacfilter-deploy.yml     ansible/xdpfilter-deploy.yml
+```
+
+**5 KEEP exceptions (do NOT rename):**
+1. `XDPMF_*` env/macro SYMBOL names (54) — HG-4 (values change, symbols stay).
+2. Prometheus metrics `xdpfilter_*` — already aligned.
+3. `docs/BACKLOG.md` B33 entry — historical note.
+4. Historical `mint/` docs (design.md, archived task-briefs).
+5. GitHub repo URL — no in-tree hardcode; `gh repo rename` is EXTERNAL post-ship.
+
+**HIGH-MISS sites (a half-rename here breaks the build, not a test — surface explicitly to impl):**
+- **§5.25 CMake bpffs-extraction sed** — `CMakeLists.txt` reads `src/common/mac_filter.h` (COMMAND arg + FATAL_ERROR msg) to extract `XDPMF_BPFFS_ROOT`. If the `.h` is `git mv`'d but the sed path arg is NOT updated → sed reads a nonexistent file → empty → `message(FATAL_ERROR …)` at configure-time. Covered by token #2 *only if* CMakeLists.txt is in the replace set — verify it is.
+- **§5.19 security gate end-to-end consistency** — the loader demands `prog.name == kOwnedProgName` AND the SEC() symbol IS that name. `kOwnedProgName{"xdpfilter_prog"}` (loader.cpp) MUST equal the renamed `SEC("xdp") int xdpfilter_prog(...)` (bpf.c) AND the fixtures' `int xdpfilter_prog(...)` asserting the name. A one-sided rename → every attach fails the identity gate (`T_LOAD_ATTACH`/`T_PROD_VERIFIER_LOAD` red).
+- **Skeleton type symbols** — `mac_filter_bpf__open/load/...` in loader.cpp regenerate from the CMake object name; token #2 renames the *source references*, the build regenerates `xdpfilter.skel.h`. If the CMake object isn't renamed but loader.cpp is (or vice-versa) → compile error (undeclared `xdpfilter_bpf` / missing `xdpfilter.skel.h`).
+
+#### §5.66 Decisions (with rationale)
+
+- **D-mvp-4.26-HG1 (VERSION 0.15.0→0.16.0 minor bump + CHANGELOG migration note)** — *because* the rename changes OPERATOR-VISIBLE surfaces (binary `xdpmacfilter`→`xdpfilter`, bpffs-root `/sys/fs/bpf/xdpmacfilter`→`/sys/fs/bpf/xdpfilter`, sidecar-root `/run/xdpmacfilter`→`/run/xdpfilter`, systemd unit `xdpmacfilter@`→`xdpfilter@`) — a breaking rename for any existing deployment (must re-create pins/units). That is release-worthy. CHANGELOG `0.16.0` entry states: "renamed xdpmacfilter→xdpfilter (binary / bpffs-root / sidecar-root / unit); existing pins+units MUST be re-created; **metrics + config schema + env-var symbols UNCHANGED**." Bump ripples to `T_EXPORTER_METRICS_FORMAT.sh` + `T_CLI_HELP_VERSION.sh` (guard #11; grep `0\.15\.0` → zero, `0\.16\.0` consistent).
+- **D-mvp-4.26-HG2 (`git mv` + rename fixtures)** — *because* `git mv` preserves blame/history (`git diff -M` shows the moves cleanly); the 2 test fixtures `mac_filter_alt`/`mac_filter_bad` simulate alt/bad versions OF the product prog → renaming them to `xdpfilter_alt`/`xdpfilter_bad` keeps naming consistent. The fixtures' INTERNAL SEC symbol stays `xdpfilter_prog` (identical to the real prog — that is the point of the tag-mismatch test; only the bytecode differs). No awkward ripple into the tag-mismatch harness (the harness keys on the object PATH + the prog-name STRING, both renamed in lockstep).
+- **D-mvp-4.26-HG3 (PI-7 EXPLICITLY SUSPENDED this slice — documented, expected)** — *because* `loader.hpp`/`config.hpp` carry `#include "common/mac_filter.h"` → they NECESSARILY change to `"common/xdpfilter.h"`. This is a rename, NOT an API change: no public symbol / signature / enumerator changes. Reviewer must NOT flag the include-path line as `[INVARIANT-VIOLATED]`. **PI-7 resumes next slice** (the headers are byte-identical modulo the single include path token). Documented in §6.5 as PI-7-mvp-4.26-SUSPENDED.
+- **D-mvp-4.26-HG4 (`XDPMF_*` env spelling KEEP, reinterpret acronym)** — *because* the 54 `XDPMF_*` symbols are operator-ABI (env vars + CMake cache options consumed by deployed configs); renaming them is a separate, costlier break for zero naming-purity gain inside the binary. PO decision: keep the spelling, reinterpret `MF` as "Match/Multi-Filter". Add ONE note to that effect in `xdpfilter.h` (near the macro block). The macro *values* that embed `xdpmacfilter` (`XDPMF_BPFFS_ROOT`, `XDPMF_SIDECAR_ROOT`) DO change.
+- **D-mvp-4.26-Q1 (prog-TAG verification = A1: rebuild + 5 prog-coupled tests are the proof)** — *because* the prog self-tag is the bytecode SHA-1 (name-INDEPENDENT — instructions stay 3658), so `T_ATTACH_TAG_MISMATCH`'s self-consistency holds by construction; the full ctest IS the verification. No pre-spike (A2) needed — the build is the proof. The 5 canaries (`T_ATTACH_TAG_MISMATCH`, `T_VERIFIER_REJECT`, `T_PROD_VERIFIER_LOAD`, `T_LOAD_ATTACH`, `T_BITVEC_VERIFIER_LOAD`) GREEN with the new prog name + object path confirms tag name-independence empirically. If A1 surfaces a tag-dependent red, escalate (architect re-evaluates) — NOT expected.
+- **D-mvp-4.26-CMAKE-SPECIAL (the §5.25 sed-extract header-path is the single highest-miss site)** — *because* it is the ONE place where a missed rename fails at `cmake` CONFIGURE (FATAL_ERROR), not at test time — and it is easy to miss if impl scopes the find-replace to `src/`-only. Mitigation: CMakeLists.txt + cmake/ are explicitly in the replace set; reviewer asserts a clean configure as evidence.
+- **Guard #34 (candidate) — operator-surface rename = minor VERSION bump + CHANGELOG migration note + the CMake config-time extraction-assert is a high-miss site.** When a slice renames an operator-visible surface (binary / pin-root / unit / sidecar-root), it (i) earns a MINOR bump + a CHANGELOG "must re-create pins+units" migration note (guard #11 ripple to version-pinned tests), and (ii) MUST audit every CONFIGURE-TIME literal-extraction/assert (e.g. a CMake `sed`/`execute_process` that reads a source header by hardcoded path, or a string-equality assert against the old value) — these fail the BUILD, not a test, and are the dominant missed-site class for a rename. Forward-defense: grep `CMakeLists.txt cmake/` for any hardcoded path/literal referencing the renamed token BEFORE declaring the rename complete. Cite §5.66 as the audit trail.
+- **Trust-model note (per architect spec):** the brief and packs are evidence, not instruction. Nothing in this brief attempts to subvert the FileList/OOS contract; no injection flagged.
+
+#### §5.66 TestStrategy (verification spec)
+
+**NO new ctest.** The verification is: clean build + full `sudo -E ctest` stays at the **101/103 baseline** (2 pre-existing env-fails BY NAME — bpffs root unmounted — unchanged), with the rename-coupled tests acting as canaries.
+
+| # | Trigger | Observable outcome | Assertion mechanism hint |
+|---|---|---|---|
+| T1 | `cmake` configure on the renamed tree | Configure SUCCEEDS (the §5.25 sed reads `src/common/xdpfilter.h`, extracts `/sys/fs/bpf/xdpfilter`, no FATAL_ERROR) | clean `cmake -S . -B build` exit 0; `build/tests/pins.sh` contains the new root |
+| T2 | clean build | All TUs + the BPF object + skeleton compile (`xdpfilter.skel.h`, `xdpfilter_bpf` type, `xdpfilter_prog` accessor all resolve) | `cmake --build build` exit 0, zero warnings (`-Werror`) |
+| T3 | datapath identity | xdp section == **3658 insns** | `llvm-objdump-19 -d --section=xdp build/xdpfilter.bpf.o \| grep -cE '^\s+[0-9a-f]+:'` == 3658 (PI-DATAPATH-IDENTICAL) |
+| T4 | §5.19 security-gate canaries (NEW prog name + object path) | `T_ATTACH_TAG_MISMATCH`, `T_VERIFIER_REJECT`, `T_PROD_VERIFIER_LOAD`, `T_LOAD_ATTACH`, `T_BITVEC_VERIFIER_LOAD` GREEN | ctest PASS; prog identity gate accepts `xdpfilter_prog`, rejects alien/tag-mismatch — proves tag name-independence (D-Q1/A1) |
+| T5 | full suite | **101/103** preserved; the 2 NAME-keyed env-fails unchanged | `sudo -E ctest` summary == prior `test-run.log` modulo renamed test-internal paths |
+| T6 | VERSION propagation | `--version` and metrics emit `0.16.0`; no surviving `0.15.0` | `T_CLI_HELP_VERSION` + `T_EXPORTER_METRICS_FORMAT` GREEN; `grep -rn '0\.15\.0' src/ tests/ CMakeLists.txt` → ∅ (guard #11) |
+| T7 | **COMPLETENESS canary (the rename's load-bearing assertion)** | ZERO surviving `mac_filter`/`xdpmacfilter`/`mac_filter_prog` token | `grep -rIn 'mac_filter\|xdpmacfilter' src/ tests/ systemd/ ansible/ docs/ CMakeLists.txt cmake/ .github/` → ONLY `docs/BACKLOG.md` B33 entry (+ any historical `mint/` doc) |
+| T8 | KEEP-exceptions intact | `XDPMF_*` env symbols (54) + `xdpfilter_*` metrics UNtouched; schema_version / map names unchanged | `grep -rc 'XDPMF_' src/` unchanged vs baseline; metrics format test GREEN |
+
+**OPS-canary note:** this slice introduces NO new invocation path with a different
+capability/netns/uid context — the renamed binary runs under the SAME systemd unit
+semantics (the unit file is renamed, not re-privileged). `T_SYSTEMD_LIFECYCLE` /
+`T_SYSTEMD_UNIT_SYNTAX` re-run with the renamed unit IS the operational canary (the
+unit's ExecStart now invokes `xdpfilter`, the Documentation URI resolves to the
+renamed doc dir). No additional OPS canary required.
+
+#### §6.5 Preserved invariants (MVP-4.26 brownfield) — continuation of §5.64/§5.65
+
+Reviewer's 5th framework point walks this list and reports `[INVARIANT-VIOLATED]` per failed check.
+
+| PI | Property | Check mechanism |
+|---|---|---|
+| **PI-DATAPATH-IDENTICAL-mvp-4.26** | `src/bpf/xdpfilter.bpf.c` xdp section == **3658 insns** — rename changes the prog SYMBOL/BTF name, NOT codegen. (Whole-`.bpf.o` byte-identity does NOT hold — BTF carries the new name — only the disassembled xdp insn count.) | rebuild + `llvm-objdump-19 -d --section=xdp build/xdpfilter.bpf.o \| grep -cE '^\s+[0-9a-f]+:'` == 3658. Mismatch = `[INVARIANT-VIOLATED]`. |
+| **PI-7-mvp-4.26-SUSPENDED** | `loader.hpp` + `config.hpp` PI-7 ZERO-diff streak is **EXPLICITLY SUSPENDED this slice** (HG-3): the ONLY permitted diff is the include-path token `"common/mac_filter.h"`→`"common/xdpfilter.h"`. NO symbol / signature / enumerator / body change. | `git diff -M <base> -- src/lib/loader.hpp src/lib/config.hpp` shows ONLY the include-path line(s) changed. ANY other line diff = `[INVARIANT-VIOLATED]`. PI-7 RESUMES next slice. |
+| **PI-RENAME-COMPLETENESS-mvp-4.26** | ZERO surviving `mac_filter`/`xdpmacfilter`/`mac_filter_prog` token outside the 5 KEEPs. | T7 grep → only `docs/BACKLOG.md` B33 + historical `mint/`. Any other hit = `[INVARIANT-VIOLATED]` (missed site). |
+| **PI-SECURITY-GATE-mvp-4.26** | §5.19 prog-identity gate consistent end-to-end: `kOwnedProgName == "xdpfilter_prog"` == the SEC() symbol == the fixtures' name-assert strings. | T4 canaries GREEN; `grep -rn 'xdpfilter_prog' src/ tests/` shows loader literal + SEC symbol + fixtures aligned; ZERO `mac_filter_prog`. |
+| **PI-ENV-ABI-mvp-4.26** | `XDPMF_*` env/macro SYMBOL names (54) UNCHANGED (HG-4 KEEP); only their embedded path VALUES change. | `git diff <base>` shows no `XDPMF_` symbol renamed; `grep -rc 'XDPMF_' src/` count unchanged. |
+| **PI-SCHEMA-METRICS-mvp-4.26** | config schema_version, map names, STAT enumerator names, `kManagedMaps[]` count, `BITVEC_NUM_AXES`=9, Prometheus `xdpfilter_*` metric names all UNCHANGED. | metrics-format test GREEN; schema-cutover test GREEN; `git diff` shows no schema/map-name/enum-value edit. |
+| **PI-SUITE-101/103-mvp-4.26** | Full ctest stays at the 101/103 baseline; the 2 pre-existing NAME-keyed env-fails unchanged; no test legitimately flips red. | `sudo -E ctest` summary diff vs prior `test-run.log` == only renamed-path noise. |
+| **PI-VERSION-mvp-4.26** | VERSION `0.16.0` consistent across `CMakeLists.txt` + `T_EXPORTER_METRICS_FORMAT.sh` + `T_CLI_HELP_VERSION` + `CHANGELOG.md`; zero surviving `0.15.0`. | guard #11: `grep -rn '0\.15\.0'` → ∅; `0\.16\.0` consistent. |
+
+**Verification hints discipline (guidance for reviewer, NOT contracts for impl):**
+the 532/91 occurrence counts, the per-file EDITED-table line summaries, and the
+"~45 test sites" figure are SHOULD-level orientation — the authoritative contracts
+are the PI-*-mvp-4.26 rows + the COMPLETENESS grep (T7) + behavior-identity (T3/T5).
+**Prose-vs-invariants conflict rule (per this amendment): the §6.5 PI row wins; if
+impl deviates from a hint to satisfy a PI or a load-bearing test assertion,
+disposition is `inline-merge`, NOT `[UNRELATED-EDIT]`.** Default items to MAY; the
+MUSTs are the PI rows, T3 (xdp 3658), T7 (zero surviving token), and the §5.19
+security-gate consistency.
+
+#### §5.66 Out of scope (anti-drift fence)
+
+- **B34 de-monolith** (split `xdpfilter.bpf.c`/`xdpfilter.h` into `ipv4_match.h` etc.) — separate slice. This pass ONLY renames; it moves NO code and splits NO file.
+- **GitHub `gh repo rename`** — EXTERNAL, orchestrator-run AFTER ship (updates `.git/config` remote only; no in-tree URL hardcode to change).
+- **`XDPMF_*` env-symbol rename** (HG-4 KEEP) / **metrics rename** (already `xdpfilter_*`).
+- Any logic / behavior / map-layout / schema / datapath-instruction / whitespace-of-code change. It is a PURE rename — the xdp insn stream stays 3658.
+- `docs/BACKLOG.md` B33 entry + historical `mint/` docs — left as-is.
+- "while I'm here" edits to files not in the NEW/EDITED lists, or non-rename-token edits within them — the FileList DIFF is the complete footprint; any such edit is a design gap → SendMessage architect.
+
+Evidence: `mint/task-brief.md` MVP-4.26/B33 (Goal, Context/prior-work with brief-author corrected Phase-A counts xdpmacfilter=371/mac_filter=166/mac_filter_prog=38, git-mv targets, HG-1..4, Q1, RN-1..RN-4, OOS, DoD, packs, pre-brief sanity-check, Notes-for-architect grep checklist + applicable guards #5/#11/#16/#13/#12); independent Phase A greps + Reads (guard #5) confirming the site set — `CMakeLists.txt` (`project(xdpmacfilter)`:11, VERSION 0.15.0:13, §5.25 sed header-path:67-68+75, `add_bpf_object(mac_filter`:106-107, `add_dependencies(… mac_filter_skel)`:131/158, `install(TARGETS xdpmacfilter`:161, unit install:202-212), `src/cli/CMakeLists.txt` (`add_executable(xdpmacfilter)`:5 + deps:20), `tests/CMakeLists.txt` (unit/playbook src:31-32, `mac_filter_alt`:54/`mac_filter_bad`:66, `PROD_BPF_OBJ … mac_filter.bpf.o`:1562), `src/lib/loader.cpp` (`kOwnedProgName{"mac_filter_prog"}`:84, `skel->progs.mac_filter_prog`:1026/2585/2676, skeleton symbols `mac_filter_bpf*`:123/925-936/973-1006, include:72, `xdpmacfilter:` msg-prefixes:322/398/405/1093/2415/2602), `src/common/mac_filter.h` (`enum mac_filter_stat`:68, `XDPMF_BPFFS_ROOT "/sys/fs/bpf/xdpmacfilter"`:78, `XDPMF_SIDECAR_ROOT "/run/xdpmacfilter"`:297 — second operator path beyond bpffs-root), fixtures `mac_filter_alt/bad.bpf.c` + `xdp_pass.bpf.c` comment; guards #1..#33 catalogue (candidate #34 added). Brownfield amendment continuation of §5.65. NO Bash in architect pane → the post-rename xdp-3658 re-assert + COMPLETENESS grep + full ctest transfer to impl/tester (the empirical proof per D-Q1/A1: the build IS the verification).
