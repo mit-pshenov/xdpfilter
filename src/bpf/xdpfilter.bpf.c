@@ -87,12 +87,18 @@ int xdpfilter_prog(struct xdp_md *ctx)
     if (em) {
         eth_mask = *em;
     }
-    __u64 wc_eth = 0;
-    __u32 wc_eth_key = active * BITVEC_NUM_AXES + BV_AXIS_ETHERTYPE;
-    __u64 *wc_eth_p = bpf_map_lookup_elem(&wildcard, &wc_eth_key);
-    if (wc_eth_p) {
-        wc_eth = *wc_eth_p;
+    /* §5.70 (MVP-4.30) B35 D-mvp-4.30-Q1-A2: ONE hoisted ruleset_state lookup
+     * above the family dispatch serves the eth axis + all 3 arms. `rs` is
+     * tracked as a PTR_TO_MAP_VALUE across the family branches; rs->wc[const] /
+     * rs->default_action are bounded field loads (no per-axis lookup, no per-axis
+     * NULL branch). NULL → DROP, consistent with the NULL-active_p / NULL-eth_inner
+     * drops at this same hoist point (active ∈ {0,1} ⇒ never NULL in practice). */
+    struct xdpmf_ruleset_state *rs = bpf_map_lookup_elem(&ruleset_state, &active);
+    if (unlikely(!rs)) {
+        bump_stat(STAT_DROP_DENY);
+        return XDP_DROP;
     }
+    __u64 wc_eth = rs->wc[BV_AXIS_ETHERTYPE];
 
     if (inner_proto == bpf_htons(ETH_P_IP)) {
         /* Verifier-required IPv4 header bounds check before daddr/saddr deref
@@ -138,65 +144,21 @@ int xdpfilter_prog(struct xdp_md *ctx)
         LOOKUP_INNER_OR_DROP(vlan_inner, vlan_rulesets);
         LOOKUP_INNER_OR_DROP(mac_inner, rulesets);
 
-        /* §5.43 D-mvp-4.3-Q2 wildcard halves: wildcard[active*BITVEC_NUM_AXES
-         * + axis]. A rule unconstrained on an axis lives here (and is ABSENT
-         * from that axis's LPM map — mutual exclusion). NULL → 0 (no wildcard
-         * survivors on that axis). */
-        __u64 wc_dst   = 0;
-        __u64 wc_src   = 0;
-        __u64 wc_proto = 0;
-        __u64 wc_port  = 0;
-        __u64 wc_vlan  = 0;
-        __u64 wc_mac   = 0;
-        __u32 wc_dst_key   = active * BITVEC_NUM_AXES + BV_AXIS_DST;
-        __u32 wc_src_key   = active * BITVEC_NUM_AXES + BV_AXIS_SRC;
-        __u32 wc_proto_key = active * BITVEC_NUM_AXES + BV_AXIS_PROTO;
-        __u32 wc_port_key  = active * BITVEC_NUM_AXES + BV_AXIS_PORT;
-        __u32 wc_vlan_key  = active * BITVEC_NUM_AXES + BV_AXIS_VLAN;
-        __u32 wc_mac_key   = active * BITVEC_NUM_AXES + BV_AXIS_MAC;
-        __u64 *wc_dst_p = bpf_map_lookup_elem(&wildcard, &wc_dst_key);
-        if (wc_dst_p) {
-            wc_dst = *wc_dst_p;
-        }
-        __u64 *wc_src_p = bpf_map_lookup_elem(&wildcard, &wc_src_key);
-        if (wc_src_p) {
-            wc_src = *wc_src_p;
-        }
-        __u64 *wc_proto_p = bpf_map_lookup_elem(&wildcard, &wc_proto_key);
-        if (wc_proto_p) {
-            wc_proto = *wc_proto_p;
-        }
-        __u64 *wc_port_p = bpf_map_lookup_elem(&wildcard, &wc_port_key);
-        if (wc_port_p) {
-            wc_port = *wc_port_p;
-        }
-        __u64 *wc_vlan_p = bpf_map_lookup_elem(&wildcard, &wc_vlan_key);
-        if (wc_vlan_p) {
-            wc_vlan = *wc_vlan_p;
-        }
-        __u64 *wc_mac_p = bpf_map_lookup_elem(&wildcard, &wc_mac_key);
-        if (wc_mac_p) {
-            wc_mac = *wc_mac_p;
-        }
-        /* §5.53 (MVP-4.13) C1: the v6 address axes' wildcard halves. A v4
-         * frame has NO v6 address ⇒ the dst6/src6 LPM survivors are 0 ⇒ those
-         * two AND-terms reduce to `& wc_dst6 & wc_src6`. A v4-only rule lives
-         * in wc_dst6/wc_src6 (family-blind lowering) so these terms are
-         * all-ones no-ops for v4-only configs (PI-mvp-4.13-IPV4-VERDICT); a
-         * v6-only rule is ABSENT from wc_dst6/wc_src6 ⇒ excluded from v4
-         * traffic (PI-mvp-4.13-CROSS-FAMILY). */
-        __u64 wc_dst6 = 0;
-        __u64 wc_src6 = 0;
-        __u32 wc_dst6_key = active * BITVEC_NUM_AXES + BV_AXIS_DST6;
-        __u32 wc_src6_key = active * BITVEC_NUM_AXES + BV_AXIS_SRC6;
-        __u64 *wc_dst6_p = bpf_map_lookup_elem(&wildcard, &wc_dst6_key);
-        if (wc_dst6_p) {
-            wc_dst6 = *wc_dst6_p;
-        }
-        __u64 *wc_src6_p = bpf_map_lookup_elem(&wildcard, &wc_src6_key);
-        if (wc_src6_p) {
-            wc_src6 = *wc_src6_p;
-        }
+        /* §5.70 (MVP-4.30) B35: per-axis wildcard halves via the hoisted `rs`
+         * (was 8 per-arm bpf_map_lookup_elem(&wildcard,...) sites). rs->wc[axis]
+         * mirrors the old wildcard[active*9+axis] 1:1. A rule unconstrained on an
+         * axis lives here (and is ABSENT from that axis's map — mutual exclusion).
+         * The v6 axes (wc_dst6/wc_src6) are all-ones no-ops for v4-only configs
+         * (PI-mvp-4.13-IPV4-VERDICT) / exclude v6-only rules from v4 traffic
+         * (PI-mvp-4.13-CROSS-FAMILY). */
+        __u64 wc_dst   = rs->wc[BV_AXIS_DST];
+        __u64 wc_src   = rs->wc[BV_AXIS_SRC];
+        __u64 wc_proto = rs->wc[BV_AXIS_PROTO];
+        __u64 wc_port  = rs->wc[BV_AXIS_PORT];
+        __u64 wc_vlan  = rs->wc[BV_AXIS_VLAN];
+        __u64 wc_mac   = rs->wc[BV_AXIS_MAC];
+        __u64 wc_dst6  = rs->wc[BV_AXIS_DST6];
+        __u64 wc_src6  = rs->wc[BV_AXIS_SRC6];
 
         /* /32 host-route LPM keys (network byte order, matches LPM_TRIE key
          * shape). LPM_TRIE returns the longest matching prefix's value — the
@@ -349,59 +311,19 @@ int xdpfilter_prog(struct xdp_md *ctx)
         LOOKUP_INNER_OR_DROP(vlan_inner, vlan_rulesets);
         LOOKUP_INNER_OR_DROP(mac_inner, rulesets);
 
-        /* All 8 wildcard halves. The v4 address axes (dst/src) contribute
-         * wildcard-only here: a v6 frame has NO v4 address ⇒ dst/src LPM
-         * survivors are 0 ⇒ `& (0|wc_dst) & (0|wc_src)` = `& wc_dst & wc_src`.
-         * A v4-only rule is ABSENT from wc_dst/wc_src ⇒ excluded from v6
-         * traffic (PI-mvp-4.13-CROSS-FAMILY). */
-        __u64 wc_dst   = 0;
-        __u64 wc_src   = 0;
-        __u64 wc_proto = 0;
-        __u64 wc_port  = 0;
-        __u64 wc_vlan  = 0;
-        __u64 wc_mac   = 0;
-        __u64 wc_dst6  = 0;
-        __u64 wc_src6  = 0;
-        __u32 wc_dst_key   = active * BITVEC_NUM_AXES + BV_AXIS_DST;
-        __u32 wc_src_key   = active * BITVEC_NUM_AXES + BV_AXIS_SRC;
-        __u32 wc_proto_key = active * BITVEC_NUM_AXES + BV_AXIS_PROTO;
-        __u32 wc_port_key  = active * BITVEC_NUM_AXES + BV_AXIS_PORT;
-        __u32 wc_vlan_key  = active * BITVEC_NUM_AXES + BV_AXIS_VLAN;
-        __u32 wc_mac_key   = active * BITVEC_NUM_AXES + BV_AXIS_MAC;
-        __u32 wc_dst6_key  = active * BITVEC_NUM_AXES + BV_AXIS_DST6;
-        __u32 wc_src6_key  = active * BITVEC_NUM_AXES + BV_AXIS_SRC6;
-        __u64 *wc_dst_p = bpf_map_lookup_elem(&wildcard, &wc_dst_key);
-        if (wc_dst_p) {
-            wc_dst = *wc_dst_p;
-        }
-        __u64 *wc_src_p = bpf_map_lookup_elem(&wildcard, &wc_src_key);
-        if (wc_src_p) {
-            wc_src = *wc_src_p;
-        }
-        __u64 *wc_proto_p = bpf_map_lookup_elem(&wildcard, &wc_proto_key);
-        if (wc_proto_p) {
-            wc_proto = *wc_proto_p;
-        }
-        __u64 *wc_port_p = bpf_map_lookup_elem(&wildcard, &wc_port_key);
-        if (wc_port_p) {
-            wc_port = *wc_port_p;
-        }
-        __u64 *wc_vlan_p = bpf_map_lookup_elem(&wildcard, &wc_vlan_key);
-        if (wc_vlan_p) {
-            wc_vlan = *wc_vlan_p;
-        }
-        __u64 *wc_mac_p = bpf_map_lookup_elem(&wildcard, &wc_mac_key);
-        if (wc_mac_p) {
-            wc_mac = *wc_mac_p;
-        }
-        __u64 *wc_dst6_p = bpf_map_lookup_elem(&wildcard, &wc_dst6_key);
-        if (wc_dst6_p) {
-            wc_dst6 = *wc_dst6_p;
-        }
-        __u64 *wc_src6_p = bpf_map_lookup_elem(&wildcard, &wc_src6_key);
-        if (wc_src6_p) {
-            wc_src6 = *wc_src6_p;
-        }
+        /* §5.70 (MVP-4.30) B35: all 8 wildcard halves via the hoisted `rs`. The
+         * v4 address axes (dst/src) contribute wildcard-only here: a v6 frame has
+         * NO v4 address ⇒ dst/src LPM survivors are 0 ⇒ `& wc_dst & wc_src`; a
+         * v4-only rule is ABSENT from wc_dst/wc_src ⇒ excluded from v6 traffic
+         * (PI-mvp-4.13-CROSS-FAMILY). */
+        __u64 wc_dst   = rs->wc[BV_AXIS_DST];
+        __u64 wc_src   = rs->wc[BV_AXIS_SRC];
+        __u64 wc_proto = rs->wc[BV_AXIS_PROTO];
+        __u64 wc_port  = rs->wc[BV_AXIS_PORT];
+        __u64 wc_vlan  = rs->wc[BV_AXIS_VLAN];
+        __u64 wc_mac   = rs->wc[BV_AXIS_MAC];
+        __u64 wc_dst6  = rs->wc[BV_AXIS_DST6];
+        __u64 wc_src6  = rs->wc[BV_AXIS_SRC6];
 
         /* /128 host-route v6 LPM keys: addr6 is network byte order
          * (addr6[0]=MSB), memcpy'd straight from ip6->daddr/saddr (no swap —
@@ -478,58 +400,19 @@ int xdpfilter_prog(struct xdp_md *ctx)
         LOOKUP_INNER_OR_DROP(vlan_inner, vlan_rulesets);
         LOOKUP_INNER_OR_DROP(mac_inner, rulesets);
 
-        /* All wildcard halves. The IP-family axes (dst/src/proto/port/dst6/src6)
-         * have NO real survivors on a non-IP frame ⇒ each reduces to its
-         * wildcard half. A rule constraining an IP-family axis is ABSENT from
-         * that axis's wildcard ⇒ excluded from non-IP traffic. */
-        __u64 wc_dst   = 0;
-        __u64 wc_src   = 0;
-        __u64 wc_proto = 0;
-        __u64 wc_port  = 0;
-        __u64 wc_vlan  = 0;
-        __u64 wc_mac   = 0;
-        __u64 wc_dst6  = 0;
-        __u64 wc_src6  = 0;
-        __u32 wc_dst_key   = active * BITVEC_NUM_AXES + BV_AXIS_DST;
-        __u32 wc_src_key   = active * BITVEC_NUM_AXES + BV_AXIS_SRC;
-        __u32 wc_proto_key = active * BITVEC_NUM_AXES + BV_AXIS_PROTO;
-        __u32 wc_port_key  = active * BITVEC_NUM_AXES + BV_AXIS_PORT;
-        __u32 wc_vlan_key  = active * BITVEC_NUM_AXES + BV_AXIS_VLAN;
-        __u32 wc_mac_key   = active * BITVEC_NUM_AXES + BV_AXIS_MAC;
-        __u32 wc_dst6_key  = active * BITVEC_NUM_AXES + BV_AXIS_DST6;
-        __u32 wc_src6_key  = active * BITVEC_NUM_AXES + BV_AXIS_SRC6;
-        __u64 *wc_dst_p = bpf_map_lookup_elem(&wildcard, &wc_dst_key);
-        if (wc_dst_p) {
-            wc_dst = *wc_dst_p;
-        }
-        __u64 *wc_src_p = bpf_map_lookup_elem(&wildcard, &wc_src_key);
-        if (wc_src_p) {
-            wc_src = *wc_src_p;
-        }
-        __u64 *wc_proto_p = bpf_map_lookup_elem(&wildcard, &wc_proto_key);
-        if (wc_proto_p) {
-            wc_proto = *wc_proto_p;
-        }
-        __u64 *wc_port_p = bpf_map_lookup_elem(&wildcard, &wc_port_key);
-        if (wc_port_p) {
-            wc_port = *wc_port_p;
-        }
-        __u64 *wc_vlan_p = bpf_map_lookup_elem(&wildcard, &wc_vlan_key);
-        if (wc_vlan_p) {
-            wc_vlan = *wc_vlan_p;
-        }
-        __u64 *wc_mac_p = bpf_map_lookup_elem(&wildcard, &wc_mac_key);
-        if (wc_mac_p) {
-            wc_mac = *wc_mac_p;
-        }
-        __u64 *wc_dst6_p = bpf_map_lookup_elem(&wildcard, &wc_dst6_key);
-        if (wc_dst6_p) {
-            wc_dst6 = *wc_dst6_p;
-        }
-        __u64 *wc_src6_p = bpf_map_lookup_elem(&wildcard, &wc_src6_key);
-        if (wc_src6_p) {
-            wc_src6 = *wc_src6_p;
-        }
+        /* §5.70 (MVP-4.30) B35: all wildcard halves via the hoisted `rs`. The
+         * IP-family axes (dst/src/proto/port/dst6/src6) have NO real survivors on
+         * a non-IP frame ⇒ each reduces to its wildcard half. A rule constraining
+         * an IP-family axis is ABSENT from that axis's wildcard ⇒ excluded from
+         * non-IP traffic. */
+        __u64 wc_dst   = rs->wc[BV_AXIS_DST];
+        __u64 wc_src   = rs->wc[BV_AXIS_SRC];
+        __u64 wc_proto = rs->wc[BV_AXIS_PROTO];
+        __u64 wc_port  = rs->wc[BV_AXIS_PORT];
+        __u64 wc_vlan  = rs->wc[BV_AXIS_VLAN];
+        __u64 wc_mac   = rs->wc[BV_AXIS_MAC];
+        __u64 wc_dst6  = rs->wc[BV_AXIS_DST6];
+        __u64 wc_src6  = rs->wc[BV_AXIS_SRC6];
 
         /* vlan exact-HASH only when the frame carried an outer tag (parallels
          * the IP arms); src-MAC exact-HASH (eth->h_source, VLAN-agnostic base
@@ -559,18 +442,13 @@ int xdpfilter_prog(struct xdp_md *ctx)
         if (acc != 0) {
             DISPATCH_MATCH(acc, active);  /* §5.68 fold #1 */
         }
-        /* acc == 0 → no rule matched; fall through to defaults[active]. */
+        /* acc == 0 → no rule matched; fall through to rs->default_action. */
     }
 
-    /* No match (non-IP with acc==0, or IPv4/IPv6 with acc==0) — consult
-     * defaults[active]. The same active_idx value indexes every outer; one u32
-     * flip swaps all. */
-    __u32 *default_p = bpf_map_lookup_elem(&defaults, &active);
-    if (unlikely(!default_p)) {
-        bump_stat(STAT_DROP_DENY);
-        return XDP_DROP;
-    }
-    if (*default_p == 1u) {
+    /* §5.70 (MVP-4.30) B35: no match (non-IP with acc==0, or IPv4/IPv6 with
+     * acc==0) — consult the folded rs->default_action (was defaults[active]; the
+     * hoisted `rs` already served it). 0=drop, 1=pass; byte-preserved semantic. */
+    if (rs->default_action == 1u) {
         bump_stat(STAT_PASS);
         return XDP_PASS;
     }

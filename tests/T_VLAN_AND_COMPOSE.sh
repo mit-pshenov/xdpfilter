@@ -133,7 +133,7 @@ if [[ "${rc}" -ne 0 ]]; then
     echo "FAIL[a1]: apply exit ${rc} (expected 0)" >&2
     exit 1
 fi
-for pin in vlan_rulesets wildcard; do
+for pin in vlan_rulesets ruleset_state; do
     if ! sudo -n test -e "${PIN_DIR}/${pin}"; then
         echo "FAIL[a2]: expected pin ${PIN_DIR}/${pin} missing (§5.45 DataStructures)" >&2
         fail=1

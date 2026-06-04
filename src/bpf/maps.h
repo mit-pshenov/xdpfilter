@@ -1,11 +1,14 @@
 #pragma once
 /*
- * maps.h — the 39 SEC(".maps") map objects + their inner-struct templates.
+ * maps.h — the SEC(".maps") map objects + their inner-struct templates.
  *
- * Moved verbatim from xdpfilter.bpf.c (MVP-4.29 / B34b, §5.69). Pure data
- * declarations; reused UNCHANGED. Included BEFORE classifier.h (its
- * __always_inline helpers reference map symbols at definition point).
- * Pure #include split: byte-identical post-preprocessing (xdp == 3658).
+ * Moved verbatim from xdpfilter.bpf.c (MVP-4.29 / B34b, §5.69). Included BEFORE
+ * classifier.h (its __always_inline helpers reference map symbols at definition
+ * point). §5.70 (MVP-4.30) B35: the `wildcard` + `defaults` ARRAYs collapse into
+ * ONE `ruleset_state` ARRAY-of-struct (one fewer map) — an INTENTIONAL map-schema
+ * VALUE-pack, so the datapath is NO LONGER byte-identical; correctness is held by
+ * verdict-identity (T_*_ORACLE_AGREEMENT) and the B37 insn gate is re-baselined
+ * to the measured post-pack count (D-mvp-4.30-REBASELINE).
  */
 
 #include "vmlinux.h"
@@ -103,20 +106,26 @@ struct {
 };
 
 /*
- * §5.43 wildcard: one combined ARRAY of __u64 indexed
- * wildcard[active * BITVEC_NUM_AXES + axis] (axis = BV_AXIS_*). A rule that does
- * NOT constrain an axis has its bit set here (and is ABSENT from that axis's
- * map); the datapath ORs the wildcard half into that axis's survivors. One
- * combined ARRAY (not per-axis symbols) because a runtime active_idx can select
- * only between slots of ONE indexed ARRAY, not between two top-level map symbols.
+ * §5.70 (MVP-4.30) B35: ruleset_state — one struct per ruleset half, holding
+ * the 9 per-axis wildcard __u64 halves (wc[BV_AXIS_*]) PLUS the folded default
+ * action (default_action: 0=drop, 1=pass). Replaces the prior `wildcard`
+ * ARRAY[RULESET_COUNT*AXES] of __u64 AND the `defaults` ARRAY[RULESET_COUNT] of
+ * __u32. Read ONCE per packet — hoisted above the family dispatch as a single
+ * inlined ARRAY lookup (key = active ∈ {0,1}), then rs->wc[axis] /
+ * rs->default_action are direct bounded field loads (D-mvp-4.30-Q1-A2 /
+ * D-mvp-4.30-Q2-FOLD). A rule that does NOT constrain an axis has its bit set in
+ * rs->wc[axis] (and is ABSENT from that axis's map); the datapath ORs the
+ * wildcard half into that axis's survivors. One indexed ARRAY (not per-axis
+ * symbols) because a runtime active_idx can select only between slots of ONE
+ * indexed ARRAY, not between top-level map symbols.
  */
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
     __type(key, __u32);
-    __type(value, __u64);
-    __uint(max_entries, XDPMF_RULESET_COUNT * BITVEC_NUM_AXES);
+    __type(value, struct xdpmf_ruleset_state);
+    __uint(max_entries, XDPMF_RULESET_COUNT);
     __uint(pinning, LIBBPF_PIN_BY_NAME);
-} wildcard SEC(".maps");
+} ruleset_state SEC(".maps");
 
 /*
  * §5.53 IPv6 dst/src-CIDR axes: LPM_TRIE bitmasks keyed by `struct xdpmf_cidr_v6`
@@ -274,18 +283,9 @@ struct {
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } active_idx SEC(".maps");
 
-/*
- * defaults: two-slot ARRAY indexed by the SAME active_idx — the default
- * action swaps atomically with the ruleset (Q2-extension). 0 = drop,
- * 1 = pass.
- */
-struct {
-    __uint(type, BPF_MAP_TYPE_ARRAY);
-    __type(key, __u32);
-    __type(value, __u32);
-    __uint(max_entries, XDPMF_RULESET_COUNT);
-    __uint(pinning, LIBBPF_PIN_BY_NAME);
-} defaults SEC(".maps");
+/* §5.70 (MVP-4.30) B35: the `defaults` ARRAY is RETIRED — the default action is
+ * folded into struct xdpmf_ruleset_state.default_action (see `ruleset_state`
+ * above), still swapped atomically with the ruleset via the shared active_idx. */
 
 /*
  * §5.61 (MVP-4.21) B30 D-mvp-4.21-Q1: slot_rule_id — USERSPACE-ONLY map.

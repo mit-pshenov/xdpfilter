@@ -140,17 +140,18 @@ constexpr ManagedMapEntry kManagedMaps[] = {
     { &SkelMapsT::cidr_allowlist_a, XDPMF_MAP_CIDR_INNER_A_NAME },
     { &SkelMapsT::cidr_allowlist_b, XDPMF_MAP_CIDR_INNER_B_NAME },
     { &SkelMapsT::cidr_rulesets,    XDPMF_MAP_CIDR_RULESETS_OUTER_NAME },
-    /* §5.43 dst-CIDR ARRAY_OF_MAPS trio + the single combined `wildcard` ARRAY
-     * (D-mvp-4.3-Q2 — ONE indexed map). The src-CIDR axis reuses the existing
-     * cidr_allowlist_a/_b/cidr_rulesets entries (value-only reshape, pin names
-     * unchanged — guard #16). */
+    /* §5.43 dst-CIDR ARRAY_OF_MAPS trio + §5.70 (MVP-4.30) B35 the single
+     * combined `ruleset_state` ARRAY-of-struct (REPLACES the prior `wildcard`
+     * ARRAY + the `defaults` ARRAY — net −1 managed map). The src-CIDR axis
+     * reuses the existing cidr_allowlist_a/_b/cidr_rulesets entries (value-only
+     * reshape, pin names unchanged — guard #16). */
     { &SkelMapsT::dst_bitmask_a,    XDPMF_MAP_DST_INNER_A_NAME },
     { &SkelMapsT::dst_bitmask_b,    XDPMF_MAP_DST_INNER_B_NAME },
     { &SkelMapsT::dst_rulesets,     XDPMF_MAP_DST_RULESETS_OUTER_NAME },
-    { &SkelMapsT::wildcard,         XDPMF_MAP_WILDCARD_NAME },
+    { &SkelMapsT::ruleset_state,    XDPMF_MAP_RULESET_STATE_NAME },
     /* §5.44 proto axis trio (proto_bitmask_a/_b + proto_rulesets, HASH) + port
-     * axis trio (port_ranges_a/_b + port_rulesets, ARRAY). `wildcard` unchanged
-     * (its max_entries grows via the BITVEC_NUM_AXES macro, not a new row). */
+     * axis trio (port_ranges_a/_b + port_rulesets, ARRAY). `ruleset_state`
+     * unchanged (one struct per ruleset half — fixed XDPMF_RULESET_COUNT). */
     { &SkelMapsT::proto_bitmask_a,  XDPMF_MAP_PROTO_INNER_A_NAME },
     { &SkelMapsT::proto_bitmask_b,  XDPMF_MAP_PROTO_INNER_B_NAME },
     { &SkelMapsT::proto_rulesets,   XDPMF_MAP_PROTO_RULESETS_OUTER_NAME },
@@ -175,9 +176,10 @@ constexpr ManagedMapEntry kManagedMaps[] = {
     { &SkelMapsT::ethertype_bitmask_b, XDPMF_MAP_ETHERTYPE_INNER_B_NAME },
     { &SkelMapsT::ethertype_rulesets,  XDPMF_MAP_ETHERTYPE_RULESETS_OUTER_NAME },
     { &SkelMapsT::active_idx,       XDPMF_MAP_ACTIVE_IDX_NAME },
-    { &SkelMapsT::defaults,         XDPMF_MAP_DEFAULTS_NAME },
+    /* §5.70 (MVP-4.30) B35: the `defaults` map is folded into `ruleset_state`
+     * (above) — its kManagedMaps row is RETIRED. */
     /* §5.61 B30: the userspace-only `slot_rule_id` ARRAY (slot→id per ruleset
-     * half), single-indexed like defaults/wildcard. Never referenced by
+     * half), single-indexed like ruleset_state. Never referenced by
      * xdpfilter_prog (HG-mvp-4.21-1). */
     { &SkelMapsT::slot_rule_id,     XDPMF_MAP_SLOT_RULE_ID_NAME },
     { &SkelMapsT::stats,            XDPMF_MAP_STATS_NAME },
@@ -1658,57 +1660,39 @@ void populate_port_inner_slot(int inner_fd, const std::vector<xdpmf_port_range>&
     }
 }
 
-/* §5.43 (MVP-4.3) D-mvp-4.3-Q2 + §5.44 (MVP-4.4) D-mvp-4.4-Q4 + §5.45 (MVP-4.5)
- * D-mvp-4.5-Q3 + §5.47 (MVP-4.7) D-mvp-4.7-Q4 + §5.53 (MVP-4.13) D-mvp-4.13-Q2:
- * write the INACTIVE half of the single combined `wildcard` ARRAY before the
- * active_idx flip — all EIGHT axis slots [inactive*BITVEC_NUM_AXES +
- * {DST,SRC,PROTO,PORT,VLAN,MAC,DST6,SRC6}]. The RESET-write (no copy-forward)
- * parallels populate_bitvec_inner_slot; the single active_idx u32 store commits
- * the wildcard swap together with the dst/src/proto/port/vlan/mac/dst6/src6/
- * defaults/rules/rule_counters swap. */
-void write_wildcard_slots(int wildcard_fd, std::uint32_t inactive,
-                          std::uint64_t wc_dst, std::uint64_t wc_src,
-                          std::uint64_t wc_proto, std::uint64_t wc_port,
-                          std::uint64_t wc_vlan, std::uint64_t wc_mac,
-                          std::uint64_t wc_dst6, std::uint64_t wc_src6,
-                          std::uint64_t wc_eth)
+/* §5.70 (MVP-4.30) B35 [supersedes §5.43 write_wildcard_slots + write_default_slot]:
+ * write the INACTIVE half of the single combined `ruleset_state` ARRAY-of-struct
+ * before the active_idx flip — the 9 per-axis wildcard halves (wc[BV_AXIS_*]) PLUS
+ * the folded default_action, in ONE bpf_map_update_elem (ARRAY values are written
+ * whole). The struct is ZERO-initialised (`val{}`) so `_pad` carries no
+ * uninitialised bytes (D-mvp-4.30-LAYOUT). RESET-write (no copy-forward,
+ * D-mvp-4.30-RESET): the whole struct is recomputed fresh each apply; the single
+ * active_idx u32 store commits the ruleset_state swap together with the
+ * dst/src/proto/port/vlan/mac/dst6/src6/rules/rule_counters swap. */
+void write_ruleset_state(int ruleset_state_fd, std::uint32_t inactive,
+                         std::uint64_t wc_dst, std::uint64_t wc_src,
+                         std::uint64_t wc_proto, std::uint64_t wc_port,
+                         std::uint64_t wc_vlan, std::uint64_t wc_mac,
+                         std::uint64_t wc_dst6, std::uint64_t wc_src6,
+                         std::uint64_t wc_eth, DefaultAction default_action)
 {
-    const struct {
-        std::uint32_t axis;
-        std::uint64_t value;
-        const char*   name;
-    } slots[] = {
-        { BV_AXIS_DST,       wc_dst,   "dst"       },
-        { BV_AXIS_SRC,       wc_src,   "src"       },
-        { BV_AXIS_PROTO,     wc_proto, "proto"     },
-        { BV_AXIS_PORT,      wc_port,  "port"      },
-        { BV_AXIS_VLAN,      wc_vlan,  "vlan"      },
-        { BV_AXIS_MAC,       wc_mac,   "mac"       },
-        { BV_AXIS_DST6,      wc_dst6,  "dst6"      },
-        { BV_AXIS_SRC6,      wc_src6,  "src6"      },
-        /* §5.54 (MVP-4.14): NET-NEW wildcard slot for the ethertype axis. */
-        { BV_AXIS_ETHERTYPE, wc_eth,   "ethertype" },
-    };
-    for (const auto& s : slots) {
-        const std::uint32_t key = inactive * BITVEC_NUM_AXES + s.axis;
-        const int rc = bpf_map_update_elem(wildcard_fd, &key, &s.value, BPF_ANY);
-        if (rc < 0) {
-            throw_loader(classify(rc, LoaderError::LoadFailed),
-                         std::format("bpf_map_update_elem(wildcard[{}] {}): {}",
-                                     key, s.name, std::strerror(-rc)));
-        }
-    }
-}
+    struct xdpmf_ruleset_state val{};
+    val.wc[BV_AXIS_DST]       = wc_dst;
+    val.wc[BV_AXIS_SRC]       = wc_src;
+    val.wc[BV_AXIS_PROTO]     = wc_proto;
+    val.wc[BV_AXIS_PORT]      = wc_port;
+    val.wc[BV_AXIS_VLAN]      = wc_vlan;
+    val.wc[BV_AXIS_MAC]       = wc_mac;
+    val.wc[BV_AXIS_DST6]      = wc_dst6;
+    val.wc[BV_AXIS_SRC6]      = wc_src6;
+    val.wc[BV_AXIS_ETHERTYPE] = wc_eth;
+    val.default_action = (default_action == DefaultAction::Pass) ? 1u : 0u;
 
-/* Write defaults_map[slot] = (default_action == Pass ? 1 : 0). */
-void write_default_slot(int defaults_fd, std::uint32_t slot, DefaultAction da)
-{
-    const std::uint32_t value = (da == DefaultAction::Pass) ? 1u : 0u;
-    const int rc = bpf_map_update_elem(defaults_fd, &slot, &value, BPF_ANY);
+    const int rc = bpf_map_update_elem(ruleset_state_fd, &inactive, &val, BPF_ANY);
     if (rc < 0) {
         throw_loader(classify(rc, LoaderError::LoadFailed),
-                     std::format("bpf_map_update_elem(defaults[{}]): {}",
-                                 slot, std::strerror(-rc)));
+                     std::format("bpf_map_update_elem(ruleset_state[{}]): {}",
+                                 inactive, std::strerror(-rc)));
     }
 }
 
@@ -2006,26 +1990,20 @@ void populate_all_axes(xdpfilter_bpf* skel, std::uint32_t slot,
         inactive_axis_fd(skel->maps.ethertype_bitmask_a, skel->maps.ethertype_bitmask_b, slot,
                          "inactive ethertype inner fd unavailable"),
         eth_low.entries, "ethertype");
-    // 7 wildcard — SINGLE map indexed by slot (D-mvp-4.8-FD-HELPER-SCOPE)
+    // 7 ruleset_state — §5.70 (MVP-4.30) B35: SINGLE map indexed by slot; the 9
+    //   wildcard halves + folded default_action in ONE struct write (replaces the
+    //   prior `wildcard` + `defaults` two-block populate). (D-mvp-4.8-FD-HELPER-SCOPE)
     {
-        const int wildcard_fd = bpf_map__fd(skel->maps.wildcard);
-        if (wildcard_fd < 0) {
-            throw_loader(LoaderError::LoadFailed, "wildcard fd unavailable");
+        const int ruleset_state_fd = bpf_map__fd(skel->maps.ruleset_state);
+        if (ruleset_state_fd < 0) {
+            throw_loader(LoaderError::LoadFailed, "ruleset_state fd unavailable");
         }
-        write_wildcard_slots(wildcard_fd, slot,
-                             dst_low.wildcard, src_low.wildcard,
-                             proto_low.wildcard, port_low.wildcard,
-                             vlan_low.wildcard, mac_low.wildcard,
-                             dst6_low.wildcard, src6_low.wildcard,
-                             eth_low.wildcard);
-    }
-    // 8 defaults — SINGLE map indexed by slot
-    {
-        const int defaults_fd = bpf_map__fd(skel->maps.defaults);
-        if (defaults_fd < 0) {
-            throw_loader(LoaderError::LoadFailed, "defaults fd unavailable");
-        }
-        write_default_slot(defaults_fd, slot, default_action);
+        write_ruleset_state(ruleset_state_fd, slot,
+                            dst_low.wildcard, src_low.wildcard,
+                            proto_low.wildcard, port_low.wildcard,
+                            vlan_low.wildcard, mac_low.wildcard,
+                            dst6_low.wildcard, src6_low.wildcard,
+                            eth_low.wildcard, default_action);
     }
     // 9 rules — paired rules_a/_b inner ARRAY (keyed by internal slot)
     populate_rules_inner_slot(

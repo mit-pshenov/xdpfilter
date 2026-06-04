@@ -8,8 +8,11 @@
  * Moved verbatim from xdpfilter.bpf.c (MVP-4.29 / B34b, §5.69); absorbs the
  * 1-function vlan helper (l3_after_vlan). The helpers reference map symbols
  * (maps.h) and the constant shims (defs.h) at definition point, so both
- * MUST precede this header. Pure #include split: byte-identical post-
- * preprocessing (xdp section stays 3658 insns).
+ * MUST precede this header. §5.70 (MVP-4.30) B35: the per-axis wildcard loads
+ * collapse into the hoisted `ruleset_state` read (fold #2 RESOLVED below) — an
+ * INTENTIONAL codegen change, so the xdp section is NO LONGER byte-identical;
+ * correctness is held by verdict-identity (T_*_ORACLE_AGREEMENT) and the B37
+ * insn gate is re-baselined to the measured post-pack count.
  */
 
 #include "vmlinux.h"
@@ -220,16 +223,16 @@ static __always_inline __u16 l3_after_vlan(void *eth, void *data_end, void **l3h
         return XDP_DROP; \
     }
 
-/* §5.68 (MVP-4.28) fold #2 (load_wildcards) DROPPED per HG-3 / guard #36: a
- * single shared __always_inline body cannot hold the 3658 baseline because the
- * three family arms originally used DIFFERENT source orderings of the 8 wildcard
- * loads (v4 = 6-axis block + dst6/src6; v6/non-IP = 8 batched) and each ordering
- * compiles to a different per-site instruction count (batched body ⇒ 3657,
- * 6+2-split body ⇒ 3659 — the gate brackets 3658, never hits it). The §5.68
- * Phase-A "interleaving does not change codegen" de-risk was empirically
- * refuted by the per-fold gate; A3-struct has the same one-body impossibility
- * AND touches the rent-payer acc expressions → also dropped. The 3 inline
- * wildcard-load blocks are LEFT AS-IS (inline-merge, NOT a regression). */
+/* §5.68 (MVP-4.28) fold #2 (load_wildcards) — RESOLVED by §5.70 (MVP-4.30) B35.
+ * The fold was DROPPED at §5.68 (guard #36) because byte-identity forbade it: the
+ * three family arms used DIFFERENT source orderings of the per-axis wildcard
+ * loads, and each ordering compiled to a different insn count (the 3658 gate
+ * could never be held by one shared body). B35 collapses ALL per-axis wildcard
+ * lookups into ONE hoisted `ruleset_state` read; every arm now reads the halves
+ * UNIFORMLY via `rs->wc[axis]` (no divergent per-arm load ordering remains —
+ * D-mvp-4.30-UNIFORM-ARMS / PI-mvp-4.30-UNIFORM-ARMS). The divergence the dropped
+ * fold documented is GONE (resolved, not relocated); correctness is now held by
+ * verdict-identity, not the byte-identity that blocked the original fold. */
 
 /* §5.68 (MVP-4.28) fold #12: the src-MAC axis lookup, shared by all three arms.
  *

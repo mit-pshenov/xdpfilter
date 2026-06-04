@@ -3,6 +3,36 @@
 Notes for team-lead/architect/tester about implementation decisions and
 deviations made during impl phase.
 
+## §5.70 MVP-4.30 / B35 wildcard+defaults → ruleset_state pack — impl notes (2026-06-04)
+
+Brownfield, 13 EDITED files (5 src + 2 insn-gate + 6 pin-smoke). SPIKE-GATED,
+verdict-identity (NOT byte-identical) — map-schema VALUE-pack.
+
+Spike gate (D-mvp-4.30-FEAS/ABORT) — **REAL WIN, shipped**:
+- xdp insn count: **3658 → 3437** (−221 insns; ≥25 proceed-threshold cleared; precedent predicted ≈100+).
+- Verifier `bpftool prog load build/xdpfilter.bpf.o ... type xdp`: **rc=0** (accepts packed layout, 5.x kernel).
+- ABORT NOT triggered.
+
+MAY-level choices (§5.70 hints #6/#7/#8 — `inline-merge` per design):
+- **Retired macros (hint #7):** DELETED `XDPMF_MAP_WILDCARD_NAME` / `XDPMF_MAP_DEFAULTS_NAME` (replaced with
+  `[RETIRED]` comment markers in xdpfilter.h) — sole consumer (loader kManagedMaps) was edited anyway; dead
+  macros would be lie-by-name (D-mvp-4.30-PINNAME spirit).
+- **Names (hint #8):** canonical `struct xdpmf_ruleset_state` / `ruleset_state` SEC(".maps"); all 6 pin smokes
+  swapped in lockstep to the `ruleset_state` token (PI-mvp-4.30-PINRIPPLE); adjacent echo strings updated.
+- **Layout (hint #6):** `wc[9]` u64 + `default_action` u32 + `_pad` u32 = 80B, 8-aligned, static_assert-pinned
+  (sizeof==80, offsetof(default_action)==72); loader zero-inits (`val{}`) → `_pad` no uninit bytes.
+- **Read strategy:** D-mvp-4.30-Q1-A2 (hoist ONE lookup, thread `rs` into all 3 arms) — verifier accepted; A1 fallback NOT needed.
+- **NEW test:** none added by impl (tester owns verdict-identity harness + any T_RULESET_STATE_SWAP).
+
+Re-baseline (D-mvp-4.30-REBASELINE): both insn-gate defaults `:-3658` → `:-3437`
+(T_PROD_VERIFIER_LOAD.sh:120, T_INSN_BASELINE_GATE.sh:67), documented intentional.
+
+ctest: 104/106 passed; the 2 known env-fails BY NAME unchanged (#48
+T_EXPORTER_EXITS_6_ALL_IFACES_EACCES, #63 T_LOG_JSON_EXPORTER_EVENTS — both
+"Killed" in unprivileged exporter spawn, present in prior mint/test-run.log);
+2 skips unchanged (#5, #38). All oracle-agreement + pin-smoke + both insn gates green.
+No deviations from design requiring architect escalation.
+
 ## §5.68 MVP-4.28 / B34a datapath helper-extraction — impl notes (2026-06-04)
 
 Brownfield, single file EDITED: `src/bpf/xdpfilter.bpf.c`. Pure byte-identical

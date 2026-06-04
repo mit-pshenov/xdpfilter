@@ -64,7 +64,11 @@ fi
 
 # The expected baseline honours the SAME escape hatch the gate exposes, so an
 # intentional re-baseline (XDPMF_PROD_INSN_BASELINE=<N>) governs uniformly.
-EXPECTED="${XDPMF_PROD_INSN_BASELINE:-3658}"
+# §5.70 (MVP-4.30) B35 D-mvp-4.30-REBASELINE: re-baselined 3658 → 3437 (the
+# MEASURED post-pack count) for the intentional ruleset_state map-schema
+# VALUE-pack — the sanctioned escape-hatch use; Part-B (wrong-baseline → FAIL)
+# still proves the gate keeps its teeth at the NEW count.
+EXPECTED="${XDPMF_PROD_INSN_BASELINE:-3437}"
 
 # ── Part A: STANDALONE datapath-identity fence ───────────────────────────
 echo "=== Part A: objdump xdp-section instruction-line count vs baseline ${EXPECTED}"

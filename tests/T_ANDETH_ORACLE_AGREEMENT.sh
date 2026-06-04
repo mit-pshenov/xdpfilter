@@ -109,12 +109,12 @@ fi
 if ! sudo -n test -e "${PIN_DIR}/rule_counters_a"; then
     echo "FAIL[smoke]: ${PIN_DIR}/rule_counters_a pin missing after apply" >&2; exit 1
 fi
-for pin in ethertype_rulesets ethertype_bitmask_a wildcard; do
+for pin in ethertype_rulesets ethertype_bitmask_a ruleset_state; do
     if ! sudo -n test -e "${PIN_DIR}/${pin}"; then
         echo "FAIL[smoke]: ${PIN_DIR}/${pin} pin missing after apply (S5 ethertype axis not wired)" >&2; exit 1
     fi
 done
-echo "smoke OK: apply exit 0; rule_counters + ethertype_rulesets + ethertype_bitmask_a + wildcard reachable"
+echo "smoke OK: apply exit 0; rule_counters + ethertype_rulesets + ethertype_bitmask_a + ruleset_state reachable"
 
 fail=0
 saw_negation=0

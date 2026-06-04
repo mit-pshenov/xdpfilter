@@ -107,12 +107,12 @@ fi
 if ! sudo -n test -e "${PIN_DIR}/rule_counters_a"; then
     echo "FAIL[smoke]: ${PIN_DIR}/rule_counters_a pin missing after apply" >&2; exit 1
 fi
-for pin in dst6_rulesets src6_rulesets wildcard; do
+for pin in dst6_rulesets src6_rulesets ruleset_state; do
     if ! sudo -n test -e "${PIN_DIR}/${pin}"; then
         echo "FAIL[smoke]: ${PIN_DIR}/${pin} pin missing after apply (S4 v6 axes not wired)" >&2; exit 1
     fi
 done
-echo "smoke OK: apply exit 0; rule_counters + dst6_rulesets + src6_rulesets + wildcard reachable"
+echo "smoke OK: apply exit 0; rule_counters + dst6_rulesets + src6_rulesets + ruleset_state reachable"
 
 # ── Vector battery (dst6 src6 proto dport vlan → expected id computed live) ──
 # vlan = "-" means UNTAGGED (no --vlan; has_vlan=0).

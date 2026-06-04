@@ -99,7 +99,8 @@ enum xdpfilter_stat {
 #define XDPMF_MAP_RULESETS_OUTER_NAME  "rulesets"        /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] */
 #define XDPMF_MAP_INNER_A_NAME         "allowlist_a"     /* inner slot 0 */
 #define XDPMF_MAP_INNER_B_NAME         "allowlist_b"     /* inner slot 1 */
-#define XDPMF_MAP_DEFAULTS_NAME        "defaults"        /* ARRAY[XDPMF_RULESET_COUNT] of __u32 */
+/* §5.70 (MVP-4.30): XDPMF_MAP_DEFAULTS_NAME RETIRED — defaults folded into
+ * struct xdpmf_ruleset_state.default_action (see XDPMF_MAP_RULESET_STATE_NAME). */
 
 /* §5.26 P0a: bpf_link pin basename under the per-iface bpffs dir. */
 #define XDPMF_LINK_PIN_BASENAME        "link"
@@ -129,7 +130,10 @@ enum xdpfilter_stat {
 #define XDPMF_MAP_DST_RULESETS_OUTER_NAME  "dst_rulesets"   /* ARRAY_OF_MAPS[XDPMF_RULESET_COUNT] of LPM_TRIE fds */
 #define XDPMF_MAP_DST_INNER_A_NAME         "dst_bitmask_a"  /* inner slot 0, LPM_TRIE of __u64 */
 #define XDPMF_MAP_DST_INNER_B_NAME         "dst_bitmask_b"  /* inner slot 1, LPM_TRIE of __u64 */
-#define XDPMF_MAP_WILDCARD_NAME            "wildcard"       /* ARRAY[XDPMF_RULESET_COUNT*BITVEC_NUM_AXES] of __u64 */
+/* §5.70 (MVP-4.30): XDPMF_MAP_WILDCARD_NAME RETIRED — the 9 per-axis wildcard
+ * halves are now packed into struct xdpmf_ruleset_state.wc[] (the `wildcard`
+ * ARRAY + `defaults` ARRAY collapse to ONE `ruleset_state` ARRAY-of-struct;
+ * see XDPMF_MAP_RULESET_STATE_NAME / D-mvp-4.30-Q1-A2). */
 
 /* §5.44 proto + dst_port axes (BV_AXIS_PROTO=2 / BV_AXIS_PORT=3). The `wildcard`
  * ARRAY max_entries auto-grows via the XDPMF_RULESET_COUNT * BITVEC_NUM_AXES
@@ -206,6 +210,28 @@ enum xdpfilter_stat {
 #define BV_AXIS_SRC6    7
 /* §5.54 (MVP-4.14): axis 8 = post-VLAN inner EtherType exact-match HASH. */
 #define BV_AXIS_ETHERTYPE 8
+
+/* §5.70 (MVP-4.30) B35: pack the 9 per-axis wildcard __u64 halves + the folded
+ * defaults __u32 into ONE per-ruleset struct, held in a single
+ * BPF_MAP_TYPE_ARRAY[XDPMF_RULESET_COUNT], read ONCE per packet (hoisted above
+ * the family dispatch). Replaces the prior `wildcard` ARRAY[RULESET_COUNT*AXES]
+ * of __u64 + the `defaults` ARRAY[RULESET_COUNT] of __u32 — 25 per-axis wildcard
+ * lookups + 1 defaults lookup collapse to ONE inlined ARRAY read + direct field
+ * reads (D-mvp-4.30-Q1-A2 hoist / D-mvp-4.30-Q2-FOLD).
+ *
+ * `unsigned long long`/`unsigned int` (NOT __u64/__u32) per the shared-header
+ * convention (same rationale as xdpmf_cidr_v4 / xdpmf_port_range): this header
+ * is included from BOTH userspace C++ (where __u64/__u32 are not libc types) AND
+ * BPF C; the widths are binary-compatible with kernel __u64/__u32 on every
+ * supported arch. `wc[]` indexed by BV_AXIS_* mirrors wildcard[active*9+axis]
+ * 1:1; the explicit `_pad` keeps sizeof a multiple of 8 with zero implicit
+ * padding (verifier-clean; ABI-pinned via static_assert; loader zero-inits). */
+struct xdpmf_ruleset_state {
+    unsigned long long wc[BITVEC_NUM_AXES]; /* off 0: 9×8=72B; per-axis wildcard halves, indexed by BV_AXIS_* */
+    unsigned int       default_action;      /* off 72: folds defaults[active] — 0=drop, 1=pass (byte-preserved) */
+    unsigned int       _pad;                /* off 76: explicit pad → sizeof==80, 8-aligned, no uninit bytes */
+};                                          /* total: 80 bytes, alignment 8 */
+#define XDPMF_MAP_RULESET_STATE_NAME       "ruleset_state"  /* ARRAY[XDPMF_RULESET_COUNT] of struct xdpmf_ruleset_state */
 
 /* §5.44 (MVP-4.4) D-mvp-4.4-Q2: production-owned port-range slot — analog of
  * the §5.42 spike's `bv_port_range`. One slot per port-constrained rule; a
@@ -319,5 +345,9 @@ static_assert(sizeof(struct rule_entry)       == 4,  "ABI: present+action_id+_pa
 static_assert(sizeof(struct action_entry)     == 4,  "ABI: action_type+_pad[3]");
 static_assert(sizeof(struct allow_entry)      == 8,  "ABI: present+_pad[3]+u32 rule_id (vestigial — reshaped to __u64 at §5.43; layout pinned for history/reuse-safety)");
 static_assert(offsetof(struct allow_entry, rule_id) == 4, "ABI: rule_id at offset 4");
+/* §5.70 (MVP-4.30) B35: pin the packed ruleset_state ABI (wc[9] u64 + u32
+ * default_action + u32 pad = 80B, 8-aligned, zero implicit padding). */
+static_assert(sizeof(struct xdpmf_ruleset_state) == 80, "ABI: wc[9] u64 + u32 default_action + u32 _pad, 8-aligned");
+static_assert(offsetof(struct xdpmf_ruleset_state, default_action) == 72, "ABI: default_action at offset 72 (after wc[9])");
 }
 #endif

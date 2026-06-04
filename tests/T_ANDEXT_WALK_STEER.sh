@@ -110,9 +110,9 @@ if [[ "${rc}" -ne 0 ]]; then
 fi
 sudo -n test -e "${PIN_DIR}/rule_counters_a" \
     || { echo "FAIL[smoke]: ${PIN_DIR}/rule_counters_a pin missing after apply" >&2; exit 1; }
-sudo -n test -e "${PIN_DIR}/wildcard" \
-    || { echo "FAIL[smoke]: ${PIN_DIR}/wildcard pin missing after apply" >&2; exit 1; }
-echo "smoke OK: apply exit 0; rule_counters + wildcard reachable"
+sudo -n test -e "${PIN_DIR}/ruleset_state" \
+    || { echo "FAIL[smoke]: ${PIN_DIR}/ruleset_state pin missing after apply" >&2; exit 1; }
+echo "smoke OK: apply exit 0; rule_counters + ruleset_state reachable"
 
 # Vector: name | ext-args | dport | expected-id (annotation, cross-checked live)
 # ext field uses '+' as a separator that we split into repeated --ext flags;

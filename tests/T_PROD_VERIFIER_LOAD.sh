@@ -112,12 +112,17 @@ if [[ "${rc}" -eq 0 ]]; then
 
     # ── B37-1 FATAL insn-count gate (design §5.67 / §6.83) ────────────────
     # Measure the xdp-section INSTRUCTION-LINE count of the shipped object
-    # (D-mvp-4.27-INSN-SOURCE: the project-canonical 3658 source — static
+    # (D-mvp-4.27-INSN-SOURCE: the project-canonical insn-count source — static
     # llvm-objdump of the .o, codegen/toolchain-pinned, NOT the running
     # kernel's post-verifier xlated bytes). FATAL-assert it == the baseline,
     # naming the XDPMF_PROD_INSN_BASELINE escape hatch on mismatch. SKIP-SAFE:
     # absent objdump / unparseable count → NOTE + continue (never FAIL).
-    expected="${XDPMF_PROD_INSN_BASELINE:-3658}"
+    # §5.70 (MVP-4.30) B35 D-mvp-4.30-REBASELINE: re-baselined 3658 → 3437 (the
+    # MEASURED post-pack count) — the SANCTIONED escape-hatch use for the
+    # intentional ruleset_state map-schema VALUE-pack (NOT a silent weakening;
+    # the gate stays FATAL at the NEW count). Correctness now held by
+    # verdict-identity (T_*_ORACLE_AGREEMENT), not byte-identity.
+    expected="${XDPMF_PROD_INSN_BASELINE:-3437}"
     objdump_bin=""
     for cand in llvm-objdump-19 llvm-objdump; do
         if command -v "${cand}" >/dev/null 2>&1; then objdump_bin="${cand}"; break; fi
