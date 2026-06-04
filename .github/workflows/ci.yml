@@ -48,10 +48,16 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update
+          # NOTE: the `linux-tools-*` bpftool is a kernel-versioned DISPATCHER
+          # that needs linux-tools-$(uname -r) (an azure-kernel pkg absent from
+          # the hosted apt repo) → it fails at runtime. The standalone `bpftool`
+          # package (universe, 24.04+) is kernel-agnostic and works for
+          # `btf dump`. Install it; the vmlinux.h step probes for a bpftool
+          # whose `version` actually succeeds.
           sudo apt-get install -y \
             clang-19 llvm-19 \
             libbpf-dev \
-            linux-tools-common linux-tools-generic \
+            bpftool \
             python3 python3-scapy \
             jq cmake make pkg-config
 
@@ -64,11 +70,14 @@ jobs:
         run: |
           set -euo pipefail
           test -r /sys/kernel/btf/vmlinux || { echo "::error::runner kernel lacks /sys/kernel/btf/vmlinux (no BTF)"; exit 1; }
+          # Probe for a bpftool whose `version` actually SUCCEEDS — the
+          # /usr/sbin linux-tools wrapper exists but exits non-zero ("bpftool
+          # not found for kernel <azure>"), so an exists-check is not enough.
           bpftool=""
-          for c in bpftool /usr/sbin/bpftool /usr/lib/linux-tools/*/bpftool /usr/lib/linux-tools-*/bpftool; do
-            if command -v "$c" >/dev/null 2>&1 || [ -x "$c" ]; then bpftool="$c"; break; fi
+          for c in /usr/bin/bpftool bpftool /usr/sbin/bpftool /usr/lib/linux-tools/*/bpftool; do
+            if "$c" version >/dev/null 2>&1; then bpftool="$c"; break; fi
           done
-          [ -n "$bpftool" ] || { echo "::error::no bpftool found on runner (tried PATH, /usr/sbin, linux-tools dirs)"; exit 1; }
+          [ -n "$bpftool" ] || { echo "::error::no WORKING bpftool on runner (the linux-tools wrapper needs an absent azure-kernel pkg; install the standalone 'bpftool' package)"; exit 1; }
           echo "using bpftool: $bpftool"
           sudo "$bpftool" btf dump file /sys/kernel/btf/vmlinux format c > include/vmlinux.h
           echo "generated include/vmlinux.h ($(wc -l < include/vmlinux.h) lines)"
