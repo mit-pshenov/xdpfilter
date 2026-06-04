@@ -57,8 +57,11 @@ jobs:
           # linux-tools-$(uname -r) azure pkg and fails at runtime — so the
           # vmlinux.h step probes for a bpftool whose `version` SUCCEEDS,
           # skipping the wrapper and finding the real /usr/lib binary.
+          # g++ brings the libstdc++ C++ stdlib headers (<cstdint> etc.) that
+          # clang++-19 uses by default — without it clang++ can't find <cstdint>.
           sudo apt-get install -y \
             clang-19 llvm-19 \
+            g++ libstdc++-dev \
             libbpf-dev \
             linux-tools-common linux-tools-generic \
             python3 python3-scapy \
