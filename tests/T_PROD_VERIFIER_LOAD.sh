@@ -27,10 +27,29 @@
 #                truncated to stderr), so the test machinery demonstrably
 #                distinguishes a verifying object from a rejected one.
 #
-# Informational (NON-fatal, SHOULD-level per D-mvp-4.23-H3-PRODOBJ): the xdp
-# program section is 3658 insns at the MVP-4.22/4.23 baseline. We report the
-# loaded insn count for a complexity-regression note; rc==0 is the contract,
-# the count is NOT a hard assertion (avoids literal brittleness).
+# FATAL insn-count gate (design §5.67 / §6.83, B37-1 — promoted from the prior
+# SHOULD-level informational read; this CONSCIOUSLY REVERSES D-mvp-4.23-H3-PRODOBJ
+# "the 3658-insn count is an OPTIONAL informational assert … NOT a hard gate"
+# and §5.63 verifiable-invariant item 8, both marked SUPERSEDED/RETIRED inline,
+# per [[impl-role-discipline]] — a sanctioned reversal, NOT silent drift):
+#   On the rc==0 path we measure the xdp-section INSTRUCTION-LINE count of the
+#   shipped object via llvm-objdump (the project-canonical 3658 source per
+#   D-mvp-4.27-INSN-SOURCE — NOT the post-verifier xlated-BYTE value the script
+#   used to print, which is ~30-40 KB and kernel/verifier-version dependent),
+#   and FATAL-assert it equals ${XDPMF_PROD_INSN_BASELINE:-3658}. This is the
+#   byte-identity guard every "xdp 3658" claim (incl. the upcoming B34 split)
+#   leans on. An INTENTIONAL codegen change re-baselines in one line via the
+#   XDPMF_PROD_INSN_BASELINE escape hatch (named in the failure message), so the
+#   gate is a tripwire, not a roadblock (guard #35; neutralises the original
+#   "literal brittleness" concern).
+#
+# SKIP-SAFE (HG-3 / D-mvp-4.27-SKIP-SAFE): the insn assert fires ONLY on the
+# rc==0 path AND only when the count was actually measured; if no llvm-objdump
+# is present, or the count cannot be parsed, we print a NOTE and CONTINUE — a
+# tooling-absence path NEVER becomes a hard FAIL. The whole-test SKIP-77 paths
+# below (no bpftool / object not built / no passwordless sudo) are UNCHANGED.
+# The post-verifier xlated-BYTE size MAY still be printed as a secondary
+# informational NOTE (clearly labelled — it is NOT the 3658 baseline).
 #
 # SKIP 77 paths (tooling/precondition absent, not a failure): `bpftool`
 # absent, xdpfilter.bpf.o not built, or passwordless sudo unavailable
@@ -91,13 +110,47 @@ echo "bpftool prog load rc=${rc}"
 if [[ "${rc}" -eq 0 ]]; then
     echo "  verifier ACCEPTED the PRODUCTION 9-axis object (standalone load)"
 
-    # Informational (SHOULD, NON-fatal): report the loaded xdp insn count.
-    # Baseline is 3658 at MVP-4.22/4.23; a drift feeds a complexity-regression
-    # note but is NOT a hard gate (D-mvp-4.23-H3-PRODOBJ).
-    insns=$(sudo -n bpftool prog show pinned "${PROBE_PIN}" 2>/dev/null \
+    # ── B37-1 FATAL insn-count gate (design §5.67 / §6.83) ────────────────
+    # Measure the xdp-section INSTRUCTION-LINE count of the shipped object
+    # (D-mvp-4.27-INSN-SOURCE: the project-canonical 3658 source — static
+    # llvm-objdump of the .o, codegen/toolchain-pinned, NOT the running
+    # kernel's post-verifier xlated bytes). FATAL-assert it == the baseline,
+    # naming the XDPMF_PROD_INSN_BASELINE escape hatch on mismatch. SKIP-SAFE:
+    # absent objdump / unparseable count → NOTE + continue (never FAIL).
+    expected="${XDPMF_PROD_INSN_BASELINE:-3658}"
+    objdump_bin=""
+    for cand in llvm-objdump-19 llvm-objdump; do
+        if command -v "${cand}" >/dev/null 2>&1; then objdump_bin="${cand}"; break; fi
+    done
+    if [[ -z "${objdump_bin}" ]]; then
+        echo "  NOTE: no llvm-objdump available — insn-count sub-gate skipped" >&2
+        echo "        for tooling absence (NOT a failure; D-mvp-4.27-SKIP-SAFE)" >&2
+    else
+        actual=$("${objdump_bin}" -d --section=xdp "${PROD_OBJ}" 2>/dev/null \
+                 | grep -cE '^\s+[0-9a-f]+:' || true)
+        if ! [[ "${actual}" =~ ^[0-9]+$ ]]; then
+            echo "  NOTE: ${objdump_bin} produced an unparseable xdp-section count" >&2
+            echo "        ('${actual}') — insn sub-gate skipped (NOT a failure)" >&2
+        elif [[ "${actual}" -ne "${expected}" ]]; then
+            echo "FAIL: xdp-section instruction-count ${actual} != baseline ${expected}" >&2
+            echo "      this is an xdp-section instruction-count regression OR an" >&2
+            echo "      intentional codegen change. The 3658 byte-identity guard" >&2
+            echo "      (every 'xdp 3658' claim, incl. the B34 split) just tripped." >&2
+            echo "      If this change is INTENTIONAL, re-baseline via" >&2
+            echo "      XDPMF_PROD_INSN_BASELINE=${actual}" >&2
+            fail=1
+        else
+            echo "  insn-count gate: xdp section == ${expected} instructions (datapath identity holds)"
+        fi
+    fi
+
+    # Secondary informational NOTE (NOT the gate): the post-verifier xlated
+    # BYTE size (~30-40 KB, kernel/verifier-version dependent) — explicitly
+    # NOT the 3658 baseline (which is the objdump instruction-line count above).
+    xlated_bytes=$(sudo -n bpftool prog show pinned "${PROBE_PIN}" 2>/dev/null \
             | grep -oE 'xlated [0-9]+B' | grep -oE '[0-9]+' | head -1 || true)
-    if [[ -n "${insns:-}" ]]; then
-        echo "  NOTE: loaded xlated size ${insns}B (informational complexity signal)"
+    if [[ -n "${xlated_bytes:-}" ]]; then
+        echo "  NOTE: post-verifier xlated bytes ${xlated_bytes}B (NOT the 3658 baseline)"
     fi
 else
     echo "FAIL: verifier REJECTED the production xdpfilter.bpf.o (rc=${rc})" >&2

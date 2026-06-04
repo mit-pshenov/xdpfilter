@@ -1581,3 +1581,34 @@ set_tests_properties(T_COVERAGE_FLOOR PROPERTIES
     ENVIRONMENT "${TEST_ENV}"
     TIMEOUT 15
 )
+
+# §6.84 T_LOADER_STDERR_GOLDEN (MVP-4.27 / §5.67 B37-2): pin the operator-facing
+#   loader/CLI error-stderr SHAPE (the `xdpfilter:` / `error:` audit-ABI prefix)
+#   by driving operator-REACHABLE error paths through the real xdpfilter CLI and
+#   EXACT-matching rendered stderr against checked-in goldens. The MUST corpus
+#   (bad trust_model / missing config / usage error) fails at CLI/env/config
+#   parse BEFORE `--iface lo` is resolved → NO RESOURCE_LOCK (D-mvp-4.27-Q1-NOLOCK).
+#   SKIP_RETURN_CODE 77 for the loader-binary-not-built precondition.
+add_test(
+    NAME T_LOADER_STDERR_GOLDEN
+    COMMAND bash ${TEST_DIR}/T_LOADER_STDERR_GOLDEN.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_LOADER_STDERR_GOLDEN PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    TIMEOUT 30
+    SKIP_RETURN_CODE 77
+)
+
+# ── §6.83/§6.84 (MVP-4.27/B37) tester verification layer ──
+add_test(NAME T_INSN_BASELINE_GATE
+    COMMAND bash ${TEST_DIR}/T_INSN_BASELINE_GATE.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(T_INSN_BASELINE_GATE PROPERTIES
+    ENVIRONMENT "${TEST_ENV};PROD_BPF_OBJ=${CMAKE_BINARY_DIR}/xdpfilter.bpf.o"
+    SKIP_RETURN_CODE 77 TIMEOUT 120)
+add_test(NAME T_LOADER_STDERR_SHAPE
+    COMMAND bash ${TEST_DIR}/T_LOADER_STDERR_SHAPE.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
+set_tests_properties(T_LOADER_STDERR_SHAPE PROPERTIES
+    ENVIRONMENT "${TEST_ENV}" SKIP_RETURN_CODE 77 TIMEOUT 30)

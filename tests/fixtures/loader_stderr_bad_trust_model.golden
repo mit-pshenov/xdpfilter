@@ -1,0 +1,1 @@
+xdpfilter: config error: unknown trust model: 'garbage_value' (expected: strict|fleet): config error (YAML parse / schema / trust_model violation)
