@@ -1,113 +1,94 @@
-# Task brief — MVP-4.30 / B35: wildcard+defaults → `ruleset_state` pack (brownfield, SPIKE-GATED, verdict-identity)
+# Task brief — MVP-4.31 / B38: simplify-harvest — exporter dedup + dead-code + bitvec template-merge (brownfield)
 
 ## Goal
 
-Collapse the per-axis `wildcard` ARRAY lookups + the `defaults` lookup in the datapath into **one `ruleset_state[active]` struct read** carrying all 9 per-axis wildcard `__u64` + the `defaults` `__u32` as struct fields. Today each family arm independently issues a `bpf_map_lookup_elem(&wildcard, &computed_key)` per axis (`wildcard[active*BITVEC_NUM_AXES + axis]`) — **25 static wildcard-lookup sites across the 3 family arms** (per-packet dynamic ≈ 8–9, since only one arm runs) + 1 `defaults` lookup. Packing the values into a single per-ruleset struct turns those into one (or one-per-arm) struct lookup + field reads — fewer BPF helper calls, fewer instructions. This is **B35 = PERF-M1 promoted** (`docs/BACKLOG.md:196`).
+Harvest the four BEDROCK/CONTESTED **code** subtractions from the `/mint-simplify` fresh-pass verdict (run `wf_c66d2b84`, post-cleanup-arc @ `0c73fd6`). All are pure subtractions with zero behavior change; the doc-truth items (BACKLOG demote + CHANGELOG arc) already shipped hand-done (`ca80fb9`). This slice is the code half: ~−70 LOC, 0 net new abstractions beyond one shared exporter header.
 
-**Honest framing: perf is NOT a fire.** The parked perf envelope ([[project_perf_envelope]], `mint/perf.md`) shows eBPF clears SLA#1 with ~1–2 core headroom; there is no classifier-cost forcing-function. B35 is **ceiling-lowering**, and its co-equal motives are (a) it is the structural home for the B34a-deferred fold #2 (`load_wildcards` — the 3 arms' divergent wildcard-load orderings, `src/bpf/classifier.h:223`, normalize through a single struct read), and (b) band-training value ([[project_dual_purpose_band_training]]).
-
-**This is the ONLY slice in the cleanup arc with a real regression surface.** It is a **map-schema change** (the `wildcard` + `defaults` ARRAYs → a `ruleset_state` ARRAY-of-struct) ⇒ the compiled datapath is **NOT byte-identical**. Correctness is held by **verdict-identity**, not byte-identity: the existing `T_*_ORACLE_AGREEMENT.sh` family (datapath verdict vs userspace oracle across crafted vectors) MUST stay green. The B37 insn gate's 3658 baseline WILL change — this is the **sanctioned use of the `XDPMF_PROD_INSN_BASELINE` escape hatch** (`tests/T_PROD_VERIFIER_LOAD.sh:120,137` — "intentional codegen change … XDPMF_PROD_INSN_BASELINE=<actual>"), re-baselined to the new measured count, NOT a violation.
-
-## SPIKE-GATED — measure-first is a hard prerequisite (can ABORT the slice)
-
-Per the backlog's literal "**MEASURE instructions/cycles per packet first**" and the project's spike-gated precedent (S4 cidr6, S6 ext-walk: briefer→SPIKE→mint-dev), B35's first step is a verifier-load + perf spike:
-- Prototype the `ruleset_state` pack (throwaway or a guarded branch), build the `.bpf.o`, and **measure**: (a) does it load on the verifier cleanly? (b) the new xdp insn count vs 3658 — does it actually go DOWN, or does the verifier expand the struct read back into N field-loads that net to ~zero (or worse)?
-- **Gate**: if the measured instruction win is negligible (or the verifier rejects / regresses), the architect ESCALATES — the slice is not worth its verdict-identity regression risk and we abort/defer (surface to team-lead → user). Do NOT proceed to the full restructure on an unproven win. External value being weighed: ceiling-lowering + band-training vs the regression risk of a map-schema change; the spike discharges it.
-- Spike tooling: [[reference_bpf_spike_tooling]] (`clang-19 -target bpf -O2 -g -D__TARGET_ARCH_x86 -Iinclude -Isrc` + bpftool load); insn-count recipe = `llvm-objdump-19 -d --section=xdp <obj> | grep -cE '^\s+[0-9a-f]+:'` (the B37 gate's own method).
+Four items:
+1. **B4 (dead-code, UPHELD)** — delete the `read_all_attached(std::string_view)` single-arg trampoline (def + decl). Zero live callers; the sole scrape consumer (`http.cpp`) calls `read_all_attached_with_acc` directly. Its own comment ("keeps existing call sites byte-equivalent") is stale — no surviving call site.
+2. **B2 (extract-shared, UPHELD ×3)** — hoist `round_up_8` + `percpu_sum_u64` (duplicated across the two exporter PERCPU readers) into one shared inline home; delete the duplicate copies. `round_up_8` char-identical; `percpu_sum_u64` differs only in the first param name (`stats_fd`/`map_fd`). NOT covered by the §5.31 byte-equivalence note (that note is attached ONLY to `list_iface_dirs`).
+3. **C1 (extract-shared, WEAKENED → conscious reversal)** — hoist `list_iface_dirs` (also byte-identical across the two readers) into the same shared home, **but ONLY as an explicit, documented reversal of the §5.31 "deliberately duplicated, keep byte-equivalent" decision** (`rule_counters_reader.cpp:63-64`) — written down the way B37 reversed `D-mvp-4.23-H3-PRODOBJ`, NOT a silent factor-out. The comment's own rationale (keep the two readers byte-equivalent) is *better* served by a single shared definition (equivalent by construction), so the reversal is defensible — but it MUST be recorded.
+4. **B5 (merge, UPHELD)** — collapse `populate_bitvec_inner_slot` / `populate_bitvec6_inner_slot` (near-identical fork) into one `template<class Key>` mirroring the house-style `populate_hash_inner_slot<Key>`. **PROVENANCE-SAFE**: the audited guard #23 (#1 bit-vector bug class) lives in `close_prefixes`/`close_prefixes6`, NOT the populate wrapper — the merged template MUST still receive the two close fns as separate args so the cover-direction surface stays eyeball-auditable. This is the userspace loader map-population path, NOT the protected datapath family-arm asymmetry.
 
 ## Context: prior work
 
-- All prior briefs archived in `mint/task-brief-*.md` (B34b → `mint/task-brief-mvp-4.29.md`).
-- Existing design: `mint/design.md` §5.69 (B34b module split — the post-split tree this builds on: `maps.h` holds the `wildcard`/`defaults` defs, `classifier.h`+`xdpfilter.bpf.c` hold the reads).
-- BACKLOG: `docs/BACKLOG.md:196` (B35, PERF-M1).
-- B34a fold #2 deferral: `src/bpf/classifier.h:223` (the 3 arms' divergent wildcard orderings, "LEFT AS-IS … NOT a regression") — B35 is its home.
-- Perf baseline method: `mint/perf.md` / commit `e9bb321` (BPF_PROG_TEST_RUN).
+- All prior briefs archived in `mint/task-brief-*.md` (B35 → `mint/task-brief-mvp-4.30.md`).
+- Source: `/mint-simplify` verdict (run `wf_c66d2b84`, full output in the task transcript). Two substrates: Code Judo (source) + Entropy Controller (concept). These four survived dedup-by-replication + adversarial defense.
+- Existing design: `mint/design.md` §5.70 (B35 ruleset_state pack — the most recent datapath slice).
+- The §5.31 byte-equivalent-readers decision (the C1 reversal target) is in `src/exporter/rule_counters_reader.cpp:62-64`.
 - Phase A code-grep verification: brief author ran the greps in the evidence footer.
-- PI continuity: PI-7 (C++ loader/config header tree) — wildcard/defaults populate lives in `src/lib/loader.cpp` so loader.cpp IS edited this slice; PI-7's loader.hpp/config.hpp zero-diff streak likely continues (impl edits .cpp, not the .hpp interface — architect confirms). PI-DATAPATH-IDENTICAL (byte) is **RETIRED for this slice**, replaced by PI-VERDICT-IDENTICAL.
+- PI continuity: PI-7 (loader.hpp/config.hpp zero-diff) — B5 edits `loader.cpp` body only (the `.hpp` interface is untouched → streak likely continues; architect confirms). The exporter items touch `src/exporter` (outside the loader/config PI-7 surface).
 
-## Workflow rules (brownfield, spike-gated)
+## Workflow rules (brownfield)
 
-- **Architect**: read §5.69 (post-split tree) + the `wildcard`/`defaults` map defs (`src/bpf/maps.h`) + the datapath reads + the loader populate path (`write_wildcard_slots`/`write_default_slot`) + the `T_*_ORACLE_AGREEMENT` harness + §6.5 invariants + the B37 gate. **Run the measure-first spike in Phase A** (or consume a standalone spike if run first) and record the measured win as a D-decision; ABORT-escalate if the win is not real. EDIT design.md in place; append §5.70. Owns the `ruleset_state` layout, the per-arm-vs-hoisted read strategy, the loader restructure, the re-baseline value, and the verdict-identity test plan.
-- **Impl**: FileList per brownfield DIFF. The datapath restructure touches all 3 arms (25 static wildcard sites). Re-run the B37 gate AND the ORACLE_AGREEMENT family after the change. Re-baseline `XDPMF_PROD_INSN_BASELINE` to the measured value per the architect's D-decision (do NOT leave 3658 if the count legitimately changed).
-- **Tester**: the **verdict-identity oracle is the bible** — the `T_*_ORACLE_AGREEMENT.sh` family must stay green across ALL crafted vectors (this is the regression control for a non-byte-identical change). Confirm the negation control still has teeth. A NEW `T_RULESET_STATE_*` test only if the architect identifies a struct-specific surface (e.g. the active-half flip writes the right slot). Re-run the B37 gate against the re-baselined count.
-- **Reviewer**: 5-point brownfield. Special attention: (a) verdict-identity — every ORACLE_AGREEMENT vector still agrees; (b) the re-baseline is the MEASURED count + the bump is documented as intentional (not a silent weakening); (c) atomic-swap RESET semantic preserved (the struct is written fresh to the inactive half each apply, then flipped — no stale carry); (d) all 3 arms read consistently (the fold-#2 ordering divergence is GONE, not just relocated); (e) PI-7 loader.hpp/config.hpp diff.
+- **Architect**: read §5.70 + the two exporter readers + the loader bitvec-populate path + §6.5 invariants. EDIT design.md in place; append §5.71. Owns the shared-header home (Q1), the C1 §5.31-reversal record (HG-2), and the B5 template signature. Phase A re-verify the body-identity claims (guard #5) — the verdict's per-helper diff is the starting point, not gospel.
+- **Impl**: FileList per brownfield DIFF. Four independent subtractions; each is small and mechanical. Build clean + zero warnings. Userspace (no insn gate) for B2/B4/C1; B5 rebuilds the loader (no datapath `.bpf.c` change → xdp stays 3437).
+- **Tester**: the existing oracles ARE the regression control — NO new behavioural test. Exporter ctests (`T_PERCPU_STATS_SUM`, `T_EXPORTER_VALUES_MATCH_STATS`, `T_RULE_COUNTER_*`, `T_EXPORTER_NO_ATTACHED_IFACE`) cover B2/B4/C1 end-to-end; the `T_*_ORACLE_AGREEMENT` family + `T_ANDV6_PREFIX_CLOSURE_OVERLAP` (the /40-/68-/127 cover canary) cover B5's map-population. Confirm the full ctest baseline is unchanged (104/106; the 2 known env-fails by NAME).
+- **Reviewer**: 5-point brownfield. Special attention: (a) each subtraction is behavior-preserving (compiler/linker for B4 dead-code; exporter ctests for B2/C1; ORACLE_AGREEMENT for B5); (b) the C1 §5.31 reversal is DOCUMENTED, not silent (the anti-extraction comment must be removed/replaced with a reversal note, not just deleted); (c) B5 keeps `close_prefixes`/`close_prefixes6` as separate args (guard #23 surface intact); (d) PI-7 loader.hpp/config.hpp ∅; (e) no datapath `.bpf.c` change (xdp 3437 unchanged).
 
 ## Human-gate decisions (defaults applied — architect overrides at Phase A)
 
-### HG-mvp-4.30-1: spike outcome gates the slice → **default = proceed ONLY if measured insn win is real**
-If the Phase-A spike shows the pack does not meaningfully reduce instructions (verifier expands the struct read) or fails to load, ESCALATE and abort/defer rather than ship a verdict-identity-risky change for no gain. Default proceed-threshold is the architect's to set with the measured numbers; "real win" ≈ a clear net instruction reduction that survives the verifier. This is the one genuinely-conditional gate; everything below assumes the spike passed.
+### HG-mvp-4.31-1: shared exporter-helper home → **default = NEW `src/exporter/percpu_read.hpp` (or equivalent), included from both readers**
+**CORRECTION to the verdict (Phase 2, guard #5):** the verdict claimed `rule_counters_reader.hpp` "already #includes `stats_reader.hpp`, so no new include required" — this is FALSE. `rule_counters_reader.cpp` does NOT include `stats_reader.hpp` (grep-confirmed; the `.hpp:3` mention is a prose comment "Sister to stats_reader.hpp", not an `#include`). So a shared home needs EITHER a new small header (`percpu_read.hpp`, namespace `xdpmf::exporter::detail`, holding `round_up_8`+`percpu_sum_u64`+`list_iface_dirs`) + 2 `#include`s, OR homing in `stats_reader.hpp` + adding 1 `#include` to `rule_counters_reader.cpp`. Either is still net-negative (~−18 LOC for B2 alone, ~−40 incl. C1). Default: NEW `percpu_read.hpp` (cleanest — neither reader is "primary"). Architect picks.
 
-### HG-mvp-4.30-2: `ruleset_state` layout → **default = 9 wildcard `__u64` (indexed by `BV_AXIS_*`) + `defaults` `__u32`, one struct per ruleset, ARRAY[XDPMF_RULESET_COUNT]**
-Mirrors the existing `wildcard[active*BITVEC_NUM_AXES+axis]` + `defaults[active]` semantics, just packed. Architect refines field order/padding for verifier-friendliness. Whether `defaults` folds INTO the struct or stays a sibling ARRAY is the architect's call (folding it in is the backlog's intent and saves the extra lookup; keeping it separate is lower-blast-radius). Default: fold in.
+### HG-mvp-4.31-2: C1 §5.31 reversal → **default = REVERSE explicitly, documented**
+The `list_iface_dirs` extraction reverses the `rule_counters_reader.cpp:62-64` "deliberately duplicated … §5.31 keeps the two readers byte-equivalent" decision. Default: do it, and record the reversal in §5.71 (cite the §5.31 rationale verbatim, state why a single shared def serves the byte-equivalence goal BETTER — equivalent by construction) + remove/replace the anti-extraction comment with a one-line "extracted in §5.71, reverses §5.31" note. Per [[impl-role-discipline]] / the B37 precedent (which reversed D-mvp-4.23). If the architect judges the §5.31 intent still load-bearing (e.g. a reason the comment doesn't state), DROP C1 and keep `list_iface_dirs` duplicated — B2/B4/B5 are independent and ship regardless.
 
-### HG-mvp-4.30-3: atomic-swap semantic → **RESET (UNCHANGED) — no copy-forward**
-`wildcard` + `defaults` are config-derived (recomputed every `apply` via `write_wildcard_slots`/`write_default_slot` into the INACTIVE half, then the `active_idx` flip). They are NOT operator-observable counters — they carry no monotonic Prometheus contract. Prior semantic = RESET-on-apply; post-pack = RESET (UNCHANGED). Per the Phase-1.5 matrix RESET→RESET needs NO `copy_*_forward` helper — the atomic-swap shape alone is correct (the struct is written fresh each apply). (Contrast `rule_counters`, which DOES preserve — that is a different map.)
+### HG-mvp-4.31-3: VERSION bump → **default = NO bump**
+Pure internal subtraction — no operator-facing API/schema/metric/CLI change. VERSION stays 0.16.0.
 
-### HG-mvp-4.30-4: VERSION bump → **default = NO bump (internal perf restructure, no operator-facing API/schema change)**
-No config-schema change, no new CLI surface, no metric rename — the `apply -f` contract and the operator-observable maps are unchanged. Default: VERSION stays 0.16.0. Architect overrides if a config/schema-version field is actually touched (it should not be).
+## Open mechanism questions (architect decides; document in §5.71)
 
-## Open mechanism questions (architect decides; document in §5.70)
+### Q1: B5 template parameterization shape
+- **A1**: `template<class Key>` param = key type (`xdpmf_cidr_v4`/`xdpmf_cidr_v6`) + prefix-vec type (`BitPrefix`/`BitPrefix6`) + close-fn (`close_prefixes`/`close_prefixes6`) passed as args — mirrors `populate_hash_inner_slot<Key>`.
+- **A2**: leave the fork (do NOT merge) if the type divergence (`BitPrefix` vs `BitPrefix6`, `std::uint64_t` vs `__int128` masks live in the close fns) makes the template signature uglier than the saved LOC.
+- **Recommendation**: **A1** (house-style precedent exists; the close fns stay separate args so guard #23 is untouched). Architect downgrades to A2 only if the signature exceeds the ~−38 LOC saving.
 
-### Q1: datapath read strategy
-- **A1**: one `ruleset_state` lookup per family arm (3 static sites, ≈1 dynamic/packet) — minimal restructure, each arm reads the struct it needs.
-- **A2**: hoist a single `ruleset_state` lookup ABOVE the family dispatch (1 static site) — fewest lookups, but the pointer must thread into all 3 arms.
-- **Recommendation**: architect picks from the spike's instruction numbers; **A2** likely wins on lookup count but **A1** may be more verifier-friendly / lower-blast-radius. Whichever the spike shows lower-insn-and-clean-verify.
+## Scope (cycle MVP-4.31 — concrete items; UPPER-BOUND estimates)
 
-### Q2: `defaults` — fold into the struct or keep sibling
-- **A1**: fold `defaults` into `ruleset_state` (one read serves both) — backlog intent.
-- **A2**: keep `defaults` as its own ARRAY (it is already a clean 2-slot ARRAY) — smaller blast radius.
-- **Recommendation**: **A1** (the −1 lookup is the backlog's stated win); architect downgrades to A2 if folding complicates the verifier or the loader disproportionately.
+### Item B38-1 — delete dead `read_all_attached` trampoline (B4)
+**Where**: `src/exporter/stats_reader.cpp` (def, ~`:140-148`), `src/exporter/stats_reader.hpp` (decl, ~`:69` + the 2 stale doc-comments ~`:15`,`:38`,`:75`). ~−12 LOC. Oracle: linker (no callers) + `T_EXPORTER_*` (only the `_with_acc` path via `http.cpp`).
 
-## Scope (cycle MVP-4.30 — concrete items; UPPER-BOUND estimates)
+### Item B38-2 — extract `round_up_8` + `percpu_sum_u64` to shared header (B2)
+**Where**: NEW shared home per HG-1; delete copies from `src/exporter/rule_counters_reader.cpp` (~`:56-59`,`:102-121`); keep one definition. ~−18 LOC net.
 
-### Item B35-0 — measure-first spike (PREREQUISITE, gates all below)
-**Where**: throwaway / guarded prototype + `llvm-objdump` insn measurement. Prove the pack loads + reduces instructions before any real restructure. ABORT-escalate if not.
+### Item B38-3 — extract `list_iface_dirs` to the same shared home (C1, conscious §5.31 reversal)
+**Where**: same shared home; delete copies from both readers (~`stats_reader.cpp:54-80` / `rule_counters_reader.cpp:65-91`); remove/replace the §5.31 anti-extraction comment (`rule_counters_reader.cpp:62-64`). ~−21 LOC net. **Gated by HG-2** — drop if architect judges §5.31 still load-bearing.
 
-### Item B35-1 — `ruleset_state` type + map definition
-**Where**: `src/common/xdpfilter.h` (the shared struct + map-name constant), `src/bpf/maps.h` (the `SEC(".maps")` def). Retire/repurpose the `wildcard` (+ maybe `defaults`) ARRAY defs per HG-2/Q2.
-
-### Item B35-2 — datapath reads (all 3 arms)
-**Where**: `src/bpf/xdpfilter.bpf.c` (the 3 family arms, 25 static wildcard sites + 1 defaults), `src/bpf/classifier.h` (any helper/comment touching wildcard loads, incl. the fold-#2 note). Replace per-axis lookups with struct-field reads per Q1.
-
-### Item B35-3 — loader populate restructure
-**Where**: `src/lib/loader.cpp` (`write_wildcard_slots` + `write_default_slot` → write the `ruleset_state` struct to the inactive half). Possibly `src/lib/sidecar.cpp`/`apply_internal.hpp`/`sidecar.hpp` if they reference the retired map names — grep-confirm (see footer). Keep the RESET/inactive-half-then-flip ordering.
-
-### Item B35-4 — verdict-identity regression + re-baseline
-**Where**: `tests/T_*_ORACLE_AGREEMENT.sh` (must stay green — the correctness oracle), `tests/T_PROD_VERIFIER_LOAD.sh` / the B37 baseline (re-baseline `XDPMF_PROD_INSN_BASELINE` to the measured count, documented intentional). NEW `T_RULESET_STATE_*` only if a struct-specific surface needs it.
+### Item B38-4 — template-merge `populate_bitvec_inner_slot` v4/v6 (B5)
+**Where**: `src/lib/loader.cpp` (`populate_bitvec_inner_slot` ~`:1538` + `populate_bitvec6_inner_slot`), call sites uniform. ~−38 LOC. `close_prefixes`/`close_prefixes6` stay SEPARATE args (guard #23). Oracle: `T_*_ORACLE_AGREEMENT` + `T_ANDV6_PREFIX_CLOSURE_OVERLAP`.
 
 ## Out of scope (explicit)
 
-- **Any match-semantic / verdict change** — verdict-identity is the contract; every ORACLE_AGREEMENT vector keeps its verdict. This is a pure representation change.
-- **The OUTER per-axis map-reference lookups** (`dst_rulesets`/`cidr_rulesets`/`rules_outer`/ARRAY_OF_MAPS double-buffer) — those are map REFERENCES, NOT packable (backlog: "hard ceiling"). B35 packs only the VALUE class (wildcard + defaults).
-- **Schema / axis / VERSION change** — none (HG-4).
-- **B36** (64-rule `__u64` ceiling, DEBT) — separate, not-now.
-- **Capability work** (mirror/redirect XDP→TC handoff) — the real product gap per [[project_real_requirements_and_strategy]]; a `/mint-hld` round when the cleanup arc closes. NOT this slice.
+- **Any behavior/verdict change** — all four are pure representation/dead-code subtractions; every existing ctest (esp. ORACLE_AGREEMENT + exporter) keeps its result.
+- **The datapath `.bpf.c`** — untouched; xdp stays 3437 (B5 is the userspace loader, not the BPF program).
+- **`close_prefixes`/`close_prefixes6` merge** — the FORK is a protected rent-payer (guard #23, PI-mvp-4.13); B5 merges only the populate WRAPPER, keeping the close fns separate.
+- **The confirmed-KEEP rent-payers** from the verdict: 3 family arms + per-arm `wc_*`/acc asymmetry, `BitPrefix`/`AxisLowering` v4/v6 forks, `parse_prefix`/`parse_prefix6`, FFS_FALLBACK + inline ETH_P/IPPROTO shims, `consume_flag_value` (exit-vs-throw divergence), design-brief corpus + perf-scratch + task-brief chain + hybrid-review (all have live consumers). Do NOT touch.
+- **B6** (collapse BACKLOG B1-B14 verbose bodies) — doc-only, deferred (marginal; interleaved with open items). Not this slice.
+- **Schema / axis / VERSION change** — none.
 
 ## Definition of done
 
-- Phase-A spike measured + recorded (D-decision); slice proceeded only on a real win.
-- §5.70 amendment in design.md (`ruleset_state` layout, read strategy, RESET semantic, re-baseline value, verdict-identity test plan; PI-DATAPATH-IDENTICAL retired → PI-VERDICT-IDENTICAL).
-- PI-7 continues (loader.hpp/config.hpp zero-diff — impl edits .cpp). PI-VERDICT-IDENTICAL: all `T_*_ORACLE_AGREEMENT` green.
-- B37 gate green against the re-baselined `XDPMF_PROD_INSN_BASELINE` (= measured count, intentional).
-- ctest baseline preserved (the 2 known env-fails by NAME; no NEW regression).
-- No VERSION bump (HG-4) unless architect finds a real schema touch.
+- §5.71 amendment in design.md (the 4 subtractions + the C1 §5.31-reversal record + B5 template decision).
+- PI-7 continues (loader.hpp/config.hpp ∅). No datapath change (xdp 3437). No new behaviour.
+- Full ctest baseline preserved (104/106; 2 known env-fails by NAME; ORACLE_AGREEMENT + exporter all green).
+- No VERSION bump (HG-3).
 - `mint/review.md` round-1 verdict = pass.
 - One git commit per phase boundary.
 
 ## Dependencies
 
-- Build: clang-19 `-target bpf` (existing). Spike uses the same.
-- Runtime: none new.
-- Kernel/platform: the new struct-read map layout must load on the verifier (the spike proves this; prod floor 5.15, dev 6.1).
+- Build: clang++-19 / cmake (existing). Userspace + loader rebuild; no BPF datapath recompile needed for B2/B4/C1 (B5 rebuilds loader, datapath `.bpf.o` unchanged).
+- Runtime / kernel: none new.
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 
 ```yaml
 mode: brownfield
 packs:
-  architect:  [lang/bpf.md, lang/cpp.md]      # BPF map/verifier idioms + the C++ loader populate path
-  impl:       [lang/bpf.md, lang/cpp.md]
-  tester:     [test/bpf-xdp.md]               # ORACLE_AGREEMENT family is the verdict-identity oracle
+  architect:  [lang/cpp.md, lang/bpf.md]     # C++ exporter/loader + BPF map-ABI context for B5
+  impl:       [lang/cpp.md, lang/bpf.md]
+  tester:     [test/bpf-xdp.md]              # ORACLE_AGREEMENT (B5) + exporter ctests are the regression control
   reviewer:   [test/bpf-xdp.md]
 ```
 
@@ -115,51 +96,40 @@ packs:
 
 ## Pre-brief sanity check (per [[mint-hld-scope-discipline]])
 
-**Spike-gated single-architect → `/mint-dev`, NOT `/mint-hld`.** The APPROACH is committed by the backlog (pack the value-class into `ruleset_state`); the regression control already EXISTS (`T_*_ORACLE_AGREEMENT` family); the real unknowns are spike-resolvable (does it verify + actually reduce instructions) and design-resolvable (arm read strategy + loader restructure), NOT a wide design-space to farm to multiple architects. Farming "should we pack into a struct?" to a lens panel when the answer is given and the open question is "does it verify and win" (a measurement, not a debate) is the [[feedback_mint_hld_scope]] overkill case. The one genuinely-conditional decision (proceed iff the spike shows a real win) is an engineering gate discharged BY the spike, not a PO fork. Atomic-swap is decidable (RESET→RESET, no copy-forward). This is the S4/S6 mold: briefer → SPIKE → mint-dev.
+**Mechanical / single-architect → `/mint-dev`, NOT `/mint-hld`.** Four small independent subtractions, each with an existing oracle (exporter ctests for B2/B4/C1, ORACLE_AGREEMENT + prefix-closure canary for B5). No design SPACE to explore — the verdict + defense already settled what/how; the only judgment calls are the shared-header home (HG-1, derivable) and the C1 §5.31-reversal record (HG-2, a documented-decision-reversal, not a fork). B5 is provenance-safe (guard #23 in the close fns, kept separate). No PRESERVE/RESET axis (no map-shape change). No PO-tier decision (all engineering, external value = entropy reduction + maintenance-coupling removal).
 
 ## Notes for architect Phase A code-grep discipline (per architect spec rules)
 
-Brief author ran these (evidence footer); architect re-verifies + extends:
-
-- `grep -c 'bpf_map_lookup_elem(&wildcard' src/bpf/xdpfilter.bpf.c` → **25** static sites (NOT the backlog's per-packet "9" — that is the dynamic one-arm count; the restructure touches all 25). `grep -c 'bpf_map_lookup_elem(&defaults' …` → **1**.
-- `grep -n 'BITVEC_NUM_AXES' src/common/xdpfilter.h` → **9**; `XDPMF_RULESET_COUNT` → **2**.
-- `grep -rn 'ruleset_state' src/` → ∅ (NEW type/map).
-- Populate path: `write_wildcard_slots` (`src/lib/loader.cpp:1669`) + `write_default_slot` (`:1704`) — re-anchor by name, not line. `grep -rln 'wildcard\|defaults' src/lib/` → loader.cpp + sidecar.{hpp,cpp} + apply_internal.hpp — confirm which actually WRITE vs merely reference the names (guard #16 pin-name ripple class).
-- `ls tests/T_*_ORACLE_AGREEMENT.sh` → the verdict-identity harness (AND4/5/6/ETH/V6/BITVEC/MAC_MERGE) — the regression control.
-- B37 re-baseline: `tests/T_PROD_VERIFIER_LOAD.sh:120,137` — `XDPMF_PROD_INSN_BASELINE` is the sanctioned escape hatch for an intentional codegen change.
-- Run the measure-first spike (insn count pre/post) BEFORE committing to the restructure.
+- `grep -rnE 'read_all_attached\b' src/ tests/ | grep -v _with_acc` → only the def (`stats_reader.cpp:140`) + decl (`.hpp:69`) + 3 doc-comments; ZERO live callers (B4 dead). `http.cpp` uses `_with_acc`.
+- `grep -nE 'round_up_8|percpu_sum_u64|list_iface_dirs' src/exporter/{stats_reader,rule_counters_reader}.cpp` → all three defined in BOTH readers. Verify body-identity yourself (guard #5): `round_up_8` char-identical; `percpu_sum_u64` modulo param name (`stats_fd`/`map_fd`); `list_iface_dirs` md5-identical.
+- **§5.31 note covers ONLY `list_iface_dirs`** (`rule_counters_reader.cpp:62-64`) — confirm `round_up_8`/`percpu_sum_u64` carry NO such provenance (they don't → B2 is clean, no reversal needed; only C1 reverses §5.31).
+- **Include reality (Phase-2 correction):** NO file includes `stats_reader.hpp` from the rule_counters side; a shared home needs a new include/header (HG-1). The verdict's "already includes" claim is refuted.
+- `grep -nE 'populate_bitvec_inner_slot|populate_bitvec6_inner_slot|populate_hash_inner_slot|close_prefixes' src/lib/loader.cpp` → fork at `:1538`/`_v6`, house-style template at `:1492`, guard #23 lives in `close_prefixes` (`:1191`)/`close_prefixes6` (`:1327`) — NOT the wrapper.
+- All anon-namespace / TU-local (no ODR hazard for the exporter extractions); error strings NOT test-pinned (grep tests/ for them = ∅ before assuming).
 
 ### Anti-misdiagnosis guards applicable to this slice (per Phase 3)
 
-- **Guard #5 (Phase A code-grep)** — always; re-anchor every literal (the 25-vs-9 distinction is exactly the kind of approximation guard #5 catches).
-- **Guard #15 / Phase-1.5 (atomic-swap PRESERVE-vs-RESET)** — resolved RESET→RESET UNCHANGED (HG-3); architect confirms wildcard/defaults carry no operator-observable monotonic contract (contrast `rule_counters`). NO copy-forward.
-- **Guard #16 (retired pin-path / map-name ripple)** — `wildcard` / `defaults` are `XDPMF_MAP_*_NAME` pinned constants; if retired/renamed, grep tests/ AND src/ for direct pin reads (`bpftool map dump pinned …/wildcard`, `…/defaults`) and pre-list every consumer (exporter reader, test bodies, fixtures). The ORACLE_AGREEMENT tests likely dump these pins — check before assuming they "just work".
-- **Guard #35 / #37 (gate-as-sole-arbiter; insn-gating discipline)** — the B37 gate arbitrates the insn count; here it is INTENTIONALLY re-baselined (the sanctioned escape-hatch use), not held at 3658. The new baseline = the measured post-spike count, documented.
-- **Guard #28 (bounded-walk / verifier-load spikes)** — the new map layout is a verifier-load risk → the measure-first spike carries insns/stack/states, mirroring the S4/S6 spike discipline.
-- **Guard #12 (RESOURCE_LOCK)** — applies if a NEW ctest touches the xdp fixture / real load; the ORACLE_AGREEMENT family already follows the project's fixture-lock pattern.
+- **Guard #5 (Phase A code-grep)** — always; re-verify the body-identity diffs + the include reality (the verdict's "already includes stats_reader.hpp" was wrong).
+- **Guard #9 (helper-location duplication-over-extraction)** — this slice INTENTIONALLY reverses the duplication for B2/C1. #9's caution (don't pull stable files into the edit surface) is acknowledged: the exporter readers ARE the edit surface here by design, and the §5.31 reversal (C1) is documented per HG-2. The shared header is the minimal new surface.
+- **Guard #23 (#1 bit-vector bug class — cover-direction)** — B5 must keep `close_prefixes`/`close_prefixes6` as separate args to the merged template; the audited surface stays eyeball-auditable. Do NOT merge the close fns.
+- **Guard #12 (RESOURCE_LOCK)** — applies only if a new ctest touches shared host state; this slice adds NO new ctest (existing oracles are the control).
+- **Guard #16 (retired pin-path/map-name ripple)** — N/A (no map name retired; B5 is a wrapper merge, same maps; the exporter extractions touch no pin name).
 
 ### Evidence footer — brief-author Phase 2 grep verification
 
 ```
 File/path:
-  ✓ src/common/xdpfilter.h         BITVEC_NUM_AXES=9 (:195), XDPMF_RULESET_COUNT=2 (:97), wildcard/defaults map-name consts
-  ✓ src/bpf/maps.h                 wildcard ARRAY def (:119), defaults ARRAY def (:288)
-  ✓ src/bpf/xdpfilter.bpf.c        25 wildcard lookups + 1 defaults lookup (3 family arms)
-  ✓ src/bpf/classifier.h           fold-#2 deferral note (:223) — B35 is its home
-  ✓ src/lib/loader.cpp             write_wildcard_slots (:1669), write_default_slot (:1704)
-  ✓ tests/T_*_ORACLE_AGREEMENT.sh  AND4/5/6/ETH/V6/BITVEC/MAC_MERGE — verdict-identity oracle (regression control)
-  ✓ tests/T_PROD_VERIFIER_LOAD.sh  XDPMF_PROD_INSN_BASELINE escape hatch (:120,137) — sanctioned re-baseline
-  ✓ ruleset_state                  absent in src/ → NEW type + map
+  ✓ src/exporter/stats_reader.cpp/.hpp          read_all_attached(sv) def :140 + decl :69, ZERO non-_with_acc callers (B4 dead)
+  ✓ src/exporter/rule_counters_reader.cpp       round_up_8/percpu_sum_u64/list_iface_dirs all dup'd
+  ✓ §5.31 note                                  rule_counters_reader.cpp:63-64, covers ONLY list_iface_dirs (C1 target)
+  ✓ src/lib/loader.cpp                          populate_bitvec_inner_slot :1538 + _v6; house-style populate_hash_inner_slot<Key> :1492; close_prefixes :1191 / close_prefixes6 :1327 (guard #23 home)
+  ✗ "rule_counters_reader.hpp already #includes stats_reader.hpp"  → FALSE (only a prose comment); shared home needs a new include/header (HG-1)
 
-Estimate corrections vs backlog:
-  Backlog "−9 lookups" = per-packet DYNAMIC (one arm). STATIC sites = 25 wildcard + 1 defaults across 3 arms;
-  the restructure touches all 25. The dynamic per-packet win is ≈ 8–9 (one arm) + 1 defaults.
+Estimate corrections vs verdict:
+  • "no new include needed" → REFUTED: rule_counters_reader.cpp does not include stats_reader.hpp → new header (percpu_read.hpp) or +1 include required (still net-negative).
+  • Net LOC: B4 ~−12, B2 ~−18, C1 ~−21, B5 ~−38 → ~−89 gross / ~−70 net after the shared-header scaffold (~+6).
 
 Surprising findings:
-  • `wildcard` is ALREADY a single combined ARRAY (not 9 maps) — the win is fewer LOOKUPS into it
-    (one struct read replaces N per-axis lookups), not fewer maps.
-  • B35 naturally subsumes the deferred B34a fold #2 (the 3 arms' divergent wildcard-load orderings
-    collapse into a single struct read) — track it, do not treat as separate.
-  • This is the FIRST non-byte-identical slice in the arc → B37 baseline is re-based (sanctioned), and the
-    pre-existing ORACLE_AGREEMENT family is the correctness oracle (test surface is NOT from scratch).
+  • C1 (list_iface_dirs) is the ONLY extraction that touches a documented decision (§5.31) → gated HG-2 (drop if architect judges §5.31 still load-bearing; B2/B4/B5 independent).
+  • B5 is the only loader/datapath-adjacent item; verdict-identity-gated via ORACLE_AGREEMENT (userspace map-population, no .bpf.c change).
 ```
