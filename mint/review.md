@@ -1,4 +1,4 @@
-# Review — MVP-4.27 / B37 decorative-gates (mint triangulation)
+# Review — MVP-4.28 / B34a datapath helper-extraction (§5.68) (mint triangulation)
 
 ## Verdict
 `pass` (round-1)
@@ -7,49 +7,52 @@
 
 | Framework point | Findings | Tags |
 |---|---|---|
-| 1. Spec ↔ Code (test-infra) | 0 | — |
+| 1. Spec ↔ Code | 0 | — |
 | 2. Spec ↔ Tests | 0 | — |
-| 3. Code ↔ Tests | 0 | — |
+| 3. Code ↔ Tests | 0 (1 flaky, see OOT) | — |
 | 4. Out-of-Scope Drift | 0 | — |
 | 5. Behaviour preserved (brownfield) | 0 | — |
 
-## Point-by-point
+## What was verified (independently, not from logs)
 
-**1. Spec ↔ Code** — "code" here is test-infra (zero `src/`). Both Interfaces honored:
-- `T_PROD_VERIFIER_LOAD.sh:120-145` — FATAL insn assert on the `rc==0` path; measures `llvm-objdump-19 -d --section=xdp | grep -cE '^\s+[0-9a-f]+:'` (the 3658 objdump LINE count, NOT the xlated-BYTE value) → **D-mvp-4.27-INSN-SOURCE honored**; `expected=${XDPMF_PROD_INSN_BASELINE:-3658}` (`:120`); failure msg NAMES the hatch (`:139-140`); xlated-byte read kept as labelled secondary NOTE (`:147-154`). SKIP-safe: missing objdump → NOTE+continue (`:125-127`), unparseable → NOTE+continue (`:131-133`), never FAIL/77.
-- `T_LOADER_STDERR_GOLDEN.sh:78-114` — 3 MUST shapes driven through real `LOADER_BIN`, exact-match `diff` vs checked-in goldens; SKIP-77 on absent binary (`:41-44`); Permission arm SKIP-clean when privileged (`:120-121`); NO-LOCK confirmed (parse-throws before iface resolve). Goldens (`tests/fixtures/loader_stderr_*.golden`) are operator-REACHABLE rendered lines, no internal-only-code coupling.
-- Sanctioned reversal: §5.63 markers present at design.md:17559/17566/17601 — verbatim reversed text cited + `[SUPERSEDED BY §5.67]`/`[RETIRED by §5.67]` (grep count = 3); Decisions block (18175-18177) quotes both reversed texts verbatim. **guard #35 candidate present** (18226-18229). Clean per impl-role-discipline — design, not silent drift.
+**Load-bearing PI-mvp-4.28-DATAPATH-IDENTICAL — 3658 ✓.** Forced fresh recompile (`touch src/bpf/xdpfilter.bpf.c && cmake --build build --target xdpfilter_bpf`), then `llvm-objdump-19 -d --section=xdp build/xdpfilter.bpf.o | grep -cE '^\s+[0-9a-f]+:'` = **3658**. Byte-identity holds. B37 gates green in-suite: `T_PROD_VERIFIER_LOAD` (#102) + `T_INSN_BASELINE_GATE` (#105) both Passed.
 
-**2. Spec ↔ Tests** — TestStrategy §6.83/§6.84 both covered. Negation controls present and real:
-- `T_INSN_BASELINE_GATE.sh:100-147` drives the gate with a WRONG baseline (must fail-loud) + CORRECT baseline (must pass) + cross-track check.
-- `T_LOADER_STDERR_SHAPE.sh:111-132` exact-golden-vs-self (empty) + mutated-golden (non-empty) discrimination. **[NO-NEGATION-CONTROL] not triggered.** No tautological/circular tests — assertions target stated outcomes (insn count == baseline; rendered stderr == golden; exit codes), not impl internals.
+**PI-mvp-4.28-NONDATAPATH-ZERO + PI-7 ✓.** `git diff 71addf0 -- src/lib src/common src/cli src/exporter src/common/xdpfilter.h` = **0 lines**. `git diff 71addf0 --name-only` = exactly `mint/design.md`, `mint/impl-notes.md`, `src/bpf/xdpfilter.bpf.c`. Net `src/bpf` delta −46 (155 ins / 201 del). VERSION `0.16.0` unchanged.
 
-**3. Code ↔ Tests** — re-ran all 4 slice tests via ctest: 4/4 Passed (`/tmp/mint-review-tests-1780568921.log`). Teeth independently re-proven:
-- Insn gate with `XDPMF_PROD_INSN_BASELINE=9999` → `FAIL: xdp-section instruction-count 3658 != baseline 9999`, names hatch, rc=1 (not 77). Confirmed xlated bytes = 39216B ≠ 3658 (proves D-mvp-4.27-INSN-SOURCE was a real catch).
-- Mutated `loader_stderr_bad_trust_model.golden` → `FAIL[1-shape]: rendered stderr does NOT match`, rc=1; restored byte-clean (git diff empty). Bonus: the unprivileged OPS-canary Permission arm fired (exit 6, pinned shape) when run un-sudo'd.
-- objdump count on `build/xdpfilter.bpf.o` == 3658 (independently). No UNEXERCISED-EXPORT (test-infra only).
+**4 folds land faithfully (every site read):**
+- #1 `DISPATCH_MATCH` macro — def `:623-641`; 3 calls guarded by `acc != 0` (`:967`/`:1159`/`:1259`). `do/while(0)`, two caller early-returns in scope. Phase-B EDIT-1 (helper→macro, negotiated).
+- #3 `LOOKUP_INNER_OR_DROP` macro — def `:657-662`; exactly **15** sites (eth `:782` + v4×6 `:833-838` + v6×6 `:1044-1049` + non-IP×2 `:1177-1178`). No `do/while`, `unlikely` preserved — byte-identical by construction.
+- #12 `mac_axis()` helper — def `:683-693`; 3 calls. Faithful `{0}`/memcpy-6/lookup/NULL→0.
+- #13 `READ_DPORT` macro — def `:711-728`; 2 calls. MALFORMED bump+`return XDP_DROP` preserved 1:1. Design-authorized macro FALLBACK (out-param helper measured +50).
 
-**4. Out-of-Scope** — no code/test references B34/B35/B36 or the P3/P4/P6 folds; no `src/` touched. No OOS-DRIFT.
+**Fold #2 `load_wildcards` DROPPED — inline-merge, NOT a gap.** Per verifiable-invariant #5 + D-mvp-4.28-Q2 Phase-B EDIT-2. 3 inline 8-axis blocks left byte-for-byte; drop documented in-file `:664-673`. Root cause (per-arm ordering asymmetry, 3657/3659 brackets-never-3658) consistent with the held gate.
 
-**5. Behaviour preserved (brownfield)**:
-- PI-mvp-4.27-ZERO-SRC: `git diff 4a9aa5d -- src/` = ∅ ✓
-- PI-7 RESUMES: `git diff 4a9aa5d -- src/lib/loader.hpp src/lib/config.hpp` = ∅ ✓
-- PI-DATAPATH-IDENTICAL: `xdpfilter.bpf.c` ∅; xdp section == 3658 ✓
-- PI-VERSION: `--version` ⇒ 0.16.0 ✓
-- No REGRESSION: tester's full run = 104/106 pass; the only 2 failures are the pre-existing env-fails BY NAME (T_EXPORTER_EXITS_6_ALL_IFACES_EACCES #48, T_LOG_JSON_EXPORTER_EVENTS #63) — both untouched by the slice (`git diff 4a9aa5d` empty), prior 101/103 baseline preserved (+3 new green = 104/106).
-- No UNRELATED-EDIT: footprint == FileList exactly (NEW T_LOADER_STDERR_GOLDEN.sh + 3 goldens; EDITED T_PROD_VERIFIER_LOAD.sh + CMakeLists.txt + design.md) PLUS the 2 meta-verification tests (T_INSN_BASELINE_GATE, T_LOADER_STDERR_SHAPE) sanctioned by team-lead as the expected triangulation layer — confirmed, not flagged. Existing T_PROD_VERIFIER_LOAD CMake registration untouched (diff is append-only at CMakeLists:1581+).
+**RENT-PAYERS intact ✓.** 3 family arms (`:796`/`:970`/`:1162`); per-arm `acc` AND-asymmetry preserved (PI-mvp-4.13-CROSS-FAMILY uncollapsed); `XDPMF_FFS_FALLBACK` #ifdef `:510-520`; inline `ETH_P_*`/`IPPROTO_*` `#ifndef` `:43-80`; hoisted `eth`/`wc_eth` 9th half kept.
+
+**ANCHORS migrated 1-canonical (guard #33) ✓.** HG-mvp-4.3-4 → `DISPATCH_MATCH:618`; §5.26/§5.27 verifier-NULL → `LOOKUP_INNER_OR_DROP:653`; §5.47 MAC → `mac_axis:677`; §5.44 dport → `READ_DPORT:708`. §5.43 wildcard note correctly stays inline (#2 dropped). Per-arm cross-family AND comments preserved.
+
+**Spec↔Tests / OOS ✓.** §5.68 mandates NO new test — the B37 insn gate IS the oracle (green at 3658). No module split, no rent-payer collapse, no loader fork-merge, no non-bpf `src/` edit, no VERSION/schema/axis/map change. Footprint == FileList.
 
 ## Test execution
-```
-1/4 Test #102: T_PROD_VERIFIER_LOAD .............   Passed    0.26 sec
-2/4 Test #104: T_LOADER_STDERR_GOLDEN ...........   Passed    0.07 sec
-3/4 Test #105: T_INSN_BASELINE_GATE .............   Passed    0.58 sec
-4/4 Test #106: T_LOADER_STDERR_SHAPE ............   Passed    0.07 sec
-100% tests passed, 0 tests failed out of 4
-```
-Teeth (independent re-proof): insn-gate FAIL-loud on baseline=9999 (rc=1, hatch named); mutated-golden FAIL[1-shape] (rc=1); both restored clean. Tester's full-suite baseline: 104/106 (2 pre-existing env-fails by name).
+
+`sudo -E ctest --test-dir build` → **97% passed, 3 failed / 106** (2 skipped). Full log: `/tmp/mint-review-tests-1780577235.log`.
+- #48 `T_EXPORTER_EXITS_6_ALL_IFACES_EACCES` — known env-fail (bpffs/EACCES, exporter-side).
+- #63 `T_LOG_JSON_EXPORTER_EVENTS` — known env-fail (exporter-side).
+- #54 `T_EXPORTER_RULE_LABELS` — **FLAKE**: green in tester baseline (`mint/test-run.log:147`) + green isolated (`ctest -R '^T_EXPORTER_RULE_LABELS$'` 1/1); red only in the 682s full-suite run. ∅ `src/exporter` diff → structurally impossible for this byte-identical datapath slice to cause. Resource contention (port 9417 / veth / sidecar timing), not code.
+
+**[REGRESSION] ruled out.** The slice is byte-identical datapath (3658) with ∅ exporter diff.
 
 ## Out-of-triangulation findings
-None. (Minor observation, NOT a finding: `loader_stderr_missing_config.golden` embeds the strerror tail "No such file or directory" — locale-fragile in principle, but design-sanctioned exact-match for the MUST corpus per D-mvp-4.27-Q1 and passes in the C/en CI locale. No action.)
 
-All three artifacts agree. Ship it.
+### [OUT-OF-TRIANGULATION] T_EXPORTER_RULE_LABELS flakes under full-suite load
+**Location**: `tests/T_EXPORTER_RULE_LABELS.sh` (§6.51); failed in full-suite, passes isolated.
+**Evidence**: green baseline `mint/test-run.log:147` + green isolated (4.39s); red only in the 682s full-suite run. Zero exporter diff this slice → cause is test-infra contention, not code.
+**Recommended disposition**: `defer` (pre-existing test-infra flake, unrelated to this slice; a future test-infra slice could add port/fixture isolation or a retry).
+
+## Rework assignments
+None — verdict `pass`. The 2 Phase-B design EDITs (fold #1 helper→macro, fold #2 drop) + the READ_DPORT macro fallback are all gate-arbitrated `inline-merge` per verifiable-invariants #4/#5/#7, not findings.
+
+---
+
+### Deferred to next slice
+- **T_EXPORTER_RULE_LABELS full-suite flake** (`tests/T_EXPORTER_RULE_LABELS.sh`, §6.51) — pre-existing test-infra resource-contention flake (exporter port 9417 / veth / sidecar timing under a ~680s parallel run); passes isolated + in the tester baseline. NOT caused by this byte-identical datapath slice (∅ `src/exporter` diff). Candidate for a future test-infra hardening slice (per-test port/fixture isolation or a bounded retry). Surfaced MVP-4.28 review.
