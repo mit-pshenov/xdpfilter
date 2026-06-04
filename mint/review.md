@@ -1,54 +1,55 @@
-# Review — MVP-4.26 / B33 rename mac_filter/xdpmacfilter/mac_filter_prog → xdpfilter (mint triangulation)
+# Review — MVP-4.27 / B37 decorative-gates (mint triangulation)
 
 ## Verdict
-`pass` (round-1, 0 findings, 1 out-of-triangulation → inline-merge)
-
-Base for all diffs: `7fdecda` (design commit; src = pre-rename state).
+`pass` (round-1)
 
 ## Triangulation matrix
+
 | Framework point | Findings | Tags |
 |---|---|---|
-| 1. Spec ↔ Code | 0 | — |
+| 1. Spec ↔ Code (test-infra) | 0 | — |
 | 2. Spec ↔ Tests | 0 | — |
 | 3. Code ↔ Tests | 0 | — |
 | 4. Out-of-Scope Drift | 0 | — |
-| 5. Behaviour preserved | 0 | 1 OOT inline-merge (T7 KEEP wording) |
+| 5. Behaviour preserved (brownfield) | 0 | — |
 
-## Point 1 — Spec ↔ Code
-- **6 git mv** (history-preserving R-status): `mac_filter.bpf.c→xdpfilter.bpf.c` (R099), `mac_filter.h→xdpfilter.h` (R096), the 2 fixtures, `systemd/xdpmacfilter@→xdpfilter@.service`, `ansible/xdpmacfilter-deploy→xdpfilter-deploy.yml`.
-- **§5.19 security gate end-to-end consistent**: `kOwnedProgName{"xdpfilter_prog"}` (`loader.cpp:84`) == SEC `int xdpfilter_prog` (`xdpfilter.bpf.c:614`) == `skel->progs.xdpfilter_prog` (`loader.cpp:1026,2585,2676`) == fixtures' name-asserts. **ZERO `mac_filter_prog` survives.**
-- **VERSION 0.16.0** (HG-1): `CMakeLists.txt:13`; `grep '0\.15\.0'` → ∅ (guard #11).
-- **KEEPs**: `XDPMF_*` = 54 symbols (HG-4, unchanged; only path VALUES changed); `xdpfilter_*` metrics + `BITVEC_NUM_AXES`/`kManagedMaps`/schema untouched.
+## Point-by-point
 
-## Point 2 — Spec ↔ Tests
-NO new ctest (design-correct; canaries ARE the verification). Negation controls present (xdpfilter_bad/alt, T_NEGATION_CONTROL, T_SYSTEMD_UNIT_SYNTAX neg-arm, xdp_pass alien-refusal). T6 VERSION canaries green.
+**1. Spec ↔ Code** — "code" here is test-infra (zero `src/`). Both Interfaces honored:
+- `T_PROD_VERIFIER_LOAD.sh:120-145` — FATAL insn assert on the `rc==0` path; measures `llvm-objdump-19 -d --section=xdp | grep -cE '^\s+[0-9a-f]+:'` (the 3658 objdump LINE count, NOT the xlated-BYTE value) → **D-mvp-4.27-INSN-SOURCE honored**; `expected=${XDPMF_PROD_INSN_BASELINE:-3658}` (`:120`); failure msg NAMES the hatch (`:139-140`); xlated-byte read kept as labelled secondary NOTE (`:147-154`). SKIP-safe: missing objdump → NOTE+continue (`:125-127`), unparseable → NOTE+continue (`:131-133`), never FAIL/77.
+- `T_LOADER_STDERR_GOLDEN.sh:78-114` — 3 MUST shapes driven through real `LOADER_BIN`, exact-match `diff` vs checked-in goldens; SKIP-77 on absent binary (`:41-44`); Permission arm SKIP-clean when privileged (`:120-121`); NO-LOCK confirmed (parse-throws before iface resolve). Goldens (`tests/fixtures/loader_stderr_*.golden`) are operator-REACHABLE rendered lines, no internal-only-code coupling.
+- Sanctioned reversal: §5.63 markers present at design.md:17559/17566/17601 — verbatim reversed text cited + `[SUPERSEDED BY §5.67]`/`[RETIRED by §5.67]` (grep count = 3); Decisions block (18175-18177) quotes both reversed texts verbatim. **guard #35 candidate present** (18226-18229). Clean per impl-role-discipline — design, not silent drift.
 
-## Point 3 — Code ↔ Tests (reviewer re-ran)
-Sample `/tmp/mint-review-mvp426.log` — **7/7 PASS**: T_LOAD_ATTACH, T_ATTACH_TAG_MISMATCH, T_VERIFIER_REJECT, T_BITVEC_VERIFIER_LOAD, T_PROD_VERIFIER_LOAD, T_CLI_HELP_VERSION, **T_SYSTEMD_UNIT_SYNTAX (#35 now GREEN** after the team-lead's `/usr/bin/xdpfilter` symlink fix). The 5 §5.19 canaries green with new prog name + object path = empirical proof of tag name-independence (D-Q1/A1). The 2 full-suite env-fails (#48/#63, bpffs-root unmounted — logs show the correct NEW path `/sys/fs/bpf/xdpfilter does not exist`) + #57 transient -j flake are NOT rename defects.
+**2. Spec ↔ Tests** — TestStrategy §6.83/§6.84 both covered. Negation controls present and real:
+- `T_INSN_BASELINE_GATE.sh:100-147` drives the gate with a WRONG baseline (must fail-loud) + CORRECT baseline (must pass) + cross-track check.
+- `T_LOADER_STDERR_SHAPE.sh:111-132` exact-golden-vs-self (empty) + mutated-golden (non-empty) discrimination. **[NO-NEGATION-CONTROL] not triggered.** No tautological/circular tests — assertions target stated outcomes (insn count == baseline; rendered stderr == golden; exit codes), not impl internals.
 
-## Point 4 — Out-of-Scope Drift
-Clean. `src/bpf/` = only `xdpfilter.bpf.c`; `src/common/` = only `xdpfilter.h` (+ pre-existing) → NO B34 split. No `XDPMF_*` symbol rename, no logic/schema/map change.
+**3. Code ↔ Tests** — re-ran all 4 slice tests via ctest: 4/4 Passed (`/tmp/mint-review-tests-1780568921.log`). Teeth independently re-proven:
+- Insn gate with `XDPMF_PROD_INSN_BASELINE=9999` → `FAIL: xdp-section instruction-count 3658 != baseline 9999`, names hatch, rc=1 (not 77). Confirmed xlated bytes = 39216B ≠ 3658 (proves D-mvp-4.27-INSN-SOURCE was a real catch).
+- Mutated `loader_stderr_bad_trust_model.golden` → `FAIL[1-shape]: rendered stderr does NOT match`, rc=1; restored byte-clean (git diff empty). Bonus: the unprivileged OPS-canary Permission arm fired (exit 6, pinned shape) when run un-sudo'd.
+- objdump count on `build/xdpfilter.bpf.o` == 3658 (independently). No UNEXERCISED-EXPORT (test-infra only).
 
-## Point 5 — Behaviour preserved (§6.5)
-- **PI-DATAPATH-IDENTICAL**: xdp section = **3658**; `git diff -M 7fdecda -- src/bpf/` non-rename-token lines = ZERO (pure token rename).
-- **PI-7-mvp-4.26-SUSPENDED** (HG-3 + EDIT-1): loader.hpp/config.hpp diff = exactly 4 line-pairs (2× include-path + 2× doc-prose); NO symbol/signature/body change → inline-merge per EDIT-1, NOT [INVARIANT-VIOLATED].
-- **PI-RENAME-COMPLETENESS**: grep → zero LIVE-surface survivors; only deliberate KEEPs (BACKLOG historical ledger + CHANGELOG migration note).
-- PI-SECURITY-GATE / PI-ENV-ABI / PI-SCHEMA-METRICS / PI-VERSION all ✓.
+**4. Out-of-Scope** — no code/test references B34/B35/B36 or the P3/P4/P6 folds; no `src/` touched. No OOS-DRIFT.
 
-## Completeness grep (T7 — load-bearing)
-ZERO hits in any LIVE surface (src/, tests/, systemd/, ansible/, CMakeLists.txt, cmake/, .github/, README.md, CONFIG_SCHEMA.md, FLEET_DEPLOYMENT.md). Surviving hits ONLY in: `CHANGELOG.md` 0.16.0 migration note (intentional — must name what it migrated from); `docs/BACKLOG.md` historical-ledger entries (B7/B18/B20/B26/B33/B34) citing past commits by their then-current filenames (renaming would falsify the shipped record). Both correct KEEPs.
+**5. Behaviour preserved (brownfield)**:
+- PI-mvp-4.27-ZERO-SRC: `git diff 4a9aa5d -- src/` = ∅ ✓
+- PI-7 RESUMES: `git diff 4a9aa5d -- src/lib/loader.hpp src/lib/config.hpp` = ∅ ✓
+- PI-DATAPATH-IDENTICAL: `xdpfilter.bpf.c` ∅; xdp section == 3658 ✓
+- PI-VERSION: `--version` ⇒ 0.16.0 ✓
+- No REGRESSION: tester's full run = 104/106 pass; the only 2 failures are the pre-existing env-fails BY NAME (T_EXPORTER_EXITS_6_ALL_IFACES_EACCES #48, T_LOG_JSON_EXPORTER_EVENTS #63) — both untouched by the slice (`git diff 4a9aa5d` empty), prior 101/103 baseline preserved (+3 new green = 104/106).
+- No UNRELATED-EDIT: footprint == FileList exactly (NEW T_LOADER_STDERR_GOLDEN.sh + 3 goldens; EDITED T_PROD_VERIFIER_LOAD.sh + CMakeLists.txt + design.md) PLUS the 2 meta-verification tests (T_INSN_BASELINE_GATE, T_LOADER_STDERR_SHAPE) sanctioned by team-lead as the expected triangulation layer — confirmed, not flagged. Existing T_PROD_VERIFIER_LOAD CMake registration untouched (diff is append-only at CMakeLists:1581+).
+
+## Test execution
+```
+1/4 Test #102: T_PROD_VERIFIER_LOAD .............   Passed    0.26 sec
+2/4 Test #104: T_LOADER_STDERR_GOLDEN ...........   Passed    0.07 sec
+3/4 Test #105: T_INSN_BASELINE_GATE .............   Passed    0.58 sec
+4/4 Test #106: T_LOADER_STDERR_SHAPE ............   Passed    0.07 sec
+100% tests passed, 0 tests failed out of 4
+```
+Teeth (independent re-proof): insn-gate FAIL-loud on baseline=9999 (rc=1, hatch named); mutated-golden FAIL[1-shape] (rc=1); both restored clean. Tester's full-suite baseline: 104/106 (2 pre-existing env-fails by name).
 
 ## Out-of-triangulation findings
+None. (Minor observation, NOT a finding: `loader_stderr_missing_config.golden` embeds the strerror tail "No such file or directory" — locale-fragile in principle, but design-sanctioned exact-match for the MUST corpus per D-mvp-4.27-Q1 and passes in the C/en CI locale. No action.)
 
-### [OOT] T7 KEEP wording narrower than the correct KEEP set → inline-merge (applied)
-**Location**: `design.md` §5.66 T7 row + PI-RENAME-COMPLETENESS row.
-**Evidence**: the design literally said "ONLY `docs/BACKLOG.md` B33 entry"; the actual & correct surviving set is the WHOLE BACKLOG historical ledger (every entry citing a past commit by its then-current filename). Tester + reviewer concur this is correct historical-ledger preservation.
-**Disposition**: `inline-merge` (applied — see Post-review sweep).
-
-## Post-review sweep — round 1
-- OOT (T7 KEEP wording too narrow) → `mint/design.md` §5.66 T7 row + PI-RENAME-COMPLETENESS row edited (EDIT-2): broadened the KEEP set from "B33 entry only" to "all `docs/BACKLOG.md` historical-ledger entries citing past commits by their then-current names + the CHANGELOG migration note". Design-prose correction to match reality; zero impl/behavior impact.
-
-## Rework assignments
-None — `pass`.
-
-Net: rename complete + behavior-identical; security gate consistent (zero `mac_filter_prog`); xdp 3658; VERSION 0.16.0; XDPMF_=54; 6 git mv; #35 green post-symlink-fix; sample 7/7. Candidate guard #34 (operator-surface rename = minor bump + migration note + the CMake bpffs-extraction-assert is a high-miss site) validated. Ship-ready.
+All three artifacts agree. Ship it.
