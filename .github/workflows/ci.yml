@@ -80,8 +80,15 @@ jobs:
           for c in /usr/lib/linux-tools-*/bpftool /usr/lib/linux-tools/*/bpftool /usr/bin/bpftool bpftool /usr/sbin/bpftool; do
             if "$c" version >/dev/null 2>&1; then bpftool="$c"; break; fi
           done
-          [ -n "$bpftool" ] || { echo "::error::no WORKING bpftool on runner (the linux-tools wrapper needs an absent azure-kernel pkg; install the standalone 'bpftool' package)"; exit 1; }
+          [ -n "$bpftool" ] || { echo "::error::no WORKING bpftool on runner (the /usr/sbin wrapper needs an absent azure-kernel pkg; linux-tools-generic provides a real /usr/lib binary)"; exit 1; }
           echo "using bpftool: $bpftool"
+          # Make the WORKING bpftool THE `bpftool` on PATH (dev-box convention:
+          # /usr/local/bin/bpftool, ahead of the broken /usr/sbin wrapper). The
+          # CMake build's `find_program(BPFTOOL_EXE NAMES bpftool)` + its
+          # `bpftool gen skeleton` step (xdpfilter.skel.h) must pick this one,
+          # NOT the wrapper — so the symlink lands BEFORE the Configure step.
+          sudo ln -sf "$(readlink -f "$bpftool")" /usr/local/bin/bpftool
+          hash -r
           sudo "$bpftool" btf dump file /sys/kernel/btf/vmlinux format c > include/vmlinux.h
           echo "generated include/vmlinux.h ($(wc -l < include/vmlinux.h) lines)"
 
