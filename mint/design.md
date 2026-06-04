@@ -18900,3 +18900,33 @@ Guidance for the reviewer, NOT contracts for impl. **Resolution rule: if any ite
 - "while I'm here" edits to files not in the EDITED/NEW list — the FileList DIFF is the complete footprint; any edit outside it is a design gap → SendMessage architect.
 
 Evidence: `mint/task-brief.md` MVP-4.31/B38 (Goal, four items B4/B2/C1/B5, Context/prior-work, Workflow rules brownfield, HG-1/2/3, Q1 A1/A2, Scope B38-1/2/3/4, OOS, DoD, Dependencies, packs, pre-brief sanity-check, Notes-for-architect grep checklist + guards #5/#9/#23/#12/#16, evidence footer); independent Phase-A live-tree Reads (guard #5) — `stats_reader.cpp` (`round_up_8` `:45-48`, `list_iface_dirs` `:50-80`, `percpu_sum_u64` `:82-112`, dead `read_all_attached(sv)` `:140-148`, `_with_acc` `:150`), `stats_reader.hpp` (decl `:69` + stale comments `:15`/`:38`/`:75`), `rule_counters_reader.cpp` (`round_up_8` `:54-59`, `list_iface_dirs` + §5.31 comment `:61-91`, `percpu_sum_u64` `:93-121`), `http.cpp:234` (`_with_acc` only); `loader.cpp` (`populate_bitvec_inner_slot` `:1538`, `populate_bitvec6_inner_slot` `:1583`, `populate_hash_inner_slot<Key>` `:1491`, `close_prefixes` `:1190`/`close_prefixes6`, call-sites `:1954`/`:1959`/`:1979`/`:1984`); `CMakeLists.txt:144-145` (TUs only, no header enumeration); REFUTED verdict claim "rule_counters_reader includes stats_reader.hpp" (only `stats_reader.cpp`/`http.cpp`/`main.cpp`/`prom_format.hpp` do). Brownfield amendment; pure-subtraction slice; NO datapath change → xdp 3437. Highest prior section §5.70; this is §5.71; NO new guard (exercises #5/#9/#16/#23; C1 reversal follows the §5.67/B37 documented-reversal precedent). Guards #1..#37 catalogue + §5.70 candidate #38.
+
+---
+
+### §5.72 MVP-4.32 / B39: CI build-only reframe — regenerate `vmlinux.h` on the runner + scope CI to the non-privileged subset (infra; `.github/workflows/ci.yml` + `tests/lib/common.sh` 1-line gate + this doc; ZERO `src/` change; NO schema/axis/map/loader/datapath/VERSION change; 2026-06-04)
+
+#### §5.72 Problem statement
+
+The CI gate added in §5.63 (MVP-4.23) had **never gone green** — every one of its runs (14/14 observed via `gh run list`) failed at the **Build** step on `src/bpf/xdpfilter.bpf.c:23: fatal error: 'vmlinux.h' file not found`. Root cause: `include/vmlinux.h` is gitignored (`.gitignore:13`; kernel-version-specific ~2 MB generated CO-RE header), and `ci.yml` never regenerated it on the runner. The failure was invisible to the mint workflow because mint reviews the **local** ctest (a box with `vmlinux.h` + passwordless sudo + XDP), not the live GitHub Actions run — exactly the gap §5.63's own `D-mvp-4.23-CI-UNVALIDATED` honesty note warned about ("Do NOT claim it works until a live run is observed. Expect to iterate."). It was never iterated to green. **This is not a regression — the gate was decorative from birth.**
+
+Compounding it: §5.63 armed `XDPMF_REQUIRE_FULL_COVERAGE=1` to FORCE the full datapath suite on CI. That intent is unachievable on a hosted `ubuntu-latest` runner — veth/netns + XDP-attach + the project's `bpftool`-path assumptions are flaky/unsupported there (the §5.63 file itself documents a self-hosted alternative as the real-coverage path).
+
+#### §5.72 Decision — `D-mvp-4.32-CI-BUILD-ONLY` (REVERSES `D-mvp-4.23` full-coverage-on-CI intent)
+
+Scope hosted CI to **what a hosted runner can do HONESTLY**: build under `-Werror` + run the **non-privileged** test subset. The privileged datapath suite (veth/XDP/sudo) is deferred to the **local / self-hosted mint gate**, where it runs green every slice. Green on CI now MEANS "compiles clean under `-Werror` + the cheap invariants a refactor mutates still hold" — an achievable, non-vacuous gate. This is a conscious reversal of the §5.63 full-coverage intent (documented per the §5.67/B37 documented-reversal precedent), NOT an oversight; the full-coverage `XDPMF_REQUIRE_FULL_COVERAGE` mechanism is retained in-tree for the self-hosted path.
+
+**Two coupled changes:**
+1. **`ci.yml` regenerates `include/vmlinux.h` per-runner** from the runner's own `/sys/kernel/btf/vmlinux` via `bpftool btf dump … format c` (the canonical CO-RE pattern), probing a few `bpftool` locations and failing LOUD if BTF/bpftool is absent (so a silent build break can never recur). This unblocks the Build step.
+2. **`tests/lib/common.sh` `require_passwordless_sudo()` gains a 1-line `XDPMF_CI_BUILD_ONLY=1` deterministic SKIP-77.** A hosted runner HAS passwordless sudo, so the privileged suite would otherwise ATTEMPT to run (and fail on XDP) rather than skip. The env gate makes all 91 `require_passwordless_sudo`-guarded tests SKIP cleanly; the ~16 non-privileged tests (`T_BUILD`, `T_INSN_BASELINE_GATE` [llvm-objdump, no root — the B37 byte-identity gate], `T_LOADER_STDERR_GOLDEN`/`_SHAPE`, config/CLI error-paths, `T_LOG_EVENT_CATALOG_STABILITY`, `*_UNIT/PLAYBOOK_SYNTAX`) RUN and gate. The CI test step runs **without sudo**, `XDPMF_CI_BUILD_ONLY=1`, and **drops** `XDPMF_REQUIRE_FULL_COVERAGE` (which by design reds on SKIPs).
+
+#### §5.72 Verification
+
+- **Local (the locally-verifiable half):** `env XDPMF_CI_BUILD_ONLY=1 ctest` (no sudo) → **100% tests passed, 0 failed out of 106** (16 RUN+PASS, ~90 SKIP). The partition is deterministic and the green is non-vacuous (it includes the compile + B37 insn-gate + golden-stderr). Validated 2026-06-04 before push.
+- **Runner (the push-only half):** the `vmlinux.h` regeneration + `bpftool`-availability can only be confirmed against a live runner → push + watch `gh run`. "Expect to iterate" (inherited §5.63 honesty stance).
+
+#### §5.72 Preserved invariants
+- **ZERO `src/` change** — `git diff -- src/` ∅. Footprint = `.github/workflows/ci.yml` (rewrite) + `tests/lib/common.sh` (+1 gate) + this §5.72.
+- Datapath unchanged — xdp section **3437 insns** (no `.bpf.c` touch). VERSION 0.16.0 (no bump). PI-7 ∅.
+- The full-coverage path (`XDPMF_REQUIRE_FULL_COVERAGE`) is retained for the self-hosted runner — build-only is the HOSTED-runner scope, not a deletion of the capability.
+
+Evidence: `gh run list` (14/14 RED) + `gh run view --log-failed` (`vmlinux.h file not found` at Build); `.gitignore:13` (vmlinux.h gitignored); `tests/lib/common.sh:64` (`require_passwordless_sudo`); `tests/CMakeLists.txt` (`SKIP_RETURN_CODE 77`); local `XDPMF_CI_BUILD_ONLY=1 ctest` = 100%/0-failed/106. Highest prior section §5.71; this is §5.72; NO new guard (infra slice; reverses D-mvp-4.23 per the §5.67/B37 precedent). Guards #1..#37 + §5.70 candidate #38.

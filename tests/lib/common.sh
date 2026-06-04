@@ -62,6 +62,16 @@ PIN_DIR=${PIN_ROOT}/${IFACE_A}
 # On failure (sudo would prompt or be denied), exit 77 — ctest's
 # SKIP_RETURN_CODE convention; the test is reported as Skipped, not Failed.
 require_passwordless_sudo() {
+    # CI build-only gate (§5.72 / B39): a hosted runner has passwordless sudo
+    # but cannot reliably create veth/netns + attach XDP. When XDPMF_CI_BUILD_ONLY=1
+    # the privileged datapath suite SKIPs (77) DETERMINISTICALLY — its real
+    # verification lives on the local/self-hosted mint gate. This reverses the
+    # §5.63 D-mvp-4.23 full-coverage-on-CI intent (see §5.72); the non-privileged
+    # tests (compile, insn-gate, golden-stderr, config/CLI) still RUN and gate.
+    if [ "${XDPMF_CI_BUILD_ONLY:-0}" = "1" ]; then
+        echo "SKIP: XDPMF_CI_BUILD_ONLY=1 — privileged datapath suite deferred to the local/self-hosted gate" >&2
+        exit 77
+    fi
     if ! sudo -n true 2>/dev/null; then
         echo "SKIP: passwordless sudo not available (sudo -n true failed)" >&2
         echo "      this test needs CAP_BPF/CAP_NET_ADMIN; run ctest as root" >&2

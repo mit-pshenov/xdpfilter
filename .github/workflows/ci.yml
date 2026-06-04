@@ -1,24 +1,31 @@
-# .github/workflows/ci.yml — design §5.63 (MVP-4.23, TEST-H1 / C-3).
+# .github/workflows/ci.yml — design §5.72 (MVP-4.32 / B39, build-only reframe).
 #
-# Continuous-integration gate for `main`: build the project under -Werror and
-# run the full ctest suite under sudo, DEMANDING full coverage so a runner
-# without passwordless sudo (which would silently SKIP-77 the entire datapath
-# suite incl. the T_NEGATION_CONTROL canary) goes RED via T_COVERAGE_FLOOR.
+# Continuous-integration gate for `main`, scoped to what a HOSTED runner can do
+# HONESTLY: build the project under -Werror and run the NON-privileged test
+# subset (compile, the B37 insn-baseline gate via llvm-objdump, golden-stderr,
+# config/CLI error-paths, catalog-stability, unit/playbook syntax). The
+# privileged datapath suite (veth + XDP attach + sudo) SKIPs deterministically
+# via XDPMF_CI_BUILD_ONLY=1 — its real verification lives on the local /
+# self-hosted mint gate (a box with a recent kernel + passwordless sudo + an
+# XDP-capable interface), where it runs green every slice.
 #
-# ┌─ HONESTY NOTE (D-mvp-4.23-CI-UNVALIDATED, §5.60 precedent) ───────────────┐
-# │ This workflow is BEST-EFFORT and UNVALIDATED-until-first-push. A GitHub   │
-# │ Actions workflow cannot be executed in the authoring environment; it has  │
-# │ NOT been run against a live runner. `actionlint` (if available) provides  │
-# │ STATIC syntax validation ONLY — it does not prove the pipeline runs green │
-# │ (toolchain availability, kernel/XDP behaviour on the hosted runner, sudo  │
-# │ semantics are all unverified until the first push triggers this file).    │
-# │ Do NOT claim it "works" until a live run is observed. Expect to iterate.  │
-# └──────────────────────────────────────────────────────────────────────────┘
+# ┌─ WHY build-only (D-mvp-4.32-CI-BUILD-ONLY — REVERSES §5.63 D-mvp-4.23) ────┐
+# │ §5.63 (MVP-4.23) armed XDPMF_REQUIRE_FULL_COVERAGE=1 to FORCE full coverage│
+# │ on CI. That intent was UNVALIDATED and is unachievable on ubuntu-latest:   │
+# │ (1) the BPF object needs a generated `include/vmlinux.h` (gitignored) —    │
+# │     CI never regenerated it, so the build failed before any test ran       │
+# │     (14/14 historical runs RED on `vmlinux.h file not found`); and         │
+# │ (2) even with the build fixed, veth/XDP-attach on a hosted runner is       │
+# │     flaky/unsupported, so a full-coverage run cannot be a reliable green.   │
+# │ This file fixes (1) by regenerating vmlinux.h per-runner from the runner's  │
+# │ own BTF, and resolves (2) by scoping CI to the build + non-privileged       │
+# │ subset. Green now MEANS "compiles clean under -Werror + the cheap          │
+# │ invariants a refactor mutates still hold" — an honest, achievable gate.    │
+# └────────────────────────────────────────────────────────────────────────────┘
 #
-# BRANCH-PROTECTION INTENT (not configurable from a file in-tree): to make
-# this check REQUIRED for merge into `main`, a repo admin must enable branch
-# protection on `main` and mark the `build-and-test` check as required. That
-# is a GitHub repo-admin setting (Settings → Branches), NOT a tree artifact.
+# BRANCH-PROTECTION INTENT (not configurable from a file in-tree): to make this
+# check REQUIRED for merge into `main`, a repo admin enables branch protection
+# on `main` and marks `build-and-test` required (Settings → Branches).
 
 name: ci
 
@@ -34,10 +41,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Toolchain. NOTE: bpftool ships via the linux-tools-* packages on
-      # hosted runners; the project's prototype tests expect a `bpftool` on
-      # PATH (the dev box uses /usr/local/bin/bpftool). clang-19 matches the
-      # BPF target the build uses; libbpf-dev provides the userspace lib.
+      # Toolchain. clang-19 matches the BPF target; llvm-19 provides
+      # llvm-objdump-19 (the B37 insn-baseline gate's canonical insn source,
+      # D-mvp-4.27-INSN-SOURCE); libbpf-dev = userspace lib; linux-tools-* =
+      # bpftool (used here ONLY to regenerate vmlinux.h from the runner's BTF).
       - name: Install toolchain
         run: |
           sudo apt-get update
@@ -48,35 +55,44 @@ jobs:
             python3 python3-scapy \
             jq cmake make pkg-config
 
+      # include/vmlinux.h is gitignored (kernel-version-specific, ~2MB
+      # generated). Regenerate it per-runner from the runner's OWN BTF — the
+      # canonical CO-RE pattern. Fail LOUD if no bpftool / no BTF (so a silent
+      # build break can never recur). bpftool may live off-PATH under the
+      # linux-tools versioned dir, so probe a few locations.
+      - name: Generate vmlinux.h (CO-RE)
+        run: |
+          set -euo pipefail
+          test -r /sys/kernel/btf/vmlinux || { echo "::error::runner kernel lacks /sys/kernel/btf/vmlinux (no BTF)"; exit 1; }
+          bpftool=""
+          for c in bpftool /usr/sbin/bpftool /usr/lib/linux-tools/*/bpftool /usr/lib/linux-tools-*/bpftool; do
+            if command -v "$c" >/dev/null 2>&1 || [ -x "$c" ]; then bpftool="$c"; break; fi
+          done
+          [ -n "$bpftool" ] || { echo "::error::no bpftool found on runner (tried PATH, /usr/sbin, linux-tools dirs)"; exit 1; }
+          echo "using bpftool: $bpftool"
+          sudo "$bpftool" btf dump file /sys/kernel/btf/vmlinux format c > include/vmlinux.h
+          echo "generated include/vmlinux.h ($(wc -l < include/vmlinux.h) lines)"
+
       - name: Configure
         run: cmake -S . -B build
 
-      # The build already enforces -Werror; a warning fails the build here.
+      # The build enforces -Werror; a warning fails here. This is the primary
+      # gate — a clean compile of the whole tree (incl. the BPF object).
       - name: Build
         run: cmake --build build
 
-      # Serial (no -j) per D-mvp-4.23-CI-SERIAL: the existing build_cpu /
-      # xdp_fixture RESOURCE_LOCKs already serialize the heavy tests, the suite
-      # is small, and serial avoids CPU-oversubscription SIGKILL/TIMEOUT flakes
-      # on a 2-vCPU hosted runner. ctest returns non-zero on any non-SKIP
-      # failure → the job fails → the gate works. XDPMF_REQUIRE_FULL_COVERAGE=1
-      # arms T_COVERAGE_FLOOR: if the runner lacks passwordless sudo (so the
-      # datapath suite + negation canary would all SKIP-77), the floor gate
-      # goes RED rather than letting a coverage-zero run report green.
-      - name: Test (full coverage required)
-        run: sudo -E env XDPMF_REQUIRE_FULL_COVERAGE=1 ctest --test-dir build --output-on-failure
+      # Build-only subset (D-mvp-4.32): NO sudo, XDPMF_CI_BUILD_ONLY=1 → the
+      # privileged datapath suite SKIPs (77) deterministically; the
+      # non-privileged tests RUN and gate (T_BUILD, T_INSN_BASELINE_GATE,
+      # T_LOADER_STDERR_GOLDEN/_SHAPE, config/CLI error-paths,
+      # T_LOG_EVENT_CATALOG_STABILITY, *_UNIT/PLAYBOOK_SYNTAX). ctest treats
+      # exit-77 as Skipped (SKIP_RETURN_CODE), non-zero only on a real failure.
+      # Serial (no -j) avoids CPU-oversubscription flakes on the 2-vCPU runner.
+      - name: Test (build-only — privileged datapath deferred to local gate)
+        run: env XDPMF_CI_BUILD_ONLY=1 ctest --test-dir build --output-on-failure
 
-      # OPTIONAL defense-in-depth (D-mvp-4.23-Q1-NO-A3-IN-CTEST): a post-ctest
-      # skip-count sanity grep. UNVALIDATED and non-load-bearing — the A2
-      # coverage-floor ctest above is the primary gate. Left commented so it
-      # is not mistaken for a working check.
-      # - name: Skip-count sanity (informational, unvalidated)
-      #   run: |
-      #     skips=$(grep -c 'Skipped' build/Testing/Temporary/LastTest.log || true)
-      #     echo "ctest reported ${skips} skipped tests"
-
-# SELF-HOSTED-RUNNER ALTERNATIVE (for environments where the hosted runner's
-# veth/XDP support misbehaves): swap `runs-on: ubuntu-latest` for
-# `runs-on: [self-hosted, linux, x64]` on a box with a recent kernel,
-# passwordless sudo, clang-19 + libbpf + bpftool installed. The job steps are
-# otherwise identical. This alternative is UNVALIDATED here as well.
+# SELF-HOSTED-RUNNER ALTERNATIVE (to run the FULL suite incl. the XDP datapath):
+# swap `runs-on: ubuntu-latest` for `runs-on: [self-hosted, linux, x64]` on a box
+# with a recent kernel, passwordless sudo, clang-19 + libbpf + bpftool + an
+# XDP-capable iface, and DROP `XDPMF_CI_BUILD_ONLY=1` from the test step (the
+# datapath tests will then run instead of skip). Unvalidated here.
