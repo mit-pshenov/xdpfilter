@@ -113,6 +113,15 @@ jobs:
       # T_LOG_EVENT_CATALOG_STABILITY, *_UNIT/PLAYBOOK_SYNTAX). ctest treats
       # exit-77 as Skipped (SKIP_RETURN_CODE), non-zero only on a real failure.
       # Serial (no -j) avoids CPU-oversubscription flakes on the 2-vCPU runner.
+      # T_SYSTEMD_UNIT_SYNTAX runs `systemd-analyze verify`, which checks the
+      # units' ExecStart= binaries EXIST at /usr/bin (the dev box has them
+      # installed; a fresh runner does not). Install the built binaries there so
+      # the positive verify passes. (Non-privileged test, but env-dependent.)
+      - name: Install binaries (for systemd-analyze verify ExecStart check)
+        run: |
+          sudo install -m 0755 build/src/cli/xdpfilter   /usr/bin/xdpfilter
+          sudo install -m 0755 build/xdpmf-exporter       /usr/bin/xdpmf-exporter
+
       - name: Test (build-only — privileged datapath deferred to local gate)
         run: env XDPMF_CI_BUILD_ONLY=1 ctest --test-dir build --output-on-failure
 
