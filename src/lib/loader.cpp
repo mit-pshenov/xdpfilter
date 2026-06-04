@@ -52,6 +52,7 @@
 #include <string_view>
 #include <system_error>
 #include <unordered_map>     // §5.61 (MVP-4.21): id→slot rank map (D-mvp-4.21-SLOT-PLUMB)
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -1528,18 +1529,29 @@ void populate_hash_inner_slot(int inner_fd,
     }
 }
 
-/* §5.43 (MVP-4.3) D-mvp-4.3-Q1/Q3: populate one LPM bit-vector axis inner
- * (dst_bitmask_<a|b> OR cidr_allowlist_<a|b>) — value-reshaped to a __u64
- * prefix-closed bitmask. Used for BOTH LPM axes (the src axis replaces the
- * §5.31 allow_entry write; the dst axis is the new mirror). Bulk-clear-then-
- * insert preserved. RESET-on-apply: the caller passes the INACTIVE inner fd
- * and writes BEFORE the active_idx flip (D-mvp-4.3-RESET-VS-PRESERVE — match
- * maps reflect only the current config; NO copy-forward). */
-void populate_bitvec_inner_slot(int inner_fd, const std::vector<BitPrefix>& prefixes)
+/* §5.43 (MVP-4.3) D-mvp-4.3-Q1/Q3 + §5.71 (MVP-4.31) B5: populate one LPM
+ * bit-vector axis inner — value-reshaped to a __u64 prefix-closed bitmask.
+ * ONE template (D-mvp-4.31-Q1, mirroring populate_hash_inner_slot<Key>)
+ * covering BOTH the v4 axes (dst_bitmask/cidr_allowlist, key xdpmf_cidr_v4,
+ * close_prefixes) and the v6 axes (dst6_bitmask/src6_bitmask, key
+ * xdpmf_cidr_v6, close_prefixes6) — the two forks differed ONLY in key type +
+ * prefix-vec element type + the close fn + the "bitvec_inner"/"bitvec6_inner"
+ * diagnostic label. The close fn is passed as a SEPARATE arg: guard #23's
+ * cover-direction trap lives in close_prefixes/close_prefixes6, which stay TWO
+ * separate named definitions, NOT merged. Bulk-clear-then-insert preserved.
+ * RESET-on-apply: the caller passes the INACTIVE inner fd and writes BEFORE
+ * the active_idx flip (D-mvp-4.3-RESET-VS-PRESERVE — match maps reflect only
+ * the current config; NO copy-forward). */
+template<class Prefix, class CloseFn>
+void populate_bitvec_inner_slot(int                        inner_fd,
+                                const std::vector<Prefix>& prefixes,
+                                CloseFn                    close_fn,
+                                const char*                what)
 {
-    xdpmf_cidr_v4 prev{};
-    xdpmf_cidr_v4 cur{};
-    bool          have_prev = false;
+    using Key = std::remove_cvref_t<decltype(std::declval<Prefix>().cidr)>;
+    Key  prev{};
+    Key  cur{};
+    bool have_prev = false;
     while (true) {
         const int rc = bpf_map_get_next_key(inner_fd,
                                             have_prev ? &prev : nullptr,
@@ -1547,72 +1559,30 @@ void populate_bitvec_inner_slot(int inner_fd, const std::vector<BitPrefix>& pref
         if (rc != 0) {
             if (-rc == ENOENT) break;
             throw_loader(classify(rc, LoaderError::LoadFailed),
-                         std::format("bpf_map_get_next_key(bitvec_inner): {}",
-                                     std::strerror(-rc)));
+                         std::format("bpf_map_get_next_key({}): {}",
+                                     what, std::strerror(-rc)));
         }
         const int drc = bpf_map_delete_elem(inner_fd, &cur);
         if (drc != 0 && -drc != ENOENT) {
             throw_loader(classify(drc, LoaderError::LoadFailed),
-                         std::format("bpf_map_delete_elem(bitvec_inner): {}",
-                                     std::strerror(-drc)));
+                         std::format("bpf_map_delete_elem({}): {}",
+                                     what, std::strerror(-drc)));
         }
         prev      = cur;
         have_prev = true;
     }
     // FI-1 cover-closure: each entry's stored __u64 = OR of every covering
-    // rule's bit (close_prefixes). Duplicate prefixes (two rules sharing an
-    // exact prefix) get IDENTICAL closed masks and collapse to one map entry.
-    const std::vector<std::uint64_t> closed = close_prefixes(prefixes);
+    // rule's bit (close_fn). Duplicate prefixes (two rules sharing an exact
+    // prefix) get IDENTICAL closed masks and collapse to one map entry.
+    const std::vector<std::uint64_t> closed = close_fn(prefixes);
     for (std::size_t i = 0; i < prefixes.size(); ++i) {
-        const xdpmf_cidr_v4 key  = prefixes[i].cidr;  // addr already network order
+        const Key           key  = prefixes[i].cidr;  // addr already network order
         const std::uint64_t mask = closed[i];
         const int rc = bpf_map_update_elem(inner_fd, &key, &mask, BPF_ANY);
         if (rc < 0) {
             throw_loader(classify(rc, LoaderError::LoadFailed),
-                         std::format("bpf_map_update_elem(bitvec_inner): {}",
-                                     std::strerror(-rc)));
-        }
-    }
-}
-
-/* §5.53 (MVP-4.13) D-mvp-4.13-FORK: populate one v6 LPM bit-vector axis inner
- * (dst6_bitmask_<a|b> OR src6_bitmask_<a|b>) — value = __u64 prefix-closed
- * bitmask (close_prefixes6). FORK of populate_bitvec_inner_slot with the
- * xdpmf_cidr_v6 key. Bulk-clear-then-insert; RESET-on-apply (caller passes the
- * INACTIVE inner fd, writes BEFORE the active_idx flip — NO copy-forward). */
-void populate_bitvec6_inner_slot(int inner_fd, const std::vector<BitPrefix6>& prefixes)
-{
-    xdpmf_cidr_v6 prev{};
-    xdpmf_cidr_v6 cur{};
-    bool          have_prev = false;
-    while (true) {
-        const int rc = bpf_map_get_next_key(inner_fd,
-                                            have_prev ? &prev : nullptr,
-                                            &cur);
-        if (rc != 0) {
-            if (-rc == ENOENT) break;
-            throw_loader(classify(rc, LoaderError::LoadFailed),
-                         std::format("bpf_map_get_next_key(bitvec6_inner): {}",
-                                     std::strerror(-rc)));
-        }
-        const int drc = bpf_map_delete_elem(inner_fd, &cur);
-        if (drc != 0 && -drc != ENOENT) {
-            throw_loader(classify(drc, LoaderError::LoadFailed),
-                         std::format("bpf_map_delete_elem(bitvec6_inner): {}",
-                                     std::strerror(-drc)));
-        }
-        prev      = cur;
-        have_prev = true;
-    }
-    const std::vector<std::uint64_t> closed = close_prefixes6(prefixes);
-    for (std::size_t i = 0; i < prefixes.size(); ++i) {
-        const xdpmf_cidr_v6 key  = prefixes[i].cidr;  // addr6 already network order
-        const std::uint64_t mask = closed[i];
-        const int rc = bpf_map_update_elem(inner_fd, &key, &mask, BPF_ANY);
-        if (rc < 0) {
-            throw_loader(classify(rc, LoaderError::LoadFailed),
-                         std::format("bpf_map_update_elem(bitvec6_inner): {}",
-                                     std::strerror(-rc)));
+                         std::format("bpf_map_update_elem({}): {}",
+                                     what, std::strerror(-rc)));
         }
     }
 }
@@ -1954,12 +1924,12 @@ void populate_all_axes(xdpfilter_bpf* skel, std::uint32_t slot,
     populate_bitvec_inner_slot(
         inactive_axis_fd(skel->maps.dst_bitmask_a, skel->maps.dst_bitmask_b, slot,
                          "inactive dst inner fd unavailable"),
-        dst_low.prefixes);
+        dst_low.prefixes, close_prefixes, "bitvec_inner");
     // 3 src — paired cidr_allowlist_a/_b LPM bit-vector
     populate_bitvec_inner_slot(
         inactive_axis_fd(skel->maps.cidr_allowlist_a, skel->maps.cidr_allowlist_b, slot,
                          "inactive src inner fd unavailable"),
-        src_low.prefixes);
+        src_low.prefixes, close_prefixes, "bitvec_inner");
     // 4 proto — paired proto_bitmask_a/_b exact-HASH
     populate_hash_inner_slot(
         inactive_axis_fd(skel->maps.proto_bitmask_a, skel->maps.proto_bitmask_b, slot,
@@ -1976,15 +1946,15 @@ void populate_all_axes(xdpfilter_bpf* skel, std::uint32_t slot,
                          "inactive vlan inner fd unavailable"),
         vlan_low.entries, "vlan");
     // §5.53 dst6 — paired dst6_bitmask_a/_b LPM bit-vector (v6 key)
-    populate_bitvec6_inner_slot(
+    populate_bitvec_inner_slot(
         inactive_axis_fd(skel->maps.dst6_bitmask_a, skel->maps.dst6_bitmask_b, slot,
                          "inactive dst6 inner fd unavailable"),
-        dst6_low.prefixes);
+        dst6_low.prefixes, close_prefixes6, "bitvec6_inner");
     // §5.53 src6 — paired src6_bitmask_a/_b LPM bit-vector (v6 key)
-    populate_bitvec6_inner_slot(
+    populate_bitvec_inner_slot(
         inactive_axis_fd(skel->maps.src6_bitmask_a, skel->maps.src6_bitmask_b, slot,
                          "inactive src6 inner fd unavailable"),
-        src6_low.prefixes);
+        src6_low.prefixes, close_prefixes6, "bitvec6_inner");
     // §5.54 ethertype — paired ethertype_bitmask_a/_b exact-HASH (host-order u32 key)
     populate_hash_inner_slot(
         inactive_axis_fd(skel->maps.ethertype_bitmask_a, skel->maps.ethertype_bitmask_b, slot,

@@ -12,7 +12,7 @@
  *   - validate_bpffs_root_or_warn() emits the PI-32 startup WARN line if
  *     bpffs_root does not exist (called ONCE from main() before the first
  *     http::run() invocation).
- *   - read_all_attached() now also populates a DiscoveryAccounting struct
+ *   - read_all_attached_with_acc() also populates a DiscoveryAccounting struct
  *     so the caller (main.cpp) can detect "ALL discovered ifaces failed
  *     EACCES/EPERM" and exit(6) per D-3.4.5-2. Per-iface partial-EACCES
  *     continues to WARN-and-continue (preserves PI-31/PI-32).
@@ -35,7 +35,7 @@ struct StatsSample {
 };
 
 /* §5.30 HK-17 (MVP-3.4.5) — per-scrape discovery accounting populated by
- * read_all_attached(). main.cpp consumes this AFTER every scrape: if
+ * read_all_attached_with_acc(). main.cpp consumes this AFTER every scrape: if
  * `total_discovered > 0 && eacces_failures == total_discovered &&
  *  successes == 0` then exit(6) per D-3.4.5-2. Empty bpffs root
  * (`total_discovered == 0`) is a normal state (HK-16 startup WARN flow).
@@ -62,19 +62,14 @@ struct DiscoveryAccounting {
  * (returns the HELP+TYPE header only). */
 void validate_bpffs_root_or_warn(std::string_view bpffs_root) noexcept;
 
-/* Scan ${bpffs_root}/<iface>/stats for every attached iface; libbpf
- * PERCPU-sum each one. Returns an empty vector on empty / nonexistent
- * bpffs root (PI-32 — graceful). May emit per-iface WARN lines to stderr
- * on transient open / lookup errors but never throws. */
-[[nodiscard]] std::vector<StatsSample> read_all_attached(std::string_view bpffs_root) noexcept;
-
-/* §5.30 HK-17 (MVP-3.4.5) — accounting-aware variant. Same semantics as the
- * single-arg overload BUT additionally populates `acc` with per-iface
- * accounting (see DiscoveryAccounting). Caller examines `acc` to detect
- * the all-EACCES condition and exit(6) per D-3.4.5-2. Kept as a separate
- * entry-point so the existing `read_all_attached(bpffs_root)` call shape
- * in http.cpp stays byte-equivalent (UNCHANGED-BUT-AFFECTED preservation
- * pending the architect-confirmed HK-17 hook location). */
+/* §5.30 HK-17 (MVP-3.4.5) — scan ${bpffs_root}/<iface>/stats for every
+ * attached iface; libbpf PERCPU-sum each one. Returns an empty vector on
+ * empty / nonexistent bpffs root (PI-32 — graceful). May emit per-iface WARN
+ * lines to stderr on transient open / lookup errors but never throws.
+ * Additionally populates `acc` with per-iface accounting (see
+ * DiscoveryAccounting); the caller examines `acc` to detect the all-EACCES
+ * condition and exit(6) per D-3.4.5-2. (§5.71/B38: the dead single-arg
+ * read_all_attached trampoline was removed — this is the sole entry-point.) */
 [[nodiscard]] std::vector<StatsSample> read_all_attached_with_acc(
     std::string_view      bpffs_root,
     DiscoveryAccounting&  acc) noexcept;

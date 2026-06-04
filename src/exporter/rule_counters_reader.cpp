@@ -20,14 +20,13 @@
  */
 #include "rule_counters_reader.hpp"
 
+#include "percpu_read.hpp"     // §5.71 B2/C1: shared round_up_8/percpu_sum_u64/list_iface_dirs
 #include "common/logger.hpp"   // §5.32 (MVP-3.5) structured-logging surface
 
-#include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <filesystem>
 #include <format>
 #include <span>
 #include <string>
@@ -41,6 +40,17 @@
 
 namespace xdpmf::exporter {
 
+/* §5.71/B38 C1: round_up_8 / percpu_sum_u64 / list_iface_dirs now live in
+ * percpu_read.hpp (namespace detail). list_iface_dirs in particular was the
+ * §5.31 deliberate-duplication "NOT factored out — keep the two readers
+ * byte-equivalent" rent-payer; extraction REVERSES §5.31 because one shared
+ * definition makes the two readers equivalent BY CONSTRUCTION (it cannot
+ * drift), satisfying the byte-equivalence goal strictly better than two
+ * manually-synced copies (D-mvp-4.31-HG2). */
+using detail::list_iface_dirs;
+using detail::percpu_sum_u64;
+using detail::round_up_8;
+
 namespace {
 
 /* §5.64 (MVP-4.24) D-mvp-4.24-Q1: number of active_idx RE-READS after the
@@ -50,75 +60,6 @@ namespace {
  * buffer reads per iface ≤ 4 (1 initial + 3 retries) — bounded, NOT the B27
  * unbounded-retry DoS surface. */
 inline constexpr std::size_t kRuleCountersGenRetryMax = 3;
-
-/* PERCPU map ABI rounds per-CPU value-size up to 8 bytes. We read exactly
- * num_possible_cpus * round-up-8 bytes per slot. */
-[[nodiscard]] constexpr std::size_t round_up_8(std::size_t n) noexcept
-{
-    return (n + 7u) & ~static_cast<std::size_t>(7u);
-}
-
-/* List subdirectories under `root` (one level deep). Returns iface names sorted
- * lexicographically so the exporter output ordering is stable across scrapes.
- * Deliberately duplicated with stats_reader.cpp (NOT factored out — §5.31 keeps
- * the two readers byte-equivalent). */
-[[nodiscard]] std::vector<std::string> list_iface_dirs(std::string_view bpffs_root)
-{
-    std::vector<std::string> out;
-    std::error_code          ec;
-    std::filesystem::directory_iterator it{
-        std::filesystem::path{bpffs_root}, ec};
-    if (ec) {
-        return out;
-    }
-    for (; it != std::filesystem::directory_iterator{}; it.increment(ec)) {
-        if (ec) {
-            break;
-        }
-        const auto& path = it->path();
-        const auto  name = path.filename().string();
-        if (name.empty() || name[0] == '.') {
-            continue;
-        }
-        std::error_code ec2;
-        if (!std::filesystem::is_directory(path, ec2) || ec2) {
-            continue;
-        }
-        out.push_back(name);
-    }
-    std::sort(out.begin(), out.end());
-    return out;
-}
-
-/* PERCPU sum of `rule_counters` map's value at `key`. Returns 0 on lookup
- * error (caller logs once per iface, not once per key, to avoid flooding
- * stderr on a transient bpffs unmount).
- *
- * §5.40 P-1: the caller hoists `buf` above the per-iface loop and reuses it for
- * every (iface, key) read, so the scratch allocation is O(1) per scrape. No
- * per-call zero-init is needed: on rc==0 the kernel overwrites the FULL span (so
- * every byte summed is freshly written by THIS lookup); on rc<0 the buffer is
- * never read. */
-[[nodiscard]] std::uint64_t percpu_sum_u64(int map_fd,
-                                            std::uint32_t key,
-                                            int num_cpus,
-                                            std::span<std::uint8_t> buf)
-{
-    const std::size_t per_slot_bytes = round_up_8(sizeof(std::uint64_t));
-    const int rc = ::bpf_map_lookup_elem(map_fd, &key, buf.data());
-    if (rc < 0) {
-        return 0;
-    }
-    std::uint64_t total = 0;
-    for (int cpu = 0; cpu < num_cpus; ++cpu) {
-        std::uint64_t v = 0;
-        std::memcpy(&v,
-                    buf.data() + static_cast<std::size_t>(cpu) * per_slot_bytes,
-                    sizeof(std::uint64_t));
-        total += v;
-    }
-    return total;
-}
 
 /* §5.64 (MVP-4.24) D-mvp-4.24-FD-REUSE: read the live ruleset index from an
  * already-open `active_idx` fd (reused across the seqlock's pre/post reads, so
