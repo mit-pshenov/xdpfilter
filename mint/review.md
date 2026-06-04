@@ -1,53 +1,53 @@
-# Review — MVP-4.29 / B34b datapath module split (mint triangulation)
+# Review — MVP-4.30 / B35 wildcard+defaults → ruleset_state pack (mint triangulation)
 
 ## Verdict
-`pass` (round 1)
+`pass` (round 1, 0 findings, 0 OOT)
 
 ## Triangulation matrix
 
 | Framework point | Findings | Tags |
 |---|---|---|
 | 1. Spec ↔ Code | 0 | — |
-| 2. Spec ↔ Tests | 0 | — (D-mvp-4.29-NOTEST sanctioned) |
-| 3. Code ↔ Tests | 0 | — (1 flake, non-regression, see OOT) |
+| 2. Spec ↔ Tests | 0 | — |
+| 3. Code ↔ Tests | 0 | — |
 | 4. Out-of-Scope Drift | 0 | — |
-| 5. Behaviour preserved (brownfield) | 0 | — |
+| 5. Behaviour (VERDICT) preserved | 0 | — |
 
-## What was verified (load-bearing question: is this a PURE BYTE-IDENTICAL #include split?)
+## The 6 load-bearing questions — all answered (3 independent insn measurements: impl/tester/reviewer all 3437)
 
-**YES — proven, not assumed.**
+**1. VERDICT-IDENTITY ✓** — full `T_*_ORACLE_AGREEMENT` family green (BITVEC/AND/AND4/AND5/AND6/MAC_MERGE/ANDV6/ANDETH); oracle VECTOR bodies UNTOUCHED (`git diff fc96a45` on the 6 pin-smokes = pin-name token + echo strings only; zero vector/expected-verdict edits). No verdict masked.
 
-**MOVE-ONLY (PI-mvp-4.29-MOVE-ONLY) — byte-for-byte against `git show 8c9a110:src/bpf/xdpfilter.bpf.c`:**
-- `defs.h` body (12–71) ≡ orig `:28–87` → IDENTICAL
-- `maps.h` body (15–386) ≡ orig `:89–460` → IDENTICAL
-- `classifier.h` body (21–287) ≡ orig `:462–728` → IDENTICAL
-- `.bpf.c` header+includes (1–26) ≡ orig 1–26 → IDENTICAL
-- `.bpf.c` program body (31–581) ≡ orig `:730–1280` (SEC, 3 inline arms, `__license`) → IDENTICAL
-- Only new bytes: `#pragma once` + doc-comment + self-includes per header, + 3 `#include` lines in `.bpf.c`. Nothing reshaped/renamed/re-macroed (guard #36/#37 satisfied).
+**2. REAL INSN WIN ✓** — reviewer re-measured (3rd independent, guard #35): `llvm-objdump-19 -d --section=xdp build/xdpfilter.bpf.o | grep -cE '^\s+[0-9a-f]+:'` = **3437** (−221 vs 3658), `bpftool prog load … type xdp` rc=0. The spike gate (D-mvp-4.30-FEAS) cleared decisively; ABORT not triggered.
 
-**Insn count (PI-mvp-4.29-DATAPATH-IDENTICAL) — third independent measurement:** rebuild → `llvm-objdump-19 -d --section=xdp build/xdpfilter.bpf.o | grep -cE '^\s+[0-9a-f]+:'` = **3658** ✓; `T_INSN_BASELINE_GATE` + `T_PROD_VERIFIER_LOAD` both PASS.
+**3. RE-BASELINE INTEGRITY ✓** — both gates default to the MEASURED 3437 (`T_PROD_VERIFIER_LOAD.sh:120`, `T_INSN_BASELINE_GATE.sh:67`), documented sanctioned `XDPMF_PROD_INSN_BASELINE` escape-hatch use (intentional codegen change), NOT silent. Teeth verified: 3438→FAIL loud, 3437→PASS. Re-baseline is DOWN to measured, not up.
 
-**Include order (PI-mvp-4.29-ODR):** `defs.h`→`maps.h`→`classifier.h` (`src/bpf/xdpfilter.bpf.c:27–29`) ✓.
+**4. RESET semantic (HG-3) ✓** — `write_ruleset_state` zero-inits `struct xdpmf_ruleset_state val{}`, fills `wc[BV_AXIS_*]`+`default_action`, one `bpf_map_update_elem` to the inactive slot BEFORE the active_idx flip. No copy-forward, no stale carry. `T_APPLY_ATOMIC_SWAP_NO_DROP` green.
 
-**HG-2 (D-mvp-4.29-CMAKE):** `cmake/BpfBuild.cmake` diff = exactly one line (`+ ${CMAKE_SOURCE_DIR}/src/bpf/*.h` in `_shared_headers`). `touch src/bpf/maps.h` → rebuild re-runs BPF compile ✓.
+**5. PIN-RIPPLE LOCKSTEP (guard #16, D-mvp-4.30-PINNAME) ✓** — post-edit `grep -rnE "test -e .*[/ ]wildcard|for pin in.*wildcard" tests/` = ∅. All 6 smokes swapped wildcard→ruleset_state in lockstep with the SEC(".maps") symbol. `defaults` pin had zero consumers (folding safe). [This is the team-lead-caught 2→6 undercount, corrected pre-impl.]
 
-**Diff fences (PI-mvp-4.29-NONDATAPATH-ZERO + PI-7):** `git diff 8c9a110 -- src/lib src/common src/cli src/exporter src/common/xdpfilter.h CMakeLists.txt tests/` = ∅ ✓. New files ONLY under src/bpf/. VERSION unchanged (0.16.0).
+**6. PI-7 ∅ + footprint ✓** — `git diff fc96a45 -- src/lib/loader.hpp src/lib/config.hpp` = ∅; exporter/CMakeLists/cmake/VERSION/cli/sidecar/defs.h/apply_internal.hpp = ∅. VERSION 0.16.0 (no bump). Footprint = 13 EDITED (5 src + 2 gates + 6 smokes) + design.md + impl-notes.md.
 
-**HG-1 / OOS:** no `ipv4_match.h`/`ipv6_match.h`/`vlan.h`; 3 family arms stayed inline (`.bpf.c` v4 `:97`, v6 `:271`, non-IP `:464`); no schema/axis/map/VERSION change.
+## Spec ↔ Code spot-checks
+- `struct xdpmf_ruleset_state` (`xdpfilter.h:233`): `wc[9]` u64 + `default_action` u32 + `_pad` u32; static_asserts sizeof==80 / offsetof(default_action)==72 — matches DataStructures.
+- Map def (`maps.h:122`): ARRAY, value `struct xdpmf_ruleset_state`, max_entries `XDPMF_RULESET_COUNT`, PIN_BY_NAME.
+- Datapath (`xdpfilter.bpf.c:94`): ONE hoisted `bpf_map_lookup_elem(&ruleset_state,&active)` + `if(!rs) DROP`; all 3 arms read `rs->wc[axis]` UNIFORMLY (fold-#2 divergence RESOLVED — PI-UNIFORM-ARMS); fallthrough `rs->default_action` — Q1-A2 hoist honored.
+- `write_ruleset_state` matches Interfaces; `write_wildcard_slots`/`write_default_slot` DELETED; kManagedMaps net −1.
 
 ## Test execution
-- `/tmp/mint-review-tests-1780581986.log`
-- B37 gates PASS (xdp==3658). Full `sudo -E ctest`: 2 skip (T_DROP_MALFORMED, T_ANSIBLE_PLAYBOOK_SYNTAX), 2 known env-fails BY NAME (#48 T_EXPORTER_EXITS_6_ALL_IFACES_EACCES, #63 T_LOG_JSON_EXPORTER_EVENTS) — baseline-matched, PI-6 holds.
+- `/tmp/mint-review-tests-*.log` + `mint/test-run.log`.
+- Targeted acceptance: 16/16 (oracle family + both insn gates + atomic-swap + compose/pin smokes). Full ctest: 104/106 — the 2 FAILs (#48 T_EXPORTER_EXITS_6_ALL_IFACES_EACCES, #63 T_LOG_JSON_EXPORTER_EVENTS) are the documented pre-existing env-fails BY NAME (exporter reads NO wildcard/defaults/ruleset_state pin → not B35-caused). 2 skips (#5/#38) unchanged. No [REGRESSION].
+
+```
+insn re-measure (3 independent): 3437 | verifier load rc=0
+teeth: WRONG=3438 → FAIL ✓ | RIGHT=3437 → PASS ✓
+```
+
+## PI delta
+- RETIRED going-forward: `PI-mvp-4.29-DATAPATH-IDENTICAL` (byte/3658) — cited verbatim + `[RETIRED]` marker; stays true as B34b's record.
+- NEW: `PI-mvp-4.30-VERDICT-IDENTITY` (oracle agreement is the control), `PI-mvp-4.30-RESET`, `PI-mvp-4.30-PINRIPPLE`, `PI-UNIFORM-ARMS`. PI-7 continues.
+- Candidate guard #38 (map-schema VALUE-pack discipline: measure-first/verdict-identity/sanctioned-rebaseline/broad-grep-pin-ripple/bash-less-FEAS-ABORT).
 
 ## Out-of-triangulation findings
+None.
 
-### [OUT-OF-TRIANGULATION] T_EXPORTER_METRICS_FORMAT flaked under full-parallel run → `defer`
-**Location**: test #40 (exporter suite — NOT touched by this slice).
-**Evidence**: failed once in reviewer's 705s full-parallel `ctest`; green in tester's `mint/test-run.log`; re-ran isolated → Passed (10.5s). `git diff 8c9a110 -- src/exporter` = ∅ (exporter byte-identical, not recompiled) — a src/bpf header split cannot causally affect exporter metrics formatting. Classified flaky/resource-contention, NOT [REGRESSION].
-**Disposition**: `defer` — pre-existing exporter-suite flakiness under parallel load, orthogonal to B34b. Does not block this slice.
-
-## Result
-No rework. Clean byte-identical #include split; all 5 brownfield points green.
-
-### Deferred to next slice
-- **T_EXPORTER_METRICS_FORMAT (#40) parallel-run flakiness** — exporter metrics test flakes under full `-j` ctest contention (passes isolated; exporter source ∅-diff this slice). Candidate backlog item: add RESOURCE_LOCK / serialize the exporter metrics tests, or investigate the contention source. Orthogonal to the datapath; surfaced during B34b review only as a parallel-load artifact.
+All §6.5 PI-mvp-4.30-* rows hold; no unnegotiated drift; no OOS creep. Ship it.
