@@ -57,11 +57,14 @@ jobs:
           # linux-tools-$(uname -r) azure pkg and fails at runtime — so the
           # vmlinux.h step probes for a bpftool whose `version` SUCCEEDS,
           # skipping the wrapper and finding the real /usr/lib binary.
-          # g++ brings the libstdc++ C++ stdlib headers (<cstdint> etc.) that
-          # clang++-19 uses by default — without it clang++ can't find <cstdint>.
+          # CMakeLists forces clang++-19, which auto-selects the HIGHEST gcc
+          # toolchain present (gcc-14 stubs on 24.04) for its libstdc++ headers.
+          # The runner ships gcc-13's headers but NOT libstdc++-14-dev → clang
+          # picks 14 and can't find <cstdint>. Install libstdc++-14-dev so the
+          # version clang selects has its headers.
           sudo apt-get install -y \
             clang-19 llvm-19 \
-            g++ \
+            libstdc++-14-dev \
             libbpf-dev \
             linux-tools-common linux-tools-generic \
             python3 python3-scapy \
