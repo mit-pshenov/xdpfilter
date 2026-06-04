@@ -196,9 +196,6 @@ Blast radius (greps 2026-06-02): A. internal source — 27 files (`mac_filter.bp
 ### B35 [perf, MEASURE-FIRST] wildcard+defaults → `ruleset_state` struct (= PERF-M1 promoted)
 ~30 lookups/pkt IPv4. The collapsible class = VALUES: pack 9 per-axis `wildcard` u64 + `defaults` u32 into one `ruleset_state[active]` struct → 1 lookup (−9). The per-axis OUTER lookups are map-REFERENCES (ARRAY_OF_MAPS double-buffer) → NOT packable → hard ceiling. **MEASURE instructions/cycles per packet first** (BPF_PROG_TEST_RUN, commit `e9bb321`). **Only slice with real regression surface — map-layout change ⇒ verdict-identity test, not byte-identity.** Perf is NOT a fire (eBPF clears SLA#1 w/ 1-2 core headroom) — this is ceiling-lowering.
 
-### B36 [architectural DEBT, not-now] 64-rule ceiling (`__u64` bitmask)
-`acc` bitmask `1ULL<<slot`/`ffsll` → hard 64-rule ceiling (B30 noted as `N>64` OOS). Future 256/512 → `u64[N]` words + per-word ffs = serious datapath refactor. **Pay-trigger = a real GGSN-Gi config exceeding 64 rules** (product-dependent; may stay <64 for years). Record; do NOT pre-refactor. This is capacity, NOT the tidiness workstream.
-
 ### B37 [test-hardening, DO BEFORE B34] decorative regression gates on the two surfaces any refactor touches
 Source: subtractive-reviewer ("Code Judo") trial, external review 2026-06-03. Full writeup + P1-P6 proposal math: `/home/user/agent-teams-review/runs/SESSION-SUMMARY-20260603-simplifier-trial.md`. **Finding**: the project's regression gates are *decorative* on exactly the surfaces a behavior-preserving refactor mutates —
 1. **BPF instruction-stream**: `tests/T_PROD_VERIFIER_LOAD.sh:94-101` **prints** the xlated insn count (baseline 3658) but **asserts only `rc==0`** — the count is informational/NON-fatal by an explicit prior decision (`D-mvp-4.23-H3-PRODOBJ`). A codegen drift that still verifies passes silently. The `xdp 3658 byte-identical` claim we lean on every slice has **no automated gate**.
