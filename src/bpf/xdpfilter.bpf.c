@@ -610,6 +610,123 @@ static __always_inline __u16 l3_after_vlan(void *eth, void *data_end, void **l3h
     return proto;
 }
 
+/* §5.68 (MVP-4.28) fold #1: the shared post-match dispatch tail, factored out of
+ * the three family arms (byte-identical code-movement; the v4/v6/non-IP callers
+ * keep their own `acc != 0` guard so acc==0 still falls through to
+ * defaults[active]).
+ *
+ * HG-mvp-4.3-4 first-match-by-id: the lowest set bit IS the lowest matching rule
+ * id (bit position == id), so ffsll picks it for free with NO sort. bump_rule
+ * first (per-match counter, HG-5), then the reused rules_outer → rules_inner →
+ * action_table dispatch (DROP → STAT_DROP_DENY + XDP_DROP; PASS or any
+ * NULL-fallthrough → STAT_PASS_CIDR + XDP_PASS, D-mvp-4.3-STAT). */
+#define DISPATCH_MATCH(acc_, active_) \
+    do { \
+        __u32 rid = first_set_u64(acc_) - 1; \
+        bump_rule(rid, active_); \
+        void *rules_inner_map = bpf_map_lookup_elem(&rules_outer, &active_); \
+        if (rules_inner_map) { \
+            struct rule_entry *r = bpf_map_lookup_elem(rules_inner_map, &rid); \
+            if (r && r->present) { \
+                __u32 aid = r->action_id; \
+                struct action_entry *a = bpf_map_lookup_elem(&action_table, &aid); \
+                if (a && a->action_type == ACTION_DROP) { \
+                    bump_stat(STAT_DROP_DENY); \
+                    return XDP_DROP; \
+                } \
+            } \
+        } \
+        bump_stat(STAT_PASS_CIDR); \
+        return XDP_PASS; \
+    } while (0)
+
+/* §5.68 (MVP-4.28) fold #3: the verifier-mandated inner-lookup-or-deny idiom,
+ * shared by all 15 outer-map lookups (eth_inner + the per-arm dst/src/proto/
+ * port/vlan/mac inners). A statement MACRO (NOT a helper): a BPF
+ * __always_inline helper cannot early-`return XDP_DROP` from the CALLER, and
+ * textual substitution is byte-identical BY CONSTRUCTION (D-mvp-4.28-Q1-MACRO).
+ * NO `do { } while(0)` wrapper — `var` is deliberately declared into the
+ * caller's scope (the caller dereferences it). `active` is captured from the
+ * enclosing scope by name (every call site has `__u32 active` live). The
+ * trailing `;` at each call site is a harmless null statement.
+ *
+ * §5.26 Q2 A1 / §5.27: the NULL check is verifier-required; unreachable in
+ * practice because userspace populates both ruleset slots before the first
+ * attach (the §5.30 HK-5 `unlikely` hint biases JIT layout to the common
+ * non-error fall-through). */
+#define LOOKUP_INNER_OR_DROP(var, outer) \
+    void *var = bpf_map_lookup_elem(&(outer), &active); \
+    if (unlikely(!var)) { \
+        bump_stat(STAT_DROP_DENY); \
+        return XDP_DROP; \
+    }
+
+/* §5.68 (MVP-4.28) fold #2 (load_wildcards) DROPPED per HG-3 / guard #36: a
+ * single shared __always_inline body cannot hold the 3658 baseline because the
+ * three family arms originally used DIFFERENT source orderings of the 8 wildcard
+ * loads (v4 = 6-axis block + dst6/src6; v6/non-IP = 8 batched) and each ordering
+ * compiles to a different per-site instruction count (batched body ⇒ 3657,
+ * 6+2-split body ⇒ 3659 — the gate brackets 3658, never hits it). The §5.68
+ * Phase-A "interleaving does not change codegen" de-risk was empirically
+ * refuted by the per-fold gate; A3-struct has the same one-body impossibility
+ * AND touches the rent-payer acc expressions → also dropped. The 3 inline
+ * wildcard-load blocks are LEFT AS-IS (inline-merge, NOT a regression). */
+
+/* §5.68 (MVP-4.28) fold #12: the src-MAC axis lookup, shared by all three arms.
+ *
+ * §5.47 (MVP-4.7) D-mvp-4.7-Q2 MAC axis: exact-HASH lookup keyed by the SOURCE
+ * MAC (eth->h_source — the v1 semantic, §5.26; NO closure). The src MAC sits at
+ * the base-eth fixed offset (read before the VLAN walk, already bounds-checked
+ * at the datapath head), so it is VLAN-agnostic. Every frame carries a src MAC →
+ * no "absent" sentinel (unlike vlan); a rule that omits `mac` survives via
+ * wc_mac. NULL → 0 (no MAC survivors). */
+static __always_inline __u64 mac_axis(void *mac_inner, const __u8 *src_mac)
+{
+    struct xdpmf_mac mac_key = {0};
+    __builtin_memcpy(mac_key.octets, src_mac, 6);
+    __u64 mac_mask = 0;
+    __u64 *mm = bpf_map_lookup_elem(mac_inner, &mac_key);
+    if (mm) {
+        mac_mask = *mm;
+    }
+    return mac_mask;
+}
+
+/* §5.68 (MVP-4.28) fold #13: the TCP/UDP dport read, shared by the v4 + v6 arms
+ * (non-IP has no L4). The per-arm `l4` OFFSET is computed in each arm (v4
+ * ip->ihl*4, v6 ext-walk cursor) and passed in — only the READ is shared.
+ *
+ * Realized as a statement MACRO (the D-mvp-4.28-13 macro FALLBACK): the
+ * out-param helper form round-trips dport/has_port through pointers and the
+ * malformed flag through a caller branch — neither folds back under -O2
+ * (gate measured +50 insns), so it does NOT hold 3658. The macro expands the
+ * exact original TCP/UDP block (incl. the two MALFORMED `return XDP_DROP`) in
+ * caller scope → byte-identical BY CONSTRUCTION (like fold #3). `data_end` is
+ * captured from the enclosing scope (both arms have it live); the per-block
+ * `t`/`u` declarations are scoped inside their own braces.
+ *
+ * §5.44 (MVP-4.4): dport is read only for TCP/UDP after an explicit L4-header
+ * bounds-check (has_port); non-TCP/UDP frames keep has_port=0 → port_mask=0
+ * (only port-wildcard rules survive the port axis), per the §5.42 spike. */
+#define READ_DPORT(proto_, l4_, dport_, has_port_) \
+    if (proto_ == IPPROTO_TCP) { \
+        struct tcphdr *t = l4_; \
+        if (unlikely((void *)(t + 1) > data_end)) { \
+            bump_stat(STAT_DROP_MALFORMED); \
+            return XDP_DROP; \
+        } \
+        dport_    = bpf_ntohs(t->dest); \
+        has_port_ = 1; \
+    } else if (proto_ == IPPROTO_UDP) { \
+        struct udphdr *u = l4_; \
+        if (unlikely((void *)(u + 1) > data_end)) { \
+            bump_stat(STAT_DROP_MALFORMED); \
+            return XDP_DROP; \
+        } \
+        dport_    = bpf_ntohs(u->dest); \
+        has_port_ = 1; \
+    }
+
 SEC("xdp")
 int xdpfilter_prog(struct xdp_md *ctx)
 {
@@ -662,11 +779,7 @@ int xdpfilter_prog(struct xdp_md *ctx)
      * all THREE arms. Key = HOST-order post-VLAN inner ethertype; exact-HASH, NO
      * closure. With no ethertype rule, (eth_mask|wc_eth) is an all-ones no-op ⇒
      * IP-arm verdicts stay bit-identical (PI-mvp-4.14-IPVERDICT). */
-    void *eth_inner = bpf_map_lookup_elem(&ethertype_rulesets, &active);
-    if (unlikely(!eth_inner)) {
-        bump_stat(STAT_DROP_DENY);
-        return XDP_DROP;
-    }
+    LOOKUP_INNER_OR_DROP(eth_inner, ethertype_rulesets);  /* §5.68 fold #3 */
     __u32 eth_key  = (__u32)bpf_ntohs(inner_proto);
     __u64 eth_mask = 0;
     __u64 *em = bpf_map_lookup_elem(eth_inner, &eth_key);
@@ -708,60 +821,21 @@ int xdpfilter_prog(struct xdp_md *ctx)
             return XDP_DROP;
         }
         void *l4 = (void *)ip + ip->ihl * 4;
+        /* §5.68 fold #13: shared TCP/UDP dport read (per-arm l4 offset above). */
         __u32 dport    = 0;
         int   has_port = 0;
-        if (proto == IPPROTO_TCP) {
-            struct tcphdr *t = l4;
-            if (unlikely((void *)(t + 1) > data_end)) {
-                bump_stat(STAT_DROP_MALFORMED);
-                return XDP_DROP;
-            }
-            dport    = bpf_ntohs(t->dest);
-            has_port = 1;
-        } else if (proto == IPPROTO_UDP) {
-            struct udphdr *u = l4;
-            if (unlikely((void *)(u + 1) > data_end)) {
-                bump_stat(STAT_DROP_MALFORMED);
-                return XDP_DROP;
-            }
-            dport    = bpf_ntohs(u->dest);
-            has_port = 1;
-        }
+        READ_DPORT(proto, l4, dport, has_port);
 
-        /* Per-axis active inners (dst + src + proto + port) via the shared
-         * `active` snapshot (§5.27 Q1 AS1 extended to 4 axes). */
-        void *dst_inner = bpf_map_lookup_elem(&dst_rulesets, &active);
-        if (unlikely(!dst_inner)) {
-            bump_stat(STAT_DROP_DENY);
-            return XDP_DROP;
-        }
-        void *src_inner = bpf_map_lookup_elem(&cidr_rulesets, &active);
-        if (unlikely(!src_inner)) {
-            bump_stat(STAT_DROP_DENY);
-            return XDP_DROP;
-        }
-        void *proto_inner = bpf_map_lookup_elem(&proto_rulesets, &active);
-        if (unlikely(!proto_inner)) {
-            bump_stat(STAT_DROP_DENY);
-            return XDP_DROP;
-        }
-        void *port_inner = bpf_map_lookup_elem(&port_rulesets, &active);
-        if (unlikely(!port_inner)) {
-            bump_stat(STAT_DROP_DENY);
-            return XDP_DROP;
-        }
-        void *vlan_inner = bpf_map_lookup_elem(&vlan_rulesets, &active);
-        if (unlikely(!vlan_inner)) {
-            bump_stat(STAT_DROP_DENY);
-            return XDP_DROP;
-        }
-        /* §5.47 (MVP-4.7) D-mvp-4.7-Q2: MAC axis un-frozen — the same shared
-         * `active` snapshot selects the active allowlist inner (HASH-AOM). */
-        void *mac_inner = bpf_map_lookup_elem(&rulesets, &active);
-        if (unlikely(!mac_inner)) {
-            bump_stat(STAT_DROP_DENY);
-            return XDP_DROP;
-        }
+        /* Per-axis active inners (dst + src + proto + port + vlan) via the
+         * shared `active` snapshot (§5.27 Q1 AS1 extended to 4 axes); §5.47
+         * D-mvp-4.7-Q2: MAC axis un-frozen, same snapshot selects the active
+         * allowlist inner (HASH-AOM). §5.68 fold #3 LOOKUP_INNER_OR_DROP. */
+        LOOKUP_INNER_OR_DROP(dst_inner, dst_rulesets);
+        LOOKUP_INNER_OR_DROP(src_inner, cidr_rulesets);
+        LOOKUP_INNER_OR_DROP(proto_inner, proto_rulesets);
+        LOOKUP_INNER_OR_DROP(port_inner, port_rulesets);
+        LOOKUP_INNER_OR_DROP(vlan_inner, vlan_rulesets);
+        LOOKUP_INNER_OR_DROP(mac_inner, rulesets);
 
         /* §5.43 D-mvp-4.3-Q2 wildcard halves: wildcard[active*BITVEC_NUM_AXES
          * + axis]. A rule unconstrained on an axis lives here (and is ABSENT
@@ -872,19 +946,8 @@ int xdpfilter_prog(struct xdp_md *ctx)
             }
         }
 
-        /* §5.47 (MVP-4.7) D-mvp-4.7-Q2 MAC axis: exact-HASH lookup keyed by the
-         * SOURCE MAC (eth->h_source — the v1 semantic, §5.26; NO closure). The
-         * src MAC sits at the base-eth fixed offset (read before the VLAN walk,
-         * already bounds-checked above), so it is VLAN-agnostic. Every frame
-         * carries a src MAC → no "absent" sentinel (unlike vlan); a rule that
-         * omits `mac` survives via wc_mac. */
-        struct xdpmf_mac mac_key = {0};
-        __builtin_memcpy(mac_key.octets, eth->h_source, 6);
-        __u64 mac_mask = 0;
-        __u64 *mm = bpf_map_lookup_elem(mac_inner, &mac_key);
-        if (mm) {
-            mac_mask = *mm;
-        }
+        /* §5.68 fold #12: src-MAC axis via mac_axis (see helper for §5.47). */
+        __u64 mac_mask = mac_axis(mac_inner, eth->h_source);
 
         /* The OR→AND pivot (PI-mvp-4.3-AND / …4 / …5 / PI-mvp-4.7-MAC): per
          * axis, OR the axis survivors with the axis wildcard half, then
@@ -901,28 +964,7 @@ int xdpfilter_prog(struct xdp_md *ctx)
                     wc_src6                 &
                     (eth_mask   | wc_eth);  /* §5.54 hoisted ethertype axis */
         if (acc != 0) {
-            /* HG-mvp-4.3-4 first-match-by-id: the lowest set bit IS the lowest
-             * matching rule id (bit position == id), so ffsll picks it for
-             * free with NO sort. bump_rule first (per-match counter, HG-5),
-             * then the reused rules_outer → rules_inner → action_table
-             * dispatch (DROP → STAT_DROP_DENY + XDP_DROP; PASS or any
-             * NULL-fallthrough → STAT_PASS_CIDR + XDP_PASS, D-mvp-4.3-STAT). */
-            __u32 rid = first_set_u64(acc) - 1;
-            bump_rule(rid, active);
-            void *rules_inner_map = bpf_map_lookup_elem(&rules_outer, &active);
-            if (rules_inner_map) {
-                struct rule_entry *r = bpf_map_lookup_elem(rules_inner_map, &rid);
-                if (r && r->present) {
-                    __u32 aid = r->action_id;
-                    struct action_entry *a = bpf_map_lookup_elem(&action_table, &aid);
-                    if (a && a->action_type == ACTION_DROP) {
-                        bump_stat(STAT_DROP_DENY);
-                        return XDP_DROP;
-                    }
-                }
-            }
-            bump_stat(STAT_PASS_CIDR);
-            return XDP_PASS;
+            DISPATCH_MATCH(acc, active);  /* §5.68 fold #1 */
         }
         /* acc == 0 → no rule matched; fall through to defaults[active]. */
     } else if (inner_proto == bpf_htons(ETH_P_IPV6)) {
@@ -992,57 +1034,19 @@ int xdpfilter_prog(struct xdp_md *ctx)
          * port_mask=0 (only port-wildcard rules survive), mirroring the v4
          * arm's has_port logic. */
         void *l4 = cursor;
+        /* §5.68 fold #13: shared TCP/UDP dport read (per-arm l4 = walked cursor). */
         __u32 dport    = 0;
         int   has_port = 0;
-        if (proto == IPPROTO_TCP) {
-            struct tcphdr *t = l4;
-            if (unlikely((void *)(t + 1) > data_end)) {
-                bump_stat(STAT_DROP_MALFORMED);
-                return XDP_DROP;
-            }
-            dport    = bpf_ntohs(t->dest);
-            has_port = 1;
-        } else if (proto == IPPROTO_UDP) {
-            struct udphdr *u = l4;
-            if (unlikely((void *)(u + 1) > data_end)) {
-                bump_stat(STAT_DROP_MALFORMED);
-                return XDP_DROP;
-            }
-            dport    = bpf_ntohs(u->dest);
-            has_port = 1;
-        }
+        READ_DPORT(proto, l4, dport, has_port);
 
-        /* Per-axis active inners via the shared `active` snapshot. */
-        void *dst6_inner = bpf_map_lookup_elem(&dst6_rulesets, &active);
-        if (unlikely(!dst6_inner)) {
-            bump_stat(STAT_DROP_DENY);
-            return XDP_DROP;
-        }
-        void *src6_inner = bpf_map_lookup_elem(&src6_rulesets, &active);
-        if (unlikely(!src6_inner)) {
-            bump_stat(STAT_DROP_DENY);
-            return XDP_DROP;
-        }
-        void *proto_inner = bpf_map_lookup_elem(&proto_rulesets, &active);
-        if (unlikely(!proto_inner)) {
-            bump_stat(STAT_DROP_DENY);
-            return XDP_DROP;
-        }
-        void *port_inner = bpf_map_lookup_elem(&port_rulesets, &active);
-        if (unlikely(!port_inner)) {
-            bump_stat(STAT_DROP_DENY);
-            return XDP_DROP;
-        }
-        void *vlan_inner = bpf_map_lookup_elem(&vlan_rulesets, &active);
-        if (unlikely(!vlan_inner)) {
-            bump_stat(STAT_DROP_DENY);
-            return XDP_DROP;
-        }
-        void *mac_inner = bpf_map_lookup_elem(&rulesets, &active);
-        if (unlikely(!mac_inner)) {
-            bump_stat(STAT_DROP_DENY);
-            return XDP_DROP;
-        }
+        /* Per-axis active inners via the shared `active` snapshot. §5.68 fold
+         * #3 LOOKUP_INNER_OR_DROP. */
+        LOOKUP_INNER_OR_DROP(dst6_inner, dst6_rulesets);
+        LOOKUP_INNER_OR_DROP(src6_inner, src6_rulesets);
+        LOOKUP_INNER_OR_DROP(proto_inner, proto_rulesets);
+        LOOKUP_INNER_OR_DROP(port_inner, port_rulesets);
+        LOOKUP_INNER_OR_DROP(vlan_inner, vlan_rulesets);
+        LOOKUP_INNER_OR_DROP(mac_inner, rulesets);
 
         /* All 8 wildcard halves. The v4 address axes (dst/src) contribute
          * wildcard-only here: a v6 frame has NO v4 address ⇒ dst/src LPM
@@ -1135,14 +1139,9 @@ int xdpfilter_prog(struct xdp_md *ctx)
             }
         }
 
-        /* src-MAC exact-HASH (eth->h_source, VLAN-agnostic base offset). */
-        struct xdpmf_mac mac_key = {0};
-        __builtin_memcpy(mac_key.octets, eth->h_source, 6);
-        __u64 mac_mask = 0;
-        __u64 *mm = bpf_map_lookup_elem(mac_inner, &mac_key);
-        if (mm) {
-            mac_mask = *mm;
-        }
+        /* §5.68 fold #12: src-MAC axis via mac_axis (eth->h_source,
+         * VLAN-agnostic base offset). */
+        __u64 mac_mask = mac_axis(mac_inner, eth->h_source);
 
         /* Symmetric 9-term AND (Q2 + §5.54): v4 address axes are wildcard-only
          * here; the hoisted ethertype axis composes uniformly (eth_mask carries
@@ -1157,24 +1156,7 @@ int xdpfilter_prog(struct xdp_md *ctx)
                     (smask6     | wc_src6)  &
                     (eth_mask   | wc_eth);  /* §5.54 hoisted ethertype axis */
         if (acc != 0) {
-            /* first-match-by-id + the reused rules_outer → rules_inner →
-             * action_table dispatch (identical to the v4 arm). */
-            __u32 rid = first_set_u64(acc) - 1;
-            bump_rule(rid, active);
-            void *rules_inner_map = bpf_map_lookup_elem(&rules_outer, &active);
-            if (rules_inner_map) {
-                struct rule_entry *r = bpf_map_lookup_elem(rules_inner_map, &rid);
-                if (r && r->present) {
-                    __u32 aid = r->action_id;
-                    struct action_entry *a = bpf_map_lookup_elem(&action_table, &aid);
-                    if (a && a->action_type == ACTION_DROP) {
-                        bump_stat(STAT_DROP_DENY);
-                        return XDP_DROP;
-                    }
-                }
-            }
-            bump_stat(STAT_PASS_CIDR);
-            return XDP_PASS;
+            DISPATCH_MATCH(acc, active);  /* §5.68 fold #1 */
         }
         /* acc == 0 → no rule matched; fall through to defaults[active]. */
     } else {
@@ -1190,16 +1172,10 @@ int xdpfilter_prog(struct xdp_md *ctx)
          * bounds-check; runts are caught upstream by the base-eth check at the
          * datapath head. Family-agnostic mac/vlan now fire on non-IP frames —
          * SUPERSEDING the old mac-IPv4-gated boundary (D-mvp-4.14-MAC-NONIP-SUPERSEDE). */
-        void *vlan_inner = bpf_map_lookup_elem(&vlan_rulesets, &active);
-        if (unlikely(!vlan_inner)) {
-            bump_stat(STAT_DROP_DENY);
-            return XDP_DROP;
-        }
-        void *mac_inner = bpf_map_lookup_elem(&rulesets, &active);
-        if (unlikely(!mac_inner)) {
-            bump_stat(STAT_DROP_DENY);
-            return XDP_DROP;
-        }
+        /* §5.68 fold #3 LOOKUP_INNER_OR_DROP (non-IP arm: only vlan + mac
+         * inners — no L3/L4 axes). */
+        LOOKUP_INNER_OR_DROP(vlan_inner, vlan_rulesets);
+        LOOKUP_INNER_OR_DROP(mac_inner, rulesets);
 
         /* All wildcard halves. The IP-family axes (dst/src/proto/port/dst6/src6)
          * have NO real survivors on a non-IP frame ⇒ each reduces to its
@@ -1265,13 +1241,8 @@ int xdpfilter_prog(struct xdp_md *ctx)
                 vlan_mask = *vm;
             }
         }
-        struct xdpmf_mac mac_key = {0};
-        __builtin_memcpy(mac_key.octets, eth->h_source, 6);
-        __u64 mac_mask = 0;
-        __u64 *mm = bpf_map_lookup_elem(mac_inner, &mac_key);
-        if (mm) {
-            mac_mask = *mm;
-        }
+        /* §5.68 fold #12: src-MAC axis via mac_axis. */
+        __u64 mac_mask = mac_axis(mac_inner, eth->h_source);
 
         /* Full symmetric 9-term AND: IP-family axes wildcard-only; mac/vlan/
          * ethertype carry real survivors. */
@@ -1285,24 +1256,7 @@ int xdpfilter_prog(struct xdp_md *ctx)
                     wc_src6                 &
                     (eth_mask   | wc_eth);
         if (acc != 0) {
-            /* first-match-by-id + the reused rules_outer → rules_inner →
-             * action_table dispatch (identical to the IP arms). */
-            __u32 rid = first_set_u64(acc) - 1;
-            bump_rule(rid, active);
-            void *rules_inner_map = bpf_map_lookup_elem(&rules_outer, &active);
-            if (rules_inner_map) {
-                struct rule_entry *r = bpf_map_lookup_elem(rules_inner_map, &rid);
-                if (r && r->present) {
-                    __u32 aid = r->action_id;
-                    struct action_entry *a = bpf_map_lookup_elem(&action_table, &aid);
-                    if (a && a->action_type == ACTION_DROP) {
-                        bump_stat(STAT_DROP_DENY);
-                        return XDP_DROP;
-                    }
-                }
-            }
-            bump_stat(STAT_PASS_CIDR);
-            return XDP_PASS;
+            DISPATCH_MATCH(acc, active);  /* §5.68 fold #1 */
         }
         /* acc == 0 → no rule matched; fall through to defaults[active]. */
     }

@@ -3,6 +3,53 @@
 Notes for team-lead/architect/tester about implementation decisions and
 deviations made during impl phase.
 
+## §5.68 MVP-4.28 / B34a datapath helper-extraction — impl notes (2026-06-04)
+
+Brownfield, single file EDITED: `src/bpf/xdpfilter.bpf.c`. Pure byte-identical
+refactor; xdp section held at **3658** insns, gated after EVERY fold
+(`llvm-objdump-19 -d --section=xdp build/xdpfilter.bpf.o | grep -cE '^\s+[0-9a-f]+:'`).
+
+Fold outcomes — **4 landed, 1 dropped**:
+
+| Fold | Realization landed | gate | Note |
+|---|---|---|---|
+| #1 `dispatch_match` | **statement MACRO `DISPATCH_MATCH`** (NOT the design-named value-returning helper) | 3658 | Deviation, escalated. |
+| #2 `load_wildcards` | **DROPPED** (HG-3 / guard #36) | n/a | Cannot hold 3658, escalated. |
+| #3 `LOOKUP_INNER_OR_DROP` | statement macro per design (15 sites) | 3658 | byte-identical by construction. |
+| #12 `mac_axis` | value-returning `__always_inline` helper per design (3 sites) | 3658 | clean. |
+| #13 `read_dport` | **macro FALLBACK `READ_DPORT`** (design's pre-authorized fallback) | 3658 | out-param helper default measured +50 → fell back per D-mvp-4.28-13. |
+
+**Deviation 1 — fold #1 a MACRO not the named helper (ESCALATED to architect).**
+D-mvp-4.28-1's value-returning helper measured **3661 (+3)** — the inlined
+value-return forces a verdict merge/mov per the 3 sites (the two `return XDP_*`
+are caller early-returns that don't fold through a return value). The statement
+macro `DISPATCH_MATCH` holds **3658** and matches candidate guard #36. Realization
+shape is §5.68 verifiable-invariant #4 (MAY). Gate is the arbiter (guard #35).
+
+**Deviation 2 — fold #2 DROPPED (ESCALATED to architect).** No single shared body
+holds 3658: "8-batched" body → 3657 (−1), "6+2-split" body → 3659 (+1). The three
+arms originally used DIFFERENT source orderings (v4 = 6-block then dst6/src6; v6 &
+non-IP = 8 batched); each ordering compiles to a different per-site count, so one
+shared `__always_inline` body matches only some arms — gate brackets 3658, never
+hits it. Empirically refutes the §5.68 Phase-A "interleaving does not change
+codegen" de-risk. A3-struct = same one-body impossibility + touches rent-payer
+`acc` operands → not attempted. Per HG-3 a non-holding fold is DROPPED
+(inline-merge, verifiable-invariant #5 MAY). 3 inline wildcard blocks left
+byte-for-byte; in-file comment records the drop.
+
+Anchors migrated (guard #33): HG-mvp-4.3-4→`DISPATCH_MATCH`; §5.26/§5.27 NULL→
+`LOOKUP_INNER_OR_DROP`; §5.47 MAC→`mac_axis`; §5.44 dport→`READ_DPORT`. §5.43
+generic wildcard note stays inline (fold #2 dropped). Rent-payers untouched (3
+arms split, per-arm `acc` asymmetry, FFS #ifdef, inline proto/ethertype #ifndef,
+hoisted `wc_eth`, per-arm `l4` offset).
+
+Smoke (Phase 2.5): per-fold gate == 3658 each + final; `T_PROD_VERIFIER_LOAD` +
+`T_INSN_BASELINE_GATE` PASS; full `sudo -E ctest` = **104/106 passed, 2 failed**
+(the 2 known env-fails BY NAME `T_EXPORTER_EXITS_6_ALL_IFACES_EACCES` +
+`T_LOG_JSON_EXPORTER_EVENTS`, bpffs/EACCES, pre-existing) + 2 pre-existing skips;
+no new failure. `git diff -- src/lib src/common src/cli src/exporter
+src/common/xdpfilter.h` = ∅. VERSION 0.16.0 unchanged. Net LOC −46.
+
 ## §5.53 MVP-4.13 / S4 cidr6 — impl notes (2026-05-31)
 
 Implemented per §5.53 with NO silent deviations. Q1=`unsigned __int128` closure
