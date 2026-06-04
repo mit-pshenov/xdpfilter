@@ -1,143 +1,154 @@
-# Task brief — MVP-4.28 / B34a: datapath helper-extraction (de-monolith part a) (brownfield)
+# Task brief — MVP-4.29 / B34b: datapath module split (de-monolith part b) (brownfield)
 
 ## Goal
 
-`src/bpf/xdpfilter.bpf.c` (1326 lines) carries the same idioms triplicated
-across its three family arms (IPv4 / IPv6 / non-IP). Extract the genuinely-
-shared idioms into `static __always_inline` helpers / macros so each arm
-shrinks to its legitimately-distinct head. This is **part (a) of the B34
-de-monolith** (BACKLOG B34); **part (b), the `.bpf.c`/`.h` module split into
-`ipv4_match.h`/`ipv6_match.h`/`vlan.h`/`classifier.h`/`maps.h`, is a SEPARATE
-follow-up slice** — its FileList only becomes definable once extraction has
-shrunk the arms (split-before-extract just scatters spaghetti; #4-before-#5).
+Split the (now helper-extracted) datapath monolith `src/bpf/xdpfilter.bpf.c` (live tree **1280 lines**, single `.c`) into per-concern header modules so the single translation unit reads as a set of cohesive includes instead of one 1280-line wall. This is **part (b)** of B34 — the explicit follow-up to B34a (§5.68, commit `8c9a110`), which extracted the shared idioms into in-file `static __always_inline` helpers + statement macros and **deferred the file split to a separate slice briefed against the POST-extraction tree** (the `#4-before-#5` ordering — boundaries only become legible once the arms shrank).
 
-The extraction targets, ranking, and the rent-payers (what must NOT be
-collapsed) are the **discharged output of the `/mint-simplify` subtractive
-pass** (workflow `wf_37ca9d53`, synth verdict; the doc-corpus prerequisites
-it surfaced shipped in `0d7f415`). The slice is **byte-identical pure
-refactor**: every fold must preserve the datapath bytecode, arbitrated by the
-**brand-new B37 insn gate** (`T_INSN_BASELINE_GATE.sh` + `T_PROD_VERIFIER_LOAD.sh`,
-objdump xdp-section line-count `== 3658`) re-run **after each fold**. No
-schema / axis / map / VERSION change; PI-7 continues; `git diff -- src/lib
-src/common src/cli src/exporter` stays ∅ (only `src/bpf/xdpfilter.bpf.c`
-changes, plus possibly new `.h` includes IF the architect chooses to land a
-helper in a header — but no module split this slice).
+The §5.68 sketch named five candidate modules: `ipv4_match.h` / `ipv6_match.h` / `vlan.h` / `classifier.h` / `maps.h`. **That set is a sketch, NOT a contract** — the architect refines the final boundary set against the post-extraction tree (collapse a boundary that doesn't carry its weight; the entropy-control bar applies). The `.bpf.c` retains `SEC("xdp")` + the includes; the headers carry the moved code.
+
+**Load-bearing contract: byte-identical pure code-movement.** A `#include` split changes nothing after preprocessing — the compiled datapath bytecode MUST be unchanged. Arbitrated by the B37 insn gate (`tests/T_INSN_BASELINE_GATE.sh` + `tests/T_PROD_VERIFIER_LOAD.sh`, objdump xdp-section instruction-line count `== ${XDPMF_PROD_INSN_BASELINE:-3658}`) re-run AFTER the split. This is the same guard B34a leaned on (xdp 3658).
 
 ## Context: prior work
 
-- Prior brief archived `mint/task-brief-mvp-4.27.md` (B37 gates — the oracle this slice leans on).
-- Recent: MVP-4.27/B37 (`bb62891`, the 3658 gate now has teeth) → corpus-refresh (`0d7f415`, design.md §2 no longer misleads on paths).
-- Design tail: `mint/design.md` §5.67 (B37); guards #1..**#35** (max).
-- Source of the extraction list: `/mint-simplify` run `wf_37ca9d53` (synth verdict + SESSION writeup). **Its line numbers are APPROXIMATE** (cited up to :1305 vs the file's 1326 lines) — architect MUST re-grep the live tree.
-- Brief-author Phase 2 grep verification (this brief): dispatch-tail `rules_outer` lookup = **exactly 3** (triplication confirmed); 3 family arms confirmed (`bpf.c:6`); `BITVEC_NUM_AXES 9` + `BV_AXIS_*` confirmed (`xdpfilter.h:195-200`); a shared counter-bump helper already exists (`bpf.c:471`, §5.31) — precedent for in-file `__always_inline` sharing.
-- PI continuity: PI-7 (`loader.hpp`/`config.hpp` zero-diff) continues trivially (not touched); **PI-DATAPATH-IDENTICAL** (xdp 3658) is the load-bearing contract of this slice.
+- All prior briefs archived in `mint/task-brief-*.md` (B34a → `mint/task-brief-mvp-4.28.md`).
+- Existing design: `mint/design.md` §5.68 (B34a helper-extraction) — most recent datapath section; names B34b in its OOS (`design.md:18380`).
+- BACKLOG: `docs/BACKLOG.md:193` (B34 "datapath de-monolith: helpers → module split").
+- B37 gate (the byte-identity teeth this slice rests on): §5.67, `tests/T_PROD_VERIFIER_LOAD.sh` FATAL-asserts `== 3658` with the `XDPMF_PROD_INSN_BASELINE` escape hatch named in the failure message.
+- Brief-author Phase 2 grep verification: ran the file/symbol/build/gate greps below (see evidence footer).
+- PI continuity: PI-7 (C++/header tree zero-diff) continues trivially. **PI-mvp-4.28-NONDATAPATH-ZERO is EXTENDED, not continued verbatim** — see HG-mvp-4.29-3.
 
 ## Workflow rules (brownfield)
 
-- **Architect**: read `mint/design.md` §5.43 (the 9-axis AND model), §5.55 (ext-walk), §5.67 (the gate), + this brief. EDIT design.md in place; append §5.68. **Re-grep the live `src/bpf/xdpfilter.bpf.c`** for every extraction target (line numbers in this brief are approximate-from-simplify). Produce a FileList DIFF + the per-fold extraction spec + §6.5 Preserved invariants. Decide Q1/Q2.
-- **Impl**: FileList per mode. ONLY `src/bpf/xdpfilter.bpf.c` (+ optionally a new in-tree `.h` IF the architect lands a helper in a header — but NO module split). **Re-run the 3658 gate after EACH fold**; do NOT batch-then-pray. If a fold cannot hold 3658 byte-identical, invoke the per-fold FALLBACK (drop that fold from the slice — the others still land) and SendMessage architect. `git diff -- src/lib src/common src/cli src/exporter` must stay ∅.
-- **Tester**: the B37 gates ARE the regression oracle — confirm they re-run green at 3658 post-extraction; confirm full-suite no-regression (101/103 + B37's tests). NO new test needed unless a fold changes an observable (it must not). Negation already lives in the B37 gates.
-- **Reviewer**: 5-point brownfield. **Special attention**: (a) byte-identity — xdp 3658 after the full extraction (re-run the gate yourself, don't trust the log); (b) the rent-payers (below) were NOT collapsed; (c) provenance anchors preserved per guard #33 (one canonical copy migrates onto each helper); (d) `git diff -- src/{lib,common,cli,exporter}` ∅; (e) the per-arm 9-term AND asymmetry intact.
+- **Architect**: read `design.md` §5.68 (the B34a extraction it builds on) + §6.5 invariants + the B37 gate sections; EDIT `design.md` in place; append a new §5.69 (MVP-4.29). Owns the final module boundary set + include style + the BpfBuild.cmake dependency question (HG-mvp-4.29-2).
+- **Impl**: FileList per brownfield mode. The move is mechanical (cut from `.bpf.c`, paste into `.h`, add `#include`); the discipline is running the B37 gate after the split and NOT letting any `mov`/verdict-merge creep in (none should — same TU).
+- **Tester**: NO new behaviour to test. Re-run the existing B37 gate (`T_INSN_BASELINE_GATE`, `T_PROD_VERIFIER_LOAD`) as the acceptance oracle. Add a NEW ctest ONLY if the architect identifies a split-specific regression surface (e.g. a "no `src/bpf/*.h` orphaned / every header included exactly once" structural assert) — otherwise the insn gate IS the test.
+- **Reviewer**: 5-point brownfield framework. Special attention: (a) xdp insn count `== 3658` post-split (byte-identity); (b) no header included more than once / no double-definition (ODR within the single TU); (c) PI-7 + extended-NONDATAPATH-ZERO diff fences; (d) the new headers carry ONLY moved code — zero behavioural edit smuggled into the move.
 
 ## Human-gate decisions (defaults applied — architect overrides at Phase A)
 
-### HG-mvp-4.28-1: scope = extraction ONLY; module split DEFERRED → **extraction only**
-The 5 folds (#1/#2/#3/#12/#13). The `.bpf.c`/`.h` module split (`ipv4_match.h` etc.) is a SEPARATE follow-up slice briefed against the POST-extraction tree (boundaries emerge only after the arms shrink). Bundling both = an oversized, hard-to-review cycle + a premature split FileList.
+### HG-mvp-4.29-1: module boundary set → **default = §5.68 five-file sketch, architect refines against post-extraction tree**
+`maps.h` (the 39 `SEC(".maps")` map definitions + their inner structs, currently ~lines 91–460 — the cleanest, biggest cut), plus the match/classifier split across `ipv4_match.h` / `ipv6_match.h` / `vlan.h` / `classifier.h`. The architect MAY collapse boundaries that don't carry weight (e.g. fold `ipv4_match.h`+`ipv6_match.h` if the post-extraction arms are too thin to justify two files) — fewer, cohesive files beat five thin ones. The entropy-control bar (don't manufacture structure) governs. **Architect-overridable with a one-line rationale per merged/kept boundary.**
 
-### HG-mvp-4.28-2: VERSION bump → **NO bump (stay 0.16.0)**
-Internal byte-identical refactor; zero operator-visible surface. (guard #11 N/A.)
+### HG-mvp-4.29-2: BpfBuild.cmake header-dependency GLOB → **default = ADD `src/bpf/*.h` to `_shared_headers`**
+`cmake/BpfBuild.cmake:28-31` GLOBs only `src/common/*.h` + `include/*.h` into the `DEPENDS` of the BPF compile command. New `src/bpf/*.h` headers would therefore NOT trigger an incremental rebuild when edited → stale-object footgun. Default: add `${CMAKE_SOURCE_DIR}/src/bpf/*.h` to that GLOB (build-correctness, derivable — NOT a PO fork). This is the ONE edit outside `src/bpf/` this slice needs; it is NOT `src/lib|common|cli|exporter` so PI-7 is unaffected. Architect confirms / picks an equivalent (explicit `DEPENDS` list).
 
-### HG-mvp-4.28-3: byte-identity contract + per-fold FALLBACK → **3658 after EACH fold; a fold that can't hold it is DROPPED, not forced**
-Pure code-movement ⇒ both verdict-identity AND byte-identity expected. The gate is re-run after each fold. **Per-fold FALLBACK** (pre-negotiated, NOT a rework trigger): if a fold's `__always_inline`/macro realization shifts the xdp section off 3658 (esp. #2's struct-array-vs-named-scalars stack layout), impl first tries an alternate realization; if none holds 3658, that ONE fold is dropped from this slice and noted — the remaining folds still ship. A dropped fold is `inline-merge`, not `[REGRESSION]`.
+### HG-mvp-4.29-3: NONDATAPATH-ZERO invariant → **EXTEND, do not inherit verbatim**
+B34a's `PI-mvp-4.28-NONDATAPATH-ZERO` forbade ANY new `.h`/file. This slice's whole point is new `src/bpf/*.h` files, so the architect RE-STATES the invariant for B34b: NEW files allowed ONLY under `src/bpf/`; `git diff -- src/lib src/common src/cli src/exporter` MUST stay ∅; `git diff -- src/common/xdpfilter.h` MUST stay ∅. The only sanctioned non-`src/bpf/` touch is the HG-2 CMake dependency line. Cite the retired B34a PI text verbatim per [[impl-role-discipline]].
 
-## Open mechanism questions (architect decides; document in §5.68)
+## Open mechanism questions (architect decides; document in §5.69)
 
-### Q1: #3 inner-lookup-or-deny realization — macro vs helper
-The idiom does `lookup(inner); if (!p) { bump(DROP_DENY); return XDP_DROP; }` — a BPF helper **cannot** early-return `XDP_DROP` from the caller. mint-simplify's defense WEAKENED this from helper→**macro**.
-- **A1**: a statement macro `LOOKUP_INNER_OR_DROP(...)` that expands in the caller scope and `return XDP_DROP`s from there.
-- **A2**: an `__always_inline` helper returning a sentinel the caller checks then returns on (keeps it a function, adds one `if` per call site).
-- **Recommendation**: **A1** if it holds 3658 and reads cleanly; A2 as the fallback if the macro is too sharp-edged. Architect owns the exact form (carry ONE canonical §5.26/§5.27 verifier-required-NULL note onto it).
+### Q1: include path style for the new headers
+- **A1**: relative quoted — `#include "maps.h"` (resolves relative to the including `.bpf.c`, which lives in `src/bpf/`).
+- **A2**: src-rooted — `#include "bpf/maps.h"` (via the existing `-I${CMAKE_SOURCE_DIR}/src`, mirroring the current `#include "common/xdpfilter.h"`).
+- **Recommendation**: **A1** for the sibling `src/bpf/*.h` headers (shortest, conventional for co-located headers); keep the existing `"common/xdpfilter.h"` form untouched. Architect's call — low-stakes, no codegen impact.
 
-### Q2: #2 wildcard-load helper signature
-- **A1**: `static __always_inline void load_wildcards(__u32 active, __u64 wc[BITVEC_NUM_AXES])`, index `wc[BV_AXIS_*]` (simplify's suggestion).
-- **A2**: individual `__u64*` out-params (closer to current named scalars → lower stack-layout risk).
-- **A3**: a small `struct` out.
-- **Recommendation**: **A1** for the cleanest −LOC, BUT this carries the documented **stack-layout risk** (array-vs-named-scalars may shift insns). Architect/impl pick whichever HOLDS 3658; if A1 breaks it, A2 is the byte-safe fallback. The gate decides, not a read. (Leave the already-hoisted `eth`/`wc_eth` 9th half alone.)
+### Q2: include-guard convention for the new headers
+- **A1**: `#pragma once`.
+- **A2**: classic `#ifndef XDPMF_BPF_MAPS_H` triple.
+- **Recommendation**: match whatever the existing project headers use (`grep` `src/common/*.hpp` / `include/*.h`); pick the dominant form. Pure consistency choice.
 
-D-mvp-4.28-* (tactical, architect documents): exact helper names/signatures for #1/#12/#13, fold ordering + commit granularity (recommend #1→#2→#3→#12→#13, gate after each), where each migrated §-anchor lands.
+## Scope (cycle MVP-4.29 — concrete items)
 
-## Scope (cycle — concrete items; line numbers APPROXIMATE, architect re-greps)
+### Item B34b-1 — carve `maps.h`
+**Where**: NEW `src/bpf/maps.h`; cut from `src/bpf/xdpfilter.bpf.c`.
+Move the map-definition block (the 39 `SEC(".maps")` objects + their `xdpmf_*_inner` struct definitions + the `rulesets`/`rules`/`rule_counters` ARRAY_OF_MAPS wrappers, currently ~lines 91–460). The cleanest, lowest-risk cut — pure data declarations.
 
-### Item #1 — dispatch-match tail → `dispatch_match()` (do FIRST, cleanest)
-**Where**: `src/bpf/xdpfilter.bpf.c`, the 3 `rules_inner_map = bpf_map_lookup_elem(&rules_outer …)` → first-set → bump → DROP/PASS tails (byte-IDENTICAL ×3, confirmed count=3).
-Extract `static __always_inline int dispatch_match(__u64 acc, __u32 active)` → 3 arms become `if (acc) return dispatch_match(acc, active);`. Carry the HG-mvp-4.3-4 first-match-by-id comment onto the helper. ~−27 LOC.
+### Item B34b-2 — carve match/classifier headers
+**Where**: NEW `src/bpf/{ipv4_match,ipv6_match,vlan,classifier}.h` (final set per HG-1); cut from `src/bpf/xdpfilter.bpf.c`.
+Move the `static __always_inline` helpers + statement macros into their cohesive homes:
+- `vlan.h`: `l3_after_vlan` (`:577`).
+- shared/classifier: `bump_stat` (`:463`), `bump_rule` (`:480`), `first_set_u64` (`:508`), `port_scan` (`:541`), `mac_axis` (`:683`), `DISPATCH_MATCH` (`:623`), `LOOKUP_INNER_OR_DROP` (`:657`), `READ_DPORT` (`:711`).
+- The per-family AND-composition arms move into `ipv4_match.h` / `ipv6_match.h` (or a merged `match.h` per HG-1).
+Architect assigns each helper/macro to a module against the post-extraction tree.
 
-### Item #2 — 8-axis wildcard load → `load_wildcards()`
-**Where**: the per-arm `wc_dst…wc_src6` load blocks (×3: v4 / v6 / non-IP). Leave the hoisted `eth`/`wc_eth` 9th half. ~−80…110 LOC. **Stack-layout risk — Q2 + HG-3 FALLBACK govern.**
+### Item B34b-3 — reduce `xdpfilter.bpf.c` to includes + `SEC("xdp")`
+**Where**: EDIT `src/bpf/xdpfilter.bpf.c`.
+After the carves, the `.c` retains: the top `#include` block (vmlinux, bpf helpers, `common/xdpfilter.h`) + the new `#include "…"` lines (in dependency order — `maps.h` before the match headers) + the `SEC("xdp")` program (`:730`+) + `char _license[] SEC("license")`. Include ORDER matters for the single TU (maps before consumers).
 
-### Item #3 — inner-lookup + NULL→DROP_DENY → `LOOKUP_INNER_OR_DROP` macro
-**Where**: the per-axis `lookup; if(!p) drop_deny` idiom (×3). MACRO not helper (Q1). ~−25…42 LOC.
+### Item B34b-4 — BpfBuild.cmake dependency (per HG-2)
+**Where**: EDIT `cmake/BpfBuild.cmake` (`_shared_headers` GLOB, `:28-31`).
+Add `src/bpf/*.h` so header edits trigger BPF rebuild. One-line change.
 
-### Item #12 — src-MAC exact-HASH fetch → `mac_axis()`
-**Where**: the 3× ~7-line MAC inner-fetch idiom. ~−12 LOC. Bundle with the pass.
+## Out of scope (explicit)
 
-### Item #13 — TCP/UDP dport-read → `read_dport()`
-**Where**: the v4 + v6 dport reads (2 copies; non-IP has no L4). Return `has_port`; **preserve the MALFORMED bounds-miss branch 1:1** via an out-of-band sentinel → `STAT_DROP_MALFORMED`. ~−12 LOC.
-
-## Out of scope (explicit) — RENT-PAYERS, do NOT touch / collapse
-- **The module split (part b)** — separate follow-up slice (briefed post-extraction).
-- **The THREE family arms themselves stay split** — they genuinely differ (v4 ihl L4 offset; v6 `MAX_EXT_HOPS` ext-walk + /128 LPM; non-IP no L3/L4). Extract shared **tails/loads**, NOT the heads.
-- **Per-arm 9-term `acc` AND-expressions** — each arm zeroes a DIFFERENT axis subset (cross-family exclusion, **PI-mvp-4.13-CROSS-FAMILY**); the asymmetry IS the family semantics. Collapsing reintroduces zeroed lookups (breaks 3658) or adds masks costing more than the dup. **Do NOT blanket-collapse the AND-composition comments — they meaningfully differ per arm.**
-- **`XDPMF_FFS_FALLBACK` #ifdef branch** (§5.42) — verifier-floor portability hatch, conditionally-dead by design. KEEP.
-- **Inline `ETH_P_*`/`IPPROTO_*` `#ifndef` defs** (`bpf.c:43-47`+) — no header to include in the BPF-target build. KEEP.
-- **loader FORK-merges** (`close_prefixes`/`populate_bitvec` templates) — a SEPARATE later **loader.cpp** slice (verdict-identity, different file/oracle). NOT this byte-identical `.bpf.c` slice.
-- **B35** (wildcard `ruleset_state` pack — perf, verdict-identity), **B36** (64-rule ceiling), mirror/redirect — later.
-- Any `src/{lib,common,cli,exporter}` change. VERSION bump. Schema/axis/map change.
+- **ANY behavioural / codegen change.** If the split shifts the insn count off 3658, the split is wrong (not the baseline) — fix the move, do NOT bump `XDPMF_PROD_INSN_BASELINE`. (The escape hatch is for *intentional* codegen changes; B34b has none.)
+- **Schema / axis / map-count / VERSION change** — none. VERSION stays 0.16.0.
+- **`src/lib` / `src/common` / `src/cli` / `src/exporter`** — zero diff (PI-7). `src/common/xdpfilter.h` — zero diff.
+- **B35** (ruleset_state / wildcard-pack — where the B34a-dropped fold #2 `load_wildcards` belongs) — separate follow-up slice, MEASURE-FIRST (`docs/BACKLOG.md:196`). The B34b module homes should leave a natural seam for it but NOT implement it.
+- **`.bpf.c` → `.bpf.o` skeleton / loader changes** — the loader consumes the same single object; nothing downstream of the compile changes.
 
 ## Definition of done
-- §5.68 amendment in `mint/design.md` (per-fold extraction spec + §6.5 PI rows + the migrated anchors).
-- PI-7 continues; **PI-DATAPATH-IDENTICAL: xdp section == 3658 after the full extraction** (the B37 gate green).
-- `git diff <base> -- src/lib src/common src/cli src/exporter` = ∅; only `src/bpf/xdpfilter.bpf.c` (+ any new in-tree `.h` IF a helper lands in a header, no split) changed.
-- Full ctest no-regression: 101/103 baseline (2 known env-fails BY NAME — `T_EXPORTER_EXITS_6_ALL_IFACES_EACCES`, `T_LOG_JSON_EXPORTER_EVENTS`) + B37's gates green at 3658.
+
+- §5.69 amendment in `design.md` (B34b module boundary set + include style + HG resolutions + the extended NONDATAPATH-ZERO PI).
+- PI-7 continues (C++/header tree zero-diff). PI-mvp-4.29-DATAPATH-IDENTICAL: xdp section `== 3658` post-split.
+- ctest: existing baseline GREEN (esp. `T_INSN_BASELINE_GATE`, `T_PROD_VERIFIER_LOAD`); NEW structural ctest only if architect identifies a split-regression surface.
 - No VERSION bump.
 - `mint/review.md` round-1 verdict = pass.
 - One git commit per phase boundary.
 
 ## Dependencies
-- Build: clang/libbpf as-is; `llvm-objdump-19` for the gate (already used by B37).
-- Runtime: `bpftool` + passwordless sudo for `T_PROD_VERIFIER_LOAD` (SKIP-gated).
-- Kernel/platform: dev 6.1; the verifier must still accept the post-extraction object (`__always_inline` ⇒ expected, but the standalone-load gate confirms).
+
+- Build: clang `-target bpf` (existing, `cmake/BpfBuild.cmake`); `-I${CMAKE_SOURCE_DIR}/include -I${CMAKE_SOURCE_DIR}/src` already on the compile line.
+- Runtime: none new.
+- Kernel/platform: none new (byte-identical object → same verifier acceptance as today; dev floor 6.1, prod floor 5.15 unchanged).
 
 ## Packs to load (orchestrator: inject into spawn prompts)
+
 ```yaml
 mode: brownfield
 packs:
-  architect:  []
-  impl:       []
-  tester:     []
-  reviewer:   []
+  architect:  [lang/bpf.md, lang/cmake.md]   # BPF idioms + the BpfBuild.cmake header-dep GLOB (HG-2)
+  impl:       [lang/bpf.md, lang/cmake.md]
+  tester:     [test/bpf-xdp.md]              # NOTE: acceptance oracle is the B37 insn gate, not veth injection
+  reviewer:   [test/bpf-xdp.md]
 ```
 
 ---
 
 ## Pre-brief sanity check (per [[mint-hld-scope-discipline]])
-**Mechanical/single-axis → single-architect `/mint-dev`, no `/mint-hld`.** The design-space exploration was ALREADY done by `/mint-simplify` (it enumerated the folds, ranked by replication, ran an adversarial keep-defense that produced the rent-payer list + the helper→macro correction). What remains is bounded extraction against a discharged list with a built oracle. The one real risk (#2 stack-layout) is an impl-time, gate-arbitrated realizability question with a pre-negotiated FALLBACK — NOT a multi-axis design fork. PO-filter (POF-M2): no decision here carries external/product value for the user; all engineering, discharged in-brief or routed to the architect. Scope-split (extraction now / module-split later) derived from the FileList-can't-exist-yet constraint, not punted.
+
+**Mechanical / single-axis → single-architect via `/mint-dev`, NO `/mint-hld`.** The one design axis is "where to draw module boundaries", §5.68 already sketched it, and the byte-identity gate makes any boundary choice cheaply reversible (it's pure code movement — re-merge is a `cat`). Not expensive-to-undo; not ≥3-axis. The architect refining a sketched boundary set against the live tree is exactly Phase-1 single-architect work. The only non-`src/bpf/` decision (the CMake GLOB) is derivable build-correctness, not a PO fork — handled as HG-2 default, not a user gate.
 
 ## Notes for architect Phase A code-grep discipline (per architect spec rules)
-Brief author ran these (evidence above); architect RE-RUNS on the live tree (simplify line numbers are approximate — bpf.c is 1326 lines, simplify cited to :1305):
-- `grep -n 'rules_inner_map = bpf_map_lookup_elem(&rules_outer' src/bpf/xdpfilter.bpf.c` — the 3 dispatch tails (#1).
-- `grep -nE 'wc_dst|wc_src6' src/bpf/xdpfilter.bpf.c` — the wildcard load blocks (#2); confirm the 3 arms + the hoisted 9th half to LEAVE.
-- `grep -nE 'DROP_DENY|drop_deny|bpf_map_lookup_elem.*inner' src/bpf/xdpfilter.bpf.c` — the inner-lookup-or-deny idiom (#3).
-- `grep -nE 'dport|src_mac|mac_inner' src/bpf/xdpfilter.bpf.c` — #12/#13.
-- `grep -nE 'BV_AXIS_|BITVEC_NUM_AXES' src/common/xdpfilter.h` — axis indices for the `wc[]` helper.
-- Confirm at end of EACH fold: `llvm-objdump-19 -d --section=xdp build/xdpfilter.bpf.o | grep -cE '^\s+[0-9a-f]+:'` == 3658, AND `git diff --stat -- src/lib src/common src/cli src/exporter` empty.
+
+Brief author already ran these (evidence footer); architect re-verifies independently + extends:
+
+- `wc -l src/bpf/xdpfilter.bpf.c` → **1280** (NOT §5.68's 1327 — the post-extraction tree is smaller; guard #5: re-anchor every literal, do NOT trust this brief's line numbers — they will drift as you carve).
+- `grep -nE '^(static __always_inline|#define [A-Z_]+\()' src/bpf/xdpfilter.bpf.c` → the 9 move-candidates (5 helpers + 4 macros, listed in B34b-2 with current line numbers).
+- `grep -cE 'SEC\(".maps"\)' src/bpf/xdpfilter.bpf.c` → **39** map objects (the `maps.h` payload).
+- `ls src/bpf/` → single `.c`, no `.h` yet; confirm each target `.h` is NEW (`! test -f`).
+- `sed -n '25,55p' cmake/BpfBuild.cmake` → confirm the `_shared_headers` GLOB omits `src/bpf/*.h` (HG-2 rationale).
+- After EACH carve (or at minimum once post-split): run the B37 gate / objdump xdp-section count and confirm `== 3658`. Re-measure recipe in the `bpf-spike-tooling` pack.
 
 ### Anti-misdiagnosis guards applicable to this slice (per Phase 3)
-- **Guard #5 (Phase A code-grep discipline)** — always; architect re-greps the live tree (the simplify line numbers are stale-ish).
-- **Guard #33 (D-ANCHOR-PRESERVE / traceability)** — load-bearing here: on extraction, ONE canonical copy of each migrated §-anchor (HG-mvp-4.3-4 first-match, §5.26/§5.27 verifier-NULL, §5.42 FFS, PI-mvp-4.13-CROSS-FAMILY) lands on its helper; do NOT drop anchors, do NOT blanket-collapse the per-arm AND comments (they differ per arm).
-- **Guard #35 (a print-only gate is decorative / the insn gate is the arbiter)** — this slice is the FIRST real consumer of B37's teeth: the 3658 gate is RUN, not read; byte-identity is asserted by the gate, never from a code read (esp. #2).
-- **Guard #9 (helper-location duplication-over-extraction)** — INVERTED context: here extraction IS the goal, but the helpers are in-file `static __always_inline` (single TU), not cross-file — so #9's "duplicate don't extract across files" does not fire; the module split (part b) is where cross-file sharing gets decided.
-- **Guard #11 (VERSION-bump literal propagation)** — N/A (no bump).
-- **Guard #12 (RESOURCE_LOCK)** — N/A (no new ctest; B37 gates already correctly locked/unlocked).
 
-> Operative-semantic note: the −LOC figures (−27/−90/−35/−12/−12) and line ranges are SHOULD-level orientation, not contracts; the authoritative contract is **xdp 3658 byte-identical + the rent-payer list intact**. A fold landing fewer/more lines, or dropped under the HG-3 FALLBACK, is `inline-merge`.
+- **Guard #5 (Phase A code-grep discipline)** — ALWAYS applies; the live tree is 1280 lines, not §5.68's 1327. Re-anchor every literal by pattern; line numbers in THIS brief are orientation, not contract.
+- **Guard #9 (helper-location duplication-over-extraction)** — applies in SPIRIT (inverted): this slice MOVES helpers into co-located headers within the SAME TU — it does NOT extract into a cross-module shared abstraction or pull any stable external file into the edit surface. Watch that the split does not accidentally invite a "DRY across files" temptation; the contract is relocation, not abstraction.
+- **Guard #35 / #36 (gate-as-sole-arbiter; statement-macro-over-value-helper for byte-identity)** — applies: B34a learned (D-mvp-4.28 Phase B) that even a value-returning helper form shifts the insn count (+3). The split MUST preserve the exact helper/macro FORMS as-extracted; moving them across a `#include` boundary changes nothing post-preprocessing, but any incidental reshaping (e.g. turning a macro back into a function "while we're here") will break 3658. The B37 gate is the sole arbiter.
+- **Guard #12 (RESOURCE_LOCK for shared host state)** — applies ONLY if a NEW structural ctest touches the xdp fixture / a real load; if the acceptance oracle stays the existing B37 gate, no new lock surface.
+
+### Evidence footer — brief-author Phase 2 grep verification
+
+```
+File/path:
+  ✓ src/bpf/xdpfilter.bpf.c           1280 lines, single .c (will EDIT + carve from)
+  ✓ src/bpf/{ipv4_match,ipv6_match,vlan,classifier,maps}.h   all absent (NEW)
+  ✓ src/common/xdpfilter.h            exists (MUST stay zero-diff)
+  ✓ cmake/BpfBuild.cmake              _shared_headers GLOBs common/*.h + include/*.h ONLY (HG-2)
+  ✓ CMakeLists.txt:106                add_bpf_object(xdpfilter src/bpf/xdpfilter.bpf.c) — single TU, unchanged
+  ✓ tests/T_INSN_BASELINE_GATE.sh     exists
+  ✓ tests/T_PROD_VERIFIER_LOAD.sh     exists; FATAL-asserts == ${XDPMF_PROD_INSN_BASELINE:-3658}
+
+Symbol/structure:
+  ✓ 9 move-candidates: bump_stat:463 bump_rule:480 first_set_u64:508 port_scan:541
+    l3_after_vlan:577 DISPATCH_MATCH:623 LOOKUP_INNER_OR_DROP:657 mac_axis:683 READ_DPORT:711
+  ✓ 39 SEC(".maps") objects (maps.h payload)
+  ✓ SEC("xdp") program at :730
+
+Estimate corrections vs §5.68 sketch:
+  §5.68 cited file as 1327 lines; LIVE tree (post-B34a) is 1280 → use 1280.
+
+Surprising findings:
+  • BpfBuild.cmake _shared_headers GLOB omits src/bpf/*.h → new headers wouldn't trigger
+    incremental rebuild. Surfaced as HG-mvp-4.29-2 (the one sanctioned non-src/bpf/ edit).
+```
