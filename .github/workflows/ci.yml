@@ -98,6 +98,14 @@ jobs:
           sudo "$bpftool" btf dump file /sys/kernel/btf/vmlinux format c > include/vmlinux.h
           echo "generated include/vmlinux.h ($(wc -l < include/vmlinux.h) lines)"
 
+      - name: Diagnose clang++ stdlib search (temporary)
+        run: |
+          echo "=== distro ==="; . /etc/os-release; echo "$PRETTY_NAME"
+          echo "=== gcc dirs present ==="; ls -d /usr/include/c++/* 2>/dev/null; ls -d /usr/lib/gcc/x86_64-linux-gnu/* 2>/dev/null
+          echo "=== which clang++-19 ==="; command -v clang++-19 || echo MISSING
+          echo "=== clang++-19 -v include search ==="; clang++-19 -v -E -x c++ /dev/null 2>&1 | sed -n '1,40p'
+          echo "=== try compiling cstdint ==="; echo '#include <cstdint>' | clang++-19 -std=c++23 -x c++ -c - -o /tmp/t.o 2>&1 | head -20 || true
+
       - name: Configure
         run: cmake -S . -B build
 
