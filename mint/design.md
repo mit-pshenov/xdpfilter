@@ -18922,7 +18922,11 @@ Scope hosted CI to **what a hosted runner can do HONESTLY**: build under `-Werro
 #### §5.72 Verification
 
 - **Local (the locally-verifiable half):** `env XDPMF_CI_BUILD_ONLY=1 ctest` (no sudo) → **100% tests passed, 0 failed out of 106** (16 RUN+PASS, ~90 SKIP). The partition is deterministic and the green is non-vacuous (it includes the compile + B37 insn-gate + golden-stderr). Validated 2026-06-04 before push.
-- **Runner (the push-only half):** the `vmlinux.h` regeneration + `bpftool`-availability can only be confirmed against a live runner → push + watch `gh run`. "Expect to iterate" (inherited §5.63 honesty stance).
+- **Runner (the push-only half) — RESOLVED, CI GREEN** (run `26983525051`: `100% tests passed, 0 failed out of 106`; 17 non-privileged RUN+pass, ~89 datapath SKIP). FIRST observed green in the repo's history (was 14/14 RED). Iterated live through a runner-fix chain:
+  1. **vmlinux.h gen** — `/usr/sbin/bpftool` is a kernel-versioned dispatcher needing the absent `linux-tools-$(uname -r)` azure pkg; `linux-tools-generic` ships a REAL `/usr/lib/linux-tools-*/bpftool` that works for `btf dump` → probe for a bpftool whose `version` succeeds (skips the wrapper).
+  2. **skeleton gen** — CMake's `find_program(BPFTOOL_EXE)` + `bpftool gen skeleton` also hit the wrapper → symlink the working bpftool to `/usr/local/bin/bpftool` (ahead of `/usr/sbin` on PATH) BEFORE Configure.
+  3. **ROOT CAUSE of the `cstdint`-not-found stall** — the project compiles C++ with **`-stdlib=libc++`** (`CMakeLists.txt:55-56`), NOT libstdc++; the runner lacked the libc++ headers. Fix: install `libc++-19-dev libc++abi-19-dev`. (A standalone `#include <cstdint>` compiled fine only because it defaulted to libstdc++ — the project flag switched stdlib; the gcc/libstdc++ detours were the wrong stdlib.)
+  4. **systemd-analyze** — `T_SYSTEMD_UNIT_SYNTAX` verifies the units' `ExecStart=/usr/bin/{xdpfilter,xdpmf-exporter}` binaries EXIST → install the built binaries to `/usr/bin` before the test step.
 
 #### §5.72 Preserved invariants
 - **ZERO `src/` change** — `git diff -- src/` ∅. Footprint = `.github/workflows/ci.yml` (rewrite) + `tests/lib/common.sh` (+1 gate) + this §5.72.
