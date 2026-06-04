@@ -28,6 +28,7 @@ function(add_bpf_object name source)
     file(GLOB _shared_headers
         ${CMAKE_SOURCE_DIR}/src/common/*.h
         ${CMAKE_SOURCE_DIR}/include/*.h
+        ${CMAKE_SOURCE_DIR}/src/bpf/*.h
     )
 
     add_custom_command(
