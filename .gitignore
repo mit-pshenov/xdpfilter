@@ -32,3 +32,6 @@ mint/test-run.log
 # Python bytecode
 __pycache__/
 *.pyc
+
+# CTest run artifacts (regenerated each build/test run)
+Testing/

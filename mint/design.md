@@ -1,4 +1,14 @@
-# Design — MVP-1: L2 MAC allow-list XDP filter
+# Design — xdpfilter (9-axis L2/L3 XDP filter)
+
+> **⚠️ FROZEN MVP-1 BASELINE — §1–§4 below describe the original MVP-1
+> L2-MAC bootstrap and are NOT current.** The living design is the **§5
+> amendment ledger** (§5.1 … §5.67) + **§6 TestStrategy** + the **§6.5
+> Preserved-Invariants** rows. Since MVP-1: the artifact was renamed
+> `xdpmacfilter`→`xdpfilter` (B33: `src/loader/`→`src/lib/`+`src/cli/`,
+> `mac_filter.bpf.c`→`xdpfilter.bpf.c`, `mac_filter.h`→`xdpfilter.h`), and
+> the match model became **9 AND-composed axes across IPv4/IPv6/non-IP
+> arms** — not the single-MAC allow-list §1 describes. Read §1–§4 as
+> provenance only; for current state start at the §5 ledger tail.
 
 ## 1. Problem statement
 
@@ -19,44 +29,18 @@ intentionally one vertical slice exercising the toolchain end-to-end.
 
 ## 2. FileList
 
-| Path | Role (one line) | Language | LOC est |
-|---|---|---|---|
-| `CMakeLists.txt` | Top-level build: C++23 flags, libbpf find, subdirs, ctest enable | CMake | 60 |
-| `cmake/BpfBuild.cmake` | Helper: clang `-target bpf` compile + bpftool skeleton gen | CMake | 70 |
-| `src/common/mac_filter.h` | Shared types: `struct xdpmf_mac`, `enum mac_filter_stat`, map names | C (BPF+C++ compatible header) | 50 |
-| `src/bpf/mac_filter.bpf.c` | XDP program: parse Eth header, lookup allow-list, bump counter, return XDP_PASS/XDP_DROP | BPF C | 90 |
-| `src/loader/raii.hpp` | RAII wrappers: `BpfSkeleton`, `XdpAttachment`, `BpffsDir` (see §5.17) | C++23 (header-only) | 120 |
-| `src/loader/cli.hpp` | CLI parse declarations (subcommand `attach`/`detach`, flags, MAC parsing) | C++23 | 40 |
-| `src/loader/cli.cpp` | CLI parser implementation: tokenization, MAC validation, usage text | C++23 | 130 |
-| `src/loader/loader.hpp` | Loader API: `attach()`, `detach()`, error enum (allow-list populated inline in `attach()` — see §5.17). Post-§5.21 A1: also owns `AttachConfig`/`DetachConfig` structs (moved from `cli.hpp`). Post-§5.22: enum gains `PathRefused = 8` (single enumerator addition — see §5.22 Q3). Post-§5.24: enum gains `KernelUnsupported = 7` (single enumerator addition — see §5.24 Q1). | C++23 | 50 |
-| `src/loader/loader.cpp` | Open skeleton, pin maps under `/sys/fs/bpf/xdpmacfilter/<iface>/`, attach XDP (SKB mode), 4-state detect-and-(detach-ours / refuse-alien / recover-stale-pin) probe per §5.4 (revised MVP-1.1B: identity-verified ownership + all-modes XDP query — see §5.19, §5.20; MVP-1.1C D4: detach state (a) returns exit 0 — see §5.21; MVP-2 Sec §5.22: tag-check identity gate + O_PATH bpffs root fd hardening + symlink-refused exit 8) | C++23 | 290 |
-| `src/loader/main.cpp` | `main()`: dispatch subcommand, map exceptions/errors to exit codes (post-§5.22: exit 8 row added) | C++23 | 60 |
-| `README.md` | Repo entry-point doc: what / prerequisites / build / run / test / where-docs-live (added MVP-1.1A) | Markdown | 50 |
-| `CHANGELOG.md` | Repo-root version history per Keep-a-Changelog convention; seeded with `0.1.0`/`0.1.1`/`0.1.2`/`0.1.3` sections (added MVP-1.1C per §5.21 B4) | Markdown | 30 |
-| `tests/CMakeLists.txt` | ctest registration (tester populates; MVP-1.1B adds T_ATTACH_ALIEN_REFUSAL entry + `add_bpf_object(xdp_pass …)` wiring per §6.9; MVP-1.1C adds T_CLI_HELP_VERSION/T_CLI_CAPACITY/T_CLI_BAD_MAC/T_DETACH_NOTHING entries per §6.10–§6.13; MVP-2 Sec adds T_ATTACH_TAG_MISMATCH + T_BPFFS_ROOT_SYMLINK entries + `add_bpf_object(mac_filter_alt …)` wiring per §6.14–§6.15) | CMake | tester |
-| `tests/T_SANITIZER_BUILD.sh` | ASAN+UBSAN sanitizer-build smoke: fresh `/tmp` build with `-DXDPMF_SANITIZERS=ON` + one end-to-end attach/inject/stats/detach + stderr grep (per §6.8, added MVP-1.1A) | bash | 60 |
-| `tests/T_ATTACH_ALIEN_REFUSAL.sh` | Alien-XDP refusal end-to-end: pre-attach `xdp_pass.bpf.o` to `${IFACE_A}`, run our `attach`, assert exit 4 + foreign prog still attached + stderr names foreign id (per §6.9, added MVP-1.1B) | bash | 80 |
-| `tests/T_CLI_HELP_VERSION.sh` | CLI surface: `--help` / `--version` exit 0 + content asserts (per §6.10, added MVP-1.1C) | bash | 30 |
-| `tests/T_CLI_CAPACITY.sh` | CLI surface: 65-MAC overflow → exit 1 + `too many --allow entries` in stderr (per §6.11, added MVP-1.1C) | bash | 30 |
-| `tests/T_CLI_BAD_MAC.sh` | CLI surface: 4 malformed-MAC sub-cases → exit 1 + recognizable stderr (per §6.12, added MVP-1.1C) | bash | 30 |
-| `tests/T_DETACH_NOTHING.sh` | `detach --iface lo` on clean iface → exit 0 (per §6.13 + §5.21 D4 idempotency amendment, added MVP-1.1C) | bash | 30 |
-| `tests/T_ATTACH_TAG_MISMATCH.sh` | Tag-check end-to-end: pre-attach `mac_filter_alt.bpf.o` (same SEC name, different bytecode) to `${IFACE_A}` + invoke our `attach`, assert exit 4 + stderr contains hex tag AND `tag mismatch` substring; negation control re-runs with the real `mac_filter.bpf.o` and asserts exit 0 (per §6.14, added MVP-2 Sec) | bash | 80 |
-| `tests/T_BPFFS_ROOT_SYMLINK.sh` | O_PATH bpffs root hardening: pre-symlink `/sys/fs/bpf/xdpmacfilter` (and per-iface sub-variant) to attacker-controlled dir, invoke `attach`, assert exit 8 + `symlink`/`ELOOP` substring; cleanup restores real bpffs root and confirms negation attach succeeds (per §6.15, added MVP-2 Sec) | bash | 100 |
-| `tests/fixtures/xdp_pass.bpf.c` | Minimal foreign-XDP fixture: `SEC("xdp") int xdp_pass_prog(...) { return XDP_PASS; }` (function name MUST differ from `mac_filter_prog` so §5.19 identity-check classifies it as alien) — built via `add_bpf_object(xdp_pass …)` (per §6.9, added MVP-1.1B) | BPF C | 15 |
-| `tests/fixtures/mac_filter_alt.bpf.c` | Tag-mismatch fixture: `SEC("xdp") int mac_filter_prog(...) { return XDP_PASS; }` — function name IDENTICAL to the real prog (`mac_filter_prog`) so name-check passes; body intentionally minimal so bytecode (and therefore `bpf_prog_info.tag`) differs from `src/bpf/mac_filter.bpf.c`'s built `.bpf.o`. Built via `add_bpf_object(mac_filter_alt …)` (per §6.14, added MVP-2 Sec) | BPF C | 15 |
-| `tests/...` | Other test scripts/binaries (tester populates per TestStrategy §6) | tester-chosen | tester |
-
-Total impl LOC est: ~960 (excluding tests; +60 from §5.22 — ~30 for the
-tag-check / probe extension and ~30 for the `BpffsRootFd` RAII + the
-`*at()` syscall conversion of `ensure_bpffs_dir`/`bpffs_remove_iface` per
-§5.22 Q2 Standard scope). `loader.hpp` grows by exactly **one line** —
-the `PathRefused = 8` enumerator — per §5.22 Q3. Plus the `KernelUnsupported = 7` enumerator — per §5.24 Q1.
-
-The generated BPF skeleton header (`mac_filter.skel.h`) lives in
-`${CMAKE_BINARY_DIR}` — not committed, not listed. Likewise the foreign
-fixture's BPF object (`${CMAKE_BINARY_DIR}/xdp_pass.bpf.o`) and the
-tag-mismatch fixture's BPF object (`${CMAKE_BINARY_DIR}/mac_filter_alt.bpf.o`)
-are build artifacts, not committed.
+> **⚠️ HISTORICAL — the original MVP-1/2 file inventory that stood here does
+> NOT match the current tree and was removed to stop it being read as
+> current.** Since then: B33 renamed `src/loader/`→`src/lib/`+`src/cli/`,
+> `src/common/mac_filter.h`→`xdpfilter.h`, `src/bpf/mac_filter.bpf.c`→
+> `xdpfilter.bpf.c`; the codebase grew to the 9-axis bit-vector classifier
+> + exporter + sidecar + ~100 ctests. **Do NOT use a §1–§4 FileList to locate
+> current files** (e.g. for the B34 module split) — the authoritative
+> per-slice FileList is the **DIFF block inside each §5.x amendment**, and the
+> ground truth is the actual `src/` tree (`git ls-files src/`). The generated
+> skeleton (`xdpfilter.skel.h`) and fixture objects are git-ignored build
+> artifacts. The original MVP-1/2 inventory is recoverable from git history
+> (early commits / the MVP-2-era tags).
 
 ## 3. DataStructures
 
