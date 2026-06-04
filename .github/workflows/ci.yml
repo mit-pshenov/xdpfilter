@@ -48,16 +48,19 @@ jobs:
       - name: Install toolchain
         run: |
           sudo apt-get update
-          # NOTE: the `linux-tools-*` bpftool is a kernel-versioned DISPATCHER
-          # that needs linux-tools-$(uname -r) (an azure-kernel pkg absent from
-          # the hosted apt repo) → it fails at runtime. The standalone `bpftool`
-          # package (universe, 24.04+) is kernel-agnostic and works for
-          # `btf dump`. Install it; the vmlinux.h step probes for a bpftool
-          # whose `version` actually succeeds.
+          # bpftool: `linux-tools-generic` installs a REAL binary under
+          # /usr/lib/linux-tools-<generic-abi>/bpftool. That binary works for
+          # `btf dump file /sys/kernel/btf/vmlinux` regardless of the running
+          # (azure) kernel — it reads the live BTF, it does not need to match
+          # uname -r. The /usr/sbin/bpftool wrapper, by contrast, is a
+          # kernel-versioned DISPATCHER that needs the absent
+          # linux-tools-$(uname -r) azure pkg and fails at runtime — so the
+          # vmlinux.h step probes for a bpftool whose `version` SUCCEEDS,
+          # skipping the wrapper and finding the real /usr/lib binary.
           sudo apt-get install -y \
             clang-19 llvm-19 \
             libbpf-dev \
-            bpftool \
+            linux-tools-common linux-tools-generic \
             python3 python3-scapy \
             jq cmake make pkg-config
 
@@ -74,7 +77,7 @@ jobs:
           # /usr/sbin linux-tools wrapper exists but exits non-zero ("bpftool
           # not found for kernel <azure>"), so an exists-check is not enough.
           bpftool=""
-          for c in /usr/bin/bpftool bpftool /usr/sbin/bpftool /usr/lib/linux-tools/*/bpftool; do
+          for c in /usr/lib/linux-tools-*/bpftool /usr/lib/linux-tools/*/bpftool /usr/bin/bpftool bpftool /usr/sbin/bpftool; do
             if "$c" version >/dev/null 2>&1; then bpftool="$c"; break; fi
           done
           [ -n "$bpftool" ] || { echo "::error::no WORKING bpftool on runner (the linux-tools wrapper needs an absent azure-kernel pkg; install the standalone 'bpftool' package)"; exit 1; }
