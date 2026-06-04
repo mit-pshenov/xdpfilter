@@ -98,16 +98,13 @@ jobs:
           sudo "$bpftool" btf dump file /sys/kernel/btf/vmlinux format c > include/vmlinux.h
           echo "generated include/vmlinux.h ($(wc -l < include/vmlinux.h) lines)"
 
-      - name: Diagnose clang++ stdlib search (temporary)
-        run: |
-          echo "=== distro ==="; . /etc/os-release; echo "$PRETTY_NAME"
-          echo "=== gcc dirs present ==="; ls -d /usr/include/c++/* 2>/dev/null; ls -d /usr/lib/gcc/x86_64-linux-gnu/* 2>/dev/null
-          echo "=== which clang++-19 ==="; command -v clang++-19 || echo MISSING
-          echo "=== clang++-19 -v include search ==="; clang++-19 -v -E -x c++ /dev/null 2>&1 | sed -n '1,40p'
-          echo "=== try compiling cstdint ==="; echo '#include <cstdint>' | clang++-19 -std=c++23 -x c++ -c - -o /tmp/t.o 2>&1 | head -20 || true
-
+      # clang++-19 auto-selects the HIGHEST gcc toolchain (gcc-14 on this image)
+      # but its libstdc++-14 headers are not reliably present → <cstdint> not
+      # found. Pin clang to gcc-13, whose headers ARE present (g++-13.2.0 ships
+      # in the runner image, with its libstdc++-13-dev). CI-only flag; the BPF
+      # object (clang -target bpf, separate invocation) is unaffected.
       - name: Configure
-        run: cmake -S . -B build
+        run: cmake -S . -B build -DCMAKE_CXX_FLAGS="--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13"
 
       # The build enforces -Werror; a warning fails here. This is the primary
       # gate — a clean compile of the whole tree (incl. the BPF object).
