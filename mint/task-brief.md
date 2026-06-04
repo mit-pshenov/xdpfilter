@@ -1,128 +1,143 @@
-# Task brief — MVP-4.26 / B33: rename mac_filter / xdpmacfilter → xdpfilter (brownfield)
+# Task brief — MVP-4.27 / B37: make the two decorative regression gates real (brownfield)
 
 ## Goal
 
-The artifact no longer filters only MAC — it is a 9-axis L2/L3 classifier. Purge
-the "mac" misnomer: rename the whole `mac_filter` / `xdpmacfilter` / `mac_filter_prog`
-surface to **`xdpfilter`** (the metrics are ALREADY `xdpfilter_*`, so this aligns
-everything to that namespace; pairs with the user's `pktgate`). Mechanical-but-big
-find-replace + `git mv`, verified end-to-end by a clean build + the full ctest suite
-(a rename that misses a site fails the build / a fixture). B33 of the tidiness
-workstream (B32 comment-collapse SHIPPED → **this rename** → B34 de-monolith split,
-SEPARATE later).
+Two of the project's regression gates are **decorative on exactly the surfaces a
+behavior-preserving refactor mutates** — they observe the invariant but never
+assert it, so a regression passes silently:
+
+1. **BPF instruction-stream gate.** `tests/T_PROD_VERIFIER_LOAD.sh` loads the
+   shipped `xdpfilter.bpf.o`, reads the xlated insn count, **prints** it, but
+   asserts only `rc==0` (verifier accepted). The 3658-insn baseline — the
+   number every byte-identity claim leans on — has **no automated gate**. This
+   was a deliberate SHOULD-level decision (`D-mvp-4.23-H3-PRODOBJ`,
+   design.md:17559 / §6.80:17601). This slice **consciously reverses** it.
+2. **Operator-facing loader stderr gate.** `throw_loader` / `classify`
+   (`src/lib/loader.cpp:333,342`) emit `std::system_error` whose `what()` renders
+   to the operator as `"<label>: <category-message>"` (via `main.cpp:112-197`).
+   That text is part of the operator/audit ABI (greppable prefix,
+   `docs/FLEET_DEPLOYMENT.md:37`) and is **pinned by NO ctest** — only `T_BUILD`
+   compile-clean. ~20 existing tests grep stderr *substrings* incidentally; none
+   pin the **shape corpus**.
+
+**Why now / payoff.** This is the **test-hardening prerequisite for B34** (the
+`__always_inline` extraction + `.bpf.c`/`.h` module split), which rests entirely
+on the "xdp 3658 byte-identical" guard these gates would make real. It also
+unblocks the deferred behavior-preserving folds catalogued in the external review
+(`SESSION-SUMMARY-20260603` P3/P4 objdump-gated, P6 stderr-gated) and catches
+future codegen/message regressions. Source finding: `docs/BACKLOG.md` B37 +
+`/home/user/agent-teams-review/runs/SESSION-SUMMARY-20260603-simplifier-trial.md`.
+
+Not an architecture-v2.md row — this is a `docs/BACKLOG.md` B37 test-hardening
+item, sequenced BEFORE B34 in the tidiness workstream.
 
 ## Context: prior work
 
-- Prior slice: **MVP-4.25 / B32** (`1d31f51`) — comment-collapse; archived as `mint/task-brief-mvp-4.25.md`.
-- Existing design: `mint/design.md` (most recent §5.65); this slice appends §5.66.
-- Phase A code-grep verification (brief author — counts CORRECTED from the original ask):
-  - `xdpmacfilter` = **371** occurrences (operator surface); `mac_filter` = 166; `mac_filter_prog` = **38** (security-coupled); `mac_filter.` (file refs) = 83.
-  - **git mv targets**: `src/bpf/mac_filter.bpf.c`→`xdpfilter.bpf.c`, `src/common/mac_filter.h`→`xdpfilter.h`, + test fixtures `tests/fixtures/mac_filter_alt.bpf.c` / `mac_filter_bad.bpf.c` (architect: rename for consistency vs keep — HG-2).
-  - **Skeleton/object ripple**: `src/lib/raii.hpp` `#include "mac_filter.skel.h"`; CMake `add_bpf_object(mac_filter …)` + `add_bpf_skeleton(mac_filter)` + `add_dependencies(xdpmf_internal mac_filter_skel)` → renaming the CMake object target `mac_filter`→`xdpfilter` propagates to `mac_filter.skel.h`→`xdpfilter.skel.h` AND `build/mac_filter.bpf.o`→`build/xdpfilter.bpf.o`; `skel->progs.mac_filter_prog` (loader.cpp) regenerates when the SEC() name changes.
-  - **Security literal**: `src/lib/loader.cpp` `constexpr std::string_view kOwnedProgName{"mac_filter_prog"}` (the §5.19 name-check) + the `bpf_obj_get_info_by_fd(skel->progs.mac_filter_prog…).tag` self-tag capture.
-  - **CMake special sites** (the brief's original ask MISSED these — surface to architect): `CMakeLists.txt project(xdpmacfilter …)`; the **§5.25 P2 bpffs-root extraction-assert** (`CMakeLists.txt` greps `mac_filter.h` for `XDPMF_BPFFS_ROOT` and ASSERTS it equals `"/sys/fs/bpf/xdpmacfilter"` — BOTH the header path AND the asserted literal change).
-  - **Build-object-path tests**: `T_ATTACH_TAG_MISMATCH.sh` (`REAL_OBJ=${BUILD_DIR}/mac_filter.bpf.o`), `T_PROD_VERIFIER_LOAD.sh` (`PROD_BPF_OBJ=…/mac_filter.bpf.o`), `T_BITVEC_VERIFIER_LOAD.sh`.
-  - **Repo-name in-tree refs**: ONLY `docs/BACKLOG.md:190` (this slice's own B33 entry — leave it). ci.yml / README / CHANGELOG do NOT hardcode the repo URL → the GitHub `gh repo rename` (external, post-ship) updates `.git/config` only.
-  - **STAYS**: Prometheus metrics already `xdpfilter_*` (verified — no change); env-var spelling `XDPMF_*` STAYS (54 symbols, operator-ABI — PO decision, reinterpret acronym).
-  - VERSION 0.15.0 sites (bump ripples here): `CMakeLists.txt`, `tests/T_EXPORTER_METRICS_FORMAT.sh`, `CHANGELOG.md` (guard #11).
-- **PI continuity — NOTE**: **PI-7 (loader.hpp+config.hpp byte-identical) is EXPLICITLY SUSPENDED this slice** (HG-3): the `#include "common/mac_filter.h"`→`"common/xdpfilter.h"` path change lands in those headers — an unavoidable, documented rename diff, NOT an API change. **PI-DATAPATH-IDENTICAL** holds on the INSTRUCTION stream (xdp section stays 3658; the rename changes the prog SYMBOL/BTF name, not codegen — so the `.bpf.o` is NOT whole-file byte-identical, but the disassembled xdp instruction count is).
+- All prior briefs archived in `mint/task-brief-*.md` (this one supersedes mvp-4.26/B33 rename).
+- Most recent slice: **MVP-4.26 / B33** rename → `xdpfilter` (`00e28ea`, round-1, VERSION 0.16.0, xdp 3658 byte-identical).
+- Existing design: `mint/design.md` §5.63 (T_PROD_VERIFIER_LOAD origin / D-mvp-4.23-H3-PRODOBJ), §6.80 (the test's verifiable-invariants block), §5.66 (rename, current tail).
+- **Brief-author Phase 2 grep verification** (this brief) — greps run, see evidence footer. Both surfaces confirmed live; guard count confirmed **#34** (`Guard #34 (candidate)` design.md:18012).
+- PI continuity: this slice is **test-infra + design-doc only**. PI-7 (`loader.hpp`/`config.hpp` zero-diff) trivially CONTINUES (no source touched). The `xdpfilter.bpf.c` program bytecode stays **byte-identical** (the slice asserts that fact, does not change it).
 
 ## Workflow rules (brownfield)
 
-- **Architect**: read §5.65 tail + §6.5 invariants + guards #1..#33; EDIT `design.md`, append §5.66. Resolve HG-1 (VERSION), HG-2 (fixture rename), Q1 (prog-tag verification approach). Run the Phase A grep discipline (the CMake special sites + skeleton + security literal are the high-miss-risk spots).
-- **Impl**: `git mv` the 2 (or 4) files; tree-wide find-replace `mac_filter`→`xdpfilter`, `xdpmacfilter`→`xdpfilter`, `mac_filter_prog`→`xdpfilter_prog` across src/ tests/ systemd/ ansible/ docs/ CMakeLists.txt cmake/ .github/ — EXCEPT the `XDPMF_*` env symbols (keep) and the metrics `xdpfilter_*` (already correct). Regenerate skeleton (build). Build clean. The `git mv` preserves history.
-- **Tester**: NO new ctest. Phase B = full `sudo -E ctest` MUST stay 101/103 — ESPECIALLY the prog-name/object-path-coupled tests (`T_ATTACH_TAG_MISMATCH`, `T_VERIFIER_REJECT`, `T_PROD_VERIFIER_LOAD`, `T_LOAD_ATTACH`, `T_BITVEC_VERIFIER_LOAD`) must pass with the NEW prog name + object path. Confirm xdp section == 3658. Confirm NO surviving `mac_filter`/`xdpmacfilter` token outside the deliberate keeps (`grep -rIn 'mac_filter\|xdpmacfilter' src/ tests/ systemd/ ansible/ docs/ CMakeLists.txt cmake/ .github/` → only the BACKLOG B33 entry + any historical mint/ doc).
-- **Reviewer**: 5-point brownfield. Special attention: (a) ZERO surviving `mac_filter`/`xdpmacfilter` token (completeness — a rename's failure mode is a MISS); (b) the §5.19 security name-check literal + fixtures updated consistently (prog identity gate still works); (c) the §5.25 CMake bpffs-root extraction-assert updated (path + literal); (d) behavior unchanged (full suite + xdp 3658); (e) `XDPMF_*` env + `xdpfilter_*` metrics UNtouched; (f) OOS: no B34 split, no logic change.
+- **Architect**: read design.md §5.63, §6.80, §5.66 + this brief. EDIT design.md in place; append a new §5.67. **Must cite the prior `D-mvp-4.23-H3-PRODOBJ` text + the §6.80 point-8 "missing insn-count assert is NOT a gap" line VERBATIM and mark them RETIRED/SUPERSEDED** (per [[impl-role-discipline]] — this is a sanctioned design reversal, not silent deviation). Decide Q1/Q2; document tactical D-mvp-4.27-* choices.
+- **Impl**: FileList per mode. Source untouched (`grep` should confirm `git diff -- src/` is EMPTY at the end — this is a test+design slice). Work lives in `tests/`.
+- **Tester**: NEW ctest(s) for the golden-stderr corpus; EDITED `T_PROD_VERIFIER_LOAD.sh` (promote insn check) + `tests/CMakeLists.txt` registration. Honor SKIP discipline (tooling-absence ≠ failure).
+- **Reviewer**: 5-point brownfield framework. **Special attention**: (a) the insn-assert must NOT convert a SKIP/tooling-absence path into a hard FAIL (only assert when the count was actually read on the `rc==0` path); (b) the escape hatch must actually let an intentional codegen change pass with a one-line baseline bump; (c) the golden corpus must pin operator-REACHABLE shapes, not internal-only messages; (d) confirm `git diff -- src/` empty (no datapath/loader change).
 
 ## Human-gate decisions (defaults applied — architect overrides at Phase A)
 
-### HG-mvp-4.26-1: VERSION → **minor bump `0.15.0`→`0.16.0`** + CHANGELOG migration note
-The rename changes OPERATOR-VISIBLE names (binary `xdpmacfilter`→`xdpfilter`, bpffs-root `/sys/fs/bpf/xdpmacfilter`→`/sys/fs/bpf/xdpfilter`, systemd unit `xdpmacfilter@`→`xdpfilter@`) — a breaking rename for any existing deployment (must re-create pins/units). That is release-worthy → minor bump + a CHANGELOG entry "renamed xdpmacfilter→xdpfilter (binary/bpffs-root/unit); existing pins+units must be re-created; metrics + config schema + env vars UNCHANGED". Bump ripples to `T_EXPORTER_METRICS_FORMAT.sh` (guard #11). Architect may keep 0.15.0 if it judges the rename non-release, but the operator-surface change argues for the bump.
+### HG-mvp-4.27-1: VERSION bump → **NO bump (stay 0.16.0)**
+Test-infra + design-doc only; zero operator-visible surface change (no binary/CLI/schema/metric/env change). Mirrors the **MVP-4.23 CI-gate precedent** (zero-src test-hardening shipped without a bump). Architect overrides only if some operator surface is unexpectedly touched. ⇒ guard #11 (VERSION literal propagation) is **N/A** under this default.
 
-### HG-mvp-4.26-2: file renames → **`git mv` (preserve history)**; test fixtures → rename for consistency
-`git mv src/bpf/mac_filter.bpf.c src/bpf/xdpfilter.bpf.c` + `git mv src/common/mac_filter.h src/common/xdpfilter.h`. Default: ALSO rename `tests/fixtures/mac_filter_alt.bpf.c`/`mac_filter_bad.bpf.c` → `xdpfilter_alt`/`xdpfilter_bad` (they simulate alt/bad versions OF the product prog — consistency). Architect may keep the fixture names if the rename ripples awkwardly into the tag-mismatch test harness.
+### HG-mvp-4.27-2: insn-count assert + escape hatch → **fatal compare against 3658 baseline, overridable by env**
+Promote the existing informational `insns` read in `T_PROD_VERIFIER_LOAD.sh` to a **fatal** assert: when the count is successfully read on the `rc==0` path, `insns != baseline` ⇒ test FAILS with a loud "complexity/codegen regression OR intentional change — bump baseline" message. **Escape hatch**: an env override (default name suggestion `XDPMF_PROD_INSN_BASELINE`, architect/tester finalize) lets an intentional codegen change pass by setting the new expected value, AND the failure message names that hatch. This **consciously reverses `D-mvp-4.23-H3-PRODOBJ`** — architect documents the reversal + new PI.
 
-### HG-mvp-4.26-3: PI-7 → **EXPLICITLY SUSPENDED this slice** (documented, expected)
-`loader.hpp`/`config.hpp` carry `#include "common/mac_filter.h"` → they NECESSARILY change to `"common/xdpfilter.h"`. This is a rename, not an API change — no symbol/signature change. Document the expected diff in §5.66 so the reviewer does not flag it; PI-7 resumes next slice.
+### HG-mvp-4.27-3: SKIP/tooling-absence discipline → **PRESERVED — absence never becomes failure**
+The insn assert fires ONLY on the path where `rc==0` AND the count was actually parsed from `bpftool prog show`. All existing SKIP 77 paths (no bpftool / object not built / no passwordless sudo / count unparseable) stay SKIP, never FAIL. `D-mvp-4.23-H3-NOLOCK` (no RESOURCE_LOCK on this test) is UNCHANGED — promoting print→assert does not add iface/attach state.
 
-### HG-mvp-4.26-4: `XDPMF_*` env spelling → **KEEP** (reinterpret acronym, do NOT rename)
-`XDPMF_TRUST_MODEL`/`XDPMF_LOG_FORMAT`/`XDPMF_BPFFS_ROOT`/`XDPMF_*` macros stay (operator-ABI; 54 symbols). Add ONE note (in `xdpfilter.h` or docs) that `MF` now reads "Match/Multi-Filter". PO decision. The `XDPMF_BPFFS_ROOT` *value* changes (`/sys/fs/bpf/xdpmacfilter`→`/sys/fs/bpf/xdpfilter`) but the *symbol name* stays.
+## Open mechanism questions (architect decides; document in §5.67)
 
-## Open mechanism questions (architect decides; document in §5.66)
+### Q1: golden-stderr corpus scope + match strategy
+- **A1 — full LoaderError corpus**: golden file enumerating every operator-reachable `LoaderError` code's rendered `"<label>: <message>"` shape; exact-match diff.
+- **A2 — targeted operator-throw sites**: golden only for the handful of throw sites an operator actually triggers via the CLI (kernel-too-old, path-refused, permission, load-failed), driven through the real CLI entry points; exact-match.
+- **A3 — shared golden helper extending existing stderr tests**: factor a `tests/lib` golden-compare helper, repoint a representative subset.
+- **Recommendation**: **A2** (operator-REACHABLE shapes via the real CLI, exact-match against a small checked-in golden) — it pins the audit-ABI contract the finding names without over-coupling to internal-only error codes that never reach an operator. Architect owns realizability + exact corpus membership (which `LoaderError` codes are operator-reachable is an architect grep, not a brief literal).
 
-### Q1: prog-TAG behavior verification (the security-sensitive bit)
-Renaming `mac_filter_prog`→`xdpfilter_prog` changes the SEC() symbol → the skeleton accessor + the §5.19 name-check literal + the fixtures asserting the name STRING all change. The prog **self-tag** is the bytecode SHA-1 (name-independent — instructions stay 3658), so `T_ATTACH_TAG_MISMATCH`'s self-consistency holds; but VERIFY, don't assume.
-- **A1** — rename + rebuild + run the 5 prog-coupled tests; if all green, the tag is confirmed name-independent. **Recommended** (the build IS the proof; no spike needed).
-- **A2** — pre-spike: build both objects, `bpftool prog show` both tags, confirm equal before the full slice. Only if A1 surfaces a tag-dependent failure.
-- **Recommendation**: A1. The full ctest is the verification; the prog-identity tests are the canaries.
+### Q2: where the insn-fatal assert lives
+- **A1 — promote in place** in `T_PROD_VERIFIER_LOAD.sh` (the object is already loaded+pinned there).
+- **A2 — new dedicated test** that re-loads + reads the count.
+- **Recommendation**: **A1** — A2 doubles the privileged `bpftool prog load`; the count is already computed at `:97-98`, the change is print→assert + escape hatch. Keeps the verifier-load privileged path single-owner.
 
-## Scope (cycle 1 — concrete items)
+D-mvp-4.27-* (tactical, architect documents in Phase A; NOT pre-loaded): exact env-var name, golden file path/naming convention, exact-match vs normalized diff (trailing-strerror locale stability), the precise set of operator-reachable LoaderError codes, golden-test RESOURCE_LOCK need per guard #12.
 
-### Item RN-1 — git mv the source files + fixtures
-`src/bpf/mac_filter.bpf.c`→`xdpfilter.bpf.c`, `src/common/mac_filter.h`→`xdpfilter.h` (+ fixtures per HG-2). Fix every `#include` + the `raii.hpp` skeleton include.
+## Scope (cycle — concrete items; UPPER-BOUND estimates)
 
-### Item RN-2 — CMake (object target, project, bpffs-extraction-assert)
-`add_bpf_object(mac_filter …)`/`add_bpf_skeleton(mac_filter)`/`mac_filter_skel`→`xdpfilter`; `project(xdpmacfilter)`→`project(xdpfilter)`; the §5.25 bpffs-root extraction-assert (header path + the asserted `/sys/fs/bpf/xdpmacfilter`→`/sys/fs/bpf/xdpfilter` literal); the binary target name.
+### Item B37-1 — insn-count gate: print → fatal assert (+ escape hatch)
+**Where**: `tests/T_PROD_VERIFIER_LOAD.sh` (the `if rc==0` block ~`:91-101`; header comment ~`:30-32`).
+Promote the informational `insns` read to a fatal `insns == baseline(3658)` assert on the read path; add the env escape hatch + a failure message naming it. Update the header comment block that currently documents the SHOULD/non-fatal intent (`:30-32`, `:94-96`) to the new fatal-with-hatch contract.
 
-### Item RN-3 — security prog-name (§5.19 / §5.22)
-`mac_filter_prog`→`xdpfilter_prog` everywhere: the SEC() symbol in the bpf.c, `kOwnedProgName`, the skeleton accessor `skel->progs.*`, the self-tag capture comment, and the fixtures/tests asserting the name (`T_ATTACH_TAG_MISMATCH`, `T_VERIFIER_REJECT`, `xdp_pass.bpf.c` comment, `mac_filter_alt/bad.bpf.c`).
+### Item B37-2 — golden-stderr ctest (operator error-shape corpus)
+**Where**: NEW `tests/T_LOADER_STDERR_GOLDEN.sh` (name architect/tester final) + NEW `tests/fixtures/loader_stderr_*.txt` golden(s) + `tests/CMakeLists.txt` `add_test` registration.
+Drive the operator-reachable loader error paths through the real CLI, capture stderr, compare against the checked-in golden per Q1. SKIP-clean where the path needs unavailable privilege/tooling.
 
-### Item RN-4 — operator surface + tests + docs
-`xdpmacfilter`→`xdpfilter`: binary name, bpffs-root value `/sys/fs/bpf/xdpmacfilter`→`/sys/fs/bpf/xdpfilter`, systemd unit file + its contents, ansible, README/FLEET_DEPLOYMENT/CONFIG_SCHEMA, all ~45 test sites referencing the binary/root/object-path, VERSION bump (HG-1) + CHANGELOG migration note.
+### Item B37-3 — design amendment §5.67
+**Where**: `mint/design.md`.
+New §5.67: reverse `D-mvp-4.23-H3-PRODOBJ` (verbatim-cite + RETIRE the §6.80 point-8 "not a gap" line), record the new fatal-gate PI for both surfaces, and a candidate **guard #35** ("a regression gate that only PRINTS is decorative — a gate must fail-loud on its watched invariant, with an explicit intentional-change escape hatch; promoting print→assert may consciously reverse a prior SHOULD-level decision → cite it verbatim").
 
 ## Out of scope (explicit)
-
-- **B34 de-monolith** (split `xdpfilter.bpf.c`/`xdpfilter.h` into `ipv4_match.h` etc.) — separate slice. This pass ONLY renames; it does NOT move code or split files.
-- **GitHub `gh repo rename mint-filter→xdpfilter`** — EXTERNAL op, done by the orchestrator AFTER this ships (updates `.git/config` remote). In-tree has no repo-URL hardcode to change (only the BACKLOG B33 note, which stays).
-- **`XDPMF_*` env symbol rename** (HG-4 keep) / **metrics rename** (already `xdpfilter_*`).
-- Any logic / behavior / map-layout / schema / datapath-instruction change. It is a pure rename.
+- **B34** (de-monolith helpers + module split) — this slice is its prerequisite, not part of it.
+- **B35** (wildcard `ruleset_state` pack), **B36** (64-rule ceiling) — later workstream items.
+- Applying the P3/P4/P6 folds from `SESSION-SUMMARY-20260603` — unblocked BY this slice, not done IN it.
+- Any `src/` change — datapath/loader bytecode + strings are asserted-as-is, not modified. (`git diff -- src/` must be empty.)
+- Fixing the stale `mac_filter.bpf.o` references in the historical D-mvp-4.23 design prose (design.md:17559/17566) — historical record, not this slice's job.
+- VERSION bump / CHANGELOG entry (per HG-1 default).
 
 ## Definition of done
-
-- §5.66 amendment in `design.md` (the rename map + HG-1..4 + Q1 + the PI-7-suspended note + candidate guard #34 "operator-surface rename = minor bump + migration note + the CMake bpffs-extraction-assert is a high-miss site").
-- **PI-DATAPATH-IDENTICAL** (xdp section 3658 insns) holds; **PI-7 SUSPENDED** (HG-3, documented).
-- ctest: 101/103 baseline preserved — the 5 prog-name/object-path-coupled tests GREEN with new names; the 2 pre-existing env-fails by NAME unchanged.
-- **Completeness**: zero surviving `mac_filter`/`xdpmacfilter`/`mac_filter_prog` token in src/ tests/ systemd/ ansible/ docs/ CMakeLists.txt cmake/ .github/ (except the BACKLOG B33 entry + historical `mint/` docs). `XDPMF_*` env + `xdpfilter_*` metrics intact.
-- VERSION 0.16.0 (HG-1) consistent across CMakeLists + T_EXPORTER_METRICS_FORMAT + CHANGELOG.
+- §5.67 amendment in `mint/design.md` (reversal cited verbatim + RETIRED; new PI; guard #35 candidate).
+- PI-7 trivially continues (source untouched); `xdpfilter.bpf.c` byte-identical (now asserted by B37-1).
+- ctest baseline +N new (golden-stderr) and the promoted insn assert; full suite green to current baseline (101/103 with the 2 known env-fails by NAME — `T_EXPORTER_EXITS_6_ALL_IFACES_EACCES`, `T_LOG_JSON_EXPORTER_EVENTS`).
+- No VERSION bump (HG-1).
 - `mint/review.md` round-1 verdict = pass.
-- One git commit per phase boundary (the impl commit will be large but is a pure rename — `git diff -M` shows the moves).
+- One git commit per phase boundary.
 
 ## Dependencies
-
-- Build/test: existing toolchain; full ctest needs root. `git mv` for history.
-- Post-ship (orchestrator, external): `gh repo rename` + verify `git remote -v`.
-- Platform: unchanged.
+- Build deps: unchanged (CMake/clang/libbpf as-is).
+- Runtime deps: `bpftool` + passwordless sudo for the insn-load path (already SKIP-gated); golden test runs the built CLI.
+- Kernel/platform: dev 6.1 (the insn baseline 3658 is the dev-host figure — the escape hatch is precisely for legit cross-env codegen differences; architect notes whether the baseline is host-pinned or a hard expectation).
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 ```yaml
 mode: brownfield
 packs:
-  architect:  [cpp, bpf, cmake]
-  impl:       [cpp, bpf, cmake]
-  tester:     [cpp, bpf-xdp]
-  reviewer:   [cpp]
+  architect:  []
+  impl:       []
+  tester:     []
+  reviewer:   []
 ```
 
 ---
 
-## Pre-brief sanity check (per mint-hld-scope-discipline)
-
-**Mechanical — single-architect OK.** Goal fits one line ("rename the mac-bearing surface to xdpfilter"). NOT multi-axis: it is a find-replace + `git mv`; no design space, no novel mechanism. The decisions are routine (VERSION bump default, git-mv, fixture-rename, PI-7-suspend-note) — none is expensive-to-undo (a rename is git-revertable) and none has ≥3 viable design options. The ONLY sensitive spot (prog-name → security gate) is a VERIFICATION (Q1/A1: the build + 5 prog-coupled tests prove it), not a design choice. No `/mint-hld`. Large in token-count but uniform in operation — one slice (splitting would create ugly half-renamed inconsistent intermediate states; the full build+ctest is the atomic verification).
+## Pre-brief sanity check (per [[mint-hld-scope-discipline]])
+**Mechanical, single-axis → single-architect `/mint-dev`, no `/mint-hld`.** The answer falls out of B37's stated scope (two named gates → assert them). No multi-axis design space: the only genuine choices are golden-corpus scope (Q1) and assert-placement (Q2), both defaultable with rationale and architect-overridable. Expensive-to-undo? No — test-only, reversible. The single design-flavored nuance (which error shapes are operator-reachable) is an architect grep, not a product/PO fork. PO-filter (POF-M2): no decision here carries external/product value requiring the user — all are engineering, discharged in-brief or routed to the architect. No prior `/mint-hld` ladder feeds this slice (BACKLOG-sourced, not hld-sourced).
 
 ## Notes for architect Phase A code-grep discipline (per architect spec rules)
-
-Brief author already ran these; architect re-verifies + extends:
-- `grep -rIn 'mac_filter_prog' src/ tests/` — the security prog name (38 sites): the `kOwnedProgName` literal, `skel->progs.mac_filter_prog`, the SEC() symbol, fixtures.
-- `grep -rIn 'mac_filter' CMakeLists.txt cmake/` — the object target / skeleton / bpffs-extraction-assert / project name (the HIGH-MISS sites the original ask omitted).
-- `grep -rIn 'xdpmacfilter' CMakeLists.txt src/cli systemd/ ansible/` — binary name + bpffs-root + unit.
-- `grep -rln 'mac_filter\.bpf\.o\|/sys/fs/bpf/xdpmacfilter' tests/` — the object-path + pin-path coupled tests (guard #16 symmetric-consumer class).
-- After the rename: full build → `llvm-objdump-19 -d --section=xdp build/xdpfilter.bpf.o | grep -cE '^\s+[0-9a-f]+:'` == 3658; then the completeness grep (zero surviving tokens).
+Brief author already ran these (evidence footer); architect re-verifies + extends:
+- `grep -nE '3658|insns=|xlated|rc.*-eq 0' tests/T_PROD_VERIFIER_LOAD.sh` — the print-not-assert site.
+- `grep -nE 'D-mvp-4.23-H3-PRODOBJ' mint/design.md` — the decision to reverse (17559) + §6.80 point-8 (17601) to RETIRE.
+- `sed -n '311,345p' src/lib/loader.cpp` — `LoaderCategory::message` + `throw_loader` + `classify` (the stderr shape source).
+- `sed -n '85,200p' src/cli/main.cpp` — the catch arms that render `what()` to the operator (the exact `"<label>: <message>"` shape + any sentinel-suppression at `:95`).
+- `grep -rln 'loader_error_category\|LoaderError::' src/lib/loader.cpp` — enumerate the operator-reachable code set for Q1 corpus membership.
+- `grep -nE 'add_test' tests/CMakeLists.txt` — registration pattern + nearby `RESOURCE_LOCK`/`SKIP_RETURN_CODE 77` precedent for the new golden test.
+- Confirm at end: `git diff --stat -- src/` empty (no source change).
 
 ### Anti-misdiagnosis guards applicable to this slice (per Phase 3)
+- **Guard #5 (Phase A code-grep discipline)** — always; architect repeats the brief's greps independently.
+- **Guard #12 (RESOURCE_LOCK for shared host state)** — applies to the NEW golden-stderr ctest IF it touches bpffs/iface/fixed-port/systemd. If it only drives CLI error paths that fail before touching shared state, no lock; tester decides per actual codepath. `T_PROD_VERIFIER_LOAD` itself stays NO-LOCK (`D-mvp-4.23-H3-NOLOCK`).
+- **Guard #13 (fixture cross-reference for retire/rename emit-sites)** — INVERTED here: the new golden fixture deliberately COUPLES to the loader message corpus, so a future `LoaderCategory::message` change ripples to the golden — that coupling is the GATE's purpose, not a hazard. No emit-site is retired this slice.
+- **Guard #10 (catalog arithmetic)** — operative-semantic only: the golden corpus line-count is a SHOULD orientation for the reviewer, not a literal-match contract (per operative-semantic discipline; impl may add/normalize lines for shape symmetry → `inline-merge`).
+- **Guard #11 (VERSION-bump literal propagation)** — **N/A** under HG-1 (no bump). Becomes applicable only if architect flips HG-1.
+- **Guard #34 (operator-surface rename)** — **N/A** (no rename).
 
-- **Guard #5 (Phase A code-grep discipline)** — APPLIES (always); rename completeness depends entirely on grep thoroughness.
-- **Guard #11 (VERSION-bump test-literal propagation)** — APPLIES (HG-1 bump → `T_EXPORTER_METRICS_FORMAT.sh` + CHANGELOG; grep `0\.15\.0` and `0\.16\.0` consistency post-bump).
-- **Guard #16 (retired pin-path / map-name ripple)** — APPLIES: the bpffs-root path `/sys/fs/bpf/xdpmacfilter`→`/sys/fs/bpf/xdpfilter` is the canonical pin-path; every test/CMake site reading it must follow (the §5.25 extraction-assert is the load-bearing one).
-- **Guard #13 (fixture cross-reference)** — APPLIES: the prog-name STRING in `T_ATTACH_TAG_MISMATCH`/`T_VERIFIER_REJECT` + the `mac_filter_alt/bad.bpf.c` fixtures + `xdp_pass.bpf.c` comment.
-- **Guard #12 (RESOURCE_LOCK)** — N/A (no new ctest).
-- Operative-semantic note: the "371 / 166 / 38" counts are orientation; the binding contract = ZERO surviving token (completeness) + behavior-identical (full suite + xdp 3658) + the deliberate keeps (`XDPMF_*`, `xdpfilter_*` metrics) untouched.
+> Operative-semantic note for architect: counts/sizes/line-numbers in this brief and in the §5.67 verifiable-invariants block are SHOULD-level orientation, not literal-match contracts. Impl deviations mirroring existing precedent (golden line membership, fixture symmetry, retirement-citation comments at the reversed-decision sites) are `inline-merge` per design's resolution rule.
