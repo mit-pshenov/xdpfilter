@@ -1,105 +1,113 @@
-# Task brief — MVP-4.29 / B34b: datapath module split (de-monolith part b) (brownfield)
+# Task brief — MVP-4.30 / B35: wildcard+defaults → `ruleset_state` pack (brownfield, SPIKE-GATED, verdict-identity)
 
 ## Goal
 
-Split the (now helper-extracted) datapath monolith `src/bpf/xdpfilter.bpf.c` (live tree **1280 lines**, single `.c`) into per-concern header modules so the single translation unit reads as a set of cohesive includes instead of one 1280-line wall. This is **part (b)** of B34 — the explicit follow-up to B34a (§5.68, commit `8c9a110`), which extracted the shared idioms into in-file `static __always_inline` helpers + statement macros and **deferred the file split to a separate slice briefed against the POST-extraction tree** (the `#4-before-#5` ordering — boundaries only become legible once the arms shrank).
+Collapse the per-axis `wildcard` ARRAY lookups + the `defaults` lookup in the datapath into **one `ruleset_state[active]` struct read** carrying all 9 per-axis wildcard `__u64` + the `defaults` `__u32` as struct fields. Today each family arm independently issues a `bpf_map_lookup_elem(&wildcard, &computed_key)` per axis (`wildcard[active*BITVEC_NUM_AXES + axis]`) — **25 static wildcard-lookup sites across the 3 family arms** (per-packet dynamic ≈ 8–9, since only one arm runs) + 1 `defaults` lookup. Packing the values into a single per-ruleset struct turns those into one (or one-per-arm) struct lookup + field reads — fewer BPF helper calls, fewer instructions. This is **B35 = PERF-M1 promoted** (`docs/BACKLOG.md:196`).
 
-The §5.68 sketch named five candidate modules: `ipv4_match.h` / `ipv6_match.h` / `vlan.h` / `classifier.h` / `maps.h`. **That set is a sketch, NOT a contract** — the architect refines the final boundary set against the post-extraction tree (collapse a boundary that doesn't carry its weight; the entropy-control bar applies). The `.bpf.c` retains `SEC("xdp")` + the includes; the headers carry the moved code.
+**Honest framing: perf is NOT a fire.** The parked perf envelope ([[project_perf_envelope]], `mint/perf.md`) shows eBPF clears SLA#1 with ~1–2 core headroom; there is no classifier-cost forcing-function. B35 is **ceiling-lowering**, and its co-equal motives are (a) it is the structural home for the B34a-deferred fold #2 (`load_wildcards` — the 3 arms' divergent wildcard-load orderings, `src/bpf/classifier.h:223`, normalize through a single struct read), and (b) band-training value ([[project_dual_purpose_band_training]]).
 
-**Load-bearing contract: byte-identical pure code-movement.** A `#include` split changes nothing after preprocessing — the compiled datapath bytecode MUST be unchanged. Arbitrated by the B37 insn gate (`tests/T_INSN_BASELINE_GATE.sh` + `tests/T_PROD_VERIFIER_LOAD.sh`, objdump xdp-section instruction-line count `== ${XDPMF_PROD_INSN_BASELINE:-3658}`) re-run AFTER the split. This is the same guard B34a leaned on (xdp 3658).
+**This is the ONLY slice in the cleanup arc with a real regression surface.** It is a **map-schema change** (the `wildcard` + `defaults` ARRAYs → a `ruleset_state` ARRAY-of-struct) ⇒ the compiled datapath is **NOT byte-identical**. Correctness is held by **verdict-identity**, not byte-identity: the existing `T_*_ORACLE_AGREEMENT.sh` family (datapath verdict vs userspace oracle across crafted vectors) MUST stay green. The B37 insn gate's 3658 baseline WILL change — this is the **sanctioned use of the `XDPMF_PROD_INSN_BASELINE` escape hatch** (`tests/T_PROD_VERIFIER_LOAD.sh:120,137` — "intentional codegen change … XDPMF_PROD_INSN_BASELINE=<actual>"), re-baselined to the new measured count, NOT a violation.
+
+## SPIKE-GATED — measure-first is a hard prerequisite (can ABORT the slice)
+
+Per the backlog's literal "**MEASURE instructions/cycles per packet first**" and the project's spike-gated precedent (S4 cidr6, S6 ext-walk: briefer→SPIKE→mint-dev), B35's first step is a verifier-load + perf spike:
+- Prototype the `ruleset_state` pack (throwaway or a guarded branch), build the `.bpf.o`, and **measure**: (a) does it load on the verifier cleanly? (b) the new xdp insn count vs 3658 — does it actually go DOWN, or does the verifier expand the struct read back into N field-loads that net to ~zero (or worse)?
+- **Gate**: if the measured instruction win is negligible (or the verifier rejects / regresses), the architect ESCALATES — the slice is not worth its verdict-identity regression risk and we abort/defer (surface to team-lead → user). Do NOT proceed to the full restructure on an unproven win. External value being weighed: ceiling-lowering + band-training vs the regression risk of a map-schema change; the spike discharges it.
+- Spike tooling: [[reference_bpf_spike_tooling]] (`clang-19 -target bpf -O2 -g -D__TARGET_ARCH_x86 -Iinclude -Isrc` + bpftool load); insn-count recipe = `llvm-objdump-19 -d --section=xdp <obj> | grep -cE '^\s+[0-9a-f]+:'` (the B37 gate's own method).
 
 ## Context: prior work
 
-- All prior briefs archived in `mint/task-brief-*.md` (B34a → `mint/task-brief-mvp-4.28.md`).
-- Existing design: `mint/design.md` §5.68 (B34a helper-extraction) — most recent datapath section; names B34b in its OOS (`design.md:18380`).
-- BACKLOG: `docs/BACKLOG.md:193` (B34 "datapath de-monolith: helpers → module split").
-- B37 gate (the byte-identity teeth this slice rests on): §5.67, `tests/T_PROD_VERIFIER_LOAD.sh` FATAL-asserts `== 3658` with the `XDPMF_PROD_INSN_BASELINE` escape hatch named in the failure message.
-- Brief-author Phase 2 grep verification: ran the file/symbol/build/gate greps below (see evidence footer).
-- PI continuity: PI-7 (C++/header tree zero-diff) continues trivially. **PI-mvp-4.28-NONDATAPATH-ZERO is EXTENDED, not continued verbatim** — see HG-mvp-4.29-3.
+- All prior briefs archived in `mint/task-brief-*.md` (B34b → `mint/task-brief-mvp-4.29.md`).
+- Existing design: `mint/design.md` §5.69 (B34b module split — the post-split tree this builds on: `maps.h` holds the `wildcard`/`defaults` defs, `classifier.h`+`xdpfilter.bpf.c` hold the reads).
+- BACKLOG: `docs/BACKLOG.md:196` (B35, PERF-M1).
+- B34a fold #2 deferral: `src/bpf/classifier.h:223` (the 3 arms' divergent wildcard orderings, "LEFT AS-IS … NOT a regression") — B35 is its home.
+- Perf baseline method: `mint/perf.md` / commit `e9bb321` (BPF_PROG_TEST_RUN).
+- Phase A code-grep verification: brief author ran the greps in the evidence footer.
+- PI continuity: PI-7 (C++ loader/config header tree) — wildcard/defaults populate lives in `src/lib/loader.cpp` so loader.cpp IS edited this slice; PI-7's loader.hpp/config.hpp zero-diff streak likely continues (impl edits .cpp, not the .hpp interface — architect confirms). PI-DATAPATH-IDENTICAL (byte) is **RETIRED for this slice**, replaced by PI-VERDICT-IDENTICAL.
 
-## Workflow rules (brownfield)
+## Workflow rules (brownfield, spike-gated)
 
-- **Architect**: read `design.md` §5.68 (the B34a extraction it builds on) + §6.5 invariants + the B37 gate sections; EDIT `design.md` in place; append a new §5.69 (MVP-4.29). Owns the final module boundary set + include style + the BpfBuild.cmake dependency question (HG-mvp-4.29-2).
-- **Impl**: FileList per brownfield mode. The move is mechanical (cut from `.bpf.c`, paste into `.h`, add `#include`); the discipline is running the B37 gate after the split and NOT letting any `mov`/verdict-merge creep in (none should — same TU).
-- **Tester**: NO new behaviour to test. Re-run the existing B37 gate (`T_INSN_BASELINE_GATE`, `T_PROD_VERIFIER_LOAD`) as the acceptance oracle. Add a NEW ctest ONLY if the architect identifies a split-specific regression surface (e.g. a "no `src/bpf/*.h` orphaned / every header included exactly once" structural assert) — otherwise the insn gate IS the test.
-- **Reviewer**: 5-point brownfield framework. Special attention: (a) xdp insn count `== 3658` post-split (byte-identity); (b) no header included more than once / no double-definition (ODR within the single TU); (c) PI-7 + extended-NONDATAPATH-ZERO diff fences; (d) the new headers carry ONLY moved code — zero behavioural edit smuggled into the move.
+- **Architect**: read §5.69 (post-split tree) + the `wildcard`/`defaults` map defs (`src/bpf/maps.h`) + the datapath reads + the loader populate path (`write_wildcard_slots`/`write_default_slot`) + the `T_*_ORACLE_AGREEMENT` harness + §6.5 invariants + the B37 gate. **Run the measure-first spike in Phase A** (or consume a standalone spike if run first) and record the measured win as a D-decision; ABORT-escalate if the win is not real. EDIT design.md in place; append §5.70. Owns the `ruleset_state` layout, the per-arm-vs-hoisted read strategy, the loader restructure, the re-baseline value, and the verdict-identity test plan.
+- **Impl**: FileList per brownfield DIFF. The datapath restructure touches all 3 arms (25 static wildcard sites). Re-run the B37 gate AND the ORACLE_AGREEMENT family after the change. Re-baseline `XDPMF_PROD_INSN_BASELINE` to the measured value per the architect's D-decision (do NOT leave 3658 if the count legitimately changed).
+- **Tester**: the **verdict-identity oracle is the bible** — the `T_*_ORACLE_AGREEMENT.sh` family must stay green across ALL crafted vectors (this is the regression control for a non-byte-identical change). Confirm the negation control still has teeth. A NEW `T_RULESET_STATE_*` test only if the architect identifies a struct-specific surface (e.g. the active-half flip writes the right slot). Re-run the B37 gate against the re-baselined count.
+- **Reviewer**: 5-point brownfield. Special attention: (a) verdict-identity — every ORACLE_AGREEMENT vector still agrees; (b) the re-baseline is the MEASURED count + the bump is documented as intentional (not a silent weakening); (c) atomic-swap RESET semantic preserved (the struct is written fresh to the inactive half each apply, then flipped — no stale carry); (d) all 3 arms read consistently (the fold-#2 ordering divergence is GONE, not just relocated); (e) PI-7 loader.hpp/config.hpp diff.
 
 ## Human-gate decisions (defaults applied — architect overrides at Phase A)
 
-### HG-mvp-4.29-1: module boundary set → **default = §5.68 five-file sketch, architect refines against post-extraction tree**
-`maps.h` (the 39 `SEC(".maps")` map definitions + their inner structs, currently ~lines 91–460 — the cleanest, biggest cut), plus the match/classifier split across `ipv4_match.h` / `ipv6_match.h` / `vlan.h` / `classifier.h`. The architect MAY collapse boundaries that don't carry weight (e.g. fold `ipv4_match.h`+`ipv6_match.h` if the post-extraction arms are too thin to justify two files) — fewer, cohesive files beat five thin ones. The entropy-control bar (don't manufacture structure) governs. **Architect-overridable with a one-line rationale per merged/kept boundary.**
+### HG-mvp-4.30-1: spike outcome gates the slice → **default = proceed ONLY if measured insn win is real**
+If the Phase-A spike shows the pack does not meaningfully reduce instructions (verifier expands the struct read) or fails to load, ESCALATE and abort/defer rather than ship a verdict-identity-risky change for no gain. Default proceed-threshold is the architect's to set with the measured numbers; "real win" ≈ a clear net instruction reduction that survives the verifier. This is the one genuinely-conditional gate; everything below assumes the spike passed.
 
-### HG-mvp-4.29-2: BpfBuild.cmake header-dependency GLOB → **default = ADD `src/bpf/*.h` to `_shared_headers`**
-`cmake/BpfBuild.cmake:28-31` GLOBs only `src/common/*.h` + `include/*.h` into the `DEPENDS` of the BPF compile command. New `src/bpf/*.h` headers would therefore NOT trigger an incremental rebuild when edited → stale-object footgun. Default: add `${CMAKE_SOURCE_DIR}/src/bpf/*.h` to that GLOB (build-correctness, derivable — NOT a PO fork). This is the ONE edit outside `src/bpf/` this slice needs; it is NOT `src/lib|common|cli|exporter` so PI-7 is unaffected. Architect confirms / picks an equivalent (explicit `DEPENDS` list).
+### HG-mvp-4.30-2: `ruleset_state` layout → **default = 9 wildcard `__u64` (indexed by `BV_AXIS_*`) + `defaults` `__u32`, one struct per ruleset, ARRAY[XDPMF_RULESET_COUNT]**
+Mirrors the existing `wildcard[active*BITVEC_NUM_AXES+axis]` + `defaults[active]` semantics, just packed. Architect refines field order/padding for verifier-friendliness. Whether `defaults` folds INTO the struct or stays a sibling ARRAY is the architect's call (folding it in is the backlog's intent and saves the extra lookup; keeping it separate is lower-blast-radius). Default: fold in.
 
-### HG-mvp-4.29-3: NONDATAPATH-ZERO invariant → **EXTEND, do not inherit verbatim**
-B34a's `PI-mvp-4.28-NONDATAPATH-ZERO` forbade ANY new `.h`/file. This slice's whole point is new `src/bpf/*.h` files, so the architect RE-STATES the invariant for B34b: NEW files allowed ONLY under `src/bpf/`; `git diff -- src/lib src/common src/cli src/exporter` MUST stay ∅; `git diff -- src/common/xdpfilter.h` MUST stay ∅. The only sanctioned non-`src/bpf/` touch is the HG-2 CMake dependency line. Cite the retired B34a PI text verbatim per [[impl-role-discipline]].
+### HG-mvp-4.30-3: atomic-swap semantic → **RESET (UNCHANGED) — no copy-forward**
+`wildcard` + `defaults` are config-derived (recomputed every `apply` via `write_wildcard_slots`/`write_default_slot` into the INACTIVE half, then the `active_idx` flip). They are NOT operator-observable counters — they carry no monotonic Prometheus contract. Prior semantic = RESET-on-apply; post-pack = RESET (UNCHANGED). Per the Phase-1.5 matrix RESET→RESET needs NO `copy_*_forward` helper — the atomic-swap shape alone is correct (the struct is written fresh each apply). (Contrast `rule_counters`, which DOES preserve — that is a different map.)
 
-## Open mechanism questions (architect decides; document in §5.69)
+### HG-mvp-4.30-4: VERSION bump → **default = NO bump (internal perf restructure, no operator-facing API/schema change)**
+No config-schema change, no new CLI surface, no metric rename — the `apply -f` contract and the operator-observable maps are unchanged. Default: VERSION stays 0.16.0. Architect overrides if a config/schema-version field is actually touched (it should not be).
 
-### Q1: include path style for the new headers
-- **A1**: relative quoted — `#include "maps.h"` (resolves relative to the including `.bpf.c`, which lives in `src/bpf/`).
-- **A2**: src-rooted — `#include "bpf/maps.h"` (via the existing `-I${CMAKE_SOURCE_DIR}/src`, mirroring the current `#include "common/xdpfilter.h"`).
-- **Recommendation**: **A1** for the sibling `src/bpf/*.h` headers (shortest, conventional for co-located headers); keep the existing `"common/xdpfilter.h"` form untouched. Architect's call — low-stakes, no codegen impact.
+## Open mechanism questions (architect decides; document in §5.70)
 
-### Q2: include-guard convention for the new headers
-- **A1**: `#pragma once`.
-- **A2**: classic `#ifndef XDPMF_BPF_MAPS_H` triple.
-- **Recommendation**: match whatever the existing project headers use (`grep` `src/common/*.hpp` / `include/*.h`); pick the dominant form. Pure consistency choice.
+### Q1: datapath read strategy
+- **A1**: one `ruleset_state` lookup per family arm (3 static sites, ≈1 dynamic/packet) — minimal restructure, each arm reads the struct it needs.
+- **A2**: hoist a single `ruleset_state` lookup ABOVE the family dispatch (1 static site) — fewest lookups, but the pointer must thread into all 3 arms.
+- **Recommendation**: architect picks from the spike's instruction numbers; **A2** likely wins on lookup count but **A1** may be more verifier-friendly / lower-blast-radius. Whichever the spike shows lower-insn-and-clean-verify.
 
-## Scope (cycle MVP-4.29 — concrete items)
+### Q2: `defaults` — fold into the struct or keep sibling
+- **A1**: fold `defaults` into `ruleset_state` (one read serves both) — backlog intent.
+- **A2**: keep `defaults` as its own ARRAY (it is already a clean 2-slot ARRAY) — smaller blast radius.
+- **Recommendation**: **A1** (the −1 lookup is the backlog's stated win); architect downgrades to A2 if folding complicates the verifier or the loader disproportionately.
 
-### Item B34b-1 — carve `maps.h`
-**Where**: NEW `src/bpf/maps.h`; cut from `src/bpf/xdpfilter.bpf.c`.
-Move the map-definition block (the 39 `SEC(".maps")` objects + their `xdpmf_*_inner` struct definitions + the `rulesets`/`rules`/`rule_counters` ARRAY_OF_MAPS wrappers, currently ~lines 91–460). The cleanest, lowest-risk cut — pure data declarations.
+## Scope (cycle MVP-4.30 — concrete items; UPPER-BOUND estimates)
 
-### Item B34b-2 — carve match/classifier headers
-**Where**: NEW `src/bpf/{ipv4_match,ipv6_match,vlan,classifier}.h` (final set per HG-1); cut from `src/bpf/xdpfilter.bpf.c`.
-Move the `static __always_inline` helpers + statement macros into their cohesive homes:
-- `vlan.h`: `l3_after_vlan` (`:577`).
-- shared/classifier: `bump_stat` (`:463`), `bump_rule` (`:480`), `first_set_u64` (`:508`), `port_scan` (`:541`), `mac_axis` (`:683`), `DISPATCH_MATCH` (`:623`), `LOOKUP_INNER_OR_DROP` (`:657`), `READ_DPORT` (`:711`).
-- The per-family AND-composition arms move into `ipv4_match.h` / `ipv6_match.h` (or a merged `match.h` per HG-1).
-Architect assigns each helper/macro to a module against the post-extraction tree.
+### Item B35-0 — measure-first spike (PREREQUISITE, gates all below)
+**Where**: throwaway / guarded prototype + `llvm-objdump` insn measurement. Prove the pack loads + reduces instructions before any real restructure. ABORT-escalate if not.
 
-### Item B34b-3 — reduce `xdpfilter.bpf.c` to includes + `SEC("xdp")`
-**Where**: EDIT `src/bpf/xdpfilter.bpf.c`.
-After the carves, the `.c` retains: the top `#include` block (vmlinux, bpf helpers, `common/xdpfilter.h`) + the new `#include "…"` lines (in dependency order — `maps.h` before the match headers) + the `SEC("xdp")` program (`:730`+) + `char _license[] SEC("license")`. Include ORDER matters for the single TU (maps before consumers).
+### Item B35-1 — `ruleset_state` type + map definition
+**Where**: `src/common/xdpfilter.h` (the shared struct + map-name constant), `src/bpf/maps.h` (the `SEC(".maps")` def). Retire/repurpose the `wildcard` (+ maybe `defaults`) ARRAY defs per HG-2/Q2.
 
-### Item B34b-4 — BpfBuild.cmake dependency (per HG-2)
-**Where**: EDIT `cmake/BpfBuild.cmake` (`_shared_headers` GLOB, `:28-31`).
-Add `src/bpf/*.h` so header edits trigger BPF rebuild. One-line change.
+### Item B35-2 — datapath reads (all 3 arms)
+**Where**: `src/bpf/xdpfilter.bpf.c` (the 3 family arms, 25 static wildcard sites + 1 defaults), `src/bpf/classifier.h` (any helper/comment touching wildcard loads, incl. the fold-#2 note). Replace per-axis lookups with struct-field reads per Q1.
+
+### Item B35-3 — loader populate restructure
+**Where**: `src/lib/loader.cpp` (`write_wildcard_slots` + `write_default_slot` → write the `ruleset_state` struct to the inactive half). Possibly `src/lib/sidecar.cpp`/`apply_internal.hpp`/`sidecar.hpp` if they reference the retired map names — grep-confirm (see footer). Keep the RESET/inactive-half-then-flip ordering.
+
+### Item B35-4 — verdict-identity regression + re-baseline
+**Where**: `tests/T_*_ORACLE_AGREEMENT.sh` (must stay green — the correctness oracle), `tests/T_PROD_VERIFIER_LOAD.sh` / the B37 baseline (re-baseline `XDPMF_PROD_INSN_BASELINE` to the measured count, documented intentional). NEW `T_RULESET_STATE_*` only if a struct-specific surface needs it.
 
 ## Out of scope (explicit)
 
-- **ANY behavioural / codegen change.** If the split shifts the insn count off 3658, the split is wrong (not the baseline) — fix the move, do NOT bump `XDPMF_PROD_INSN_BASELINE`. (The escape hatch is for *intentional* codegen changes; B34b has none.)
-- **Schema / axis / map-count / VERSION change** — none. VERSION stays 0.16.0.
-- **`src/lib` / `src/common` / `src/cli` / `src/exporter`** — zero diff (PI-7). `src/common/xdpfilter.h` — zero diff.
-- **B35** (ruleset_state / wildcard-pack — where the B34a-dropped fold #2 `load_wildcards` belongs) — separate follow-up slice, MEASURE-FIRST (`docs/BACKLOG.md:196`). The B34b module homes should leave a natural seam for it but NOT implement it.
-- **`.bpf.c` → `.bpf.o` skeleton / loader changes** — the loader consumes the same single object; nothing downstream of the compile changes.
+- **Any match-semantic / verdict change** — verdict-identity is the contract; every ORACLE_AGREEMENT vector keeps its verdict. This is a pure representation change.
+- **The OUTER per-axis map-reference lookups** (`dst_rulesets`/`cidr_rulesets`/`rules_outer`/ARRAY_OF_MAPS double-buffer) — those are map REFERENCES, NOT packable (backlog: "hard ceiling"). B35 packs only the VALUE class (wildcard + defaults).
+- **Schema / axis / VERSION change** — none (HG-4).
+- **B36** (64-rule `__u64` ceiling, DEBT) — separate, not-now.
+- **Capability work** (mirror/redirect XDP→TC handoff) — the real product gap per [[project_real_requirements_and_strategy]]; a `/mint-hld` round when the cleanup arc closes. NOT this slice.
 
 ## Definition of done
 
-- §5.69 amendment in `design.md` (B34b module boundary set + include style + HG resolutions + the extended NONDATAPATH-ZERO PI).
-- PI-7 continues (C++/header tree zero-diff). PI-mvp-4.29-DATAPATH-IDENTICAL: xdp section `== 3658` post-split.
-- ctest: existing baseline GREEN (esp. `T_INSN_BASELINE_GATE`, `T_PROD_VERIFIER_LOAD`); NEW structural ctest only if architect identifies a split-regression surface.
-- No VERSION bump.
+- Phase-A spike measured + recorded (D-decision); slice proceeded only on a real win.
+- §5.70 amendment in design.md (`ruleset_state` layout, read strategy, RESET semantic, re-baseline value, verdict-identity test plan; PI-DATAPATH-IDENTICAL retired → PI-VERDICT-IDENTICAL).
+- PI-7 continues (loader.hpp/config.hpp zero-diff — impl edits .cpp). PI-VERDICT-IDENTICAL: all `T_*_ORACLE_AGREEMENT` green.
+- B37 gate green against the re-baselined `XDPMF_PROD_INSN_BASELINE` (= measured count, intentional).
+- ctest baseline preserved (the 2 known env-fails by NAME; no NEW regression).
+- No VERSION bump (HG-4) unless architect finds a real schema touch.
 - `mint/review.md` round-1 verdict = pass.
 - One git commit per phase boundary.
 
 ## Dependencies
 
-- Build: clang `-target bpf` (existing, `cmake/BpfBuild.cmake`); `-I${CMAKE_SOURCE_DIR}/include -I${CMAKE_SOURCE_DIR}/src` already on the compile line.
+- Build: clang-19 `-target bpf` (existing). Spike uses the same.
 - Runtime: none new.
-- Kernel/platform: none new (byte-identical object → same verifier acceptance as today; dev floor 6.1, prod floor 5.15 unchanged).
+- Kernel/platform: the new struct-read map layout must load on the verifier (the spike proves this; prod floor 5.15, dev 6.1).
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 
 ```yaml
 mode: brownfield
 packs:
-  architect:  [lang/bpf.md, lang/cmake.md]   # BPF idioms + the BpfBuild.cmake header-dep GLOB (HG-2)
-  impl:       [lang/bpf.md, lang/cmake.md]
-  tester:     [test/bpf-xdp.md]              # NOTE: acceptance oracle is the B37 insn gate, not veth injection
+  architect:  [lang/bpf.md, lang/cpp.md]      # BPF map/verifier idioms + the C++ loader populate path
+  impl:       [lang/bpf.md, lang/cpp.md]
+  tester:     [test/bpf-xdp.md]               # ORACLE_AGREEMENT family is the verdict-identity oracle
   reviewer:   [test/bpf-xdp.md]
 ```
 
@@ -107,48 +115,51 @@ packs:
 
 ## Pre-brief sanity check (per [[mint-hld-scope-discipline]])
 
-**Mechanical / single-axis → single-architect via `/mint-dev`, NO `/mint-hld`.** The one design axis is "where to draw module boundaries", §5.68 already sketched it, and the byte-identity gate makes any boundary choice cheaply reversible (it's pure code movement — re-merge is a `cat`). Not expensive-to-undo; not ≥3-axis. The architect refining a sketched boundary set against the live tree is exactly Phase-1 single-architect work. The only non-`src/bpf/` decision (the CMake GLOB) is derivable build-correctness, not a PO fork — handled as HG-2 default, not a user gate.
+**Spike-gated single-architect → `/mint-dev`, NOT `/mint-hld`.** The APPROACH is committed by the backlog (pack the value-class into `ruleset_state`); the regression control already EXISTS (`T_*_ORACLE_AGREEMENT` family); the real unknowns are spike-resolvable (does it verify + actually reduce instructions) and design-resolvable (arm read strategy + loader restructure), NOT a wide design-space to farm to multiple architects. Farming "should we pack into a struct?" to a lens panel when the answer is given and the open question is "does it verify and win" (a measurement, not a debate) is the [[feedback_mint_hld_scope]] overkill case. The one genuinely-conditional decision (proceed iff the spike shows a real win) is an engineering gate discharged BY the spike, not a PO fork. Atomic-swap is decidable (RESET→RESET, no copy-forward). This is the S4/S6 mold: briefer → SPIKE → mint-dev.
 
 ## Notes for architect Phase A code-grep discipline (per architect spec rules)
 
-Brief author already ran these (evidence footer); architect re-verifies independently + extends:
+Brief author ran these (evidence footer); architect re-verifies + extends:
 
-- `wc -l src/bpf/xdpfilter.bpf.c` → **1280** (NOT §5.68's 1327 — the post-extraction tree is smaller; guard #5: re-anchor every literal, do NOT trust this brief's line numbers — they will drift as you carve).
-- `grep -nE '^(static __always_inline|#define [A-Z_]+\()' src/bpf/xdpfilter.bpf.c` → the 9 move-candidates (5 helpers + 4 macros, listed in B34b-2 with current line numbers).
-- `grep -cE 'SEC\(".maps"\)' src/bpf/xdpfilter.bpf.c` → **39** map objects (the `maps.h` payload).
-- `ls src/bpf/` → single `.c`, no `.h` yet; confirm each target `.h` is NEW (`! test -f`).
-- `sed -n '25,55p' cmake/BpfBuild.cmake` → confirm the `_shared_headers` GLOB omits `src/bpf/*.h` (HG-2 rationale).
-- After EACH carve (or at minimum once post-split): run the B37 gate / objdump xdp-section count and confirm `== 3658`. Re-measure recipe in the `bpf-spike-tooling` pack.
+- `grep -c 'bpf_map_lookup_elem(&wildcard' src/bpf/xdpfilter.bpf.c` → **25** static sites (NOT the backlog's per-packet "9" — that is the dynamic one-arm count; the restructure touches all 25). `grep -c 'bpf_map_lookup_elem(&defaults' …` → **1**.
+- `grep -n 'BITVEC_NUM_AXES' src/common/xdpfilter.h` → **9**; `XDPMF_RULESET_COUNT` → **2**.
+- `grep -rn 'ruleset_state' src/` → ∅ (NEW type/map).
+- Populate path: `write_wildcard_slots` (`src/lib/loader.cpp:1669`) + `write_default_slot` (`:1704`) — re-anchor by name, not line. `grep -rln 'wildcard\|defaults' src/lib/` → loader.cpp + sidecar.{hpp,cpp} + apply_internal.hpp — confirm which actually WRITE vs merely reference the names (guard #16 pin-name ripple class).
+- `ls tests/T_*_ORACLE_AGREEMENT.sh` → the verdict-identity harness (AND4/5/6/ETH/V6/BITVEC/MAC_MERGE) — the regression control.
+- B37 re-baseline: `tests/T_PROD_VERIFIER_LOAD.sh:120,137` — `XDPMF_PROD_INSN_BASELINE` is the sanctioned escape hatch for an intentional codegen change.
+- Run the measure-first spike (insn count pre/post) BEFORE committing to the restructure.
 
 ### Anti-misdiagnosis guards applicable to this slice (per Phase 3)
 
-- **Guard #5 (Phase A code-grep discipline)** — ALWAYS applies; the live tree is 1280 lines, not §5.68's 1327. Re-anchor every literal by pattern; line numbers in THIS brief are orientation, not contract.
-- **Guard #9 (helper-location duplication-over-extraction)** — applies in SPIRIT (inverted): this slice MOVES helpers into co-located headers within the SAME TU — it does NOT extract into a cross-module shared abstraction or pull any stable external file into the edit surface. Watch that the split does not accidentally invite a "DRY across files" temptation; the contract is relocation, not abstraction.
-- **Guard #35 / #36 (gate-as-sole-arbiter; statement-macro-over-value-helper for byte-identity)** — applies: B34a learned (D-mvp-4.28 Phase B) that even a value-returning helper form shifts the insn count (+3). The split MUST preserve the exact helper/macro FORMS as-extracted; moving them across a `#include` boundary changes nothing post-preprocessing, but any incidental reshaping (e.g. turning a macro back into a function "while we're here") will break 3658. The B37 gate is the sole arbiter.
-- **Guard #12 (RESOURCE_LOCK for shared host state)** — applies ONLY if a NEW structural ctest touches the xdp fixture / a real load; if the acceptance oracle stays the existing B37 gate, no new lock surface.
+- **Guard #5 (Phase A code-grep)** — always; re-anchor every literal (the 25-vs-9 distinction is exactly the kind of approximation guard #5 catches).
+- **Guard #15 / Phase-1.5 (atomic-swap PRESERVE-vs-RESET)** — resolved RESET→RESET UNCHANGED (HG-3); architect confirms wildcard/defaults carry no operator-observable monotonic contract (contrast `rule_counters`). NO copy-forward.
+- **Guard #16 (retired pin-path / map-name ripple)** — `wildcard` / `defaults` are `XDPMF_MAP_*_NAME` pinned constants; if retired/renamed, grep tests/ AND src/ for direct pin reads (`bpftool map dump pinned …/wildcard`, `…/defaults`) and pre-list every consumer (exporter reader, test bodies, fixtures). The ORACLE_AGREEMENT tests likely dump these pins — check before assuming they "just work".
+- **Guard #35 / #37 (gate-as-sole-arbiter; insn-gating discipline)** — the B37 gate arbitrates the insn count; here it is INTENTIONALLY re-baselined (the sanctioned escape-hatch use), not held at 3658. The new baseline = the measured post-spike count, documented.
+- **Guard #28 (bounded-walk / verifier-load spikes)** — the new map layout is a verifier-load risk → the measure-first spike carries insns/stack/states, mirroring the S4/S6 spike discipline.
+- **Guard #12 (RESOURCE_LOCK)** — applies if a NEW ctest touches the xdp fixture / real load; the ORACLE_AGREEMENT family already follows the project's fixture-lock pattern.
 
 ### Evidence footer — brief-author Phase 2 grep verification
 
 ```
 File/path:
-  ✓ src/bpf/xdpfilter.bpf.c           1280 lines, single .c (will EDIT + carve from)
-  ✓ src/bpf/{ipv4_match,ipv6_match,vlan,classifier,maps}.h   all absent (NEW)
-  ✓ src/common/xdpfilter.h            exists (MUST stay zero-diff)
-  ✓ cmake/BpfBuild.cmake              _shared_headers GLOBs common/*.h + include/*.h ONLY (HG-2)
-  ✓ CMakeLists.txt:106                add_bpf_object(xdpfilter src/bpf/xdpfilter.bpf.c) — single TU, unchanged
-  ✓ tests/T_INSN_BASELINE_GATE.sh     exists
-  ✓ tests/T_PROD_VERIFIER_LOAD.sh     exists; FATAL-asserts == ${XDPMF_PROD_INSN_BASELINE:-3658}
+  ✓ src/common/xdpfilter.h         BITVEC_NUM_AXES=9 (:195), XDPMF_RULESET_COUNT=2 (:97), wildcard/defaults map-name consts
+  ✓ src/bpf/maps.h                 wildcard ARRAY def (:119), defaults ARRAY def (:288)
+  ✓ src/bpf/xdpfilter.bpf.c        25 wildcard lookups + 1 defaults lookup (3 family arms)
+  ✓ src/bpf/classifier.h           fold-#2 deferral note (:223) — B35 is its home
+  ✓ src/lib/loader.cpp             write_wildcard_slots (:1669), write_default_slot (:1704)
+  ✓ tests/T_*_ORACLE_AGREEMENT.sh  AND4/5/6/ETH/V6/BITVEC/MAC_MERGE — verdict-identity oracle (regression control)
+  ✓ tests/T_PROD_VERIFIER_LOAD.sh  XDPMF_PROD_INSN_BASELINE escape hatch (:120,137) — sanctioned re-baseline
+  ✓ ruleset_state                  absent in src/ → NEW type + map
 
-Symbol/structure:
-  ✓ 9 move-candidates: bump_stat:463 bump_rule:480 first_set_u64:508 port_scan:541
-    l3_after_vlan:577 DISPATCH_MATCH:623 LOOKUP_INNER_OR_DROP:657 mac_axis:683 READ_DPORT:711
-  ✓ 39 SEC(".maps") objects (maps.h payload)
-  ✓ SEC("xdp") program at :730
-
-Estimate corrections vs §5.68 sketch:
-  §5.68 cited file as 1327 lines; LIVE tree (post-B34a) is 1280 → use 1280.
+Estimate corrections vs backlog:
+  Backlog "−9 lookups" = per-packet DYNAMIC (one arm). STATIC sites = 25 wildcard + 1 defaults across 3 arms;
+  the restructure touches all 25. The dynamic per-packet win is ≈ 8–9 (one arm) + 1 defaults.
 
 Surprising findings:
-  • BpfBuild.cmake _shared_headers GLOB omits src/bpf/*.h → new headers wouldn't trigger
-    incremental rebuild. Surfaced as HG-mvp-4.29-2 (the one sanctioned non-src/bpf/ edit).
+  • `wildcard` is ALREADY a single combined ARRAY (not 9 maps) — the win is fewer LOOKUPS into it
+    (one struct read replaces N per-axis lookups), not fewer maps.
+  • B35 naturally subsumes the deferred B34a fold #2 (the 3 arms' divergent wildcard-load orderings
+    collapse into a single struct read) — track it, do not treat as separate.
+  • This is the FIRST non-byte-identical slice in the arc → B37 baseline is re-based (sanctioned), and the
+    pre-existing ORACLE_AGREEMENT family is the correctness oracle (test surface is NOT from scratch).
 ```
