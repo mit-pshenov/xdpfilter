@@ -57,14 +57,14 @@ jobs:
           # linux-tools-$(uname -r) azure pkg and fails at runtime — so the
           # vmlinux.h step probes for a bpftool whose `version` SUCCEEDS,
           # skipping the wrapper and finding the real /usr/lib binary.
-          # CMakeLists forces clang++-19, which auto-selects the HIGHEST gcc
-          # toolchain present (gcc-14 stubs on 24.04) for its libstdc++ headers.
-          # The runner ships gcc-13's headers but NOT libstdc++-14-dev → clang
-          # picks 14 and can't find <cstdint>. Install libstdc++-14-dev so the
-          # version clang selects has its headers.
+          # The project builds C++ with -stdlib=libc++ (CMakeLists.txt:55-56),
+          # i.e. LLVM's libc++ — NOT libstdc++ — so clang++-19 needs the
+          # matching libc++-19 dev headers (<cstdint> etc.). Without them the
+          # build fails 'cstdint file not found' (no gcc/libstdc++ pkg helps —
+          # wrong stdlib). linux-tools-generic = a real bpftool for vmlinux.h.
           sudo apt-get install -y \
             clang-19 llvm-19 \
-            libstdc++-14-dev \
+            libc++-19-dev libc++abi-19-dev \
             libbpf-dev \
             linux-tools-common linux-tools-generic \
             python3 python3-scapy \
@@ -98,13 +98,8 @@ jobs:
           sudo "$bpftool" btf dump file /sys/kernel/btf/vmlinux format c > include/vmlinux.h
           echo "generated include/vmlinux.h ($(wc -l < include/vmlinux.h) lines)"
 
-      # clang++-19 auto-selects the HIGHEST gcc toolchain (gcc-14 on this image)
-      # but its libstdc++-14 headers are not reliably present → <cstdint> not
-      # found. Pin clang to gcc-13, whose headers ARE present (g++-13.2.0 ships
-      # in the runner image, with its libstdc++-13-dev). CI-only flag; the BPF
-      # object (clang -target bpf, separate invocation) is unaffected.
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_CXX_FLAGS="--gcc-install-dir=/usr/lib/gcc/x86_64-linux-gnu/13"
+        run: cmake -S . -B build
 
       # The build enforces -Werror; a warning fails here. This is the primary
       # gate — a clean compile of the whole tree (incl. the BPF object).
