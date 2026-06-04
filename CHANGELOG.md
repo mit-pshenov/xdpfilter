@@ -21,10 +21,23 @@ format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Documentation
 - **Doc bucket B1–B13 paid down** (2026-06-01, `docs/BACKLOG.md`) — manual prose pass, no code change. `README.md` fully rewritten off its MVP-1 freeze (9-axis match-model table, all 5 loader subcommands + `xdpmf-exporter`, exit codes 0–9, env-var + CMake-option tables, Operator/Contributor doc split). NEW `docs/CONFIG_SCHEMA.md` (schema_version-2 / 9-axis reference). NEW `mint/README.md` (design-corpus index). `docs/FLEET_DEPLOYMENT.md` gained an environment-variables section (`XDPMF_TRUST_MODEL`/`XDPMF_LOG_FORMAT`/`XDPMF_BPFFS_ROOT`) and now honestly states the `xdpfilter_trust_model` Prometheus metric is unimplemented (audit-log is the only trust-posture signal). `ansible/templates/xdpfilter-config.yaml.j2` fixed (`schema_version` 1→2, `action` no longer hardcoded to `pass`, all 9 axes renderable). `HANDOFF.md` archived → `docs/history/HANDOFF-mvp1.md`. No VERSION bump (docs-only).
 
-> Note: every slice from MVP-4.8 through MVP-4.21 below stayed at VERSION
-> `0.15.0` (set at MVP-4.7) — all are additive-within-`schema_version: 2`,
-> internal hardening, or test-only. The match model grew from 6 to **9 axes**
-> across this span.
+> Note: MVP-4.8 → MVP-4.21 stayed at VERSION `0.15.0` (set at MVP-4.7) — all
+> additive-within-`schema_version: 2`, internal hardening, or test-only; the
+> match model grew from 6 to **9 axes** across 4.8–4.15. The rename
+> (MVP-4.26/B33) bumped VERSION to `0.16.0`, where the tree sits now. The
+> post-rename **tidiness + hardening arc (MVP-4.22 → 4.30)** is logged in the
+> subsection just below; every entry is internal/test-only or a
+> behavior-preserving refactor (no operator-ABI change beyond the rename).
+
+### Tidiness + hardening arc (MVP-4.22 → 4.30, post-rename — no VERSION bump beyond the 0.16.0 rename)
+- **MVP-4.30 (B35, §5.70, `91fe39a`)** — datapath `ruleset_state` pack: the 25 static per-axis `wildcard` lookups + the `defaults` lookup collapse into ONE hoisted `ruleset_state[active]` struct read (`wc[9]` u64 + `default_action`). First **verdict-identity** slice (map-schema change, NOT byte-identical) — correctness held by the `T_*_ORACLE_AGREEMENT` family; measured instruction win **3658 → 3437 (−221)**, the B37 insn baseline re-based to 3437 (sanctioned escape-hatch). RESET atomic-swap (no copy-forward). Subsumed the B34a-deferred fold #2.
+- **MVP-4.29 (B34b, §5.69, `fc96a45`)** — datapath module split (de-monolith part b): monolithic `src/bpf/xdpfilter.bpf.c` 1280 → 581 LOC, carved into co-located `defs.h` / `maps.h` / `classifier.h` (the §5.68 5-file sketch refined to 3; family arms stay inline). Pure byte-identical `#include` split; xdp 3658 (verified ×3 independent). `cmake/BpfBuild.cmake` GLOB +`src/bpf/*.h`.
+- **MVP-4.28 (B34a, §5.68, `8c9a110`)** — datapath helper-extraction (de-monolith part a): shared idioms → in-file `static __always_inline` helpers + statement macros (`DISPATCH_MATCH`/`LOOKUP_INNER_OR_DROP`/`READ_DPORT` + `mac_axis`); 4/5 folds byte-identical (macros beat helpers for BPF byte-identity), fold #2 deferred → B35. xdp 3658.
+- **MVP-4.27 (B37, §5.67, `bb62891`)** — decorative regression gates made real: `T_PROD_VERIFIER_LOAD.sh` insn-count print → **FATAL** assert == `${XDPMF_PROD_INSN_BASELINE:-3658}` (consciously reverses `D-mvp-4.23-H3-PRODOBJ`); NEW `T_LOADER_STDERR_GOLDEN.sh` + 3 goldens pin the operator-facing error-string shapes. The byte-identity gate every refactor since leans on.
+- **MVP-4.25 (B32, §5.65, `1d31f51`)** — comment-collapse / archaeology pass: −274 comment-lines across `.bpf.c` + `loader.cpp` (KEEP WHY + invariant-tripwires, CUT D-mvp narration + net-delta archaeology + §-tag stacking); traceability audit 0 governing-anchor loss; xdp 3658 byte-identical.
+- **MVP-4.24 (§5.64)** — `xdpmf-exporter` scrape-consistency: lightweight `active_idx`-reread seqlock so a `/metrics` scrape concurrent with an `apply -f` active-half flip cannot read a torn ruleset view. Zero `src/lib` change; exporter-only.
+- **MVP-4.23 (§5.63)** — CI gate + coverage-floor: `.github/workflows/ci.yml` + `T_COVERAGE_FLOOR` + `T_PROD_VERIFIER_LOAD` wired into CI; zero `src/` change (test-infra + CI only).
+- **MVP-4.22 (§5.62)** — robustness batch: SEC-H1 hardening + `static_assert`s + atomic `g_format` + never-throw discipline on the exporter/loader error paths. Internal hardening, no operator-surface change.
 
 ### Added
 - **MVP-4.15 (S6, §5.55)** — IPv6 **extension-header walk**: the v6 arm walks up to `MAX_EXT_HOPS=8` stacked extension headers (HOPOPTS/ROUTING/DSTOPTS/FRAGMENT) via a bounded `#pragma unroll` before reading the true L4 header, so `protocol`/`dst_port` match the real transport rather than the base `nexthdr`. Completes the L2/L3 gate ladder S1–S6. Spike-validated on the dev kernel; v4 arm byte-identical; no axis growth (BITVEC stays 9).
