@@ -112,6 +112,7 @@ add_bpf_skeleton(xdpfilter)
 add_library(xdpmf_internal STATIC
     src/lib/loader.cpp
     src/lib/compiled_ruleset.cpp  # §5.73 (MVP-4.33) B40 — pure Config→CompiledRuleset lowering
+    src/lib/ruleset_delta.cpp  # §5.74 (MVP-4.34) B41 — pure libbpf-free id-reconciliation diff()
     src/lib/config.cpp
     src/lib/cidr.cpp          # §5.27 (MVP-3.2) — IPv4 CIDR parser
     src/lib/sidecar.cpp       # §5.31 (MVP-3.4b) — rule_index.json writer

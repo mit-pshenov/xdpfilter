@@ -150,6 +150,25 @@ std::uint32_t host_mask4(std::uint32_t len)
     return len == 0 ? 0u : (0xFFFFFFFFu << (32u - len));
 }
 
+// OOT-1 (§5.74 RD-5): independent v6 host-order derivations (do NOT call into
+// production). host_addr6_oracle loads the 16 network-order bytes (addr6[0]=MSB)
+// into a host-order __int128; host_mask6 builds the host-order prefix mask.
+unsigned __int128 host_addr6_oracle(const xdpmf_cidr_v6& c)
+{
+    unsigned __int128 v = 0;
+    for (int i = 0; i < 16; ++i) {
+        v = (v << 8) | static_cast<unsigned __int128>(c.addr6[i]);
+    }
+    return v;
+}
+
+unsigned __int128 host_mask6(std::uint32_t len)
+{
+    if (len == 0) { return 0; }
+    const unsigned __int128 all_ones = ~static_cast<unsigned __int128>(0);
+    return all_ones << (128u - len);
+}
+
 // ───────────────────────────── the corpus ──────────────────────────────────
 //
 // Non-contiguous ids => slot != id. Sorted unique ids:
@@ -193,7 +212,9 @@ Config build_corpus()
 // ───────────── per-axis independent expected derivations ────────────────────
 
 struct ExpPrefix4 { xdpmf_cidr_v4 cidr; std::uint32_t host_addr; std::uint64_t bit; };
-struct ExpPrefix6 { xdpmf_cidr_v6 cidr; std::uint64_t bit; };
+// OOT-1 (§5.74 RD-5): ExpPrefix6 now carries host_addr6, the v6 analog of
+// ExpPrefix4::host_addr — derived below and asserted in cmp_v6.
+struct ExpPrefix6 { xdpmf_cidr_v6 cidr; unsigned __int128 host_addr6; std::uint64_t bit; };
 struct ExpEntryU32 { std::uint32_t key; std::uint64_t mask; };
 struct ExpEntryMac { xdpmf_mac key; std::uint64_t mask; };
 struct ExpPort     { std::uint32_t lo; std::uint32_t hi; std::uint64_t bit; };
@@ -208,6 +229,10 @@ void expect_v4(const Config& cfg,
     for (const Rule& r : cfg.rules) {
         const std::optional<xdpmf_cidr_v4>& c = sel(r.match);
         if (c) {
+            // OOT-3 (§5.74 RD-5): the `& host_mask4(prefixlen)` here is
+            // TEST-DERIVATION-ONLY — production stores host_addr UNMASKED; the
+            // two agree only because the corpus CIDRs are host-bits-zero (the
+            // config invariant). Same note applies to the v6 host_addr6 oracle.
             out.push_back(ExpPrefix4{*c, host_order_v4(*c) & host_mask4(c->prefixlen),
                                      bit_of(i2s, r.id)});
         } else {
@@ -224,8 +249,16 @@ void expect_v6(const Config& cfg,
     wc = 0;
     for (const Rule& r : cfg.rules) {
         const std::optional<xdpmf_cidr_v6>& c = sel(r.match);
-        if (c) { out.push_back(ExpPrefix6{*c, bit_of(i2s, r.id)}); }
-        else   { wc |= bit_of(i2s, r.id); }
+        if (c) {
+            // OOT-1: derive host_addr6 like the v4 host_addr — masked to the
+            // prefix. Equivalent to production's UNMASKED store under the same
+            // host-bits-zero corpus invariant noted at the v4 oracle (OOT-3).
+            out.push_back(ExpPrefix6{*c,
+                host_addr6_oracle(*c) & host_mask6(c->prefixlen),
+                bit_of(i2s, r.id)});
+        } else {
+            wc |= bit_of(i2s, r.id);
+        }
     }
 }
 
@@ -315,6 +348,7 @@ void cmp_v6(const char* name, const AxisLowering6& got,
         const auto& g = got.prefixes[i]; // [CR-FIELD] BitPrefix6
         CHECK(g.cidr.prefixlen == exp[i].cidr.prefixlen, std::string(name) + " prefixlen@" + std::to_string(i));
         CHECK(std::memcmp(g.cidr.addr6, exp[i].cidr.addr6, 16) == 0, std::string(name) + " addr6@" + std::to_string(i));
+        CHECK(g.host_addr6 == exp[i].host_addr6,         std::string(name) + " host_addr6@" + std::to_string(i)); // OOT-1
         CHECK(g.bit == exp[i].bit,                       std::string(name) + " bit@" + std::to_string(i));
     }
 }

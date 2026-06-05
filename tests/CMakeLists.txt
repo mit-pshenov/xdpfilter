@@ -1650,3 +1650,37 @@ set_tests_properties(T_COMPILE_LOWERING_IDENTITY PROPERTIES
     ENVIRONMENT "${TEST_ENV}"
     TIMEOUT 30
 )
+
+# §5.74 (MVP-4.34) B41: the first DIRECT offline test of the apply's
+# id-reconciliation (counter copy-source map). Entirely OFFLINE: bare-main,
+# NO gtest, NO veth, NO libbpf (compile_harness precedent). The OPS-canary /
+# purity contract (§5.74 TestStrategy): the harness compiles the production
+# diff() TU (src/lib/ruleset_delta.cpp) DIRECTLY into the exe and links NEITHER
+# PkgConfig::LIBBPF NOR xdpmf_internal NOR any *_skel target. If diff() ever
+# acquires a libbpf / fd / throw dependency this binary fails to LINK — a signal
+# the libbpf-linked datapath tests cannot give.
+add_executable(ruleset_delta_harness
+    ${CMAKE_SOURCE_DIR}/tests/delta/ruleset_delta_harness.cpp
+    ${CMAKE_SOURCE_DIR}/src/lib/ruleset_delta.cpp
+)
+set_target_properties(ruleset_delta_harness PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+# The harness lives in tests/delta/, so it needs src on the path to resolve
+# "common/xdpfilter.h" and src/lib for "ruleset_delta.hpp".
+target_include_directories(ruleset_delta_harness PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/lib
+)
+# DELIBERATELY no target_link_libraries(... PkgConfig::LIBBPF) and no
+# add_dependencies(... *_skel): the libbpf-free link IS the test contract.
+
+add_test(
+    NAME T_RULESET_DELTA_TRUTHTABLE
+    COMMAND ruleset_delta_harness
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_RULESET_DELTA_TRUTHTABLE PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    TIMEOUT 30
+)

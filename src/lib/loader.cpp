@@ -35,6 +35,7 @@
 #include "common/logger.hpp"  // §5.32 (MVP-3.5) structured-logging surface
 #include "compiled_ruleset.hpp"  // §5.73 (MVP-4.33) B40: CompiledRuleset + compile()
 #include "config.hpp"
+#include "ruleset_delta.hpp"  // §5.74 (MVP-4.34) B41: RulesetDelta + diff()
 #include "sidecar.hpp"     // §5.31 (MVP-3.4b) rule_index.json writer
 
 #include <algorithm>
@@ -1496,26 +1497,23 @@ void copy_rule_counters_forward(int old_active_inner_fd, int inactive_inner_fd,
                                  "(copy_rule_counters_forward)", num_cpus));
     }
     std::vector<std::uint64_t> buf(static_cast<std::size_t>(num_cpus), 0u);
+    /* §5.74 (MVP-4.34) B41: the id-classification ("which old slot is the copy
+     * SOURCE for each new slot k") is now the named, libbpf-free pure diff();
+     * the 64-slot write-set below is byte-identical to HEAD (PI-mvp-4.34-WRITESET
+     * / §5.35 PRESERVE) — same lookup-at-source, same lk<0→re-zero edge. */
+    const RulesetDelta d = diff(old_slot_to_id, new_slot_to_id);
     for (std::uint32_t k = 0;
          k < static_cast<std::uint32_t>(XDPMF_RULE_COUNTERS_MAX);
          ++k) {
         std::fill(buf.begin(), buf.end(), 0u);
-        const std::uint32_t new_id = new_slot_to_id[k];
-        if (new_id != XDPMF_SLOT_ID_EMPTY) {
-            /* Find the OLD slot this surviving id occupied; copy its counter. */
-            for (std::uint32_t old_slot = 0;
-                 old_slot < static_cast<std::uint32_t>(XDPMF_RULE_COUNTERS_MAX);
-                 ++old_slot) {
-                if (old_slot_to_id[old_slot] == new_id) {
-                    const int lk = bpf_map_lookup_elem(old_active_inner_fd,
-                                                       &old_slot, buf.data());
-                    if (lk < 0) {
-                        std::fill(buf.begin(), buf.end(), 0u);
-                    }
-                    break;  // ids are unique → at most one old slot
-                }
+        const std::uint32_t src = d.source[k];
+        if (src != XDPMF_SLOT_ID_EMPTY) {
+            const int lk = bpf_map_lookup_elem(old_active_inner_fd,
+                                               &src, buf.data());
+            if (lk < 0) {
+                std::fill(buf.begin(), buf.end(), 0u);
             }
-            /* new id absent from old → buf stays all-zero (starts at 0). */
+            /* src==NONE (unoccupied/new id) → buf stays all-zero (starts at 0). */
         }
         const int up = bpf_map_update_elem(inactive_inner_fd, &k,
                                              buf.data(), BPF_ANY);
