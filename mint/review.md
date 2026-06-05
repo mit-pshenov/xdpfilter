@@ -1,64 +1,63 @@
-# Review — MVP-4.34/B41 §5.74 RulesetDelta (mint triangulation, brownfield)
+# Review — MVP-4.35/B42 redirect verb §5.75 (mint triangulation, brownfield 5-point)
 
 ## Verdict
-`pass` (round 1)
+`needs-rework` (round 1) — single narrowly-scoped finding (SPEC-UNTESTED negative config-validation paths). Code + 3 redirect tests triangulate cleanly; gap is 2 missing config-error unit tests the §5.75.6 TestStrategy lists.
 
 ## Triangulation matrix
 
 | Framework point | Findings | Tags |
 |---|---|---|
 | 1. Spec ↔ Code | 0 | — |
-| 2. Spec ↔ Tests | 0 | — |
-| 3. Code ↔ Tests | 0 | — |
+| 2. Spec ↔ Tests | 1 | [SPEC-UNTESTED × 1] |
+| 3. Code ↔ Tests | 0 | (109 pass / 2 pre-existing env-fail / 2 skip; targeted 13/13 green) |
 | 4. Out-of-Scope Drift | 0 | — |
-| 5. Behaviour preserved (brownfield) | 0 | — |
+| 5. Behaviour preserved (brownfield) | 0 | (verdict-identity green, insn-rebaseline negotiated, all zero-diffs hold) |
 
-No findings. Clean pass.
+## Point 1 — Spec ↔ Code (all match)
+- enum REDIRECT=2/MIRROR=3 reserved/MAX=4 (xdpfilter.h:272-278); STAT_REDIRECT=4/MAX=5 (:68-74); map-name macro (:291); sizeof-4 static_asserts (:352-353) UNTOUCHED.
+- redirect_devmap DEVMAP max_entries=1 (maps.h:366-372). Classifier append (classifier.h:199-202): exactly the spec'd REDIRECT branch APPENDED after the DROP test.
+- populate_redirect_devmap (loader.cpp:1571-1597): steering→resolve_ifindex(fail-closed)→update[0]; no-steering→delete[0] swallow ENOENT. Both apply branches (:2147,:2267). populate_action_table appends REDIRECT[2] only (:1560-1566). action_id 3-way (:1402-1406). kManagedMaps single row (:193-198).
+- config: RuleAction+Redirect (config.hpp:36), Steering (config.hpp:65-71), parse 'redirect' (config.cpp:128), schema {2,3} (config.cpp:359-369), steering parse+fence (config.cpp:578-600), find_key allowlist (config.cpp:618), cross-validation (config.cpp:602-609).
+- exporter: verdict_label +redirect (prom_format.cpp:32), brace-init {0,0,0,0,0} (stats_reader.hpp:34).
 
-## Point 1 — Spec ↔ Code
-- `struct RulesetDelta` = `std::array<uint32_t, XDPMF_RULE_COUNTERS_MAX> source;` — dumb aggregate, NO methods (`ruleset_delta.hpp:34-36`). Guard #36 ✔.
-- `[[nodiscard]] RulesetDelta diff(span<const u32> old, span<const u32> new) noexcept` — exact per §5.74 Interfaces (`ruleset_delta.hpp:46-47`); defn `ruleset_delta.cpp:17-40`. Pure, libbpf-free, noexcept, no fd/bpf_map_*/throw ✔.
-- D-Q1-A1 (`source[64]` precompute) ✔; D-Q2-SENTINEL (NONE = `XDPMF_SLOT_ID_EMPTY` 0xFFFFFFFF) ✔; D-HG1-PLACEMENT (new private TU) ✔.
+## Point 2 — Spec ↔ Tests
+SELECT-B (T_REDIRECT_DELIVERY) genuinely proves PHYSICAL cross-iface delivery (sink_count_prog on DISTINCT IFACE_D, peer of target IFACE_C; classifier bump can't reach it) + negation. SELECT-A (T_REDIRECT_COUNTER_AND_MAP) STAT_REDIRECT + devmap[0]==ifindex + negation. T_REDIRECT_TARGET_DOWN (optional, spike-PASS) PASS-on-miss. Negation controls present — no [NO-NEGATION-CONTROL].
 
-## Point 5 (LOAD-BEARING) — Behaviour preserved
-- **PI-mvp-4.34-WRITESET (hard gate, byte-identity)**: `git diff HEAD~1 -- src/lib/loader.cpp` consumer hunk (`loader.cpp:1500-1517`) shows ONLY inline-scan→`diff()` substitution. New loop: `fill(buf,0)` → `src=d.source[k]` → `if(src!=EMPTY){ lookup(&src); if(lk<0) re-zero; }` → `update(inactive,&k)`. Key `&src` carries the identical old_slot value the inline scan's first-match `&old_slot` carried; same `lk<0→re-zero` edge; every-slot update. Map I/O sequence byte-identical for every input. ✔ — corroborated by counter ctests green.
-- **Guard #9 (verbatim move)**: `ruleset_delta.cpp:21-38` scan = deleted `loader.cpp:1505-1515` block; ONLY change = records matched `old_slot` into `source[k]` instead of inline lookup. O(n²) outer-k × inner-old_slot, unique-id `break` preserved (HG-3) ✔.
-- **Guard #15 (branch-boundary PRESERVED)**: both call sites EXPLICIT, branch-divergent args — reattach `(old_rc_fd, inactive_rc_fd, old_slot_to_id, cr.slot_to_id)` (`loader.cpp:2133`), fresh `(rc_a_fd, rc_a_fd, empty_old, cr.slot_to_id)` (`loader.cpp:2231`). `diff()` lives INSIDE the consumer, NOT hoisted; both sites byte-identical ✔.
-- **PI-7**: `git diff -- src/lib/loader.hpp` = ∅ ✔.
-- **PI-DATAPATH**: `git diff -- src/bpf` = ∅; `T_INSN_BASELINE_GATE` PASS (xdp **3437**) ✔.
-- **CompiledRuleset untouched**: `git diff -- src/lib/compiled_ruleset.{hpp,cpp}` = ∅ ✔.
-- **No UNRELATED-EDIT**: `git diff --stat HEAD~1` = exactly the 7 FileList files ✔. **No REGRESSION**: counter ctests green.
+### [SPEC-UNTESTED] Config-validation negative paths have zero coverage
+**Location**: spec design.md:19823-19827 (§5.75.6 "Config validation … EXTENDED") vs tests.
+**Evidence**: §5.75.6 lists 4 config-validation assertions. Two POSITIVE are implicitly covered (every redirect test applies a schema_version:3 + steering config rc=0; v2 ctests staying green). The two NEGATIVE paths are UNTESTED: (1) `action: redirect` without `steering.redirect_to` → exit 9 (cross-validation config.cpp:602-609); (2) unknown sub-key in `steering:` → exit 9 (fence config.cpp:592-597). `git diff HEAD~1 -- tests/T_EXIT_CODE_9_ON_CONFIG_ERROR.sh tests/T_SCHEMA_V2_CUTOVER.sh` = ∅. Cross-validation (1) is load-bearing: it is the soundness precondition the design relies on (no steering ⇒ no redirect rule ⇒ devmap unused); a silent regression would let a redirect rule reach the datapath with an empty devmap → PASS-on-miss → DPI feed silently dark, uncaught.
+**Negotiated?**: no.
+**Fix**: add a config-error ctest (or extend T_EXIT_CODE_9_ON_CONFIG_ERROR.sh) asserting exit 9 for (a) schema_version:3 + action:redirect + no steering; (b) steering: with unknown sub-key. Pure validate() path, unit-cheap (no netns/BPF).
+**Assign to**: tester
 
-## Point 2/3 — Tests
-- `T_RULESET_DELTA_TRUTHTABLE` (`ruleset_delta_harness.cpp`): survived-in-place (`source[3]==3`), **moved/B30** (`source[4]==1` — counter follows id, NOT slot; line 140 — the assertion no test made before), new (`source[5]==EMPTY`), dropped (old slot 2 never a source), empty-new-slot, fresh-apply-degenerate, full-reorder. All §5.74 TestStrategy classes ✔.
-- **NOT circular**: independent `oracle_source()` (lines 87-99) from the §5.74 contract + hand-computed literals; does NOT read diff()'s output as truth ✔.
-- **Negation control** (line 235-251): a moved id's `source[k] != k` (the B30 "source-follows-slot" bug class would set `source[4]==4`) + smoke all-EMPTY→all-NONE ✔.
-- **Moved-class genuinely asserts** (not a fixed-point tautology): `test_full_reorder` uses a cyclic-shift **derangement** (no fixed point) asserting `source[k] != k` (line 209) — the over-assertion the tester fixed ✔.
-- **OPS-canary / purity link**: `ldd build/ruleset_delta_harness` = no libbpf; CMake target links NEITHER PkgConfig::LIBBPF NOR xdpmf_internal NOR *_skel (tests/CMakeLists.txt:1659-1676) — compiles `src/lib/ruleset_delta.cpp` directly ✔.
-- **RD-5 OOT polish** (test-only): OOT-1 (`host_addr6` v6 golden, `compile_harness.cpp:355`) ✔, OOT-3 (test-derivation-only comment at v4 masking, `:232`) ✔; OOT-2 skipped (design-permitted).
+## Point 3 — Code ↔ Tests
+Targeted run (root, netns): 13/13 PASS — 8 *_ORACLE_AGREEMENT, both insn gates green at 3477, all 3 T_REDIRECT_*. Full suite: 109 pass / 2 fail / 2 skip / 111. The 2 fails = #48/#63 pre-existing unprivileged-exec EACCES env-fails (impl-notes §5.75 note 8 + §5.70); git diff src/exporter additive-only → NOT attributable, NOT regression.
 
-## Point 4 — Out-of-scope drift
-None. No O(n²)→O(n) rewrite (O(n²) held), no A2 richer shape, no compile-path/datapath touch, no call-site/signature change, no VERSION bump (0.16.0 held).
+## Point 4 — OOS drift
+Clean. Only the reserved ACTION_MIRROR=3 hole (no branch, no populate entry — per §5.75.8). No per-rule target, no struct widen, no mirror/TC code.
 
-## Test execution (`/tmp/mint-review-tests-1780666967.log`)
+## Point 5 — Behaviour preserved (brownfield, LOAD-BEARING — all hold)
+- **PI-mvp-4.35-VERDICT-IDENTITY** ✓ — git diff HEAD~1 classifier.h = exactly ONE appended REDIRECT block; DROP test + STAT_PASS_CIDR/XDP_PASS fallthrough byte-identical. 8 ORACLE_AGREEMENT + PASS/DROP green.
+- **PI-mvp-4.35-INSN-REBASELINE** ✓ — both gates pass at 3477 (T_INSN_BASELINE_GATE.sh:73, T_PROD_VERIFIER_LOAD.sh:127); impl-notes records 3437→3477 (+40). Second gate-file = FileList omission, escalated + architect-approved + design amended — NEGOTIATED, not [UNRELATED-EDIT].
+- **PI-mvp-4.35-ACTIONTABLE-01** ✓ — only [2]=REDIRECT appended; PASS[0]/DROP[1] byte-identical.
+- **PI-mvp-4.35-NO-STRUCT-WIDEN** ✓ — sizeof-4 static_asserts (xdpfilter.h:352-353) untouched.
+- **PI-7** ✓ — git diff loader.hpp = ∅. compiled_ruleset.* / ruleset_delta.* = ∅.
+- Guard #15/#16 ✓ — single non-double-buffered devmap rides apply walk; no pin-name collision. VERSION 0.17.0 propagated. Test count +3. No REGRESSION/INVARIANT-VIOLATED/UNRELATED-EDIT.
+
+## Test execution (targeted)
 ```
-ruleset_delta_harness: all assertions passed        (offline, rc=0)
-compile_harness: all assertions passed              (offline, rc=0)
-ldd ruleset_delta_harness → OK: no libbpf in link
-#51  T_RULE_COUNTER_SURVIVES_APPLY ... Passed  3.90s
-#55  T_RULE_COUNTER_SURVIVES_REORDER  Passed  4.02s
-#70  T_RULE_COUNTERS_ATOMIC_SWAP .... Passed  3.96s
-#105 T_INSN_BASELINE_GATE (xdp 3437)  Passed  0.44s
-#108 T_RULESET_DELTA_TRUTHTABLE ..... Passed  0.00s
-100% tests passed, 0 failed out of 5
+ 9/13 #102 T_PROD_VERIFIER_LOAD ............ Passed   0.30 sec
+10/13 #105 T_INSN_BASELINE_GATE ........... Passed   1.13 sec
+11/13 #109 T_REDIRECT_DELIVERY ............ Passed   4.01 sec
+12/13 #110 T_REDIRECT_COUNTER_AND_MAP ..... Passed   2.22 sec
+13/13 #111 T_REDIRECT_TARGET_DOWN ......... Passed   2.78 sec
+100% tests passed, 0 failed out of 13
 ```
+Full suite: 98% (2 fails = #48/#63 pre-existing env, 2 skips pre-existing).
+
+## Rework assignments
+- **tester**: add config-error test for the two §5.75.6 negative config-validation paths — (a) schema_version:3 + action:redirect with no steering → exit 9; (b) steering: with unknown sub-key → exit 9. Pure validate() path, unit-cheap. Smallest fix = extend T_EXIT_CODE_9_ON_CONFIG_ERROR.sh.
+- architect / impl: none.
 
 ## Out-of-triangulation findings
 None.
-
-Clean byte-identity code-motion; §5.35 counter-monotonicity hard gate held; first direct offline test of the id-reconciliation landed with a real negation control.
-
----
-
-### Cross-cycle note — B40 deferred OOT items resolved here
-The 3 OOT test-polish items deferred from B40's review (§5.73) were carried as RD-5 ride-along: OOT-1 (v6 `host_addr6` offline assertion) DONE, OOT-3 (v4-oracle masking comment) DONE, OOT-2 (direct `close_prefixes` unit) SKIPPED (file-static, would need an src/ change — design-permitted). No deferred items remain from the loader-datamodel cleanup arc.
