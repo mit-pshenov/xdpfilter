@@ -19514,3 +19514,398 @@ the load-bearing write-set/counter-ctest assertion), the reviewer's correct disp
 
 Highest prior section §5.73; this is **§5.74**. No new guard — exercises #9 (verbatim move) / #15
 (PRESERVE boundary) / #36 (dumb aggregate). Guards #1..#37 + §5.70 candidate #38 + §5.73 candidate #39.
+
+---
+
+# §5.75 (MVP-4.35 / B42) — redirect verb: XDP-native steer-to-DPI (Option 1, single global tap)
+
+> Brownfield amendment. Highest prior section §5.74; this is **§5.75**. Realizes Slice 1 ("Option 1 —
+> Bare Verb") of `mint/architecture-mirror-redirect.md` (`eaeba64`, reviewer pass r3, grounder
+> clean-with-gates, PO ruling: build redirect now, defer mirror). FIRST datapath-CHANGING slice since
+> the cleanup arc — adds one BPF branch, so the xdp insn-count RE-BASELINES (3437→N); the surviving
+> invariant is **PASS/DROP verdict-identity** on the existing oracle corpus (the new branch fires only
+> for redirect rules). All 8 discharge-ledger slice-time rechecks re-verified against HEAD at design
+> time (evidence inline below). PI-7 (`loader.hpp` zero-diff) CONTINUES; CompiledRuleset/RulesetDelta
+> UNTOUCHED (action stays RAW). VERSION 0.16.0→0.17.0 (guard #11).
+
+## §5.75.1 Problem statement
+
+Add a per-rule **redirect** action: traffic matched by the 9-axis match-model is actively diverted —
+XDP-native `bpf_redirect_map` + a single `BPF_MAP_TYPE_DEVMAP` — to one operator-configured DPI-feed
+interface. This is the first **steering** verb, turning the filter from terminal allow/drop into a
+selector. The destination is a single global tap (`steering: { redirect_to: <iface> }`); there is NO
+per-rule target ABI (that is the Option-2 superset, OOS) and NO struct widen (`action_entry`/`rule_entry`
+stay `sizeof==4`). The new datapath branch is APPENDED after the existing `ACTION_DROP` test, so for any
+non-redirect rule the verdict path is byte-identical and PASS/DROP verdict-identity holds by
+construction. Mirror (clone-and-continue, needs TC/TCX) and per-rule targets are explicit non-goals.
+
+## §5.75.2 FileList (brownfield DIFF)
+
+### NEW
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `tests/inject/sink_xdp.bpf.c` | Counting sink XDP prog attached on the redirect-target peer; bumps a pinned PERCPU_ARRAY counter per RX frame (SELECT-B delivery oracle) | BPF C | ~35 |
+| `tests/T_REDIRECT_DELIVERY.sh` | **SELECT-B headline** — inject redirect-matching frame on source → assert sink counter==1 AND original-path PASS/DROP STAT unchanged (divert landed + original took redirect verdict) | bash+ctest | ~110 |
+| `tests/T_REDIRECT_COUNTER_AND_MAP.sh` | **SELECT-A** — STAT_REDIRECT counter bumps on a redirect match + `bpftool map dump pinned redirect_devmap` shows `[0]=ifindex(target)` | bash+ctest | ~90 |
+
+### EDITED
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `src/common/xdpfilter.h` | `enum xdpmf_action_type`: +`ACTION_REDIRECT=2`,+`ACTION_MIRROR=3`(reserved),`ACTION_MAX 2→4`. `enum xdpfilter_stat`: +`STAT_REDIRECT=4`,`STAT_MAX 4→5`. NEW `XDPMF_MAP_REDIRECT_DEVMAP_NAME`. sizeof-4 static_asserts (:344-345) UNTOUCHED | C/C++ hdr | ~8 |
+| `src/bpf/maps.h` | NEW `redirect_devmap` `SEC(".maps")` `BPF_MAP_TYPE_DEVMAP` (max_entries=1, key/value __u32). `stats`/`action_table` max_entries auto-grow via STAT_MAX/ACTION_MAX | BPF C | ~12 |
+| `src/bpf/classifier.h` | APPEND redirect branch inside `DISPATCH_MATCH` AFTER the `ACTION_DROP` test, BEFORE the STAT_PASS_CIDR fallthrough | BPF C | ~5 |
+| `src/lib/loader.cpp` | `kManagedMaps[]` +1 `redirect_devmap` row (single, non-double-buffered); `populate_action_table` +REDIRECT[2]; rules-inner `action_id` ternary 2→3-way; NEW `populate_redirect_devmap()` called in both apply branches | C++23 | ~45 |
+| `src/lib/config.hpp` | `RuleAction` +`Redirect`; NEW `struct Steering { std::string redirect_to; }`; `Config` +`std::optional<Steering> steering` | C++ hdr | ~8 |
+| `src/lib/config.cpp` | `parse_rule_action` accepts `'redirect'`; parse top-level `steering:` block; `find_key` allowlist (:580) +`steering`; schema_version {2}→{2,3} additive; cross-validate `action:redirect`⇒`steering.redirect_to` | C++23 | ~40 |
+| `src/exporter/prom_format.cpp` | `verdict_label` switch +`case STAT_REDIRECT: return "redirect";` (STAT_MAX-bounded emit loop :72 auto-adjusts) | C++ | ~2 |
+| `src/exporter/stats_reader.hpp` | brace-init `stats[STAT_MAX] = {0,0,0,0}`→`{0,0,0,0,0}` (:34, the load-bearing literal — recheck #5) | C++ hdr | ~1 |
+| `tests/lib/common.sh` | `setup_veth`/`cleanup_veth` grow a SECOND veth pair (`IFACE_C`/`IFACE_D`) + attach `sink_xdp`; NEW `read_sink` + `read_stats_with_redirect`/`wait_for_stats_sum_with_redirect` siblings | bash | ~50 |
+| `tests/lib/read_stats.py` | `--include-redirect` 5-column mode (precedent: `--include-pass-cidr`) | python | ~6 |
+| `tests/T_INSN_BASELINE_GATE.sh` | `XDPMF_PROD_INSN_BASELINE` 3437→N (re-baseline; impl measures N at Phase 2.5, documents delta = redirect-branch cost) | bash | ~1 |
+| `tests/T_EXPORTER_METRICS_FORMAT.sh` | `--version` literal `0.16.0`→`0.17.0` (:105, comment :21-22) — guard #11 | bash | ~2 |
+| `CMakeLists.txt` | `VERSION 0.16.0`→`0.17.0` (:13, source of truth) + add the 2 new ctests + `sink_xdp.bpf.c` to the BPF-object build | cmake | ~8 |
+| `tests/CMakeLists.txt` | register `T_REDIRECT_DELIVERY` + `T_REDIRECT_COUNTER_AND_MAP` (local/root gate; SELECT-A subset rides `XDPMF_CI_BUILD_ONLY` where applicable) | cmake | ~10 |
+| `CHANGELOG.md` | NEW `[0.17.0]` entry (redirect verb) | md | ~12 |
+| `docs/CONFIG_SCHEMA.md` | document `steering:` block + `action: redirect` + schema_version {2,3} | md | ~20 |
+| `docs/BACKLOG.md` | move B42 redirect → SHIPPED (doc-truth ripple) | md | ~3 |
+
+### UNCHANGED-BUT-AFFECTED (impl/tester MUST NOT touch; reviewer asserts zero git-diff)
+
+| Path | Why it must stay identical |
+|---|---|
+| `src/lib/loader.hpp` | **PI-7** — zero-diff. `Steering`/`redirect_devmap` are private (config.hpp / loader.cpp internals); no public-API symbol added. `git diff -- src/lib/loader.hpp` = ∅ |
+| `src/lib/compiled_ruleset.{hpp,cpp}` | action axis stays RAW (no mask-lowering); CompiledRuleset/`materialize`/`compile` untouched. `git diff` = ∅ |
+| `src/lib/ruleset_delta.{hpp,cpp}` | counter-reconciliation orthogonal to steering; untouched. `git diff` = ∅ |
+| `src/bpf/classifier.h` PASS/DROP path | the `ACTION_DROP`→`XDP_DROP` test + the `STAT_PASS_CIDR`+`XDP_PASS` fallthrough (:195-202) stay byte-identical — the redirect branch is APPENDED, never interposed |
+| `populate_action_table` [0]/[1] entries | PASS=0 / DROP=1 writes UNCHANGED (recheck #1); only [2]=REDIRECT appended |
+| `action_entry` / `rule_entry` struct layout | NO widen — sizeof-4 static_asserts (xdpfilter.h:344-345) stay (Option 1, no per-rule target) |
+
+Anything not in NEW/EDITED above is off-limits — if impl needs to edit an unlisted file, that is a
+design gap → SendMessage the architect.
+
+## §5.75.3 DataStructures
+
+**`enum xdpmf_action_type` (`src/common/xdpfilter.h:272-276`, EDITED):**
+```
+ACTION_PASS=0, ACTION_DROP=1, ACTION_REDIRECT=2, ACTION_MIRROR=3 /*reserved,unshipped*/, ACTION_MAX=4
+```
+`ACTION_MAX 2→4` sizes `action_table ARRAY[ACTION_MAX]` once (reserving MIRROR=3 so the deferred mirror
+slice need not re-grow the pinned map). REDIRECT=2 is the only SHIPPED new value; MIRROR=3 is a reserved
+hole (no `populate_action_table` entry, no classifier branch — a redirect-only datapath).
+
+**`enum xdpfilter_stat` (`src/common/xdpfilter.h:68-73`, EDITED):**
+```
+STAT_PASS=0, STAT_DROP_DENY=1, STAT_DROP_MALFORMED=2, STAT_PASS_CIDR=3, STAT_REDIRECT=4, STAT_MAX=5
+```
+`STAT_MAX 4→5` grows `stats PERCPU_ARRAY[STAT_MAX]` (maps.h:316 auto) AND the `stats_reader.hpp:34`
+HARD-CODED brace-init `{0,0,0,0}`→`{0,0,0,0,0}` (the literal the "cheap slot" framing omitted — recheck
+#5). The two STAT_MAX-bounded loops (prom_format.cpp:72, stats_reader.cpp:157) auto-adjust.
+
+**`redirect_devmap` (NEW, `src/bpf/maps.h`):** plain `BPF_MAP_TYPE_DEVMAP` (Q1/A1) —
+`key=__u32` (index), `value=__u32` (target ifindex), `max_entries=1`, `pinning=LIBBPF_PIN_BY_NAME`.
+Single global tap → one entry at key 0. NON-double-buffered (no `_a`/`_b`): a `SEC(".maps")` decl
+auto-generates the `SkelMapsT::redirect_devmap` member (recheck #7 — the loader-row alone is
+insufficient). Map name macro `XDPMF_MAP_REDIRECT_DEVMAP_NAME "redirect_devmap"`.
+
+**`struct action_entry` / `struct rule_entry`** — UNCHANGED (`sizeof==4`, static_asserts intact). The new
+verb is carried entirely by the `action_type` enum value [2]; no per-rule target field (recheck #4).
+
+**`xdpmf::Steering` (NEW, `src/lib/config.hpp`):** `struct Steering { std::string redirect_to; };` —
+the single global redirect target iface name. `Config` gains `std::optional<Steering> steering` (absent
+in a steering-less v2/v3 config). NO per-rule `target:` field on `Rule`/`RuleMatch` (Option-2, OOS).
+
+## §5.75.4 Interfaces
+
+**Classifier branch (`DISPATCH_MATCH` macro, `src/bpf/classifier.h`, APPEND):** inside the
+`if (r && r->present)` block, AFTER the existing `if (a && a->action_type == ACTION_DROP) {...}` and
+BEFORE the `bump_stat(STAT_PASS_CIDR); return XDP_PASS;` fallthrough, add:
+```
+if (a && a->action_type == ACTION_REDIRECT) {
+    bump_stat(STAT_REDIRECT);
+    return bpf_redirect_map(&redirect_devmap, 0, XDP_PASS);   /* PASS-on-miss fallback */
+}
+```
+- `bpf_redirect_map(map, key=0, flags=XDP_PASS)` → returns `XDP_REDIRECT` on hit (frame TX'd out the
+  devmap[0] ifindex); on a missing/down entry the low flag bits select the fallback return `XDP_PASS`
+  (degrade to original flow, NOT blackhole — HG-2; spike #3 confirms target-kernel semantics, see
+  §5.75.5 D-mvp-4.35-FEAS/FALLBACK).
+- `redirect_devmap` is visible at this definition point because `maps.h` is `#include`d before
+  `classifier.h`.
+- The DROP test + the PASS fallthrough are byte-identical ⇒ PASS/DROP verdict-identity for every
+  non-redirect rule (the new branch is reached ONLY when `a->action_type == ACTION_REDIRECT`).
+
+**`void populate_redirect_devmap(int devmap_fd, const Config& cfg)` (NEW, `src/lib/loader.cpp`, file-scope
+helper):**
+- If `cfg.steering` is present: `idx = resolve_ifindex(cfg.steering->redirect_to, LoaderError::AttachFailed)`
+  (reuses the `:868` helper; `if_nametoindex==0` ⇒ throw — **fail-closed at apply** on an unresolvable
+  target, HG-3); then `bpf_map_update_elem(devmap_fd, &k0, &idx, BPF_ANY)` (`k0=0`).
+- If `cfg.steering` is absent: delete key 0 (`bpf_map_delete_elem`, swallow `ENOENT`) so no stale
+  ifindex from a prior apply persists. Cross-validation (§5.75.4 config) guarantees: no steering ⇒ no
+  redirect rule ⇒ devmap unused.
+- Called in BOTH apply branches alongside `populate_action_table` (NON-double-buffered, no slot
+  dimension): reattach `~:2099`, fresh `~:2211`. Like `action_table`, the devmap is mutated in-place
+  (single map, idempotent write) BEFORE the active_idx flip / prog swap — see D-mvp-4.35-DEVMAP-SHARED.
+- Error modes: throws `std::system_error{LoaderError::AttachFailed}` on unresolvable target or
+  `bpf_map_update_elem<0`; same throw discipline as `populate_action_table`.
+
+**`populate_action_table` (EDITED, `:1532`):** append a third write — `action_entry redirect_entry{};
+redirect_entry.action_type = ACTION_REDIRECT;` at `k_redirect = ACTION_REDIRECT (=2)`. Entries [0]/[1]
+(PASS/DROP) UNCHANGED (recheck #1). No [3]=MIRROR entry (reserved hole — unshipped).
+
+**rules-inner `action_id` ternary (EDITED, `:1397-1399`):** 2-way → 3-way:
+```
+entry.action_id =
+    (r.action == RuleAction::Pass)     ? (unsigned char)ACTION_PASS  :
+    (r.action == RuleAction::Redirect) ? (unsigned char)ACTION_REDIRECT :
+                                         (unsigned char)ACTION_DROP;
+```
+(recheck #2 — no other site assumes identity-keying of `action_id` that the new verb breaks.)
+
+**Config grammar (`src/lib/config.cpp`, EDITED):**
+- `parse_rule_action` (:118-128): accept `"redirect"`→`RuleAction::Redirect` (alongside `"drop"`/`"pass"`;
+  update the two error strings to `"'pass', 'drop', or 'redirect'"`).
+- Top-level `steering:` (parsed after `rules`): a Mapping with a REQUIRED `redirect_to` scalar
+  (non-empty iface name); reject any OTHER sub-key inside `steering` (forward-compat fence — per-rule
+  target etc. are OOS). Absent `steering:` ⇒ `Config.steering == nullopt`.
+- `find_key` unknown-top-level allowlist (:580): add `&& kv.first != "steering"` so a top-level
+  `steering:` does NOT exit-9 (recheck #6).
+- schema_version (:357-369): `{2}`→`{2,3}` ADDITIVE (HG-1) — accept `v==2 || v==3`; update the two
+  diagnostic strings to `"supported: 2 or 3"`. A v2 config simply has no steering. NOT a hard cutover
+  (contrast §5.43 v1→v2). Canonical example/docs bump to `schema_version: 3`.
+- Cross-validation (after rules+steering parsed): if ANY `rule.action == RuleAction::Redirect` then
+  `Config.steering` MUST be present with non-empty `redirect_to`, else `throw_cfg` ConfigError (exit 9)
+  — e.g. `"action: redirect requires a top-level steering.redirect_to"`.
+
+**Exporter (`src/exporter/prom_format.cpp` :25-34):** `verdict_label` switch +`case STAT_REDIRECT: return
+"redirect";`. The emit loop (:72, `k<STAT_MAX`) auto-emits the new `verdict="redirect"` series.
+
+**Test harness (`tests/lib/common.sh`):**
+- `IFACE_C=xdpmf_c_$$`, `IFACE_D=xdpmf_d_$$` (second veth pair in the SAME netns; same
+  addrgenmode/arp-off/quiesce discipline as the A/B pair).
+- Topology: xdpfilter on `IFACE_A` (frames injected on `IFACE_B` → RX on `IFACE_A`); redirect target =
+  `IFACE_C` (devmap[0]=ifindex(IFACE_C)); `sink_xdp.bpf.c` attached on `IFACE_D` (the peer). A frame
+  redirected out `IFACE_C` arrives RX on `IFACE_D` → sink bumps its counter.
+- `read_sink [pin]` — sum the sink's pinned PERCPU_ARRAY counter (mirrors `read_stats`).
+- `read_stats_with_redirect` / `wait_for_stats_sum_with_redirect` — 5-column siblings (precedent:
+  `read_stats_with_cidr` :200/235; existing 3-/4-column helpers stay UNCHANGED for pre-§5.75 ctests).
+- `read_stats.py --include-redirect` — 5th column (precedent: `--include-pass-cidr`).
+
+## §5.75.5 Decisions (with rationale)
+
+- **D-mvp-4.35-Q1-A1 (plain `BPF_MAP_TYPE_DEVMAP`, single entry at key 0)** — *because* a single global
+  tap needs exactly one destination; `max_entries=1`, the redirect helper keys 0. DEVMAP_HASH (A2) buys
+  sparse-ifindex keying that one global tap does not need. Simplest realizable shape (synthesis Q1/A1).
+- **D-mvp-4.35-Q2-A1 (loader resolves `redirect_to`→ifindex + fills `redirect_devmap[0]` at apply)** —
+  *because* it is consistent with the existing config→maps materialization; the devmap is "just another
+  pinned, userspace-filled map" (synthesis Q2/A1). Reuses the `:868` `resolve_ifindex` helper.
+- **D-mvp-4.35-DEVMAP-SHARED (devmap is NON-double-buffered, mutated in-place before the flip, like
+  `action_table`)** — *because* Option 1 has no per-rule target → the devmap holds one operator-chosen
+  value that changes only on an operator config change. It rides the kManagedMaps clear/pin/reuse walk
+  as a SINGLE map (precedent: `active_idx`, `stats`, `ruleset_state`, `slot_rule_id` are all single,
+  non-`_a/_b`). The brief window where the still-live old prog could read the NEW target is benign (both
+  are valid DPI feeds; the operator initiated the change). This mirrors `action_table`'s shared-static
+  discipline (D-3.4b-c2-6) — NOT the double-buffered atomic-swap axes. Guard #15/#16: confirmed the
+  uniform walk handles a single map (the 4 existing singles prove it); new pin path `redirect_devmap`
+  collides with no existing hard-coded name (grep-checked: `XDPMF_MAP_*_NAME` set has no `redirect`).
+- **D-mvp-4.35-CLASSIFIER-APPEND (REDIRECT branch APPENDED after the `ACTION_DROP` test)** — *because*
+  PASS/DROP verdict-identity is the surviving invariant; appending (not interposing) keeps the DROP test
+  + the STAT_PASS_CIDR/XDP_PASS fallthrough byte-identical, so non-redirect rules are unaffected BY
+  CONSTRUCTION (recheck #3, classifier.h:195-202 re-read at design time — confirmed).
+- **D-mvp-4.35-NO-STRUCT-WIDEN (action_entry/rule_entry stay sizeof==4)** — *because* Option 1 is a
+  single global tap with no per-rule target; the verb is carried by the enum value alone. The sizeof-4
+  static_asserts (xdpfilter.h:344-345) stay UNTOUCHED (recheck #4). Per-rule targets (Option 2) would
+  reuse `_pad` — explicitly OOS.
+- **D-mvp-4.35-HG1-SCHEMA-ADDITIVE (schema_version {2,3}, NOT a hard cutover)** — *because* an optional
+  top-level `steering:` block is backward-compatible: a v2 config without steering still validates
+  unchanged. UNLIKE the v1→v2 axis-retirement hard cutover (§5.43), nothing is removed. Canonical
+  example bumps to 3; both accepted. *[A hard {3} cutover would break steering-less v2 configs for zero
+  benefit — rejected per HG-1.]*
+- **D-mvp-4.35-HG4-VERSION (0.16.0→0.17.0)** — *because* redirect is the first operator-visible
+  capability since the match-model (new config grammar + new verb). Guard #11 propagation set
+  (grep-confirmed at design time): `CMakeLists.txt:13` (source of truth), `CHANGELOG.md` (NEW [0.17.0]
+  entry), `tests/T_EXPORTER_METRICS_FORMAT.sh:105` (+ comment :21-22). `T_CLI_HELP_VERSION.sh` does NOT
+  hard-code the literal (asserts rc + single-line shape only — confirmed) → not in the set.
+- **D-mvp-4.35-REBASELINE (insn 3437→N, documented delta = redirect-branch cost — NOT silent drift)** —
+  *because* this slice CHANGES the BPF program (new branch + STAT_REDIRECT bump + `bpf_redirect_map`
+  call). `PI-mvp-4.27-DATAPATH-IDENTICAL` (insn 3437) is INTENTIONALLY retired; the surviving invariant
+  is PASS/DROP verdict-identity (T_*_ORACLE_AGREEMENT green for non-redirect rules). Precedent:
+  D-mvp-4.30-REBASELINE (§5.70 re-baselined on the ruleset_state pack). **Bash-less Phase-A fallback
+  discipline** (architect pane lacks Bash exec): the exact N is MEASURED BY IMPL at Phase 2.5 — the
+  measurement is deterministic, not a design unknown. Mechanism transferred to impl:
+  `XDPMF_PROD_INSN_BASELINE` in `T_INSN_BASELINE_GATE.sh:71` is updated to the count reported by the
+  existing gate harness (`bpftool prog dump xlated` insn count of `xdpfilter_prog`, the same path the
+  gate already uses). Expected: N modestly > 3437 (one branch + one helper call); the delta is recorded
+  in `impl-notes` as the redirect-branch cost. NO peer-DM needed for the measurement (it is a literal
+  update, not a fork).
+- **D-mvp-4.35-FEAS (PASS-on-miss happy-path ships by precedent)** — *because* `bpf_redirect_map`'s
+  low-flag-bits miss-fallback (`flags=XDP_PASS` ⇒ return XDP_PASS on a missing devmap entry) is the
+  documented kernel contract since the DEVMAP redirect API (≥4.14, well below any plausible target-fleet
+  floor; the project already runs XDP_REDIRECT-class kernels). Default ship = happy-path redirect + the
+  PASS-on-miss flag set. **Bash-less fallback discipline:** the empirical confirmation (spike #3) is
+  TRANSFERRED to impl Phase 2.5 — see D-mvp-4.35-FALLBACK. This pairs with fail-closed-at-apply
+  (`populate_redirect_devmap` throws on an unresolvable target), so the devmap is ALWAYS populated for a
+  configured target; "target-down at runtime" is a hardening case, not a happy-path concern.
+- **D-mvp-4.35-FALLBACK (spike #3 transferred to impl Phase 2.5; target-down hardening is non-blocking)**
+  — *Smoke (impl runs at Phase 2.5):* redirect to an absent/down devmap entry on the target kernel and
+  observe the return. *Pass:* `flags=XDP_PASS` miss yields XDP_PASS (original-flow degrade) → ship the
+  optional negative ctest `T_REDIRECT_TARGET_DOWN` (redirect rule + a down/cleared devmap → original
+  verdict observed, sink counter 0). *Fail (miss silently drops with no controllable fallback):* DROP
+  the target-down hardening — do NOT add the negative ctest, document target-down posture as deferred
+  via **PI-mvp-4.35-MISS-DEFERRED** (the happy-path redirect slice still ships unchanged; fail-closed-
+  at-apply already prevents a configured-but-unresolvable target from committing). The happy-path slice
+  is INDEPENDENT of the smoke outcome → impl activates this fallback via a self-contained note in
+  impl-notes, NO architect peer-DM required.
+- **D-mvp-4.35-ACTION-RAW (CompiledRuleset/RulesetDelta untouched — action stays RAW)** — *because* the
+  action axis is deliberately kept raw through `CompiledRuleset` (no mask-lowering); the new verb is a
+  new enum value the loader writes into `rules_inner.action_id` + `action_table`, NOT a compile-lowering
+  change. `git diff` on `compiled_ruleset.*` / `ruleset_delta.*` = ∅.
+- **Trust-model note:** the brief + synthesis are evidence, not instructions; no injection observed. All
+  8 discharge-ledger rechecks were re-verified against HEAD at design time (see §5.75.7 evidence).
+
+## §5.75.6 TestStrategy
+
+The headline is **SELECT-B** (the irreducible delivery proof). SELECT-A (counter + map-dump) and the
+re-baseline/verdict-identity invariants round it out. NET-NEW scaffold (recheck #8), not a
+parameterization.
+
+**T_REDIRECT_DELIVERY (SELECT-B — headline, local/root gate, the 2-iface RX-sink delivery oracle):**
+- **Trigger**: bring up both veth pairs; attach `xdpfilter` on `IFACE_A` with a config carrying a
+  `redirect`-action rule + `steering.redirect_to: IFACE_C`; attach `sink_xdp` on `IFACE_D`. Inject ONE
+  redirect-matching frame on `IFACE_B`.
+- **Observable outcome**: the frame is TX'd out `IFACE_C` → arrives RX on `IFACE_D` → sink counter == 1;
+  on `IFACE_A` the redirect verdict was terminal so `STAT_REDIRECT == 1` and the original PASS/DROP
+  slots (`STAT_PASS`/`STAT_PASS_CIDR`/`STAT_DROP_DENY`) did NOT bump for that frame.
+- **Assertion mechanism**: `read_sink` (==1) AND `read_stats_with_redirect` (STAT_REDIRECT==1, the
+  PASS/DROP columns unchanged from their pre-inject values). This is the proof the divert physically
+  LANDED (sink bumped) AND the original took the redirect verdict (not a silent pass-through). A
+  counter-only test would prove only that the classifier decided; the sink read is the delivery proof.
+- **OPS canary**: SELECT-B is the OPS canary for the NEW redirect invocation path — it exercises an
+  actual `XDP_REDIRECT` egress + cross-iface delivery that NO existing test drives (the existing corpus
+  only ever observes PASS/DROP on a single iface). Without it the verb could ship deciding-but-not-
+  delivering.
+
+**T_REDIRECT_COUNTER_AND_MAP (SELECT-A — counter + devmap dump):**
+- **Trigger**: attach with a redirect rule + steering target; inject a matching frame.
+- **Observable / assertion**: (a) `STAT_REDIRECT` bumped (`read_stats_with_redirect`); (b) `bpftool map
+  dump pinned ${PIN_DIR}/redirect_devmap --json | jq` shows key 0 == `ifindex(IFACE_C)` (precedent:
+  the active_idx bpftool-dump idiom, common.sh:266/367). SELECT-A subset is CI-green-able under
+  `XDPMF_CI_BUILD_ONLY` where it does not need live redirect.
+
+**T_REDIRECT_TARGET_DOWN (SELECT, OPTIONAL — gated by D-mvp-4.35-FALLBACK smoke PASS):**
+- **Trigger**: redirect rule with the devmap[0] entry cleared/absent (or target down); inject a matching
+  frame. **Observable**: PASS-on-miss → original verdict observed (frame NOT delivered to sink; sink
+  counter 0; the configured fallback `XDP_PASS` taken). Only shipped if the Phase-2.5 smoke confirms the
+  miss-fallback semantics on the target kernel; else SKIP/omit per PI-mvp-4.35-MISS-DEFERRED.
+
+**PASS/DROP verdict-identity (SURVIVING invariant — the existing oracle corpus, REUSED unchanged):**
+- **Trigger / mechanism**: re-run the existing `T_*_ORACLE_AGREEMENT` corpus + all PASS/DROP ctests
+  (root/BPF, local gate). **Assertion**: every non-redirect verdict is identical to HEAD — the new
+  branch fires only on `ACTION_REDIRECT`, so PASS/DROP/MALFORMED counts and verdicts are unchanged. Any
+  drift here = regression (NOT the documented insn re-baseline).
+
+**Insn re-baseline gate (`T_INSN_BASELINE_GATE`):**
+- **Trigger / mechanism**: impl measures the new `xdpfilter_prog` xlated insn count at Phase 2.5 and
+  updates `XDPMF_PROD_INSN_BASELINE` 3437→N. **Assertion**: the gate passes at N (documented as the
+  redirect-branch cost in impl-notes). The DELTA being present + documented is the contract — a silent
+  drift (gate left at 3437 → red, or changed without a note) is the failure.
+
+**Exporter format (existing `T_EXPORTER_METRICS_FORMAT`, EXTENDED):**
+- **Trigger / assertion**: the `verdict="redirect"` series appears in `/metrics` (STAT_REDIRECT slot);
+  `--version` reports `0.17.0` (the guard #11 literal at :105).
+
+**Config validation (unit / existing config-error ctests, EXTENDED):**
+- `action: redirect` without `steering.redirect_to` → ConfigError exit 9 (cross-validation).
+- a top-level `steering:` block does NOT exit-9 on the unknown-key allowlist (find_key absorbs it).
+- `schema_version: 3` validates; a v2 steering-less config still validates (additive, HG-1).
+- an unknown sub-key inside `steering:` → ConfigError (forward-compat fence).
+
+## §5.75.7 Preserved invariants (brownfield — reviewer's 5th framework point walks this)
+
+- **PI-mvp-4.35-VERDICT-IDENTITY (THE surviving hard gate — PASS/DROP verdict-identity on the existing
+  oracle corpus)** — non-redirect rules produce byte-identical verdicts vs HEAD. **Check**: re-run
+  `T_*_ORACLE_AGREEMENT` + PASS/DROP ctests GREEN; `git diff` on classifier.h shows ONLY the appended
+  REDIRECT branch (the DROP test + STAT_PASS_CIDR/XDP_PASS fallthrough untouched). Any PASS/DROP drift =
+  `[INVARIANT-VIOLATED]`.
+- **PI-mvp-4.35-INSN-REBASELINE (insn 3437→N, documented + intentional)** — `T_INSN_BASELINE_GATE`
+  passes at the new N; the delta is documented as the redirect-branch cost. **Check**: gate green at N
+  AND an impl-notes line records `3437→N (+Δ redirect branch)`. (This REPLACES the prior
+  PI-mvp-4.27-DATAPATH-IDENTICAL for this slice — a deliberate shift, precedent §5.70.)
+- **PI-7 (`loader.hpp` byte-identical — zero new public symbols)** — `git diff -- src/lib/loader.hpp` =
+  ∅. `Steering`/`redirect_devmap`/`populate_redirect_devmap` are private (config.hpp / loader.cpp
+  internals); `loader.hpp` names none.
+- **PI-mvp-4.35-ACTIONTABLE-01 (`action_table[0]`/[1] PASS/DROP unchanged)** — only [2]=REDIRECT
+  appended; no [3]. **Check**: `git diff` on `populate_action_table` shows ONLY the appended REDIRECT
+  write; the two existing writes are byte-identical (recheck #1).
+- **PI-mvp-4.35-NO-STRUCT-WIDEN (`sizeof(action_entry)==sizeof(rule_entry)==4`)** — static_asserts
+  (xdpfilter.h:344-345) UNTOUCHED. **Check**: `git diff` shows those two lines unchanged; green build IS
+  the assertion (recheck #4).
+- **CompiledRuleset / RulesetDelta untouched** — `git diff -- src/lib/compiled_ruleset.{hpp,cpp}
+  src/lib/ruleset_delta.{hpp,cpp}` = ∅ (action stays RAW).
+- **§5.35 counter-monotonicity untouched** — `copy_rule_counters_forward` + the rule_counters axis are
+  not touched; the counter ctests stay GREEN.
+- **Guard #15/#16 (single non-double-buffered DEVMAP rides the apply walk; no pin-name collision)** —
+  `redirect_devmap` is a single map in `kManagedMaps[]`; the clear/pin/reuse walk handles it like the 4
+  existing singles. **Check**: fresh attach + reattach both leave a correctly-populated `redirect_devmap`
+  (SELECT-A map-dump green on both paths); no test/src hard-codes a conflicting `redirect_devmap` name.
+- **PI-mvp-4.35-MISS-DEFERRED (CONDITIONAL — only if D-mvp-4.35-FALLBACK smoke FAILS)** — if the
+  target-kernel miss-fallback is not controllable, the target-down hardening + `T_REDIRECT_TARGET_DOWN`
+  are deferred; the happy-path redirect slice ships unchanged (fail-closed-at-apply holds). **Check**:
+  impl-notes records the smoke outcome; if FAIL, `T_REDIRECT_TARGET_DOWN` is absent/SKIP and the
+  happy-path tests are still green.
+- **All pre-existing tests remain green or legitimately SKIP** — full `ctest` re-run; count = prior
+  baseline **+2** (SELECT-B + SELECT-A), **+3** if the optional `T_REDIRECT_TARGET_DOWN` ships.
+- **VERSION 0.17.0** — propagated to the 3-site set (CMakeLists.txt:13, CHANGELOG.md, T_EXPORTER_METRICS_FORMAT.sh:105).
+
+### §5.75.7a Verification hints (guidance for reviewer — MAY, not contracts)
+*Resolution rule for this amendment: if any prose below conflicts with the §5.75.7 Preserved-invariants
+block, the invariants block WINS. If impl deviates from a hint to satisfy a contract (a PI-\* above or
+the PASS/DROP-verdict-identity / insn-gate assertion), the reviewer's correct disposition is
+`inline-merge` on the hint text, NOT `[UNRELATED-EDIT]` on impl.*
+- Reviewer MAY expect `git diff src/bpf/classifier.h` to show exactly ONE appended `if` block (the
+  REDIRECT branch) with the surrounding DROP test + PASS fallthrough untouched. (Effectively a MUST —
+  mirrored in PI-mvp-4.35-VERDICT-IDENTITY.)
+- Reviewer MAY expect the insn gate literal to be the ONLY change in `T_INSN_BASELINE_GATE.sh` (a single
+  `3437→N` line) + an impl-notes delta note. Impl MAY relax the exact N (measured), not the
+  documented-delta requirement.
+- Reviewer SHOULD see `loader.hpp`, `compiled_ruleset.*`, `ruleset_delta.*` with ZERO diff.
+- Reviewer SHOULD see `stats_reader.hpp:34` brace-init grown to exactly FIVE zeros `{0,0,0,0,0}` and the
+  two STAT_MAX-bounded loops UNCHANGED (they auto-adjust). Impl MAY relax if a STAT_MAX-derived
+  initializer is used instead, provided the 5-slot shape holds.
+- Reviewer MAY expect `populate_redirect_devmap` to be called in BOTH apply branches adjacent to
+  `populate_action_table`. Impl MAY fold it into a shared block provided both fresh + reattach populate
+  the devmap before the flip.
+
+## §5.75.8 Out of scope (anti-drift fence)
+
+- **MIRROR (clone-and-continue)** — deferred; needs a TC/TCX program (gated by discharge spikes #1 TCX
+  kernel ≥6.6 + #2 XDP→TC metadata/skb-clone perf). Reserved as `ACTION_MIRROR=3` (a hole; no datapath
+  branch, no populate entry).
+- **Per-rule redirect targets** (Option 2: `target_id` in `action_entry`'s `_pad` + a `steering_targets`
+  table + a `target_resolution` compile pass) — forward-compat superset; slice 2+. NO struct widen this
+  slice.
+- **tag / rate-limit verbs; AF_XDP/DPDK datapaths; `apply --dry-run`/preview** — OOS.
+- **DEVMAP_HASH keying; multi-entry devmap; broadcast (`BPF_F_BROADCAST`) devmap** — single key-0 entry
+  only (Option 1).
+- **mirror×verdict interaction policy** (mirror-then-DROP, redirect+mirror co-existence) — mirror-gated,
+  unowned semantics axis, PO/design input required before any mirror slice (NOT this one — redirect is
+  XOR pass/drop, no interaction arises).
+- **O(n)/hash optimizations, the 64-rule ceiling (XDPMF_ALLOWLIST_MAX=64 fixed architectural limit),
+  double-buffering the devmap** — all OOS.
+
+### §5.75.9 Evidence — 8 discharge-ledger rechecks re-verified against HEAD at design time
+1. `populate_action_table` static identity-keyed, writes only PASS=0/DROP=1 (loader.cpp:1532-1552) — ✓ (append REDIRECT[2]).
+2. rules-inner `action_id` 2-way ternary (loader.cpp:1397-1399) — ✓ (→3-way).
+3. classifier tests `ACTION_DROP` then falls through to STAT_PASS_CIDR/XDP_PASS (classifier.h:195-202, DISPATCH_MATCH macro) — ✓ (REDIRECT branch APPENDS inside the `if(r&&r->present)` block, after the DROP `if`).
+4. `sizeof(action_entry)==sizeof(rule_entry)==4` static_asserts (xdpfilter.h:344-345) — ✓ (untouched; no widen).
+5. `STAT_MAX=4` + HARD-CODED `stats[STAT_MAX]={0,0,0,0}` brace-init (stats_reader.hpp:34); STAT_MAX-bounded loops at prom_format.cpp:72 + stats_reader.cpp:157 (auto); maps.h:316 stats max_entries (auto) — ✓ (~5 sites; brace-init is the load-bearing literal).
+6. schema_version check (config.cpp:357-369), RuleAction {Drop,Pass} (config.hpp:34), parse_rule_action 'drop'/'pass' (config.cpp:118-128), find_key top-level allowlist (config.cpp:580) — ✓ (HG-1 → {2,3} additive; +Redirect; +'redirect'; +steering).
+7. `redirect_devmap` needs BOTH a `SEC(".maps")` decl in maps.h AND a `kManagedMaps[]` row (loader.cpp:137-201) — ✓ (single, non-double-buffered DEVMAP; the SkelMapsT member auto-generates from the .maps decl).
+8. `setup_veth`/`cleanup_veth` single veth pair (common.sh:116-188) → SELECT-B needs a 2nd pair (IFACE_C/D) + `sink_xdp.bpf.c` + `read_sink` + 5-column stat siblings — ✓ (NET-NEW scaffold).
+
+This is **§5.75**. No new guard minted — exercises #10 (catalog arithmetic: ACTION_MAX 2→4, STAT_MAX
+4→5 + the brace-init literal), #11 (VERSION 0.16.0→0.17.0 propagation), #15/#16 (single non-double-
+buffered DEVMAP rides the apply walk + pin-name uniqueness). Datapath re-baseline follows the §5.70
+D-mvp-4.30-REBASELINE precedent (deliberate shift, not a guard). Guards #1..#37 + §5.70 candidate #38 +
+§5.73 candidate #39 unchanged.
