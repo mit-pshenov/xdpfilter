@@ -19219,3 +19219,298 @@ Highest prior section §5.72; this is **§5.73**. New candidate guard: **#39 —
 output, don't fold the boundary"** (CompiledRuleset is a dumb aggregate wrapping the branch-INVARIANT
 consumer; `copy_rule_counters_forward`/`populate_action_table` stay explicit). Guards #1..#37 + §5.70
 candidate #38 + §5.73 candidate #39.
+
+---
+
+### §5.74 MVP-4.34 / B41: `RulesetDelta` — name the id-reconciliation + first offline truth-table (brownfield amendment; PURE HOST-SIDE code-motion, ZERO datapath/compile-path change — xdp section stays **3437 insns ×3 arms** by construction; NEW private libbpf-free TU `src/lib/ruleset_delta.{hpp,cpp}` + `loader.cpp` consumer edit + NEW bare-main test + CMake + 3 ride-along OOT polish; the consumer's 64-slot map write-set stays **BYTE-IDENTICAL** (§5.35 PRESERVE counter-monotonicity — the hard gate); PI-7 loader.hpp zero-diff CONTINUES; NO schema/axis/map/VERSION change; VERSION 0.16.0 held; 2026-06-05)
+
+#### §5.74 Problem statement
+
+`copy_rule_counters_forward` (`loader.cpp:1488`) is the apply's only stateful "two versions meet"
+seam: before the `active_idx` flip it copies each surviving operator-`id`'s per-CPU counter from the
+OLD-active `rule_counters` inner to the INACTIVE inner, **remapped by id** so a counter follows its
+id even when the id's bit-vector `slot` MOVED (reorder/insert/renumber — the load-bearing §5.61/B30
+change, PI-3.4b-2 PRESERVE-across-apply). Today the survived/moved/new/dropped set-diff over
+operator-id space is an **anonymous nested scan inlined inside the write loop** (`loader.cpp:1505–1515`:
+`old_slot_to_id[old_slot] == new_id`, unique-id `break`), structurally inseparable from the BPF map
+I/O it drives and untested except indirectly via the counter-preservation datapath ctests.
+
+This slice (slice 2 of `mint/architecture-loader-datamodel.md`, `f37b63d`, spike-discharged) gives
+that id-reconciliation **a name and a boundary**: extract the classification into a pure, libbpf-free,
+no-throw `RulesetDelta diff(old_slot_to_id, new_slot_to_id)`, leaving `copy_rule_counters_forward` a
+thin consumer whose full-64-slot write-set stays **byte-identical**. It ships the **first direct
+offline test of the id-reconciliation** — `T_RULESET_DELTA_TRUTHTABLE` (bare-`main`, libbpf-free) —
+asserting all four classes incl. the B30 moved-keeps-counter case, which no test today exercises
+directly. **Spike PASS** (this session, run 2026-06-05, throwaway lift then reverted): the
+classification lifts into a pure function reading only the two slot→id spans; the consumer's write-set
+(lookup-at-source, the `lk<0 → re-zero` edge, every-slot update) stays unchanged — proven by the
+counter ctests green in isolation. **The §5.35 risk question is therefore MOOTED** — this slice is
+byte-identity code-motion only; **no write-loop restructure**.
+
+Boundaries: **pure host-side code-motion, zero datapath/compile-path change** — `diff()` touches no
+`.bpf.c`, no skeleton, no fd/`bpf_map_*`, no throw; the BPF insn-count stays **3437 ×3 arms** by
+construction (nothing on the datapath or in `compile()` is touched). `CompiledRuleset` (§5.73/B40) is
+**untouched** — `RulesetDelta` is a SEPARATE model (counter-reconciliation across two applies, NOT
+compile output).
+
+#### §5.74 FileList (brownfield DIFF)
+
+**NEW**
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `src/lib/ruleset_delta.hpp` | private libbpf-free header: `struct RulesetDelta` (dumb aggregate, guard #36) + `[[nodiscard]] RulesetDelta diff(span,span) noexcept` decl | C++23 | ~45 |
+| `src/lib/ruleset_delta.cpp` | the pure no-throw `diff()` body — classification lifted VERBATIM from `loader.cpp:1505–1515` (guard #9), O(n²) scan preserved (HG-3) | C++23 | ~30 |
+| `tests/delta/ruleset_delta_harness.cpp` | bare-`main`, NO gtest, NO libbpf; `T_RULESET_DELTA_TRUTHTABLE` corpus over survived/moved/new/dropped + EMPTY + B30 moved-keeps-counter + negation control | C++23 | ~150 |
+
+**EDITED**
+
+| Path | Role of edit (one line) | Language | LOC est |
+|---|---|---|---|
+| `src/lib/loader.cpp` | `copy_rule_counters_forward` body: replace inline nested classification with `const RulesetDelta d = diff(old_slot_to_id, new_slot_to_id);` + SAME 64-slot write loop consuming `d.source[k]` (byte-identical map I/O); add `#include "ruleset_delta.hpp"`. NO other change; the 2 call sites `:2135`/`:2233` UNCHANGED (guard #15). | C++23 | ~ −5 net |
+| `CMakeLists.txt` | add `src/lib/ruleset_delta.cpp` to `xdpmf_internal` STATIC lib (after `compiled_ruleset.cpp` `:114`) | CMake | +1 |
+| `tests/CMakeLists.txt` | `add_executable(ruleset_delta_harness …)` compiling `tests/delta/ruleset_delta_harness.cpp` + `src/lib/ruleset_delta.cpp` DIRECTLY (libbpf-free, NO `PkgConfig::LIBBPF`, NO `*_skel` dep) + `add_test(T_RULESET_DELTA_TRUTHTABLE …)` — mirrors the `compile_harness` block `:1627` | CMake | ~28 |
+| `tests/compile/compile_harness.cpp` | ride-along OOT polish (OOT-1/OOT-3 mandatory, OOT-2 optional) — see RD-5 below; TEST-ONLY, no `src/` impact | C++23 | ~15 |
+
+**UNCHANGED-BUT-AFFECTED** (impl/tester MUST NOT touch; reviewer asserts zero git-diff)
+
+| Path | Why affected, why must stay identical |
+|---|---|
+| `src/lib/loader.hpp` | PI-7 — `diff()`/`RulesetDelta` are private (`src/lib/`); no public symbol added. `git diff -- src/lib/loader.hpp` = ∅. |
+| `loader.cpp:2135` (reattach call site) + `:2233` (fresh call site) | guard #15 / D-mvp-4.8-BOUNDARY — `copy_rule_counters_forward` stays EXPLICIT at both, branch-divergent args (`old_rc_fd,inactive_rc_fd,old_slot_to_id,cr.slot_to_id` vs `rc_a_fd,rc_a_fd,empty_old,cr.slot_to_id`). `diff()` lives INSIDE the consumer, NOT hoisted to the sites. |
+| `src/lib/compiled_ruleset.{hpp,cpp}` | §5.73/B40 — untouched this slice; `RulesetDelta` is a separate model. |
+| `src/bpf/*`, all `*Lowering` shapes, all map shapes/schema | NO datapath/compile-path change — insn 3437 by construction. `git diff -- src/bpf` = ∅. |
+
+Anything not in NEW/EDITED above is off-limits; if impl needs to edit a file not listed, that is a
+design gap → SendMessage architect.
+
+#### §5.74 DataStructures
+
+**`struct RulesetDelta`** (in `ruleset_delta.hpp`, namespace `xdpmf`, dumb value-aggregate — guard #36,
+NO methods/logic):
+
+```
+struct RulesetDelta {
+    std::array<std::uint32_t, XDPMF_RULE_COUNTERS_MAX> source;
+};
+```
+
+Contract of `source[k]` for each NEW slot `k ∈ [0, XDPMF_RULE_COUNTERS_MAX)` (= `[0,64)`):
+- `source[k] == old_slot` (a value in `[0,64)`) → the OLD slot whose id equals `new_slot_to_id[k]`
+  (a **survivor**; `old_slot == k` ⇒ survived-in-place, `old_slot != k` ⇒ **moved**, B30 case — the
+  counter is copied from `source[k]`, following the id across its slot move).
+- `source[k] == XDPMF_SLOT_ID_EMPTY` (`0xFFFFFFFFu`, the **NONE** sentinel) → no old slot is a copy
+  source for `k`: either `new_slot_to_id[k] == XDPMF_SLOT_ID_EMPTY` (unoccupied new slot) OR the new
+  id is **new** (absent from `old_slot_to_id`). Both ⇒ zeros written to `inactive[k]`.
+- A **dropped** id (present in `old_slot_to_id`, absent from `new_slot_to_id`) is NOT directly
+  represented — its old slot is simply never named by any `source[k]`. (Derivable by the test: no `k`
+  has `source[k] == that old slot`.)
+
+NONE-sentinel choice = `XDPMF_SLOT_ID_EMPTY` (`src/common/xdpfilter.h:324`, `0xFFFFFFFFu`): valid
+`source` values are old slots `∈ [0,64)`, which **never collide** with `0xFFFFFFFF` (Q2 confirmed —
+the spike's choice; the same sentinel already tags unoccupied slots in `slot_to_id`/`new_slot_to_id`,
+so reusing it is idiomatic). `source[]` element type is `std::uint32_t` (matches slot-id space).
+
+#### §5.74 Interfaces
+
+**`RulesetDelta xdpmf::diff(std::span<const std::uint32_t> old_slot_to_id, std::span<const std::uint32_t> new_slot_to_id) noexcept`**
+(decl in `ruleset_delta.hpp`, `[[nodiscard]]`; defn in `ruleset_delta.cpp`):
+
+- **Inputs**: two non-owning spans of slot→id, each indexed by slot `∈ [0,64)`, element = operator id
+  or `XDPMF_SLOT_ID_EMPTY`. Callers pass `std::array<std::uint32_t, XDPMF_RULE_COUNTERS_MAX>` (decays
+  to span): reattach passes `read_slot_rule_id_half(sri_fd, cur)` (old) + `cr.slot_to_id` (new); fresh
+  passes `empty_old` (all-EMPTY) + `cr.slot_to_id`. **Precondition**: both spans have size
+  `≥ XDPMF_RULE_COUNTERS_MAX`; `diff()` reads exactly `[0,64)` of each (it does NOT bounds-check the
+  span length — the callers' arrays are fixed-size 64; reviewer confirms no call passes a shorter
+  span). Lifetime: borrow-only; `diff()` retains no reference.
+- **Returns**: a `RulesetDelta` by value; `source[k]` per the §5.74 DataStructures contract.
+- **Purity / error modes**: **NO throw, NO I/O, NO fd/`bpf_map_*`/libbpf, NO global mutation** — a
+  total pure function (`noexcept`). The classification is lifted VERBATIM (guard #9): the O(n²)
+  outer-k × inner-old_slot scan with `old_slot_to_id[old_slot] == new_id` and unique-id `break` is
+  byte-for-byte the existing logic; the ONLY change is it records the matched `old_slot` into
+  `source[k]` instead of immediately doing the `bpf_map_lookup_elem`. O(n²) preserved (HG-3; O(n) is
+  OOS).
+
+**Consumer `copy_rule_counters_forward` (EDITED, `loader.cpp:1488`)** — signature, the two call sites,
+and the **map write-set are byte-identical**. The body becomes (per-slot, `k ∈ [0,64)`):
+1. `std::fill(buf, 0)` (per-slot zero) — unchanged.
+2. `const std::uint32_t src = d.source[k];` (was: `new_id = new_slot_to_id[k]` + inline scan).
+3. `if (src != XDPMF_SLOT_ID_EMPTY) { lk = bpf_map_lookup_elem(old_active_inner_fd, &src, buf.data()); if (lk < 0) std::fill(buf, 0); }` — **same lookup at the same old slot** the inline scan would have found, **same `lk<0 → re-zero` edge**.
+4. `bpf_map_update_elem(inactive_inner_fd, &k, buf.data(), BPF_ANY)` every slot — unchanged (same
+   error-classify/throw on `up<0`).
+
+The emitted sequence of `bpf_map_lookup_elem`/`bpf_map_update_elem` calls (which fds, which keys,
+which buffer contents) is **identical** to HEAD for every input — this is the §5.35 hard gate. The
+`num_cpus` guard, `buf` sizing, and the doc-comment §5.35/B30 semantics block (`:1456–1487`) stay.
+
+#### §5.74 Decisions (with rationale)
+
+- **D-mvp-4.34-Q1-A1 (`RulesetDelta` = `source[64]` precompute, NOT the richer A2)** — *because* A1 is
+  the spike's PROVEN byte-identity form AND is the natural guard-#9 **verbatim** lift: the existing
+  inline scan computes exactly "for each new slot, which old slot is the copy source" — recording that
+  into `source[k]` is a pure SEPARATION of classification from I/O, **not** an alteration. A2
+  (explicit `{survived/moved, added, dropped}` sets) would require diff() to COMPUTE set-membership the
+  current scan never computes — that is *adding* logic (a guard-#9 violation) and buys nothing for the
+  consumer (which only needs the source). The four truth-table classes are fully assertable from
+  `source[]` + the inputs (see TestStrategy) — A1 loses no test power. *[If the PO later wants labeled
+  class spans for a non-counter consumer, reopen as A2 — strictly larger.]*
+
+- **D-mvp-4.34-Q2-SENTINEL (NONE = `XDPMF_SLOT_ID_EMPTY` = `0xFFFFFFFFu`)** — *because* valid sources
+  are old slots `∈ [0,64)`, which never collide with `0xFFFFFFFF`; the same constant already tags
+  unoccupied slots in `slot_to_id`, so the sentinel is idiomatic and the spike used it. EMPTY-new-slot
+  and new-id BOTH map to NONE → zeros written (matches HEAD: inline scan's `new_id==EMPTY` skip and
+  its no-match fall-through both leave `buf` all-zero).
+
+- **D-mvp-4.34-HG1-PLACEMENT (NEW `src/lib/ruleset_delta.{hpp,cpp}`, NOT co-located in
+  `compiled_ruleset.*`)** — *because* `RulesetDelta` is a DISTINCT model: counter-reconciliation across
+  two applies, orthogonal to `CompiledRuleset`'s compile-output role. A separate private header reads
+  cleaner and matches the "name the models" thesis (`f37b63d`). Both are libbpf-free TUs already; a
+  second one costs one CMake line and keeps the two concerns from coupling. `diff()` links into the
+  truth-table harness WITHOUT libbpf exactly as `compile()` does into `compile_harness`.
+
+- **D-mvp-4.34-HG2-CONSUMER-UNCHANGED (`copy_rule_counters_forward` stays the consumer; write-set
+  byte-identical)** — *because* the §5.35/PI-3.4b-2 PRESERVE counter-monotonicity invariant is the
+  hard gate and the spike proved code-motion holds it. `diff()` is called at the TOP of the consumer;
+  the SAME 64-slot loop consumes `d.source[k]`. Reviewer diffs the new body against
+  `git show HEAD~1:src/lib/loader.cpp` (per DoD) — the map I/O sequence must be identical.
+
+- **D-mvp-4.34-GUARD15-BOUNDARY (`diff()` lives INSIDE the consumer, the 2 call sites UNCHANGED)** —
+  *because* guard #15 / D-mvp-4.8-BOUNDARY: the call sites pass branch-divergent args; hoisting
+  `diff()` to the sites would fold the boundary. The reattach site `:2135` and fresh site `:2233` keep
+  their exact text (incl. `read_slot_rule_id_half`/`empty_old` construction). `diff()` is NOT visible
+  at the call sites.
+
+- **D-mvp-4.34-GUARD9-VERBATIM (classification lifted VERBATIM, O(n²) preserved)** — *because* the
+  spike's byte-identity rests on the classification producing identical results; any logic change =
+  `[INVARIANT-VIOLATED]`. O(n)→hash is DEFERRED (HG-3; 64-rule scale buys nothing real, and would
+  trade byte-identity-by-construction for byte-identity-by-argument). Reviewer confirms the scan text
+  in `ruleset_delta.cpp` matches the deleted `loader.cpp:1505–1515` block (less the lookup, now in the
+  consumer).
+
+- **D-mvp-4.34-GUARD36-AGGREGATE (`RulesetDelta` carries data only)** — no methods, no logic; `diff()`
+  is a free function. Earns its keep: NAMES the apply's only stateful seam + enables the first direct
+  offline test of id-reconciliation — not a thin wrapper.
+
+- **D-mvp-4.34-HG4-VERSION (no VERSION bump)** — 0.16.0 held; internal refactor, no operator-visible
+  surface. Guard #11 N/A.
+
+- **Hidden-assumption discharge (re-run at design time):** (a) `read_slot_rule_id_half` returns
+  `std::array<std::uint32_t, XDPMF_RULE_COUNTERS_MAX>` and `cr.slot_to_id` is the same type
+  (`compiled_ruleset.hpp:104`) — both decay to `std::span<const std::uint32_t>` of length ≥64 →
+  `diff()` span signature is well-typed at both call sites. **CONFIRMED** (`loader.cpp:2133`,
+  `:2231`). (b) the inline scan reads ONLY the two spans + does the lookup — no other state feeds the
+  classification → it is cleanly separable. **CONFIRMED** (`loader.cpp:1503–1518` read). (c)
+  `XDPMF_SLOT_ID_EMPTY`/`XDPMF_RULE_COUNTERS_MAX` are in `src/common/xdpfilter.h` (`:324`/`:312`),
+  already included transitively by `loader.cpp` and includable by the libbpf-free header. **CONFIRMED.**
+
+#### §5.74 TestStrategy
+
+**The byte-identity gate is REUSED unchanged — do NOT re-author.** The existing counter-preservation
+ctests are the decisive cheap oracle that the consumer's write-set is byte-identical:
+`T_RULE_COUNTER_SURVIVES_REORDER` (×3), `T_RULE_COUNTER_SURVIVES_APPLY`, `T_RULE_COUNTERS_ATOMIC_SWAP`,
+and the rule-counter bump tests. Tester re-runs them (root/BPF, local gate) — all must stay GREEN.
+The datapath insn gate (`T_INSN_BASELINE_GATE`, xdp **3437**) and oracle-agreement corpus are
+untouched by construction (no `src/bpf` change) and ride along green.
+
+**NEW `T_RULESET_DELTA_TRUTHTABLE` (offline unit, bare-`main`, ctest, libbpf-free):**
+
+- **Trigger**: construct in-memory `old_slot_to_id` / `new_slot_to_id` arrays (`std::array<uint32_t,64>`)
+  covering every class in ONE corpus + targeted single-class cases. Call `diff(old, new)` and assert
+  on `d.source[]`. The test KNOWS the inputs, so it classifies each slot and asserts `source[k]`:
+  - **survived-in-place**: an id at the SAME slot in old and new (e.g. id `7` at slot `3` in both) ⇒
+    assert `source[3] == 3`.
+  - **moved** (B30 moved-keeps-counter — the load-bearing case): an id present in both but at a
+    DIFFERENT slot (e.g. id `9` at old slot `1`, new slot `4`) ⇒ assert `source[4] == 1` (counter
+    source follows the id, NOT the slot). This is the assertion no test makes today.
+  - **new**: an id in `new` absent from `old` (new slot `5`, id `42` nowhere in old) ⇒ assert
+    `source[5] == XDPMF_SLOT_ID_EMPTY`.
+  - **dropped**: an id in `old` absent from `new` (old slot `2`, id `99` nowhere in new) ⇒ assert NO
+    `k` has `source[k] == 2` (the dropped old slot is never a copy source) → zeros forwarded.
+  - **EMPTY new slot**: `new_slot_to_id[k] == XDPMF_SLOT_ID_EMPTY` ⇒ assert `source[k] ==
+    XDPMF_SLOT_ID_EMPTY` (regardless of old occupancy).
+  - **fresh-apply degenerate**: `old` all-EMPTY (the `empty_old` case) ⇒ assert ALL `source[k] ==
+    XDPMF_SLOT_ID_EMPTY` (nothing survives → every slot zeroed; matches D-mvp-4.21-FIRSTAPPLY).
+  - **full reorder** (mirrors `T_RULE_COUNTER_SURVIVES_REORDER`): a permutation where every id moves
+    ⇒ assert each `source[new_slot]` equals that id's old slot.
+- **Negation control (MANDATORY)**: assert a wrong expectation FAILS — e.g. assert that a moved id's
+  `source[k]` does NOT equal `k` (proving the test would catch a "source follows slot, not id"
+  regression — the exact B30 bug class). Include a smoke (the all-EMPTY/all-EMPTY → all-NONE trivial
+  case) so a totally broken `diff()` is caught cheaply.
+- **Assertion mechanism**: plain `if (got != want) { fprintf(stderr, "T_RULESET_DELTA_TRUTHTABLE: <case> slot=%u got=%#x want=%#x\n", …); ++fails; }` accumulation; `return fails ? 1 : 0` (bare-`main`,
+  `compile_harness`/`bitvec_harness` precedent — NO gtest, NO libbpf).
+- **OPS-canary / linkage contract**: `ruleset_delta_harness` is a NEW invocation surface with a
+  materially different link environment from the existing suite — it compiles `src/lib/ruleset_delta.cpp`
+  DIRECTLY and links **NEITHER `PkgConfig::LIBBPF` NOR `xdpmf_internal` NOR any `*_skel` target**. That
+  clean link IS the purity contract: if `diff()` ever acquires a libbpf/fd/throw dependency, this
+  binary fails to LINK — a signal the existing libbpf-linked datapath tests cannot give. Reviewer
+  asserts the `ruleset_delta_harness` link line is libbpf-free (mirrors the `compile_harness` `:1627`
+  contract).
+
+**RD-5 ride-along OOT polish** (`tests/compile/compile_harness.cpp`, TEST-ONLY — must NOT expand the
+slice or touch `src/`):
+- **OOT-1 (mandatory)**: add an offline assertion on the derived v6 `host_addr6` sub-field — the v4
+  path asserts `host_addr` (`compile_harness.cpp:211`); the v6 `ExpPrefix6` (`:196`) omits it. Add the
+  symmetric `host_addr6` check to the v6 golden.
+- **OOT-2 (optional)**: a direct unit exercise of `close_prefixes`/`close_prefixes6` IF cheap; skip if
+  it grows the harness materially.
+- **OOT-3 (mandatory)**: a one-line comment near the v4-oracle masking (`host_order_v4 & host_mask4`,
+  `:211`) noting it is test-derivation-only (production stores unmasked; equivalent under the
+  host-bits-zero config invariant).
+
+#### §5.74 Preserved invariants (brownfield)
+
+Reviewer's 5th framework point walks this list and reports `[INVARIANT-VIOLATED]` per failed check.
+
+- **PI-mvp-4.34-WRITESET (THE hard gate — consumer map write-set byte-identical / §5.35 PRESERVE
+  counter-monotonicity)** — `copy_rule_counters_forward`'s emitted `bpf_map_lookup_elem` /
+  `bpf_map_update_elem` sequence (fds, keys, buffer contents) is identical to HEAD for every input.
+  **Check**: `git diff HEAD~1 -- src/lib/loader.cpp` on the consumer body shows ONLY the inline-scan →
+  `diff()`-call substitution (same loop, same I/O); AND the counter ctests
+  (`T_RULE_COUNTER_SURVIVES_REORDER ×3`, `_SURVIVES_APPLY`, `T_RULE_COUNTERS_ATOMIC_SWAP`, bump tests)
+  re-run GREEN. Any counter-preservation regression = `[INVARIANT-VIOLATED]`.
+- **PI-7 (`loader.hpp` byte-identical — zero new public symbols)** — `git diff -- src/lib/loader.hpp`
+  = ∅. `RulesetDelta`/`diff()` are private (`src/lib/ruleset_delta.hpp`); `loader.hpp` names neither.
+- **PI-mvp-4.27-DATAPATH-IDENTICAL** — xdp section **3437 insns ×3 arms** (`T_INSN_BASELINE_GATE`
+  re-run); `git diff -- src/bpf` = ∅ (no `.bpf.c`/compile-path touch).
+- **Guard #15 (PRESERVE branch-boundary)** — the 2 call sites `:2135`/`:2233` stay EXPLICIT with
+  branch-divergent args; `diff()` NOT hoisted. Verified by reading both sites post-edit.
+- **Guard #9 (move byte-identical, not alter)** — the classification scan text in `ruleset_delta.cpp`
+  matches the deleted `loader.cpp:1505–1515` block (less the lookup, relocated to the consumer); O(n²)
+  preserved. Verified by `git diff` (deletion in loader.cpp + identical logic added in ruleset_delta.cpp).
+- **Guard #36 (dumb aggregate)** — `RulesetDelta` has no methods/logic. Verified by inspection.
+- **`CompiledRuleset` (§5.73) untouched** — `git diff -- src/lib/compiled_ruleset.hpp src/lib/compiled_ruleset.cpp`
+  = ∅.
+- **All pre-existing tests remain green or legitimately SKIP** — full `ctest` re-run; count = prior
+  baseline **+1** (the new `T_RULESET_DELTA_TRUTHTABLE`).
+- **VERSION 0.16.0** — no bump (HG-4).
+
+##### §5.74 Verification hints (guidance for reviewer — MAY, not contracts)
+*Resolution rule for this amendment: if any prose below conflicts with the §5.74 Preserved-invariants
+block, the invariants block wins. If impl deviates from a hint to satisfy a contract (a PI-\* above or
+the load-bearing write-set/counter-ctest assertion), the reviewer's correct disposition is
+`inline-merge` on the hint text, NOT `[UNRELATED-EDIT]` on impl.*
+- Reviewer MAY expect `git diff --stat src/lib/loader.cpp` to show a small **net reduction** (~−5; the
+  inline scan + its lookup collapse to a `diff()` call + a `source[k]` read). Impl MAY relax if a
+  comment stays with the consumer.
+- Reviewer MAY expect the `ruleset_delta_harness` link line to contain **no** `-lbpf`/`PkgConfig::LIBBPF`,
+  **no** `xdpmf_internal`, and **no** `*_skel` dep (the load-bearing purity contract — effectively a
+  MUST, mirrored in §5.74 TestStrategy OPS-canary).
+- Reviewer SHOULD see `loader.hpp`, `src/bpf/`, and `compiled_ruleset.*` with **zero** diff.
+- Reviewer SHOULD see the new consumer body call `diff(old_slot_to_id, new_slot_to_id)` ONCE at the
+  top, then a 64-slot loop reading `d.source[k]` — and SHOULD confirm no `bpf_map_*` call moved into
+  `diff()`.
+
+#### §5.74 Out of scope
+
+- **O(n²)→O(n) optimization of `diff()`** — DEFERRED (HG-3; 64-rule scale; would trade
+  byte-identity-by-construction for byte-identity-by-argument).
+- **A2 richer `RulesetDelta` shape** (`{survived/moved, added, dropped}` labeled spans) — only reopen
+  if a non-counter consumer needs labeled classes (D-mvp-4.34-Q1-A1).
+- **`CompiledRuleset` / `compile()` changes** — shipped in B40/§5.73, untouched here.
+- **Any BPF datapath / compile-path change** — none; insn 3437 stays by construction.
+- **`copy_rule_counters_forward` call-site / signature change** — the 2 sites stay byte-identical
+  (guard #15); `diff()` is NOT hoisted.
+- **`apply --dry-run` / preview, mirror/redirect / TC, the 64-rule ceiling, VERSION bump** — all OOS.
+
+Highest prior section §5.73; this is **§5.74**. No new guard — exercises #9 (verbatim move) / #15
+(PRESERVE boundary) / #36 (dumb aggregate). Guards #1..#37 + §5.70 candidate #38 + §5.73 candidate #39.
