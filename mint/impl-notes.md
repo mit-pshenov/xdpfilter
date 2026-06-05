@@ -3,6 +3,40 @@
 Notes for team-lead/architect/tester about implementation decisions and
 deviations made during impl phase.
 
+## §5.73 MVP-4.33 / B40 CompiledRuleset bundle — impl notes (2026-06-05)
+
+Brownfield, PURE host-side refactor. 3 NEW (`src/lib/compiled_ruleset.{hpp,cpp}` +
+the tester's `tests/compile/compile_harness.cpp`) + EDITED `loader.cpp` / `CMakeLists.txt`
+/ `tests/CMakeLists.txt` (last two test-files owned by tester per team-lead split).
+Impl owns: compiled_ruleset.{hpp,cpp}, loader.cpp, CMakeLists.txt.
+
+NO silent deviations. All choices below are MAY-level latitude.
+
+1. **loader.cpp net diff is −386 (50 ins / 436 del), NOT the §5.73 hint's ~−180.**
+   Expected: the ~314-line lowering block MOVED whole-cloth into compiled_ruleset.cpp
+   (guard #9 — relocation, byte-identical), so loader.cpp loses the block AND the
+   collapsed 16-arg call. The reviewer hint (~−180) is explicitly a MAY; reduction
+   *direction* correct; moved text reappears verbatim in the new TU.
+2. **Removed two now-dead includes from loader.cpp**: `<functional>` (sole user
+   `std::equal_to` moved with `aggregate_axis`) and `<arpa/inet.h>` (sole user `ntohl`
+   moved with `lower_axis`). Kept `<optional>` (still used: `std::nullopt` logger arg).
+   -Werror-floor hygiene; not a behavior change.
+3. **compile() field-assigns the aggregate** (`CompiledRuleset cr; cr.mac_low = …;`)
+   rather than aggregate-init — each `lower_*`/`aggregate_axis` reads the
+   freshly-computed `cr.id_to_slot` (same data-dependency the old apply_request locals
+   had). Byte-identical outputs.
+4. **`materialize` keeps the §5.48 comment header** (was populate_all_axes') with a
+   §5.73 note prepended; copy_rule_counters_forward + populate_action_table stay
+   EXPLICIT at both apply_request call sites (guard #15 / HG-1).
+
+Smoke: production build GREEN, zero warnings (xdpmf_internal / xdpfilter / xdpmf-exporter).
+Datapath byte-identity: `git diff src/bpf`=∅; `T_INSN_BASELINE_GATE` PASSED (xdp 3437).
+PI-7: `git diff src/lib/loader.hpp`=∅. Both binaries `--help` exit 0.
+
+Flagged to tester (test-side, peer-to-peer — impl did NOT edit the test):
+compile_harness.cpp 329/330/342/343 use `g.key`/`g.mask` on `AxisAggregate::entries`
+(= `std::vector<std::pair<Key,u64>>`) → must use `.first`/`.second`. Diagnosis sent.
+
 ## §5.70 MVP-4.30 / B35 wildcard+defaults → ruleset_state pack — impl notes (2026-06-04)
 
 Brownfield, 13 EDITED files (5 src + 2 insn-gate + 6 pin-smoke). SPIKE-GATED,

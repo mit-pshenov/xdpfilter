@@ -33,6 +33,7 @@
 #include "loader.hpp"
 #include "apply_internal.hpp"
 #include "common/logger.hpp"  // §5.32 (MVP-3.5) structured-logging surface
+#include "compiled_ruleset.hpp"  // §5.73 (MVP-4.33) B40: CompiledRuleset + compile()
 #include "config.hpp"
 #include "sidecar.hpp"     // §5.31 (MVP-3.4b) rule_index.json writer
 
@@ -45,8 +46,7 @@
 #include <cstring>
 #include <format>
 #include <fstream>           // §5.24: read override BPF object from path
-#include <functional>        // §5.50 (MVP-4.10 B28-2): std::equal_to for aggregate_axis
-#include <optional>          // §5.50 (MVP-4.10 B28-2): std::optional projector return
+#include <optional>          // §5.32 (MVP-3.5): std::nullopt logger iface arg
 #include <span>              // §5.61 (MVP-4.21): copy_rule_counters_forward slot↔id spans
 #include <string>
 #include <string_view>
@@ -56,7 +56,6 @@
 #include <utility>
 #include <vector>
 
-#include <arpa/inet.h>       // §5.43 (MVP-4.3): ntohl for prefix-closure masking
 #include <dirent.h>
 #include <fcntl.h>           // O_PATH, O_DIRECTORY, O_NOFOLLOW, O_CLOEXEC, openat
 #include <linux/bpf.h>       // BPF_XDP, BPF_LINK_TYPE_XDP
@@ -1157,322 +1156,6 @@ void pin_fd(int fd, const std::string& path)
     }
 }
 
-
-/* §5.43 (MVP-4.3) D-mvp-4.3-Q3: a constrained prefix on one LPM axis carrying
- * the rule's bit (= 1ULL << rule_id). `cidr.addr` is network byte order (the
- * LPM_TRIE key shape); `host_addr` is the host-order copy used for prefix
- * masking in close_prefixes. */
-struct BitPrefix {
-    xdpmf_cidr_v4 cidr;
-    std::uint32_t host_addr;
-    std::uint64_t bit;
-};
-
-/* Host-order mask for a prefix length ([0,32]); len==0 → all-zero mask.
- * Transcribed from the §5.42 spike (guard #9 — production-owned, NOT
- * #include'd from tests/bitvec). */
-[[nodiscard]] std::uint32_t host_mask(std::uint32_t prefixlen) noexcept
-{
-    if (prefixlen == 0) {
-        return 0u;
-    }
-    return 0xFFFFFFFFu << (32u - prefixlen);
-}
-
-/* §5.43 FI-1 prefix-closure (the #1 bit-vector trap — guard #23). For each
- * prefix P_i in `entries`, OR in bit_j of every P_j that COVERS P_i
- * (P_j.prefixlen <= P_i.prefixlen AND P_j == P_i truncated to P_j.prefixlen),
- * INCLUDING P_i itself. The cover direction is the trap: the LESS-specific
- * (shorter) prefix's bit flows INTO the MORE-specific (longer) prefix's
- * stored mask, so a longest-prefix LPM hit carries every covering rule — and
- * first-match-by-id (ffsll) then picks the lowest covering id. Returns the
- * closed mask aligned 1:1 with `entries`. Transcribed from the §5.42 spike's
- * close_prefixes() into production types (guard #9 — Q3 A1). */
-[[nodiscard]] std::vector<std::uint64_t>
-close_prefixes(const std::vector<BitPrefix>& entries)
-{
-    std::vector<std::uint64_t> closed(entries.size(), 0u);
-    for (std::size_t i = 0; i < entries.size(); ++i) {
-        const BitPrefix& pi = entries[i];
-        for (const BitPrefix& pj : entries) {
-            if (pj.cidr.prefixlen > pi.cidr.prefixlen) {
-                continue;  // pj more specific than pi → cannot cover it
-            }
-            const std::uint32_t m = host_mask(pj.cidr.prefixlen);
-            if ((pi.host_addr & m) == (pj.host_addr & m)) {
-                closed[i] |= pj.bit;  // pj covers pi (incl. pi == pj)
-            }
-        }
-    }
-    return closed;
-}
-
-/* §5.61 (MVP-4.21) B30 D-mvp-4.21-Q3 / SLOT-PLUMB: the loader-internal `slot`
- * carrier. `slot` = the rank of a rule's `id` in ascending-unique-id order,
- * ∈ [0, count-1]. Because slots are assigned in id-sorted order, `1ULL << slot`
- * preserves first-match-by-lowest-id (ffsll(acc)-1 still yields the lowest-id
- * survivor — HG-mvp-4.3-4, PI-mvp-4.21-PRIORITY) while decoupling the bit
- * position / counter index from the (now sparse) operator id. The SAME slot
- * value MUST be used at every populate site (the 4 lowering bit-shifts,
- * rules_inner[slot], rule_counters[slot], slot_rule_id[active*64+slot]) —
- * D-mvp-4.21-SLOT-COHERENCE. ids are unique (config seen_ids dedup). */
-[[nodiscard]] std::unordered_map<std::uint32_t, std::uint32_t>
-compute_id_to_slot(const std::vector<Rule>& rules)
-{
-    std::vector<std::uint32_t> ids;
-    ids.reserve(rules.size());
-    for (const Rule& r : rules) {
-        ids.push_back(r.id);
-    }
-    std::sort(ids.begin(), ids.end());
-    std::unordered_map<std::uint32_t, std::uint32_t> id_to_slot;
-    id_to_slot.reserve(ids.size());
-    for (std::uint32_t rank = 0; rank < ids.size(); ++rank) {
-        id_to_slot.emplace(ids[rank], rank);
-    }
-    return id_to_slot;
-}
-
-/* §5.61 B30: the slot→id inverse over the full [0,64) slot space — slot_to_id
- * [slot] = the id occupying `slot`, or XDPMF_SLOT_ID_EMPTY for the unoccupied
- * tail [count,64). Drives both the `slot_rule_id` map write (occupied prefix)
- * and the copy-forward-by-id remap (new-side mapping). */
-[[nodiscard]] std::array<std::uint32_t, XDPMF_RULE_COUNTERS_MAX>
-compute_slot_to_id(const std::vector<Rule>& rules,
-                   const std::unordered_map<std::uint32_t, std::uint32_t>& id_to_slot)
-{
-    std::array<std::uint32_t, XDPMF_RULE_COUNTERS_MAX> slot_to_id;
-    slot_to_id.fill(XDPMF_SLOT_ID_EMPTY);
-    for (const Rule& r : rules) {
-        slot_to_id[id_to_slot.at(r.id)] = r.id;
-    }
-    return slot_to_id;
-}
-
-/* §5.43 per-LPM-axis lowering result: the constrained prefixes (rules that
- * set this axis) + the wildcard mask (OR of bits for rules that do NOT
- * constrain this axis — they survive the axis unconditionally via
- * wildcard[active*2+axis], FI-2 mutual exclusion). */
-struct AxisLowering {
-    std::vector<BitPrefix> prefixes;
-    std::uint64_t          wildcard = 0u;
-};
-
-/* Lower one LPM axis (dst or src) from the validated Config: a rule that sets
- * the axis contributes a BitPrefix at its bit position; a rule that does NOT
- * set the axis contributes its bit to the wildcard mask. §5.61 (MVP-4.21) B30:
- * the bit is `1ULL << slot` (id-sorted rank, D-mvp-4.21-Q3) — slot ∈ [0,count)
- * is shift-safe (config caps the rule COUNT at XDPMF_ALLOWLIST_MAX). */
-[[nodiscard]] AxisLowering lower_axis(const Config& c, bool dst_axis,
-    const std::unordered_map<std::uint32_t, std::uint32_t>& id_to_slot)
-{
-    AxisLowering out;
-    out.prefixes.reserve(c.rules.size());
-    for (const Rule& r : c.rules) {
-        const std::optional<xdpmf_cidr_v4>& axis =
-            dst_axis ? r.match.dst_cidr : r.match.src_cidr;
-        const std::uint64_t bit = std::uint64_t{1} << id_to_slot.at(r.id);
-        if (axis.has_value()) {
-            BitPrefix bp{};
-            bp.cidr      = *axis;
-            bp.host_addr = ::ntohl(axis->addr);
-            bp.bit       = bit;
-            out.prefixes.push_back(bp);
-        } else {
-            out.wildcard |= bit;  // unconstrained on this axis → wildcard survivor
-        }
-    }
-    return out;
-}
-
-/* §5.53 (MVP-4.13) D-mvp-4.13-FORK: the IPv6 sibling of BitPrefix — a v6
- * constrained prefix carrying the rule's bit. `cidr.addr6` is network byte
- * order (the LPM_TRIE key shape); `host_addr6` is the host-order `unsigned
- * __int128` copy used for 128-bit prefix masking in close_prefixes6 (Q1=A1 —
- * mirrors the v4 cover-direction body so the #1-bug-class invariant is
- * eyeball-auditable). */
-struct BitPrefix6 {
-    xdpmf_cidr_v6     cidr;
-    unsigned __int128 host_addr6;
-    std::uint64_t     bit;
-};
-
-/* Load the 16 network-order bytes (addr6[0]=MSB) into a host-order __int128. */
-[[nodiscard]] unsigned __int128 host_addr6_of(const xdpmf_cidr_v6& c) noexcept
-{
-    unsigned __int128 v = 0;
-    for (int i = 0; i < 16; ++i) {
-        v = (v << 8) | static_cast<unsigned __int128>(c.addr6[i]);
-    }
-    return v;
-}
-
-/* Host-order 128-bit mask for a v6 prefix length ([0,128]); len==0 → all-zero.
- * The `/0` shift-by-128 UB site is special-cased (len==0 returns 0); for
- * len ∈ [1,128] the shift amount (128-len) ∈ [0,127], never 128 (Q1). */
-[[nodiscard]] unsigned __int128 host_mask6(unsigned int prefixlen) noexcept
-{
-    if (prefixlen == 0) {
-        return 0;
-    }
-    return (~static_cast<unsigned __int128>(0)) << (128u - prefixlen);
-}
-
-/* §5.53 FI-1 prefix-closure at 128 bits (guard #23 — the #1 bit-vector trap).
- * FORKED from close_prefixes: for each P_i, OR in bit_j of every P_j that
- * COVERS P_i (P_j.prefixlen <= P_i.prefixlen AND P_j == P_i truncated to
- * P_j.prefixlen), INCLUDING P_i. The LESS-specific (lower-id) covering prefix's
- * bit flows INTO the MORE-specific entry's stored mask, so a longest-prefix LPM
- * hit carries every covering rule and ffsll picks the lowest covering id. */
-[[nodiscard]] std::vector<std::uint64_t>
-close_prefixes6(const std::vector<BitPrefix6>& entries)
-{
-    std::vector<std::uint64_t> closed(entries.size(), 0u);
-    for (std::size_t i = 0; i < entries.size(); ++i) {
-        const BitPrefix6& pi = entries[i];
-        for (const BitPrefix6& pj : entries) {
-            if (pj.cidr.prefixlen > pi.cidr.prefixlen) {
-                continue;  // pj more specific than pi → cannot cover it
-            }
-            const unsigned __int128 m = host_mask6(pj.cidr.prefixlen);
-            if ((pi.host_addr6 & m) == (pj.host_addr6 & m)) {
-                closed[i] |= pj.bit;  // pj covers pi (incl. pi == pj)
-            }
-        }
-    }
-    return closed;
-}
-
-/* §5.53 per-v6-LPM-axis lowering result — FORK of AxisLowering. */
-struct AxisLowering6 {
-    std::vector<BitPrefix6> prefixes;
-    std::uint64_t           wildcard = 0u;
-};
-
-/* Lower one v6 LPM axis (dst6 or src6). FORK of lower_axis: a rule that sets
- * the axis contributes a BitPrefix6 at its bit; a rule that does NOT set the
- * axis contributes its bit to the wildcard mask (family-blind lowering — a
- * v4-only rule lands in wc_dst6/wc_src6 by this SAME mechanism, the load-
- * bearing Q2 cross-family fill). §5.61 (MVP-4.21) B30: bit = `1ULL << slot`. */
-[[nodiscard]] AxisLowering6 lower_axis6(const Config& c, bool dst6_axis,
-    const std::unordered_map<std::uint32_t, std::uint32_t>& id_to_slot)
-{
-    AxisLowering6 out;
-    out.prefixes.reserve(c.rules.size());
-    for (const Rule& r : c.rules) {
-        const std::optional<xdpmf_cidr_v6>& axis =
-            dst6_axis ? r.match.dst_cidr6 : r.match.src_cidr6;
-        const std::uint64_t bit = std::uint64_t{1} << id_to_slot.at(r.id);
-        if (axis.has_value()) {
-            BitPrefix6 bp{};
-            bp.cidr       = *axis;
-            bp.host_addr6 = host_addr6_of(*axis);
-            bp.bit        = bit;
-            out.prefixes.push_back(bp);
-        } else {
-            out.wildcard |= bit;  // unconstrained on this axis → wildcard survivor
-        }
-    }
-    return out;
-}
-
-/* §5.50 (MVP-4.10 B28-2) generic per-exact-HASH-axis lowering result — replaces
- * the byte-identical ProtoLowering/VlanLowering structs and the key-only-
- * different MacLowering (D-mvp-4.10-STRUCT). entries[k] = {key, OR of bits of
- * every rule constraining that exact key}; wildcard = OR of bits of rules NOT
- * constraining this axis. NO prefix-closure (exact-match HASH). PortLowering +
- * the dst/src AxisLowering are NOT folded (different shape — D-mvp-4.10-
- * BOUNDARY). */
-template<class Key>
-struct AxisAggregate {
-    std::vector<std::pair<Key, std::uint64_t>> entries;
-    std::uint64_t                              wildcard = 0u;
-};
-// Name-preserving aliases — Proto/Vlan are the SAME instantiation (legal); keep
-// populate_all_axes' signature + the apply_request locals textually stable.
-using ProtoLowering = AxisAggregate<std::uint32_t>;
-using VlanLowering  = AxisAggregate<std::uint32_t>;
-using MacLowering   = AxisAggregate<xdpmf_mac>;
-// §5.54 (MVP-4.14): ethertype is an exact-HASH axis identical in shape to
-// proto/vlan (only the projected source member differs: r.match.ethertype,
-// widened u16→u32). Same instantiation; CLONE not fork (D-mvp-4.14-CLONE).
-using EthertypeLowering = AxisAggregate<std::uint32_t>;
-
-/* §5.50 (MVP-4.10 B28-2) unify lower_proto_axis / lower_vlan_axis /
- * lower_mac_axis into ONE monomorphized template (rule-of-three OVERRIDES guard
- * #9 per §5.37 / D-3.4f-1). They differed by THREE axes — key type, the
- * projected source member (proto/vlan/mac are distinct std::optional<> types),
- * and the dedup equality (== for proto/vlan, memcmp for the 6-octet mac). Per
- * rule: bit = 1<<slot; key_of(r) projects the axis key (std::nullopt => the rule
- * does NOT constrain this axis, so its bit goes to `wildcard`, FI-2 mutual
- * exclusion); on a key, a linear dedup-scan via key_eq (D-mvp-4.10-MAC-EQ keeps
- * the mac memcmp, NOT ==) ORs the bit into the matching entry, else emplace_back
- * a new entry. Insertion order preserved EXACTLY (D-mvp-4.10-ORDER) =>
- * bit-identical entries/wildcard to the three originals. §5.61 (MVP-4.21) B30:
- * bit = `1ULL << slot` (id-sorted rank, D-mvp-4.21-Q3) — slot ∈ [0,count) is
- * shift-safe (config caps the rule COUNT). Each lambda inlines per
- * instantiation => zero indirect-call cost (Q1 -> A1). */
-template<class Key, class Project, class Eq>
-[[nodiscard]] AxisAggregate<Key> aggregate_axis(const std::vector<Rule>& rules,
-                                                Project key_of, Eq key_eq,
-    const std::unordered_map<std::uint32_t, std::uint32_t>& id_to_slot)
-{
-    AxisAggregate<Key> out;
-    for (const Rule& r : rules) {
-        const std::uint64_t      bit = std::uint64_t{1} << id_to_slot.at(r.id);
-        const std::optional<Key> key = key_of(r);
-        if (key.has_value()) {
-            // Aggregate rules sharing the same exact key into one entry.
-            bool merged = false;
-            for (std::pair<Key, std::uint64_t>& e : out.entries) {
-                if (key_eq(e.first, *key)) {
-                    e.second |= bit;
-                    merged = true;
-                    break;
-                }
-            }
-            if (!merged) {
-                out.entries.emplace_back(*key, bit);
-            }
-        } else {
-            out.wildcard |= bit;
-        }
-    }
-    return out;
-}
-
-/* §5.44 (MVP-4.4) per-port-axis lowering result: one xdpmf_port_range slot per
- * port-constrained rule (single port ⇒ lo==hi) + the wildcard mask (rules NOT
- * constraining dst_port). NO prefix-closure (explicit ranges — D-mvp-4.4-
- * NO-CLOSURE). */
-struct PortLowering {
-    std::vector<xdpmf_port_range> ranges;
-    std::uint64_t                 wildcard = 0u;
-};
-
-/* Lower the dst_port axis: a rule with `dst_port` set contributes one
- * {lo,hi,bit} slot; a rule WITHOUT `dst_port` contributes its bit to the port
- * wildcard (FI-2). §5.61 (MVP-4.21) B30: bit = `1ULL << slot` (id-sorted rank). */
-[[nodiscard]] PortLowering lower_port_axis(const Config& c,
-    const std::unordered_map<std::uint32_t, std::uint32_t>& id_to_slot)
-{
-    PortLowering out;
-    out.ranges.reserve(c.rules.size());
-    for (const Rule& r : c.rules) {
-        const std::uint64_t bit = std::uint64_t{1} << id_to_slot.at(r.id);
-        if (r.match.dst_port.has_value()) {
-            xdpmf_port_range slot{};
-            slot.lo  = r.match.dst_port->lo;
-            slot.hi  = r.match.dst_port->hi;
-            slot.bit = bit;
-            out.ranges.push_back(slot);
-        } else {
-            out.wildcard |= bit;
-        }
-    }
-    return out;
-}
-
 /* §5.50 (MVP-4.10 B28-1) unify populate_inner_slot (mac, §5.47 D-mvp-4.7-Q1) /
  * populate_proto_inner_slot (§5.44) / populate_vlan_inner_slot (§5.45) into ONE
  * monomorphized template (rule-of-three OVERRIDES guard #9 per §5.37 /
@@ -1688,7 +1371,7 @@ void write_active_idx(int active_idx_fd, std::uint32_t idx)
  * Empty slots written as {present=0, action_id=0} so a removed rule doesn't
  * leave stale state. BOTH pass and drop rules are written faithfully; the
  * action discrimination happens downstream at the rules→action_table chain. */
-void populate_rules_inner_slot(int rules_inner_fd, const std::vector<Rule>& rules,
+void populate_rules_inner_slot(int rules_inner_fd, std::span<const Rule> rules,
     const std::unordered_map<std::uint32_t, std::uint32_t>& id_to_slot)
 {
     /* Clear all 64 slots first — operator may have removed rules across
@@ -1900,66 +1583,59 @@ int inactive_axis_fd(bpf_map* a, bpf_map* b, std::uint32_t slot, const char* wha
  * same populate_* callees, same order as before the refactor. wildcard +
  * defaults are SINGLE maps indexed BY slot (direct bpf_map__fd, not pair-select
  * — D-mvp-4.8-FD-HELPER-SCOPE). */
-void populate_all_axes(xdpfilter_bpf* skel, std::uint32_t slot,
-                       const MacLowering&        mac_low,
-                       const AxisLowering&       dst_low,
-                       const AxisLowering&       src_low,
-                       const ProtoLowering&      proto_low,
-                       const PortLowering&       port_low,
-                       const VlanLowering&       vlan_low,
-                       const AxisLowering6&      dst6_low,
-                       const AxisLowering6&      src6_low,
-                       const EthertypeLowering&  eth_low,
-                       const std::vector<Rule>&  rules,
-                       const std::unordered_map<std::uint32_t, std::uint32_t>& id_to_slot,
-                       const std::array<std::uint32_t, XDPMF_RULE_COUNTERS_MAX>& slot_to_id,
-                       DefaultAction             default_action)
+// §5.73 (MVP-4.33) B40: collapses the prior 16-arg populate_all_axes into a
+// 3-arg materialize over the named CompiledRuleset — each former positional arg
+// is now read off the matching `cr.` member (positional→member rename ONLY,
+// behavior-preserving). Body wraps populate_all_axes' content EXCLUSIVELY (HG-1
+// / guard #15): populate_action_table + copy_rule_counters_forward stay EXPLICIT
+// at each apply_request call site.
+void materialize(xdpfilter_bpf* skel, std::uint32_t slot, const CompiledRuleset& cr)
 {
     // 1 mac — paired allowlist_a/_b -> __u64 aggregated rule-bitmask
     populate_hash_inner_slot(
         inactive_axis_fd(skel->maps.allowlist_a, skel->maps.allowlist_b, slot,
                          "inactive mac inner fd unavailable"),
-        mac_low.entries, "mac");
+        cr.mac_low.entries, "mac");
     // 2 dst — paired dst_bitmask_a/_b LPM bit-vector
     populate_bitvec_inner_slot(
         inactive_axis_fd(skel->maps.dst_bitmask_a, skel->maps.dst_bitmask_b, slot,
                          "inactive dst inner fd unavailable"),
-        dst_low.prefixes, close_prefixes, "bitvec_inner");
+        cr.dst_low.prefixes, close_prefixes, "bitvec_inner");
     // 3 src — paired cidr_allowlist_a/_b LPM bit-vector
     populate_bitvec_inner_slot(
         inactive_axis_fd(skel->maps.cidr_allowlist_a, skel->maps.cidr_allowlist_b, slot,
                          "inactive src inner fd unavailable"),
-        src_low.prefixes, close_prefixes, "bitvec_inner");
+        cr.src_low.prefixes, close_prefixes, "bitvec_inner");
     // 4 proto — paired proto_bitmask_a/_b exact-HASH
     populate_hash_inner_slot(
         inactive_axis_fd(skel->maps.proto_bitmask_a, skel->maps.proto_bitmask_b, slot,
                          "inactive proto inner fd unavailable"),
-        proto_low.entries, "proto");
+        cr.proto_low.entries, "proto");
     // 5 port — paired port_ranges_a/_b range ARRAY
     populate_port_inner_slot(
         inactive_axis_fd(skel->maps.port_ranges_a, skel->maps.port_ranges_b, slot,
                          "inactive port inner fd unavailable"),
-        port_low.ranges);
+        cr.port_low.ranges);
     // 6 vlan — paired vlan_bitmask_a/_b exact-HASH
     populate_hash_inner_slot(
         inactive_axis_fd(skel->maps.vlan_bitmask_a, skel->maps.vlan_bitmask_b, slot,
                          "inactive vlan inner fd unavailable"),
-        vlan_low.entries, "vlan");
+        cr.vlan_low.entries, "vlan");
     // §5.53 dst6 — paired dst6_bitmask_a/_b LPM bit-vector (v6 key)
     populate_bitvec_inner_slot(
         inactive_axis_fd(skel->maps.dst6_bitmask_a, skel->maps.dst6_bitmask_b, slot,
                          "inactive dst6 inner fd unavailable"),
-        dst6_low.prefixes, close_prefixes6, "bitvec6_inner");
+        cr.dst6_low.prefixes, close_prefixes6, "bitvec6_inner");
     // §5.53 src6 — paired src6_bitmask_a/_b LPM bit-vector (v6 key)
     populate_bitvec_inner_slot(
         inactive_axis_fd(skel->maps.src6_bitmask_a, skel->maps.src6_bitmask_b, slot,
                          "inactive src6 inner fd unavailable"),
-        src6_low.prefixes, close_prefixes6, "bitvec6_inner");
+        cr.src6_low.prefixes, close_prefixes6, "bitvec6_inner");
     // §5.54 ethertype — paired ethertype_bitmask_a/_b exact-HASH (host-order u32 key)
     populate_hash_inner_slot(
         inactive_axis_fd(skel->maps.ethertype_bitmask_a, skel->maps.ethertype_bitmask_b, slot,
                          "inactive ethertype inner fd unavailable"),
-        eth_low.entries, "ethertype");
+        cr.eth_low.entries, "ethertype");
     // 7 ruleset_state — §5.70 (MVP-4.30) B35: SINGLE map indexed by slot; the 9
     //   wildcard halves + folded default_action in ONE struct write (replaces the
     //   prior `wildcard` + `defaults` two-block populate). (D-mvp-4.8-FD-HELPER-SCOPE)
@@ -1969,17 +1645,17 @@ void populate_all_axes(xdpfilter_bpf* skel, std::uint32_t slot,
             throw_loader(LoaderError::LoadFailed, "ruleset_state fd unavailable");
         }
         write_ruleset_state(ruleset_state_fd, slot,
-                            dst_low.wildcard, src_low.wildcard,
-                            proto_low.wildcard, port_low.wildcard,
-                            vlan_low.wildcard, mac_low.wildcard,
-                            dst6_low.wildcard, src6_low.wildcard,
-                            eth_low.wildcard, default_action);
+                            cr.dst_low.wildcard, cr.src_low.wildcard,
+                            cr.proto_low.wildcard, cr.port_low.wildcard,
+                            cr.vlan_low.wildcard, cr.mac_low.wildcard,
+                            cr.dst6_low.wildcard, cr.src6_low.wildcard,
+                            cr.eth_low.wildcard, cr.default_action);
     }
     // 9 rules — paired rules_a/_b inner ARRAY (keyed by internal slot)
     populate_rules_inner_slot(
         inactive_axis_fd(skel->maps.rules_a, skel->maps.rules_b, slot,
                          "inactive rules inner fd unavailable"),
-        rules, id_to_slot);
+        cr.rules, cr.id_to_slot);
     // 10 slot_rule_id — SINGLE map indexed by slot (§5.61 B30 D-mvp-4.21-Q1);
     // RESET-on-apply, mirrors wildcard/defaults. Userspace-only.
     {
@@ -1987,7 +1663,7 @@ void populate_all_axes(xdpfilter_bpf* skel, std::uint32_t slot,
         if (sri_fd < 0) {
             throw_loader(LoaderError::LoadFailed, "slot_rule_id fd unavailable");
         }
-        write_slot_rule_id(sri_fd, slot, slot_to_id);
+        write_slot_rule_id(sri_fd, slot, cr.slot_to_id);
     }
 }
 
@@ -2192,104 +1868,47 @@ std::uint32_t apply_request(const ApplyRequest& req)
     // reject shape-invalid names (exit 8) before any lowering/kernel touch.
     validate_iface_name(req.iface, LoaderError::PathRefused);
 
-    // §5.47 (MVP-4.7): the MAC axis is UN-FROZEN — lowered to a per-MAC
-    // aggregated rule-bitmask list (constrained) + a wildcard mask
-    // (unconstrained), exactly like the proto/vlan exact-HASH axes. NO closure
-    // (D-mvp-4.7-NO-CLOSURE). The two LPM axes are lowered to prefix+bit lists
-    // (constrained) + wildcard masks (unconstrained).
-    // §5.61 (MVP-4.21) B30 D-mvp-4.21-Q3 / SLOT-PLUMB: assign each rule a dense
-    // internal `slot` = its rank in ascending-unique-id order, computed ONCE and
-    // threaded into EVERY populate site (the 4 lowering bit-shifts, rules_inner,
-    // rule_counters, slot_rule_id) so a single coherent slot per rule is used
-    // everywhere (D-mvp-4.21-SLOT-COHERENCE). slot_to_id is the [0,64) inverse
-    // (id or EMPTY) feeding the slot_rule_id map write + the copy-forward remap.
-    const std::unordered_map<std::uint32_t, std::uint32_t> id_to_slot =
-        compute_id_to_slot(req.config.rules);
-    const std::array<std::uint32_t, XDPMF_RULE_COUNTERS_MAX> slot_to_id =
-        compute_slot_to_id(req.config.rules, id_to_slot);
-    // §5.50 (MVP-4.10 B28-2): mac/proto/vlan exact-HASH lowering folded into the
-    // generic aggregate_axis template; per-axis projector + equality functors
-    // here. mac uses a 6-octet memcmp equality (NOT ==, D-mvp-4.10-MAC-EQ).
-    const MacLowering          mac_low     = aggregate_axis<xdpmf_mac>(
-        req.config.rules,
-        [](const Rule& r) { return r.match.mac; },
-        [](const xdpmf_mac& a, const xdpmf_mac& b) {
-            return std::memcmp(a.octets, b.octets, sizeof(a.octets)) == 0;
-        },
-        id_to_slot);
-    const AxisLowering         dst_low     = lower_axis(req.config, /*dst_axis=*/true, id_to_slot);
-    const AxisLowering         src_low     = lower_axis(req.config, /*dst_axis=*/false, id_to_slot);
-    // §5.53 (MVP-4.13): lower the two NEW IPv6 LPM axes (dst6/src6). FORKED
-    // siblings of the v4 dst/src lowering; family-blind (a v4-only rule lands
-    // in wc_dst6/wc_src6, the load-bearing Q2 cross-family fill).
-    const AxisLowering6        dst6_low    = lower_axis6(req.config, /*dst6_axis=*/true, id_to_slot);
-    const AxisLowering6        src6_low    = lower_axis6(req.config, /*dst6_axis=*/false, id_to_slot);
-    // §5.44 (MVP-4.4): lower the two NEW axes (proto exact-HASH, dst_port
-    // range) alongside the §5.43 LPM axes. NO closure (D-mvp-4.4-NO-CLOSURE).
-    const ProtoLowering        proto_low   = aggregate_axis<std::uint32_t>(
-        req.config.rules,
-        [](const Rule& r) -> std::optional<std::uint32_t> { return r.match.protocol; },
-        std::equal_to<std::uint32_t>{},
-        id_to_slot);
-    const PortLowering         port_low    = lower_port_axis(req.config, id_to_slot);
-    // §5.45 (MVP-4.5): lower the NEW vlan axis (exact-HASH outer VID) alongside
-    // the §5.43/§5.44 axes. NO closure (D-mvp-4.5-NO-CLOSURE). The vlan projector
-    // widens the config u16 VID -> the BPF __u32 HASH key (D-mvp-4.5-VLAN-VALUE-WIDTH).
-    const VlanLowering         vlan_low    = aggregate_axis<std::uint32_t>(
-        req.config.rules,
-        [](const Rule& r) -> std::optional<std::uint32_t> {
-            if (r.match.vlan) return std::uint32_t{*r.match.vlan};
-            return std::nullopt;
-        },
-        std::equal_to<std::uint32_t>{},
-        id_to_slot);
-    // §5.54 (MVP-4.14): lower the NEW ethertype axis (exact-HASH, host-order u16
-    // widened to the BPF __u32 HASH key). CLONE of the vlan lowering above; NO
-    // closure (D-mvp-4.14-CLONE / D-mvp-4.14-HASH-MAX). Family-blind: the axis
-    // is composed into all three datapath arms by the hoisted lookup.
-    const EthertypeLowering    eth_low     = aggregate_axis<std::uint32_t>(
-        req.config.rules,
-        [](const Rule& r) -> std::optional<std::uint32_t> {
-            if (r.match.ethertype) return std::uint32_t{*r.match.ethertype};
-            return std::nullopt;
-        },
-        std::equal_to<std::uint32_t>{},
-        id_to_slot);
-    const DefaultAction default_action     = req.config.default_action;
+    // §5.73 (MVP-4.33) B40: lower the validated Config into the named, libbpf-free
+    // CompiledRuleset in ONE pure call (D-mvp-4.33-Q2 keeps compile() throw-free —
+    // the overflow bound-checks below stay HERE, reading cr.* immediately after).
+    // `cr.rules` is a non-owning span into req.config.rules; `req` (const&)
+    // outlives the whole function, and cr is consumed (bound-checks + both
+    // materialize calls) within this scope and never escapes (D-mvp-4.33-Q1).
+    const CompiledRuleset cr = compile(req.config);
 
-    if (mac_low.entries.size() > XDPMF_ALLOWLIST_MAX) {
+    if (cr.mac_low.entries.size() > XDPMF_ALLOWLIST_MAX) {
         throw_loader(LoaderError::LoadFailed,
                      std::format("apply: mac-rule count {} exceeds XDPMF_ALLOWLIST_MAX={}",
-                                 mac_low.entries.size(), XDPMF_ALLOWLIST_MAX));
+                                 cr.mac_low.entries.size(), XDPMF_ALLOWLIST_MAX));
     }
-    if (dst_low.prefixes.size() > XDPMF_ALLOWLIST_MAX) {
+    if (cr.dst_low.prefixes.size() > XDPMF_ALLOWLIST_MAX) {
         throw_loader(LoaderError::LoadFailed,
                      std::format("apply: dst-cidr-rule count {} exceeds XDPMF_ALLOWLIST_MAX={}",
-                                 dst_low.prefixes.size(), XDPMF_ALLOWLIST_MAX));
+                                 cr.dst_low.prefixes.size(), XDPMF_ALLOWLIST_MAX));
     }
-    if (src_low.prefixes.size() > XDPMF_ALLOWLIST_MAX) {
+    if (cr.src_low.prefixes.size() > XDPMF_ALLOWLIST_MAX) {
         throw_loader(LoaderError::LoadFailed,
                      std::format("apply: src-cidr-rule count {} exceeds XDPMF_ALLOWLIST_MAX={}",
-                                 src_low.prefixes.size(), XDPMF_ALLOWLIST_MAX));
+                                 cr.src_low.prefixes.size(), XDPMF_ALLOWLIST_MAX));
     }
-    if (dst6_low.prefixes.size() > XDPMF_ALLOWLIST_MAX) {
+    if (cr.dst6_low.prefixes.size() > XDPMF_ALLOWLIST_MAX) {
         throw_loader(LoaderError::LoadFailed,
                      std::format("apply: dst-cidr6-rule count {} exceeds XDPMF_ALLOWLIST_MAX={}",
-                                 dst6_low.prefixes.size(), XDPMF_ALLOWLIST_MAX));
+                                 cr.dst6_low.prefixes.size(), XDPMF_ALLOWLIST_MAX));
     }
-    if (src6_low.prefixes.size() > XDPMF_ALLOWLIST_MAX) {
+    if (cr.src6_low.prefixes.size() > XDPMF_ALLOWLIST_MAX) {
         throw_loader(LoaderError::LoadFailed,
                      std::format("apply: src-cidr6-rule count {} exceeds XDPMF_ALLOWLIST_MAX={}",
-                                 src6_low.prefixes.size(), XDPMF_ALLOWLIST_MAX));
+                                 cr.src6_low.prefixes.size(), XDPMF_ALLOWLIST_MAX));
     }
     // §5.44 (MVP-4.4): the port axis stores one ARRAY slot per port-constrained
     // rule (bounded by XDPMF_ALLOWLIST_MAX inner slots). The proto axis
     // aggregates per proto, so its entry count ≤ 256 (XDPMF_PROTO_HASH_MAX) by
     // construction — no separate bound check needed beyond the per-rule id cap.
-    if (port_low.ranges.size() > XDPMF_ALLOWLIST_MAX) {
+    if (cr.port_low.ranges.size() > XDPMF_ALLOWLIST_MAX) {
         throw_loader(LoaderError::LoadFailed,
                      std::format("apply: dst-port-rule count {} exceeds XDPMF_ALLOWLIST_MAX={}",
-                                 port_low.ranges.size(), XDPMF_ALLOWLIST_MAX));
+                                 cr.port_low.ranges.size(), XDPMF_ALLOWLIST_MAX));
     }
 
     // §5.24 Q3 Option B: kernel-version probe BEFORE any libbpf API call.
@@ -2469,10 +2088,7 @@ std::uint32_t apply_request(const ApplyRequest& req)
         // exactly ONE place (inactive_axis_fd). populate_action_table (shared
         // static) + copy_rule_counters_forward (PRESERVE) stay EXPLICIT below
         // (guard #15 / D-mvp-4.8-BOUNDARY).
-        populate_all_axes(skel.get(), inactive, mac_low, dst_low, src_low,
-                          proto_low, port_low, vlan_low, dst6_low, src6_low,
-                          eth_low, req.config.rules, id_to_slot, slot_to_id,
-                          default_action);
+        materialize(skel.get(), inactive, cr);
         // §5.29 (MVP-3.4) step 8.5: `action_table` STAYS SHARED per
         // §5.34 HG-3.4b-c2-3 / D-3.4b-c2-6 — values are static
         // {PASS=0, DROP=1}, never mutate at runtime; atomic-swap meaningless.
@@ -2517,7 +2133,7 @@ std::uint32_t apply_request(const ApplyRequest& req)
             const std::array<std::uint32_t, XDPMF_RULE_COUNTERS_MAX> old_slot_to_id =
                 read_slot_rule_id_half(sri_fd, cur);
             copy_rule_counters_forward(old_rc_fd, inactive_rc_fd,
-                                       old_slot_to_id, slot_to_id);
+                                       old_slot_to_id, cr.slot_to_id);
         }
 
         // Atomic prog swap. The OLD prog has been reading from these same
@@ -2586,9 +2202,7 @@ std::uint32_t apply_request(const ApplyRequest& req)
     // u32 store below (= 0) is the atomic commit for all of them. slot==0 ->
     // the `_a` inners (inactive_axis_fd). populate_action_table + the self-copy
     // copy_rule_counters_forward stay EXPLICIT below (guard #15).
-    populate_all_axes(skel.get(), 0u, mac_low, dst_low, src_low, proto_low,
-                      port_low, vlan_low, dst6_low, src6_low, eth_low,
-                      req.config.rules, id_to_slot, slot_to_id, default_action);
+    materialize(skel.get(), 0u, cr);
     // §5.29 (MVP-3.4) step 8.5: `action_table` STAYS SHARED per §5.34
     // HG-3.4b-c2-3 / D-3.4b-c2-6 — static {PASS=0, DROP=1} mapping.
     {
@@ -2616,7 +2230,7 @@ std::uint32_t apply_request(const ApplyRequest& req)
         // zeroed (harmless — the fresh inner is already zero). Uniform path.
         std::array<std::uint32_t, XDPMF_RULE_COUNTERS_MAX> empty_old;
         empty_old.fill(XDPMF_SLOT_ID_EMPTY);
-        copy_rule_counters_forward(rc_a_fd, rc_a_fd, empty_old, slot_to_id);
+        copy_rule_counters_forward(rc_a_fd, rc_a_fd, empty_old, cr.slot_to_id);
     }
 
     // First attach: create+pin the XDP link with the operator-selected mode.

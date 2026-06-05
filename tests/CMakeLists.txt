@@ -1612,3 +1612,41 @@ add_test(NAME T_LOADER_STDERR_SHAPE
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR})
 set_tests_properties(T_LOADER_STDERR_SHAPE PROPERTIES
     ENVIRONMENT "${TEST_ENV}" SKIP_RETURN_CODE 77 TIMEOUT 30)
+
+# ─────────────────────────────────────────────────────────────────────────
+# §5.73 (MVP-4.33 / B40) — offline unit test of the production lowering.
+#
+# T_COMPILE_LOWERING_IDENTITY drives the production `xdpmf::compile(Config)`
+# entirely OFFLINE: bare-main, NO gtest, NO veth, NO libbpf (bitvec_harness
+# precedent MINUS the libbpf link). The OPS-canary contract (§5.73
+# TestStrategy): the harness compiles the production lowering TU
+# (src/lib/compiled_ruleset.cpp) DIRECTLY into the exe and links NEITHER
+# PkgConfig::LIBBPF NOR xdpmf_internal NOR any *_skel target. If compile()
+# ever acquires a libbpf / error-category dependency this binary fails to
+# LINK — a signal the libbpf-linked bitvec_harness cannot give.
+add_executable(compile_harness
+    ${CMAKE_SOURCE_DIR}/tests/compile/compile_harness.cpp
+    ${CMAKE_SOURCE_DIR}/src/lib/compiled_ruleset.cpp
+)
+set_target_properties(compile_harness PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+# Production source uses quote-includes "config.hpp" (own dir) +
+# "common/xdpfilter.h" (-I src). The harness lives in tests/compile/, so it
+# needs src/lib on the path to resolve "compiled_ruleset.hpp"/"config.hpp".
+target_include_directories(compile_harness PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/lib
+)
+# DELIBERATELY no target_link_libraries(... PkgConfig::LIBBPF) and no
+# add_dependencies(... *_skel): the libbpf-free link IS the test contract.
+
+add_test(
+    NAME T_COMPILE_LOWERING_IDENTITY
+    COMMAND compile_harness
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_COMPILE_LOWERING_IDENTITY PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    TIMEOUT 30
+)
