@@ -1,135 +1,226 @@
-# Task brief — MVP-4.31 / B38: simplify-harvest — exporter dedup + dead-code + bitvec template-merge (brownfield)
+# Task brief — MVP-4.33 / B40: CompiledRuleset bundle — name the compile output + offline test (brownfield)
 
 ## Goal
 
-Harvest the four BEDROCK/CONTESTED **code** subtractions from the `/mint-simplify` fresh-pass verdict (run `wf_c66d2b84`, post-cleanup-arc @ `0c73fd6`). All are pure subtractions with zero behavior change; the doc-truth items (BACKLOG demote + CHANGELOG arc) already shipped hand-done (`ca80fb9`). This slice is the code half: ~−70 LOC, 0 net new abstractions beyond one shared exporter header.
+Slice 1 ("Tidy Bundle") of `mint/architecture-loader-datamodel.md` (mint-hld synthesis,
+committed `f37b63d`; reviewer pass, grounder `clean-with-gates`). Give the loader's
+**compile output a name and a boundary**: bundle the 12 anonymous compile locals in
+`apply_request` into a dumb value-type `CompiledRuleset`, extract a pure
+`CompiledRuleset compile(const Config&)`, and collapse the 16-argument `populate_all_axes`
+into a 3-argument `materialize(skel, slot, const CompiledRuleset&)`. Ship the **first-ever
+offline unit test of the production lowering** (`Config → CompiledRuleset` bit-identity),
+closing the `D-mvp-4.2-ISOLATION` coverage gap (today only `bitvec_harness`'s parallel
+reimplementation is tested, never the production path).
 
-Four items:
-1. **B4 (dead-code, UPHELD)** — delete the `read_all_attached(std::string_view)` single-arg trampoline (def + decl). Zero live callers; the sole scrape consumer (`http.cpp`) calls `read_all_attached_with_acc` directly. Its own comment ("keeps existing call sites byte-equivalent") is stale — no surviving call site.
-2. **B2 (extract-shared, UPHELD ×3)** — hoist `round_up_8` + `percpu_sum_u64` (duplicated across the two exporter PERCPU readers) into one shared inline home; delete the duplicate copies. `round_up_8` char-identical; `percpu_sum_u64` differs only in the first param name (`stats_fd`/`map_fd`). NOT covered by the §5.31 byte-equivalence note (that note is attached ONLY to `list_iface_dirs`).
-3. **C1 (extract-shared, WEAKENED → conscious reversal)** — hoist `list_iface_dirs` (also byte-identical across the two readers) into the same shared home, **but ONLY as an explicit, documented reversal of the §5.31 "deliberately duplicated, keep byte-equivalent" decision** (`rule_counters_reader.cpp:63-64`) — written down the way B37 reversed `D-mvp-4.23-H3-PRODOBJ`, NOT a silent factor-out. The comment's own rationale (keep the two readers byte-equivalent) is *better* served by a single shared definition (equivalent by construction), so the reversal is defensible — but it MUST be recorded.
-4. **B5 (merge, UPHELD)** — collapse `populate_bitvec_inner_slot` / `populate_bitvec6_inner_slot` (near-identical fork) into one `template<class Key>` mirroring the house-style `populate_hash_inner_slot<Key>`. **PROVENANCE-SAFE**: the audited guard #23 (#1 bit-vector bug class) lives in `close_prefixes`/`close_prefixes6`, NOT the populate wrapper — the merged template MUST still receive the two close fns as separate args so the cover-direction surface stays eyeball-auditable. This is the userspace loader map-population path, NOT the protected datapath family-arm asymmetry.
+This is the **entire pre-mirror/redirect tidy mandate**: the 16-arg signature is the present
+maintenance hazard the TC workstream would otherwise extend to 17. It is a **pure host-side
+refactor — zero datapath change**. `RulesetDelta`/`diff()` is the spike-gated **slice 2** and
+is OUT of this brief.
 
 ## Context: prior work
 
-- All prior briefs archived in `mint/task-brief-*.md` (B35 → `mint/task-brief-mvp-4.30.md`).
-- Source: `/mint-simplify` verdict (run `wf_c66d2b84`, full output in the task transcript). Two substrates: Code Judo (source) + Entropy Controller (concept). These four survived dedup-by-replication + adversarial defense.
-- Existing design: `mint/design.md` §5.70 (B35 ruleset_state pack — the most recent datapath slice).
-- The §5.31 byte-equivalent-readers decision (the C1 reversal target) is in `src/exporter/rule_counters_reader.cpp:62-64`.
-- Phase A code-grep verification: brief author ran the greps in the evidence footer.
-- PI continuity: PI-7 (loader.hpp/config.hpp zero-diff) — B5 edits `loader.cpp` body only (the `.hpp` interface is untouched → streak likely continues; architect confirms). The exporter items touch `src/exporter` (outside the loader/config PI-7 surface).
+- mint-hld synthesis + discharge ledger: `mint/architecture-loader-datamodel.md` (`f37b63d`).
+- PO ruling at the gate: slice 1 is the whole pre-TC mandate; slice 2 (delta) is
+  TC-orthogonal test-hygiene, spike-gated, hard gate (defer-if-not-pure-code-motion).
+- Architecture vocabulary: `mint/architecture-rule-model.md` (Wave B). Grounder discharged
+  the naming question: arch-doc "Rule IR" names a DIFFERENT form (the config.cpp-emitted
+  NormalizedRule above the lowering boundary, and the in-map table), NOT the compile-output
+  bit-structures → **no collision; mint `CompiledRuleset`**.
+- Brief-author Phase 2 grep verification (this brief): see evidence footer. 3 of 4
+  discharge-ledger slice-time rechecks DISCHARGED at brief-time (below); the 4th (cycle/LOC)
+  is an impl-time measurement.
+- PI continuity: **PI-7** (`loader.hpp` zero-diff) CONTINUES — the new header is private
+  (`src/lib/`, like `apply_internal.hpp`), `loader.hpp` is untouched (verified: it names no
+  `populate_*`/`materialize`/`Compiled` symbol). **PI-mvp-4.27-DATAPATH-IDENTICAL** (insn
+  baseline 3437 ×3 arms) CONTINUES and is the decisive cheap oracle.
 
 ## Workflow rules (brownfield)
 
-- **Architect**: read §5.70 + the two exporter readers + the loader bitvec-populate path + §6.5 invariants. EDIT design.md in place; append §5.71. Owns the shared-header home (Q1), the C1 §5.31-reversal record (HG-2), and the B5 template signature. Phase A re-verify the body-identity claims (guard #5) — the verdict's per-helper diff is the starting point, not gospel.
-- **Impl**: FileList per brownfield DIFF. Four independent subtractions; each is small and mechanical. Build clean + zero warnings. Userspace (no insn gate) for B2/B4/C1; B5 rebuilds the loader (no datapath `.bpf.c` change → xdp stays 3437).
-- **Tester**: the existing oracles ARE the regression control — NO new behavioural test. Exporter ctests (`T_PERCPU_STATS_SUM`, `T_EXPORTER_VALUES_MATCH_STATS`, `T_RULE_COUNTER_*`, `T_EXPORTER_NO_ATTACHED_IFACE`) cover B2/B4/C1 end-to-end; the `T_*_ORACLE_AGREEMENT` family + `T_ANDV6_PREFIX_CLOSURE_OVERLAP` (the /40-/68-/127 cover canary) cover B5's map-population. Confirm the full ctest baseline is unchanged (104/106; the 2 known env-fails by NAME).
-- **Reviewer**: 5-point brownfield. Special attention: (a) each subtraction is behavior-preserving (compiler/linker for B4 dead-code; exporter ctests for B2/C1; ORACLE_AGREEMENT for B5); (b) the C1 §5.31 reversal is DOCUMENTED, not silent (the anti-extraction comment must be removed/replaced with a reversal note, not just deleted); (c) B5 keeps `close_prefixes`/`close_prefixes6` as separate args (guard #23 surface intact); (d) PI-7 loader.hpp/config.hpp ∅; (e) no datapath `.bpf.c` change (xdp 3437 unchanged).
+- **Architect**: read `apply_request` (`loader.cpp:2189+`), the lowering block
+  (`:1165–1474`), both `populate_all_axes` call sites (`:2472` reattach / `:2589` fresh),
+  and `architecture-loader-datamodel.md`. EDIT `mint/design.md` in place; append **§5.73**.
+- **Impl**: FileList per brownfield mode (NEW headers + EDIT loader.cpp + NEW test + CMake).
+- **Tester**: NEW offline unit test (bare-`main`, no gtest — precedent `bitvec_harness`,
+  `tests/CMakeLists.txt:1092`); the datapath byte-identity gate (`T_INSN_BASELINE_GATE.sh`,
+  `T_*_ORACLE_AGREEMENT`) is REUSED unchanged, not re-authored.
+- **Reviewer**: 5-point brownfield framework. Special attention: (a) datapath byte-identity
+  (insn 3437 ×3 + oracle-agreement); (b) guard #15 boundary intact (counter copy-forward
+  NOT folded into `materialize`); (c) guard #36 (CompiledRuleset is a dumb aggregate).
 
-## Human-gate decisions (defaults applied — architect overrides at Phase A)
+## Human-gate decisions (defaults applied — architect overrides at Phase A with evidence)
 
-### HG-mvp-4.31-1: shared exporter-helper home → **default = NEW `src/exporter/percpu_read.hpp` (or equivalent), included from both readers**
-**CORRECTION to the verdict (Phase 2, guard #5):** the verdict claimed `rule_counters_reader.hpp` "already #includes `stats_reader.hpp`, so no new include required" — this is FALSE. `rule_counters_reader.cpp` does NOT include `stats_reader.hpp` (grep-confirmed; the `.hpp:3` mention is a prose comment "Sister to stats_reader.hpp", not an `#include`). So a shared home needs EITHER a new small header (`percpu_read.hpp`, namespace `xdpmf::exporter::detail`, holding `round_up_8`+`percpu_sum_u64`+`list_iface_dirs`) + 2 `#include`s, OR homing in `stats_reader.hpp` + adding 1 `#include` to `rule_counters_reader.cpp`. Either is still net-negative (~−18 LOC for B2 alone, ~−40 incl. C1). Default: NEW `percpu_read.hpp` (cleanest — neither reader is "primary"). Architect picks.
+### HG-mvp-4.33-1: `materialize()` scope → **wraps `populate_all_axes` ONLY**
+`copy_rule_counters_forward` (PRESERVE, branch-divergent args — guard #15 / D-mvp-4.8-BOUNDARY)
+and `populate_action_table` (shared static table) **STAY EXPLICIT at each call site**, NOT
+folded into `materialize`. Verified separation: counter copy-forward is called at `:2519`
+(reattach) and `:2619` (fresh self-copy), distinct from the `populate_all_axes` calls.
+`materialize(skel, slot, cr)` is exactly the branch-INVARIANT 12-local consumer.
 
-### HG-mvp-4.31-2: C1 §5.31 reversal → **default = REVERSE explicitly, documented**
-The `list_iface_dirs` extraction reverses the `rule_counters_reader.cpp:62-64` "deliberately duplicated … §5.31 keeps the two readers byte-equivalent" decision. Default: do it, and record the reversal in §5.71 (cite the §5.31 rationale verbatim, state why a single shared def serves the byte-equivalence goal BETTER — equivalent by construction) + remove/replace the anti-extraction comment with a one-line "extracted in §5.71, reverses §5.31" note. Per [[impl-role-discipline]] / the B37 precedent (which reversed D-mvp-4.23). If the architect judges the §5.31 intent still load-bearing (e.g. a reason the comment doesn't state), DROP C1 and keep `list_iface_dirs` duplicated — B2/B4/B5 are independent and ship regardless.
+### HG-mvp-4.33-2: file placement → **NEW `src/lib/compiled_ruleset.{hpp,cpp}`; `compile()` libbpf-free**
+`compile()` (pure, no `skel`/fd/libbpf) lives in the new TU so the unit test links it WITHOUT
+dragging libbpf into the test binary (testability lens's clean-linkage point). `materialize()`
+needs `xdpfilter_bpf*` → its definition MAY stay in `loader.cpp` (architect's call); only its
+signature changes. `struct CompiledRuleset` is header-only in `compiled_ruleset.hpp`.
 
-### HG-mvp-4.31-3: VERSION bump → **default = NO bump**
-Pure internal subtraction — no operator-facing API/schema/metric/CLI change. VERSION stays 0.16.0.
+### HG-mvp-4.33-3: naming → **mint `CompiledRuleset`** (grounder-discharged; no "Rule IR" collision)
 
-## Open mechanism questions (architect decides; document in §5.71)
+### HG-mvp-4.33-4: VERSION → **no bump** (0.16.0 held across B37/B38/B39; internal refactor, no operator-visible surface)
 
-### Q1: B5 template parameterization shape
-- **A1**: `template<class Key>` param = key type (`xdpmf_cidr_v4`/`xdpmf_cidr_v6`) + prefix-vec type (`BitPrefix`/`BitPrefix6`) + close-fn (`close_prefixes`/`close_prefixes6`) passed as args — mirrors `populate_hash_inner_slot<Key>`.
-- **A2**: leave the fork (do NOT merge) if the type divergence (`BitPrefix` vs `BitPrefix6`, `std::uint64_t` vs `__int128` masks live in the close fns) makes the template signature uglier than the saved LOC.
-- **Recommendation**: **A1** (house-style precedent exists; the close fns stay separate args so guard #23 is untouched). Architect downgrades to A2 only if the signature exceeds the ~−38 LOC saving.
+### HG-mvp-4.33-5: `CompiledRuleset` value-equality for the test → **compare the deterministic lowering fields**
+`id_to_slot` is a `std::unordered_map` (non-deterministic iteration); the 11 other fields are
+insertion-ordered vectors/arrays/scalars (deterministic per D-mvp-4.10-ORDER). The offline
+bit-identity assertion compares the **lowering outputs** (entries/wildcard/prefixes — the
+datapath-bearing bits); `id_to_slot` is an intermediate compared by key-set if at all.
+Architect designs the exact assertion shape.
 
-## Scope (cycle MVP-4.31 — concrete items; UPPER-BOUND estimates)
+## Open mechanism questions (architect decides; document in §5.73)
 
-### Item B38-1 — delete dead `read_all_attached` trampoline (B4)
-**Where**: `src/exporter/stats_reader.cpp` (def, ~`:140-148`), `src/exporter/stats_reader.hpp` (decl, ~`:69` + the 2 stale doc-comments ~`:15`,`:38`,`:75`). ~−12 LOC. Oracle: linker (no callers) + `T_EXPORTER_*` (only the `_with_acc` path via `http.cpp`).
+### Q1: `CompiledRuleset.rules` member type
+- **A1**: `std::span<const Rule>` (non-owning — points into the caller's `Config.rules`).
+- **A2**: own a copy / hold `const Config&`.
+- **Recommendation**: **A1 `std::span<const Rule>`** per the action-axis-stays-RAW
+  non-foreclosure invariant (forward-compat lens). NB lifetime: the span must outlive the
+  `CompiledRuleset` — in `apply_request`, `compile()`'s result is consumed within the same
+  scope as `req.config`, so the span is valid; architect confirms no escape.
 
-### Item B38-2 — extract `round_up_8` + `percpu_sum_u64` to shared header (B2)
-**Where**: NEW shared home per HG-1; delete copies from `src/exporter/rule_counters_reader.cpp` (~`:56-59`,`:102-121`); keep one definition. ~−18 LOC net.
+### Q2: does `compile()` keep the bound-checks (`:2260–2293`, count > XDPMF_ALLOWLIST_MAX)?
+- **A1**: yes — bound-checks are part of "is this Config compilable", belong in `compile()`.
+- **A2**: leave them in `apply_request` after `compile()`.
+- **Recommendation**: **A1** — they throw `LoaderError::LoadFailed` on the lowering outputs;
+  keeping them in `compile()` makes the offline test able to assert the throw-on-overflow
+  contract too. Architect confirms the throw-site error strings are unchanged (byte-identity
+  of operator-visible stderr).
 
-### Item B38-3 — extract `list_iface_dirs` to the same shared home (C1, conscious §5.31 reversal)
-**Where**: same shared home; delete copies from both readers (~`stats_reader.cpp:54-80` / `rule_counters_reader.cpp:65-91`); remove/replace the §5.31 anti-extraction comment (`rule_counters_reader.cpp:62-64`). ~−21 LOC net. **Gated by HG-2** — drop if architect judges §5.31 still load-bearing.
+## Scope (cycle 1 — concrete items; estimates are UPPER BOUNDS)
 
-### Item B38-4 — template-merge `populate_bitvec_inner_slot` v4/v6 (B5)
-**Where**: `src/lib/loader.cpp` (`populate_bitvec_inner_slot` ~`:1538` + `populate_bitvec6_inner_slot`), call sites uniform. ~−38 LOC. `close_prefixes`/`close_prefixes6` stay SEPARATE args (guard #23). Oracle: `T_*_ORACLE_AGREEMENT` + `T_ANDV6_PREFIX_CLOSURE_OVERLAP`.
+### Item CR-1 — NEW `src/lib/compiled_ruleset.hpp`
+**Where**: `src/lib/compiled_ruleset.hpp` (verified absent).
+`struct CompiledRuleset` — a **dumb value-aggregate** (no methods, guard #36) of the 12
+compile locals: `id_to_slot`, `slot_to_id`, `mac_low`, `dst_low`, `src_low`, `dst6_low`,
+`src6_low`, `proto_low`, `port_low`, `vlan_low`, `eth_low`, `default_action`, plus `rules`
+(`std::span<const Rule>` per Q1). Declares `CompiledRuleset compile(const Config&)`.
+The per-axis `*Lowering` types (`AxisLowering` `:1256`, `AxisLowering6` `:1347`,
+`AxisAggregate<>` `:1387`, `PortLowering` `:1448`) are REUSED — this slice does NOT redefine
+them. (Architect decides whether they move to the header or stay in loader.cpp with a fwd
+include; moving risks needless churn — default: leave in loader.cpp, the header includes what
+it needs.)
+
+### Item CR-2 — NEW `src/lib/compiled_ruleset.cpp`
+**Where**: `src/lib/compiled_ruleset.cpp`.
+`CompiledRuleset compile(const Config&)` = verbatim lift of the compile block
+`loader.cpp:2206–2293` (the 11 `lower_*`/`aggregate_axis` calls + `compute_id_to_slot`/
+`compute_slot_to_id` + bound-checks per Q2). **Pure, no libbpf.** The lowering helper
+functions it calls must be reachable (architect: keep them in loader.cpp and declare, or
+co-locate — whichever preserves byte-identity with least churn).
+
+### Item CR-3 — EDIT `src/lib/loader.cpp`
+**Where**: `apply_request` body + `populate_all_axes` definition `:1903` + both call sites
+`:2472` / `:2589`.
+- `populate_all_axes(16 args)` → `materialize(xdpfilter_bpf* skel, std::uint32_t slot, const CompiledRuleset& cr)`; body reads `cr.mac_low` etc. (mechanical positional→member rename).
+- `apply_request`: replace the 12-local block with `const CompiledRuleset cr = compile(req.config);`
+  then `materialize(skel.get(), inactive|0u, cr)` at each branch.
+- `copy_rule_counters_forward` + `populate_action_table` call sites **UNCHANGED** (guard #15).
+
+### Item CR-4 — NEW offline unit test
+**Where**: `tests/<dir>/compile_harness.cpp` (architect/tester names the dir) + ctest
+registration. Bare-`main`, no gtest (precedent `bitvec_harness`). Builds a `Config` corpus
+including **≥1 Pass and ≥1 Drop rule** (exercises the `action_id` ternary `loader.cpp:1713` —
+recheck #4) across representative axes, runs `compile()`, asserts the lowering-bit outputs
+match a golden expectation. Links `compiled_ruleset.cpp` + `config` (NOT libbpf).
+
+### Item CR-5 — CMake wiring
+**Where**: `src/` lib target (add `compiled_ruleset.cpp` to the lib sources) +
+`tests/CMakeLists.txt` (`add_executable` + `add_test` for the compile harness, mirroring the
+`bitvec_harness` block `:1092`). Guard #11 N/A (no VERSION bump).
 
 ## Out of scope (explicit)
 
-- **Any behavior/verdict change** — all four are pure representation/dead-code subtractions; every existing ctest (esp. ORACLE_AGREEMENT + exporter) keeps its result.
-- **The datapath `.bpf.c`** — untouched; xdp stays 3437 (B5 is the userspace loader, not the BPF program).
-- **`close_prefixes`/`close_prefixes6` merge** — the FORK is a protected rent-payer (guard #23, PI-mvp-4.13); B5 merges only the populate WRAPPER, keeping the close fns separate.
-- **The confirmed-KEEP rent-payers** from the verdict: 3 family arms + per-arm `wc_*`/acc asymmetry, `BitPrefix`/`AxisLowering` v4/v6 forks, `parse_prefix`/`parse_prefix6`, FFS_FALLBACK + inline ETH_P/IPPROTO shims, `consume_flag_value` (exit-vs-throw divergence), design-brief corpus + perf-scratch + task-brief chain + hybrid-review (all have live consumers). Do NOT touch.
-- **B6** (collapse BACKLOG B1-B14 verbose bodies) — doc-only, deferred (marginal; interleaved with open items). Not this slice.
-- **Schema / axis / VERSION change** — none.
+- **`RulesetDelta` / `diff()` extraction** — spike-gated **slice 2**. The required spike
+  (verbatim-liftability of `loader.cpp:1820–1835` leaving the 64-slot write-set byte-identical)
+  must PASS first; hard gate (defer entirely if not pure code-motion).
+- **`copy_rule_counters_forward`** — untouched this slice (guard #15 boundary).
+- **Any BPF-side / map-shape change** — none; insn-count must stay 3437.
+- **O(n²)→O(n) optimization** of anything — deferred (64-rule scale makes it irrelevant).
+- **`apply --dry-run` / preview**, **mirror/redirect / TC**, **the 64-rule ceiling** — all OOS.
 
 ## Definition of done
 
-- §5.71 amendment in design.md (the 4 subtractions + the C1 §5.31-reversal record + B5 template decision).
-- PI-7 continues (loader.hpp/config.hpp ∅). No datapath change (xdp 3437). No new behaviour.
-- Full ctest baseline preserved (104/106; 2 known env-fails by NAME; ORACLE_AGREEMENT + exporter all green).
-- No VERSION bump (HG-3).
+- §5.73 amendment in `mint/design.md`.
+- PI-7 (`loader.hpp` zero-diff) CONTINUES; PI-mvp-4.27-DATAPATH-IDENTICAL CONTINUES.
+- Datapath byte-identity: `T_INSN_BASELINE_GATE.sh` stays **3437** ×3 arms;
+  `T_*_ORACLE_AGREEMENT` corpus holds (verdict-identity).
+- NEW `T_COMPILE_*` offline unit ctest green (Config→CompiledRuleset bit-identity, both action_ids).
+- Full ctest baseline unchanged + the one new test (count: current baseline + 1).
 - `mint/review.md` round-1 verdict = pass.
 - One git commit per phase boundary.
 
 ## Dependencies
 
-- Build: clang++-19 / cmake (existing). Userspace + loader rebuild; no BPF datapath recompile needed for B2/B4/C1 (B5 rebuilds loader, datapath `.bpf.o` unchanged).
-- Runtime / kernel: none new.
+- Build: C++23 (existing), libbpf (existing — but the new `compile()` TU + the unit test do
+  NOT link it). No new third-party deps (no gtest).
+- Runtime/kernel: none new (host-side refactor).
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 
 ```yaml
 mode: brownfield
 packs:
-  architect:  [lang/cpp.md, lang/bpf.md]     # C++ exporter/loader + BPF map-ABI context for B5
-  impl:       [lang/cpp.md, lang/bpf.md]
-  tester:     [test/bpf-xdp.md]              # ORACLE_AGREEMENT (B5) + exporter ctests are the regression control
-  reviewer:   [test/bpf-xdp.md]
+  architect:  []
+  impl:       []
+  tester:     []
+  reviewer:   []
 ```
 
 ---
 
-## Pre-brief sanity check (per [[mint-hld-scope-discipline]])
+## Pre-brief sanity check (per mint-hld-scope-discipline)
 
-**Mechanical / single-architect → `/mint-dev`, NOT `/mint-hld`.** Four small independent subtractions, each with an existing oracle (exporter ctests for B2/B4/C1, ORACLE_AGREEMENT + prefix-closure canary for B5). No design SPACE to explore — the verdict + defense already settled what/how; the only judgment calls are the shared-header home (HG-1, derivable) and the C1 §5.31-reversal record (HG-2, a documented-decision-reversal, not a fork). B5 is provenance-safe (guard #23 in the close fns, kept separate). No PRESERVE/RESET axis (no map-shape change). No PO-tier decision (all engineering, external value = entropy reduction + maintenance-coupling removal).
+**MECHANICAL** — single-architect `/mint-dev` is correct. The design-space was resolved by
+the mint-hld round (`f37b63d`); this slice carries a **discharged** decision (reviewer pass +
+grounder clean-with-gates). Multi-axis? No — the carving, naming, placement, and test scaffold
+are all decided/discharged. Expensive-to-undo? Low — pure struct-pack with the insn-3437 gate.
+No `/mint-hld` re-run needed. PRESERVE-vs-RESET sub-check: **N/A** — no stateful map is promoted
+to atomic-swap; `copy_rule_counters_forward` (PRESERVE) is explicitly untouched.
 
-## Notes for architect Phase A code-grep discipline (per architect spec rules)
+**Rolling-wave re-discharge of the inherited hld plan**: discharge ledger present in
+`architecture-loader-datamodel.md`. The required spike gates **slice 2 only** — slice 1 has no
+undischarged spike. Slice-time rechecks discharged at brief-time: see footer.
 
-- `grep -rnE 'read_all_attached\b' src/ tests/ | grep -v _with_acc` → only the def (`stats_reader.cpp:140`) + decl (`.hpp:69`) + 3 doc-comments; ZERO live callers (B4 dead). `http.cpp` uses `_with_acc`.
-- `grep -nE 'round_up_8|percpu_sum_u64|list_iface_dirs' src/exporter/{stats_reader,rule_counters_reader}.cpp` → all three defined in BOTH readers. Verify body-identity yourself (guard #5): `round_up_8` char-identical; `percpu_sum_u64` modulo param name (`stats_fd`/`map_fd`); `list_iface_dirs` md5-identical.
-- **§5.31 note covers ONLY `list_iface_dirs`** (`rule_counters_reader.cpp:62-64`) — confirm `round_up_8`/`percpu_sum_u64` carry NO such provenance (they don't → B2 is clean, no reversal needed; only C1 reverses §5.31).
-- **Include reality (Phase-2 correction):** NO file includes `stats_reader.hpp` from the rule_counters side; a shared home needs a new include/header (HG-1). The verdict's "already includes" claim is refuted.
-- `grep -nE 'populate_bitvec_inner_slot|populate_bitvec6_inner_slot|populate_hash_inner_slot|close_prefixes' src/lib/loader.cpp` → fork at `:1538`/`_v6`, house-style template at `:1492`, guard #23 lives in `close_prefixes` (`:1191`)/`close_prefixes6` (`:1327`) — NOT the wrapper.
-- All anon-namespace / TU-local (no ODR hazard for the exporter extractions); error strings NOT test-pinned (grep tests/ for them = ∅ before assuming).
+## Notes for architect Phase A code-grep discipline
+
+Brief author ran these; architect re-verifies + extends:
+- `grep -nE 'populate_all_axes' src/lib/loader.cpp` — def `:1903`, calls `:2472`/`:2589` (16 args each, confirmed).
+- `grep -nE 'copy_rule_counters_forward' src/lib/loader.cpp` — calls `:2519`/`:2619`, SEPARATE from populate (guard #15).
+- `test -f src/lib/compiled_ruleset.hpp` — absent (NEW).
+- `grep -nE 'struct (AxisLowering|AxisLowering6|AxisAggregate|PortLowering)' src/lib/loader.cpp` — the lowering types to REUSE (`:1256/:1347/:1387/:1448`).
+- `grep -nE 'XDPMF_PROD_INSN_BASELINE' tests/T_INSN_BASELINE_GATE.sh` — baseline `3437` (`:71`).
+- `grep -niE 'gtest|catch2|doctest' tests/CMakeLists.txt` — empty (bare-main is the only path).
+- **Architect MUST re-run** the discharge-ledger rechecks #2 (CompiledRuleset fields ↔ live
+  `*Lowering` shapes — one `unordered_map`, rest deterministic) and #4 (corpus covers both
+  action_ids) at design time, and confirm the `compile()` callees are pure/side-effect-free
+  (hidden-assumption #2) and touch no BPF-side code (hidden-assumption #1).
 
 ### Anti-misdiagnosis guards applicable to this slice (per Phase 3)
 
-- **Guard #5 (Phase A code-grep)** — always; re-verify the body-identity diffs + the include reality (the verdict's "already includes stats_reader.hpp" was wrong).
-- **Guard #9 (helper-location duplication-over-extraction)** — this slice INTENTIONALLY reverses the duplication for B2/C1. #9's caution (don't pull stable files into the edit surface) is acknowledged: the exporter readers ARE the edit surface here by design, and the §5.31 reversal (C1) is documented per HG-2. The shared header is the minimal new surface.
-- **Guard #23 (#1 bit-vector bug class — cover-direction)** — B5 must keep `close_prefixes`/`close_prefixes6` as separate args to the merged template; the audited surface stays eyeball-auditable. Do NOT merge the close fns.
-- **Guard #12 (RESOURCE_LOCK)** — applies only if a new ctest touches shared host state; this slice adds NO new ctest (existing oracles are the control).
-- **Guard #16 (retired pin-path/map-name ripple)** — N/A (no map name retired; B5 is a wrapper merge, same maps; the exporter extractions touch no pin name).
+- **Guard #15 (PRESERVE branch-boundary / D-mvp-4.8-BOUNDARY)**: `copy_rule_counters_forward`
+  has branch-divergent args (reattach reads old slot_rule_id; fresh passes empty) and stays
+  EXPLICIT at the call site — do NOT fold it into `materialize`. Reviewer special-attention.
+- **Guard #36 (macros-over-helpers for BPF byte-identity)**: `CompiledRuleset` is a dumb data
+  aggregate — no methods, no logic; the lowering stays where it is. Earn-its-keep test:
+  it kills a 16-arg signature + names a real seam (passes), it is not a thin wrapper.
+- **Guard #9 (helper-location: duplication-over-extraction)**: if `compile()` needs a lowering
+  helper currently file-local in loader.cpp, prefer declaring/sharing over re-implementing;
+  do NOT duplicate logic (byte-identity risk).
+- **Guard #37 (module-split precedent, B34b 3-header split)**: the private-header pattern is
+  blessed; `compiled_ruleset.hpp` follows it. PI-7 (`loader.hpp` zero-diff) must hold.
 
-### Evidence footer — brief-author Phase 2 grep verification
+### Evidence footer — discharge-ledger slice-time rechecks (brief-time status)
 
-```
-File/path:
-  ✓ src/exporter/stats_reader.cpp/.hpp          read_all_attached(sv) def :140 + decl :69, ZERO non-_with_acc callers (B4 dead)
-  ✓ src/exporter/rule_counters_reader.cpp       round_up_8/percpu_sum_u64/list_iface_dirs all dup'd
-  ✓ §5.31 note                                  rule_counters_reader.cpp:63-64, covers ONLY list_iface_dirs (C1 target)
-  ✓ src/lib/loader.cpp                          populate_bitvec_inner_slot :1538 + _v6; house-style populate_hash_inner_slot<Key> :1492; close_prefixes :1191 / close_prefixes6 :1327 (guard #23 home)
-  ✗ "rule_counters_reader.hpp already #includes stats_reader.hpp"  → FALSE (only a prose comment); shared home needs a new include/header (HG-1)
-
-Estimate corrections vs verdict:
-  • "no new include needed" → REFUTED: rule_counters_reader.cpp does not include stats_reader.hpp → new header (percpu_read.hpp) or +1 include required (still net-negative).
-  • Net LOC: B4 ~−12, B2 ~−18, C1 ~−21, B5 ~−38 → ~−89 gross / ~−70 net after the shared-header scaffold (~+6).
-
-Surprising findings:
-  • C1 (list_iface_dirs) is the ONLY extraction that touches a documented decision (§5.31) → gated HG-2 (drop if architect judges §5.31 still load-bearing; B2/B4/B5 independent).
-  • B5 is the only loader/datapath-adjacent item; verdict-identity-gated via ORACLE_AGREEMENT (userspace map-population, no .bpf.c change).
-```
+1. **insn baseline still 3437?** — DISCHARGED ✓ (`T_INSN_BASELINE_GATE.sh:71`
+   `${XDPMF_PROD_INSN_BASELINE:-3437}`; rebaselined 3658→3437 in B35).
+2. **CompiledRuleset fields ↔ live `*Lowering` shapes?** — VERIFIED ✓ with caveat: 5
+   deterministic structs + 1 `unordered_map` (`id_to_slot`) → drives HG-mvp-4.33-5 test design.
+3. **cycle/LOC from real diff** — DEFERRED to impl-time (planning hypothesis: ~1 TTFW cycle,
+   LOC net-neutral-to-slightly-positive; new header+test offsets the collapsed args).
+4. **corpus covers both action_ids?** — site VERIFIED ✓ (`loader.cpp:1713` Pass/Drop ternary);
+   tester MUST include ≥1 Pass + ≥1 Drop in the compile corpus.
