@@ -18934,3 +18934,288 @@ Scope hosted CI to **what a hosted runner can do HONESTLY**: build under `-Werro
 - The full-coverage path (`XDPMF_REQUIRE_FULL_COVERAGE`) is retained for the self-hosted runner — build-only is the HOSTED-runner scope, not a deletion of the capability.
 
 Evidence: `gh run list` (14/14 RED) + `gh run view --log-failed` (`vmlinux.h file not found` at Build); `.gitignore:13` (vmlinux.h gitignored); `tests/lib/common.sh:64` (`require_passwordless_sudo`); `tests/CMakeLists.txt` (`SKIP_RETURN_CODE 77`); local `XDPMF_CI_BUILD_ONLY=1 ctest` = 100%/0-failed/106. Highest prior section §5.71; this is §5.72; NO new guard (infra slice; reverses D-mvp-4.23 per the §5.67/B37 precedent). Guards #1..#37 + §5.70 candidate #38.
+
+---
+
+### §5.73 MVP-4.33 / B40: `CompiledRuleset` bundle — name the compile output + first offline unit test of the production lowering (brownfield amendment; PURE HOST-SIDE REFACTOR, ZERO datapath change — xdp section stays **3437 insns ×3 arms**, oracle-agreement holds by VERDICT-IDENTITY; NEW private header `src/lib/compiled_ruleset.{hpp,cpp}` + loader.cpp edit + NEW bare-main test + CMake; PI-7 loader.hpp zero-diff CONTINUES; NO schema/axis/map/VERSION change; VERSION 0.16.0 held; 2026-06-05)
+
+#### §5.73 Problem statement
+
+`apply_request` (`loader.cpp:2189+`) lowers a validated `Config` into **12 anonymous local
+variables** (`id_to_slot`, `slot_to_id`, `mac_low`, `dst_low`, `src_low`, `dst6_low`, `src6_low`,
+`proto_low`, `port_low`, `vlan_low`, `eth_low`, `default_action`) and threads all of them — plus
+`req.config.rules` — through a **16-argument** `populate_all_axes(skel, slot, …)` at two call
+sites (`:2472` reattach, `:2589` fresh). That 16-arg signature is the present maintenance hazard
+the TC/mirror workstream would extend to 17. This slice gives the compile output a **name and a
+boundary**: bundle the 12 locals into a dumb value-type `CompiledRuleset`, extract a pure
+`CompiledRuleset compile(const Config&)` into a NEW libbpf-free TU, and collapse `populate_all_axes`
+into a **3-argument** `materialize(skel, slot, const CompiledRuleset&)`. It ships the **first-ever
+offline unit test of the production lowering** (`Config → CompiledRuleset` bit-identity), closing
+the `D-mvp-4.2-ISOLATION` coverage gap (today only `bitvec_harness`'s parallel reimplementation is
+tested — the production `lower_*`/`aggregate_axis` path is never directly asserted).
+
+Boundaries: **pure host-side refactor, zero datapath change** — `compile()`/`materialize()` touch
+no `.bpf.c`; the BPF insn-count stays **3437 ×3 arms** and the oracle-agreement corpus holds
+(verdict-identity is the decisive cheap oracle). `copy_rule_counters_forward` (PRESERVE,
+branch-divergent args — guard #15) and `populate_action_table` (shared static table) stay
+EXPLICIT at each call site, NOT folded into `materialize`. `RulesetDelta`/`diff()` is the
+spike-gated **slice 2** and is OUT (see §7). Grounder-discharged naming: arch-doc "Rule IR" names
+a DIFFERENT form (the config.cpp-emitted normalized rule + the in-map table) → no collision →
+mint `CompiledRuleset`.
+
+#### §5.73 FileList (DIFF)
+
+**NEW**
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `src/lib/compiled_ruleset.hpp` | Private header: the `*Lowering` structs (moved), `struct CompiledRuleset` (dumb aggregate), `compile()` decl, `close_prefixes`/`close_prefixes6` decls. libbpf-free; includes only `config.hpp` + `common/xdpfilter.h` + std. | C++23 | ~90 |
+| `src/lib/compiled_ruleset.cpp` | `CompiledRuleset compile(const Config&)` + the moved pure lowering helpers (`host_mask*`, `host_addr6_of`, `close_prefixes*`, `compute_id_to_slot`, `compute_slot_to_id`, `lower_axis*`, `aggregate_axis`, `lower_port_axis`). **Pure, no libbpf, no throw.** | C++23 | ~240 (moved, not net-new) |
+| `tests/compile/compile_harness.cpp` | Bare-`main` offline unit test (no gtest; `bitvec_harness` precedent). Builds an in-memory `Config` corpus (≥1 Pass + ≥1 Drop), runs `compile()`, asserts the lowering-bit outputs == golden. **Links `compiled_ruleset.cpp` only — NO libbpf.** | C++23 | ~180 |
+
+**EDITED**
+
+| Path | Role of the edit | Language | LOC est |
+|---|---|---|---|
+| `src/lib/loader.cpp` | (1) `#include "compiled_ruleset.hpp"`; **remove** the moved defs (`:1165–1474` lowering block + `compute_id_to_slot`/`compute_slot_to_id` `:1219–1250`). (2) `populate_all_axes(16-arg)` → `materialize(xdpfilter_bpf*, std::uint32_t, const CompiledRuleset&)`; body reads `cr.mac_low`… (positional→member rename). (3) `apply_request`: replace the 12-local block `:2206–2257` with `const CompiledRuleset cr = compile(req.config);`; the 6 bound-checks `:2260–2293` read `cr.*`; both call sites `materialize(skel.get(), slot, cr)`. (4) `populate_rules_inner_slot` sig `const std::vector<Rule>&` → `std::span<const Rule>`. `copy_rule_counters_forward` + `populate_action_table` sites UNCHANGED (read `cr.slot_to_id` only). | C++23 | net ~−180 |
+| `CMakeLists.txt` | Add `src/lib/compiled_ruleset.cpp` to the `xdpmf_internal` STATIC lib sources (`:112` block). | CMake | +1 |
+| `tests/CMakeLists.txt` | `add_executable(compile_harness …)` + `add_test`, mirroring the `bitvec_harness` block `:1092` **MINUS the libbpf link** (no `PkgConfig::LIBBPF`, no skeleton dep). | CMake | +~15 |
+
+**UNCHANGED-BUT-AFFECTED** (impl/tester MUST NOT touch; reviewer asserts zero git-diff)
+
+| Path | Why it must stay byte-identical |
+|---|---|
+| `src/lib/loader.hpp` | **PI-7** zero-diff streak CONTINUES. `loader_error_category()` decl (`:57`) already present; new header is private (`src/lib/`, like `apply_internal.hpp`); loader.hpp names no `populate_*`/`materialize`/`Compiled` symbol. |
+| `src/bpf/xdpfilter.bpf.c` | Datapath — **PI-mvp-4.27-DATAPATH-IDENTICAL**: xdp section **3437 insns ×3 arms**, no `.bpf.c` touch. |
+| `src/lib/config.hpp` / `config.cpp` | `Rule`/`Config`/`DefaultAction`/`RuleAction` consumed by `compiled_ruleset.hpp`; not modified. |
+| `src/common/xdpfilter.h` | `xdpmf_mac`/`xdpmf_cidr_v4`/`xdpmf_cidr_v6`/`xdpmf_port_range` + `XDPMF_ALLOWLIST_MAX`/`XDPMF_RULE_COUNTERS_MAX`/`XDPMF_SLOT_ID_EMPTY` consumed (header-only). |
+
+Anything not in one of these three tables is off-limits. If impl needs a 4th file (e.g. a separate
+`loader_error.cpp` — see D-mvp-4.33-Q2 for why it is **NOT** needed), that is a design gap →
+SendMessage the architect.
+
+#### §5.73 DataStructures
+
+`struct CompiledRuleset` — a **dumb value-aggregate** (no methods, no logic — guard #36),
+header-only in `compiled_ruleset.hpp`, namespace `xdpmf`. Exactly the 12 branch-INVARIANT compile
+locals + the rules span:
+
+```
+struct CompiledRuleset {
+    std::unordered_map<std::uint32_t,std::uint32_t>            id_to_slot;     // id → dense slot rank
+    std::array<std::uint32_t, XDPMF_RULE_COUNTERS_MAX>        slot_to_id;     // [0,64) inverse, EMPTY tail
+    MacLowering                                               mac_low;        // AxisAggregate<xdpmf_mac>
+    AxisLowering                                              dst_low;        // v4 LPM prefixes + wildcard
+    AxisLowering                                              src_low;
+    AxisLowering6                                             dst6_low;       // v6 LPM
+    AxisLowering6                                             src6_low;
+    ProtoLowering                                             proto_low;      // AxisAggregate<u32>
+    PortLowering                                              port_low;       // ranges + wildcard
+    VlanLowering                                              vlan_low;       // AxisAggregate<u32>
+    EthertypeLowering                                         eth_low;        // AxisAggregate<u32>
+    DefaultAction                                             default_action;
+    std::span<const Rule>                                     rules;          // NON-OWNING (Q1=A1)
+};
+```
+
+The per-axis `*Lowering` types are **REUSED, not redefined** — this slice MOVES their definitions
+(`BitPrefix`, `AxisLowering` `:1256`; `BitPrefix6`, `AxisLowering6` `:1347`; `AxisAggregate<>` +
+the `MacLowering`/`ProtoLowering`/`VlanLowering`/`EthertypeLowering` aliases `:1387–1399`;
+`PortLowering` `:1448`) from `loader.cpp`'s anon namespace into `compiled_ruleset.hpp`'s
+`namespace xdpmf`. Member layout/sizes are unchanged — they are the SAME types the live datapath
+populate consumes (recheck #2: **1** `unordered_map` `id_to_slot` [non-deterministic iteration] +
+**11** deterministic fields — insertion-ordered vectors/arrays/scalars per D-mvp-4.10-ORDER; drives
+the §5.73 test-equality design).
+
+#### §5.73 Interfaces
+
+1. **`[[nodiscard]] CompiledRuleset compile(const Config& c);`** — `namespace xdpmf`, declared in
+   `compiled_ruleset.hpp`, defined in `compiled_ruleset.cpp`. **Pure / side-effect-free / libbpf-free
+   / no throw** (hidden-assumptions #1+#2 CONFIRMED below). Verbatim lift of the lowering block
+   `loader.cpp:2206–2257`: the 11 `lower_*`/`aggregate_axis`/`lower_port_axis` calls +
+   `compute_id_to_slot`/`compute_slot_to_id`, assembling and returning a `CompiledRuleset`.
+   `cr.rules = std::span<const Rule>{c.rules}`. Does NOT contain the bound-checks (Q2=A2).
+
+2. **`void materialize(xdpfilter_bpf* skel, std::uint32_t slot, const CompiledRuleset& cr);`** —
+   stays in `loader.cpp` (needs the generated skeleton type). Body = today's `populate_all_axes`
+   with each positional arg replaced by the matching `cr.` member (`mac_low`→`cr.mac_low`,
+   `rules`→`cr.rules`, `id_to_slot`→`cr.id_to_slot`, `slot_to_id`→`cr.slot_to_id`,
+   `default_action`→`cr.default_action`). Wraps `populate_all_axes`' body ONLY (HG-1 / guard #15).
+
+3. **`std::vector<std::uint64_t> close_prefixes(const std::vector<BitPrefix>&);`** and
+   **`… close_prefixes6(const std::vector<BitPrefix6>&);`** — MOVED to `compiled_ruleset.cpp`,
+   declared in `compiled_ruleset.hpp` (external linkage). `materialize` (loader.cpp `:1927/1932/1952/1957`)
+   still passes them by name to `populate_bitvec_inner_slot` — unqualified lookup resolves
+   `xdpmf::close_prefixes*`. (`host_mask`/`host_mask6`/`host_addr6_of` stay file-local in
+   `compiled_ruleset.cpp` — only `close_prefixes*` and `lower_axis*` use them.)
+
+4. **`populate_rules_inner_slot(int fd, std::span<const Rule> rules, const std::unordered_map<…>& id_to_slot)`**
+   — signature change `const std::vector<Rule>&` → `std::span<const Rule>` (so `materialize` can pass
+   `cr.rules`). Body `for (const Rule& r : rules)` + `id_to_slot.at(r.id)` is span-compatible →
+   **byte-identical BPF writes** (span preserves vector order). The ONLY caller is `materialize`.
+
+5. The `compile()`-internal helpers (`compute_id_to_slot`, `compute_slot_to_id`, `lower_axis`,
+   `lower_axis6`, `lower_port_axis`, the `aggregate_axis<>` template) become **file-local** in
+   `compiled_ruleset.cpp` (anon namespace) — after the refactor `loader.cpp` no longer calls them
+   (the only call sites `:2207/2209/2213/2220/2221/2225/2226/2229/2234/2238/2250` are inside the
+   replaced block). No header decl needed; `aggregate_axis<>` stays a template in the `.cpp` since
+   its only instantiations are inside `compile()`.
+
+#### §5.73 Decisions (with rationale)
+
+- **D-mvp-4.33-Q1 (`rules` member = `std::span<const Rule>`)** — *because* the action axis stays
+  RAW (non-foreclosure for mirror/redirect — forward-compat lens); a non-owning span points into
+  `Config.rules`. **Lifetime confirmed no-escape**: in `apply_request`, `const CompiledRuleset cr =
+  compile(req.config);` — `cr.rules` spans into `req.config.rules`; `req` (`const ApplyRequest&`)
+  outlives the whole function; `cr` is consumed (bound-checks + both `materialize` calls) within the
+  same scope and is never returned/stored. Span valid for `cr`'s entire lifetime.
+
+- **D-mvp-4.33-Q2 (bound-checks STAY in `apply_request`, NOT in `compile()`)** — **OVERRIDES the
+  brief's Q2=A1 recommendation, with evidence.** *Because* keeping the 6 `count > XDPMF_ALLOWLIST_MAX`
+  checks (`:2260–2293`) in `apply_request` (reading `cr.mac_low.entries.size()` etc., immediately
+  after `compile()`, BEFORE `kernel_version_probe()`) makes `compile()` **purely functional — zero
+  side-effects, zero `throw_loader`, zero dependency on the `LoaderError` error-category infra**.
+  That is the decisive linkage property the testability lens exists for: `compile_harness` links
+  `compiled_ruleset.cpp` ALONE — **no libbpf, no `loader_error_category()`** (which lives only in
+  the libbpf-heavy `loader.cpp:2050`). A1 would force `compile()` to call `throw_loader` →
+  `make_error_code` → `loader_error_category()`, dragging the error-category symbol into the test
+  link, which would require relocating it into a NEW `loader_error.cpp` TU (a ripple touching a
+  symbol used by 4 TUs, beyond this slice's FileList). A2 avoids all of it and matches the brief
+  FileList exactly. Conceptual fit: **`compile()` = lowering; "is this Config too big" = apply
+  policy.** The bound-check error strings are **byte-identical** (the `std::format` literals are
+  unchanged — only the operand expression goes `mac_low`→`cr.mac_low`); operator-visible stderr on
+  overflow is preserved by the unchanged production path. Tradeoff accepted: the overflow→throw is
+  not *offline*-asserted, but it is behavior-preserved and the test's PRIMARY contract
+  (Config→lowering bit-identity, both action_ids — closing D-mvp-4.2-ISOLATION) is fully delivered.
+  *[Flagged to team-lead at publication; if the PO wants the offline overflow assertion, reopen as
+  A1 + a `loader_error.cpp` extraction — a strictly larger slice.]*
+
+- **D-mvp-4.33-HELPER-MOVE (the pure lowering machinery MOVES into `compiled_ruleset.{hpp,cpp}`)** —
+  *because* `compile()`'s callees must link **without** `loader.cpp`/libbpf (testability lens), the
+  "keep them in loader.cpp + declare" alternative is **infeasible**: `compile_harness` links
+  `compiled_ruleset.cpp` but NOT `loader.cpp`, so any callee left in `loader.cpp` is an unresolved
+  symbol; and `aggregate_axis<>` is a template (cross-TU use needs the definition visible anyway).
+  So all of `compile()`'s transitive pure helpers + the `*Lowering` structs MOVE (whole-cloth source
+  relocation = **byte-identical**, NOT a re-implementation → guard #9 honored: share/move, never
+  duplicate). The `*Lowering` structs go to the header (both `materialize` and `compile` see them);
+  `close_prefixes*` go to the `.cpp` with header decls (`materialize` still calls them).
+
+- **D-mvp-4.33-RULES-SPAN-SIG (`populate_rules_inner_slot` takes `std::span<const Rule>`)** — *because*
+  `CompiledRuleset.rules` is a span (Q1) and `materialize` forwards `cr.rules`; range-for + `.at` is
+  span-identical → byte-identical BPF writes. Minimal, mechanical.
+
+- **D-mvp-4.33-AGGREGATE (`CompiledRuleset` is a dumb data aggregate — guard #36)** — no methods, no
+  logic; the lowering stays in free functions. Earn-its-keep: it KILLS a 16-arg signature + NAMES a
+  real seam (the branch-INVARIANT 12-local consumer) — not a thin wrapper.
+
+- **D-mvp-4.33-MATERIALIZE-SCOPE (HG-1: `materialize` wraps `populate_all_axes` ONLY)** — *because*
+  `copy_rule_counters_forward` has branch-divergent args (reattach reads OLD `slot_rule_id` half;
+  fresh passes all-EMPTY) — guard #15 / D-mvp-4.8-BOUNDARY — and `populate_action_table` is a shared
+  static table; both stay EXPLICIT at each call site (`:2485/2519` reattach, `:2599/2619` fresh).
+  They read `cr.slot_to_id` (was `slot_to_id`) at the explicit site — that is NOT folding.
+
+- **D-mvp-4.33-EQ (HG-5: test value-equality compares the deterministic lowering fields)** — *because*
+  `id_to_slot` has non-deterministic *iteration* order but **deterministic content**, the test
+  compares it via `std::unordered_map::operator==` (content equality, bucket-order-independent —
+  stronger than the brief's "key-set if at all"); the 11 other fields are deterministic and compared
+  field-by-field (see §5.73 TestStrategy).
+
+- **D-mvp-4.33-VERSION (HG-4: no VERSION bump)** — 0.16.0 held (internal refactor, no operator-visible
+  surface). Guard #11 N/A.
+
+- **Hidden-assumption discharge (re-run at design time):** #1 (compile callees touch no BPF) —
+  **CONFIRMED**: `lower_axis`/`lower_axis6`/`aggregate_axis`/`lower_port_axis`/`compute_id_to_slot`/
+  `compute_slot_to_id`/`close_prefixes*`/`host_*` take `Config`/vectors and return value types; **no**
+  `skel`/fd/`bpf_map_*` call appears in any of them (`loader.cpp:1165–1474`,`:1219–1250` read). #2
+  (callees pure/side-effect-free) — **CONFIRMED**: no I/O, no global mutation; with Q2=A2 not even a
+  throw. recheck #4 (corpus covers both action_ids) — site VERIFIED `loader.cpp:1713` Pass/Drop
+  ternary; tester MUST include ≥1 Pass + ≥1 Drop.
+
+#### §5.73 TestStrategy
+
+The datapath byte-identity gate is **REUSED unchanged** — do NOT re-author: `T_INSN_BASELINE_GATE.sh`
+(xdp section **3437**, `:71` `XDPMF_PROD_INSN_BASELINE`) ×3 arms + `T_*_ORACLE_AGREEMENT`
+(verdict-identity corpus). These are the decisive cheap oracle that the host-side refactor changed
+nothing on the datapath.
+
+**NEW `T_COMPILE_LOWERING_IDENTITY` (offline unit, bare-`main`, ctest):**
+
+- **Trigger**: build an in-memory `Config` corpus exercising representative axes (≥1 v4 dst/src CIDR
+  incl. a covering/covered prefix pair to exercise slot-bit assignment, ≥1 v6 dst6/src6, ≥1
+  mac/proto/vlan/ethertype exact-match, ≥1 dst_port range, ≥1 rule that constrains NOTHING on an axis
+  → wildcard bit), with **≥1 `RuleAction::Pass` and ≥1 `RuleAction::Drop`** (recheck #4). Run
+  `compile(corpus)`.
+- **Observable outcome / assertions** (golden hand-derived from the slot model: slot = rank of a
+  rule's `id` in ascending-unique-id order; bit = `1ULL << slot`):
+  - LPM axes (`dst_low`/`src_low`/`dst6_low`/`src6_low`): `prefixes` vector (each `{cidr.addr,
+    cidr.prefixlen, host_addr(6), bit}`) field-equal to golden, in insertion order; `wildcard` mask
+    equal.
+  - HASH axes (`mac_low`/`proto_low`/`vlan_low`/`eth_low`): `entries` vector (`{key, aggregated
+    bitmask}`) field-equal in insertion order (D-mvp-4.10-ORDER); `wildcard` equal. mac key compared
+    by 6-octet `memcmp` (D-mvp-4.10-MAC-EQ).
+  - `port_low.ranges` (`{lo,hi,bit}`) field-equal + `wildcard` equal.
+  - `default_action` scalar equal; `slot_to_id` array equal (incl. `XDPMF_SLOT_ID_EMPTY` tail);
+    `id_to_slot` equal via `unordered_map::operator==`.
+  - **Both action_ids**: assert the corpus carries the Pass and the Drop rule through to the right
+    slots (the `action_id` ternary `loader.cpp:1713` is consumed at `materialize`/populate time, so
+    the unit asserts the *rule carried to its slot*; the Pass/Drop→`action_id` mapping is covered by
+    the reused datapath oracle).
+  - Assertion mechanism: plain `if (… != …) { fprintf(stderr, …); return 1; }` accumulation,
+    non-zero exit on any mismatch (bare-`main`, `bitvec_harness` precedent — no gtest).
+- **OPS-canary / linkage contract**: `compile_harness` is a NEW invocation surface with a materially
+  different link environment from the existing suite — it links the production lowering **WITHOUT
+  libbpf and WITHOUT `loader.cpp`**. That clean link IS the testability contract (D-mvp-4.2-ISOLATION
+  closure): if `compile()` ever acquires a libbpf/error-infra dependency, this binary fails to LINK —
+  a signal the existing libbpf-linked `bitvec_harness` cannot give. The CMake target MUST NOT add
+  `PkgConfig::LIBBPF` or a skeleton dependency; reviewer asserts the link line is libbpf-free.
+
+#### §5.73 Preserved invariants
+
+- **PI-7 (`loader.hpp` byte-identical — zero new public symbols)** — verified via `git diff --
+  src/lib/loader.hpp` = ∅. The new header is private (`src/lib/compiled_ruleset.hpp`);
+  `loader_error_category()` decl (`:57`) already present and untouched; `loader.hpp` names no
+  `populate_*`/`materialize`/`Compiled` symbol.
+- **PI-mvp-4.27-DATAPATH-IDENTICAL** — xdp section **3437 insns ×3 arms**, verified via
+  `T_INSN_BASELINE_GATE.sh` re-run; no `src/bpf/*` touch (`git diff -- src/bpf` = ∅).
+- **Verdict-identity** — `T_*_ORACLE_AGREEMENT` corpus remains green (datapath behaviour unchanged).
+- **All pre-existing tests remain green or legitimately SKIP** — verified via full `ctest` re-run;
+  count = prior baseline **+1** (the new `T_COMPILE_LOWERING_IDENTITY`).
+- **Guard #15 (PRESERVE branch-boundary)** — `copy_rule_counters_forward` NOT folded into
+  `materialize`; stays EXPLICIT with branch-divergent args at `:2519`/`:2619` — verified by reading
+  both call sites post-edit.
+- **Guard #36 (dumb aggregate)** — `CompiledRuleset` has no methods/logic — verified by inspection.
+- **Guard #9 (no lowering duplication)** — the lowering helpers are MOVED whole-cloth, not
+  re-implemented — verified `git diff` shows deletion in `loader.cpp` + identical text added in
+  `compiled_ruleset.cpp` (no logic edit).
+- **VERSION 0.16.0** — no bump (HG-4).
+
+##### §5.73 Verification hints (guidance for reviewer — MAY, not contracts)
+*Resolution rule for this amendment: if any prose below conflicts with the §5.73 Preserved-invariants
+block, the invariants block wins. If impl deviates from a hint to satisfy a contract (a PI-\* above or
+a load-bearing test assertion), the reviewer's correct disposition is `inline-merge` on the hint, NOT
+`[UNRELATED-EDIT]` on impl.*
+- Reviewer MAY expect `git diff --stat src/lib/loader.cpp` to show a **net reduction** (~−180; the
+  removed lowering block + collapsed 16-arg sig outweigh the `#include` + member-renames). Impl MAY
+  relax if a comment-block stays with `materialize`.
+- Reviewer MAY expect the `compile_harness` link line to contain **no** `-lbpf`/`PkgConfig::LIBBPF`
+  and **no** `*_skel` dependency (the load-bearing testability contract — this one is effectively a
+  MUST, mirrored in §5.73 TestStrategy OPS-canary).
+- Reviewer SHOULD see `loader.hpp` with **zero** diff (PI-7) and `src/bpf/` with zero diff.
+
+#### §5.73 Out of scope
+
+- **`RulesetDelta` / `diff()` extraction** — spike-gated **slice 2** (TC-orthogonal test-hygiene).
+  The required spike (verbatim-liftability of `loader.cpp:1820–1835` leaving the 64-slot write-set
+  byte-identical) must PASS first; hard gate — defer entirely if not pure code-motion.
+- **`loader_error.cpp` / relocating `loader_error_category()`** — NOT needed (D-mvp-4.33-Q2=A2 keeps
+  `compile()` throw-free). Only reopen if the PO mandates offline overflow-throw assertion (→ A1).
+- **`copy_rule_counters_forward`** — untouched (guard #15 boundary); not folded into `materialize`.
+- **`populate_action_table`** — stays explicit at each call site (shared static table).
+- **Any BPF-side / map-shape / schema / axis change** — none; insn-count must stay 3437.
+- **Moving the `*Lowering` types' *shape*, O(n²)→O(n) optimization, `apply --dry-run`/preview,
+  mirror/redirect / TC, the 64-rule ceiling, VERSION bump** — all OOS.
+
+Highest prior section §5.72; this is **§5.73**. New candidate guard: **#39 — "name the compile
+output, don't fold the boundary"** (CompiledRuleset is a dumb aggregate wrapping the branch-INVARIANT
+consumer; `copy_rule_counters_forward`/`populate_action_table` stay explicit). Guards #1..#37 + §5.70
+candidate #38 + §5.73 candidate #39.
