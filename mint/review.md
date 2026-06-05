@@ -1,4 +1,4 @@
-# Review — §5.73 MVP-4.33/B40 CompiledRuleset bundle (mint triangulation, brownfield)
+# Review — MVP-4.34/B41 §5.74 RulesetDelta (mint triangulation, brownfield)
 
 ## Verdict
 `pass` (round 1)
@@ -8,64 +8,57 @@
 | Framework point | Findings | Tags |
 |---|---|---|
 | 1. Spec ↔ Code | 0 | — |
-| 2. Spec ↔ Tests | 1 minor | (sub-field coverage, OOT-1) |
-| 3. Code ↔ Tests | 0 fail | [UNEXERCISED-EXPORT × 2] (non-fatal, by design — OOT-2) |
+| 2. Spec ↔ Tests | 0 | — |
+| 3. Code ↔ Tests | 0 | — |
 | 4. Out-of-Scope Drift | 0 | — |
 | 5. Behaviour preserved (brownfield) | 0 | — |
 
-## Point 1 — Spec ↔ Code (clean)
-- `struct CompiledRuleset` (compiled_ruleset.hpp:102–116) matches DataStructures byte-for-byte: 12 branch-INVARIANT members + `std::span<const Rule> rules` (Q1=A1). Dumb aggregate, zero methods — guard #36 ✓.
-- `compile()` (compiled_ruleset.cpp:282–338) pure / libbpf-free / **non-throwing** — D-mvp-4.33-Q2=A2 honored (bound-checks stay in apply_request). Assembly order matches the old apply_request lowering block 1:1; `cr.rules = span{c.rules}` (:336).
-- `materialize(skel,slot,cr)` (loader.cpp:396) — 16-arg→3-arg collapse; body = old `populate_all_axes` with positional→member rename ONLY; 9-axis populate order + ruleset_state/rules/slot_rule_id order preserved → BPF write order intact.
-- `close_prefixes`/`close_prefixes6` external linkage decls (hpp:126/129), defs moved to .cpp; `populate_rules_inner_slot` sig `const std::vector<Rule>&`→`std::span<const Rule>` (loader.cpp:367) — range-for + `.at` span-identical.
-- Q2=A2 + HELPER-MOVE are NEGOTIATED design Decisions (design.md:19073/19093) — judged as design, not drift.
+No findings. Clean pass.
 
-## Point 2 — Spec ↔ Tests (substantially complete)
-- T_COMPILE_LOWERING_IDENTITY covers every TestStrategy axis: v4/v6 LPM prefixes+wildcard, mac/proto/vlan/eth HASH entries+wildcard (mac via 6-octet memcmp), port ranges, default_action, slot_to_id array, id_to_slot via `unordered_map::operator==` (HG-5), both Pass+Drop carried (recheck #4).
-- **NEGATION CONTROL present** (compile_harness.cpp:450) + tester re-proved machinery teeth (test-run.log:70–74, corrupted copy → exit 1). NO-NEGATION-CONTROL satisfied.
-- Independent oracle (re-derives slot model), not tautological → no CIRCULAR-TEST.
+## Point 1 — Spec ↔ Code
+- `struct RulesetDelta` = `std::array<uint32_t, XDPMF_RULE_COUNTERS_MAX> source;` — dumb aggregate, NO methods (`ruleset_delta.hpp:34-36`). Guard #36 ✔.
+- `[[nodiscard]] RulesetDelta diff(span<const u32> old, span<const u32> new) noexcept` — exact per §5.74 Interfaces (`ruleset_delta.hpp:46-47`); defn `ruleset_delta.cpp:17-40`. Pure, libbpf-free, noexcept, no fd/bpf_map_*/throw ✔.
+- D-Q1-A1 (`source[64]` precompute) ✔; D-Q2-SENTINEL (NONE = `XDPMF_SLOT_ID_EMPTY` 0xFFFFFFFF) ✔; D-HG1-PLACEMENT (new private TU) ✔.
 
-## Point 3 — Code ↔ Tests
-- Reviewer rebuilt + ran: `./build/compile_harness` → all assertions passed; `ctest -R T_COMPILE_LOWERING_IDENTITY|T_INSN_BASELINE_GATE|T_AND_ORACLE_AGREEMENT` → **3/3 passed**. Log: /tmp/mint-review-tests-1780664710.log.
-- UNEXERCISED-EXPORT (non-fatal): `close_prefixes`/`close_prefixes6` exported but not called from compile_harness — by design (closure runs in materialize, covered by T_*_ORACLE_AGREEMENT). compile() itself IS directly exercised. OOT-2.
+## Point 5 (LOAD-BEARING) — Behaviour preserved
+- **PI-mvp-4.34-WRITESET (hard gate, byte-identity)**: `git diff HEAD~1 -- src/lib/loader.cpp` consumer hunk (`loader.cpp:1500-1517`) shows ONLY inline-scan→`diff()` substitution. New loop: `fill(buf,0)` → `src=d.source[k]` → `if(src!=EMPTY){ lookup(&src); if(lk<0) re-zero; }` → `update(inactive,&k)`. Key `&src` carries the identical old_slot value the inline scan's first-match `&old_slot` carried; same `lk<0→re-zero` edge; every-slot update. Map I/O sequence byte-identical for every input. ✔ — corroborated by counter ctests green.
+- **Guard #9 (verbatim move)**: `ruleset_delta.cpp:21-38` scan = deleted `loader.cpp:1505-1515` block; ONLY change = records matched `old_slot` into `source[k]` instead of inline lookup. O(n²) outer-k × inner-old_slot, unique-id `break` preserved (HG-3) ✔.
+- **Guard #15 (branch-boundary PRESERVED)**: both call sites EXPLICIT, branch-divergent args — reattach `(old_rc_fd, inactive_rc_fd, old_slot_to_id, cr.slot_to_id)` (`loader.cpp:2133`), fresh `(rc_a_fd, rc_a_fd, empty_old, cr.slot_to_id)` (`loader.cpp:2231`). `diff()` lives INSIDE the consumer, NOT hoisted; both sites byte-identical ✔.
+- **PI-7**: `git diff -- src/lib/loader.hpp` = ∅ ✔.
+- **PI-DATAPATH**: `git diff -- src/bpf` = ∅; `T_INSN_BASELINE_GATE` PASS (xdp **3437**) ✔.
+- **CompiledRuleset untouched**: `git diff -- src/lib/compiled_ruleset.{hpp,cpp}` = ∅ ✔.
+- **No UNRELATED-EDIT**: `git diff --stat HEAD~1` = exactly the 7 FileList files ✔. **No REGRESSION**: counter ctests green.
 
-## Point 4 — OOS drift (clean)
-No RulesetDelta/diff(), no loader_error.cpp, no schema/axis/map/VERSION change. `git diff src/bpf` = ∅, `git diff config.*/xdpfilter.h` = ∅.
+## Point 2/3 — Tests
+- `T_RULESET_DELTA_TRUTHTABLE` (`ruleset_delta_harness.cpp`): survived-in-place (`source[3]==3`), **moved/B30** (`source[4]==1` — counter follows id, NOT slot; line 140 — the assertion no test made before), new (`source[5]==EMPTY`), dropped (old slot 2 never a source), empty-new-slot, fresh-apply-degenerate, full-reorder. All §5.74 TestStrategy classes ✔.
+- **NOT circular**: independent `oracle_source()` (lines 87-99) from the §5.74 contract + hand-computed literals; does NOT read diff()'s output as truth ✔.
+- **Negation control** (line 235-251): a moved id's `source[k] != k` (the B30 "source-follows-slot" bug class would set `source[4]==4`) + smoke all-EMPTY→all-NONE ✔.
+- **Moved-class genuinely asserts** (not a fixed-point tautology): `test_full_reorder` uses a cyclic-shift **derangement** (no fixed point) asserting `source[k] != k` (line 209) — the over-assertion the tester fixed ✔.
+- **OPS-canary / purity link**: `ldd build/ruleset_delta_harness` = no libbpf; CMake target links NEITHER PkgConfig::LIBBPF NOR xdpmf_internal NOR *_skel (tests/CMakeLists.txt:1659-1676) — compiles `src/lib/ruleset_delta.cpp` directly ✔.
+- **RD-5 OOT polish** (test-only): OOT-1 (`host_addr6` v6 golden, `compile_harness.cpp:355`) ✔, OOT-3 (test-derivation-only comment at v4 masking, `:232`) ✔; OOT-2 skipped (design-permitted).
 
-## Point 5 — Behaviour preserved (brownfield, LOAD-BEARING — all hold)
-- **Datapath byte-identity**: `git diff HEAD~1 -- src/bpf` = ∅; T_INSN_BASELINE_GATE PASS, measured xdp section == **3437** (test-run.log:31 + reviewer re-run); negation arm fails loud on 3438. ✓
-- **PI-7**: `git diff HEAD~1 -- src/lib/loader.hpp` = ∅. ✓
-- **Guard #9 (move byte-identical)**: diffed deleted loader.cpp block vs added compiled_ruleset.{hpp,cpp} — all function bodies (host_mask/host_mask6/host_addr6_of/compute_id_to_slot/compute_slot_to_id/lower_axis/lower_axis6/aggregate_axis/lower_port_axis/close_prefixes/6) LOGIC-identical. Only 2 comment-only edits (stale `1ULL<<rule_id`→`1ULL<<slot` BitPrefix doc; `populate_all_axes' signature`→`materialize's signature` alias doc). No logic change. ✓
-- **Guard #15**: `copy_rule_counters_forward` (loader.cpp:2133/2230, branch-divergent args) + `populate_action_table` stay EXPLICIT at both call sites, NOT folded; read `cr.slot_to_id`. ✓
-- **span lifetime**: `cr.rules` spans `req.config.rules` (`const ApplyRequest&` outlives function); cr consumed in-scope, never escapes — no dangling. ✓
-- **3 pre-existing fails (#48/#63 exporter env, #101 leaked-port flake)**: `git diff HEAD~1 -- src/exporter` = ∅ → env/flake, NOT this slice. ✓
+## Point 4 — Out-of-scope drift
+None. No O(n²)→O(n) rewrite (O(n²) held), no A2 richer shape, no compile-path/datapath touch, no call-site/signature change, no VERSION bump (0.16.0 held).
 
-## Test execution (tail)
+## Test execution (`/tmp/mint-review-tests-1780666967.log`)
 ```
-1/3 Test #78:  T_AND_ORACLE_AGREEMENT .... Passed 6.23 sec
-2/3 Test #105: T_INSN_BASELINE_GATE ...... Passed 0.42 sec
-3/3 Test #107: T_COMPILE_LOWERING_IDENTITY Passed 0.00 sec
-100% tests passed, 0 tests failed out of 3
-./build/compile_harness → compile_harness: all assertions passed
+ruleset_delta_harness: all assertions passed        (offline, rc=0)
+compile_harness: all assertions passed              (offline, rc=0)
+ldd ruleset_delta_harness → OK: no libbpf in link
+#51  T_RULE_COUNTER_SURVIVES_APPLY ... Passed  3.90s
+#55  T_RULE_COUNTER_SURVIVES_REORDER  Passed  4.02s
+#70  T_RULE_COUNTERS_ATOMIC_SWAP .... Passed  3.96s
+#105 T_INSN_BASELINE_GATE (xdp 3437)  Passed  0.44s
+#108 T_RULESET_DELTA_TRUTHTABLE ..... Passed  0.00s
+100% tests passed, 0 failed out of 5
 ```
 
-## Out-of-triangulation findings (do NOT affect verdict)
+## Out-of-triangulation findings
+None.
 
-### OOT-1: v6 `host_addr6` sub-field not asserted in the offline unit — `defer`
-tests/compile/compile_harness.cpp:196 vs design.md:19150. v4 asserts `host_addr`; v6 omits derived `host_addr6` (__int128). Pure deterministic fn of `cidr.addr6` (memcmp-asserted) consumed only by close_prefixes6 (oracle-agreement-covered). One-line tester add closes the literal gap next cycle.
-
-### OOT-2: close_prefixes/close_prefixes6 not directly unit-tested by compile_harness — `defer`
-compiled_ruleset.cpp:233/258 exported; closure applied in materialize, not compile(). Matches TestStrategy intent (design.md:19150-21); oracle-agreement is the decisive cheap oracle for closure.
-
-### OOT-3: test v4 oracle masks host_addr; production stores unmasked — `defer` (+ inline-note to tester)
-compile_harness.cpp:211 (`host_order_v4 & host_mask4`) vs compiled_ruleset.cpp:119 (`ntohl(addr)`, unmasked). Agree for ALL valid inputs (config rejects host-bits-set CIDRs — cidr.cpp:155 v4 / :250 v6). Worth a tester comment so masking isn't mistaken for production semantics.
+Clean byte-identity code-motion; §5.35 counter-monotonicity hard gate held; first direct offline test of the id-reconciliation landed with a real negation control.
 
 ---
 
-### Deferred to next slice (Phase 4.5 sweep — round 1)
-All three OOT findings dispositioned `defer` (none affect the pass verdict; all are test-completeness niceties with proven substantive coverage, NOT correctness gaps):
-- **OOT-1** — add an offline assertion on the derived v6 `host_addr6` sub-field in compile_harness.
-- **OOT-2** — (optional) a direct unit exercise of `close_prefixes`/`close_prefixes6`, if ever decoupled from oracle-agreement.
-- **OOT-3** — add a one-line comment in compile_harness near the v4 oracle masking, noting it is test-derivation-only (production stores unmasked; equivalent under the host-bits-zero config invariant).
-
-These are candidates for the NEXT slice's tester scope (cheap, low-priority). Natural home: **slice 2 (RulesetDelta)** if/when its spike passes, or a standalone test-polish slice.
+### Cross-cycle note — B40 deferred OOT items resolved here
+The 3 OOT test-polish items deferred from B40's review (§5.73) were carried as RD-5 ride-along: OOT-1 (v6 `host_addr6` offline assertion) DONE, OOT-3 (v4-oracle masking comment) DONE, OOT-2 (direct `close_prefixes` unit) SKIPPED (file-static, would need an src/ change — design-permitted). No deferred items remain from the loader-datamodel cleanup arc.
