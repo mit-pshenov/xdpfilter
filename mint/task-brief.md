@@ -1,164 +1,156 @@
-# Task brief — MVP-4.33 / B40: CompiledRuleset bundle — name the compile output + offline test (brownfield)
+# Task brief — MVP-4.34 / B41: RulesetDelta — name the id-reconciliation + offline truth-table (brownfield)
 
 ## Goal
 
-Slice 1 ("Tidy Bundle") of `mint/architecture-loader-datamodel.md` (mint-hld synthesis,
-committed `f37b63d`; reviewer pass, grounder `clean-with-gates`). Give the loader's
-**compile output a name and a boundary**: bundle the 12 anonymous compile locals in
-`apply_request` into a dumb value-type `CompiledRuleset`, extract a pure
-`CompiledRuleset compile(const Config&)`, and collapse the 16-argument `populate_all_axes`
-into a 3-argument `materialize(skel, slot, const CompiledRuleset&)`. Ship the **first-ever
-offline unit test of the production lowering** (`Config → CompiledRuleset` bit-identity),
-closing the `D-mvp-4.2-ISOLATION` coverage gap (today only `bitvec_harness`'s parallel
-reimplementation is tested, never the production path).
+Slice 2 ("Bundle + Delta", second slice) of `mint/architecture-loader-datamodel.md` (mint-hld
+synthesis `f37b63d`). Give the loader's **id-reconciliation a name and a boundary**: extract the
+anonymous nested-scan classification inside `copy_rule_counters_forward` (the
+survived/moved/new/dropped set-diff over operator-id space — the apply's only stateful "two
+versions meet" seam) into a **pure `RulesetDelta diff(old_slot_to_id, new_slot_to_id)`**, leaving
+`copy_rule_counters_forward` as a thin consumer whose full-64-slot write-set stays **byte-identical**.
+Ship the **first direct offline test of the id-reconciliation** — `T_RULESET_DELTA_TRUTHTABLE`
+(bare-`main`, libbpf-free) asserting survived/moved/new/dropped incl. the B30 moved-keeps-counter
+case.
 
-This is the **entire pre-mirror/redirect tidy mandate**: the 16-arg signature is the present
-maintenance hazard the TC workstream would otherwise extend to 17. It is a **pure host-side
-refactor — zero datapath change**. `RulesetDelta`/`diff()` is the spike-gated **slice 2** and
-is OUT of this brief.
+**The slice-2 spike (the HLD's hard gate) has PASSED** (run 2026-06-05, throwaway lift then
+reverted): verbatim code-motion IS achievable — the classification (`loader.cpp:1505–1515`) lifts
+into a pure function reading only the two slot→id spans; the consumer's write-set (lookup at the
+precomputed source + the `lk<0 → re-zero` edge + every-slot update) stays unchanged. Empirical
+proof: throwaway built clean, counter-preservation ctests green in isolation (REORDER ×3,
+SURVIVES_APPLY, ATOMIC_SWAP, all bump). **The §5.35 risk question is therefore MOOTED** — no
+write-loop restructure is needed; this slice is byte-identity code-motion only.
 
 ## Context: prior work
 
 - mint-hld synthesis + discharge ledger: `mint/architecture-loader-datamodel.md` (`f37b63d`).
-- PO ruling at the gate: slice 1 is the whole pre-TC mandate; slice 2 (delta) is
-  TC-orthogonal test-hygiene, spike-gated, hard gate (defer-if-not-pure-code-motion).
-- Architecture vocabulary: `mint/architecture-rule-model.md` (Wave B). Grounder discharged
-  the naming question: arch-doc "Rule IR" names a DIFFERENT form (the config.cpp-emitted
-  NormalizedRule above the lowering boundary, and the in-map table), NOT the compile-output
-  bit-structures → **no collision; mint `CompiledRuleset`**.
-- Brief-author Phase 2 grep verification (this brief): see evidence footer. 3 of 4
-  discharge-ledger slice-time rechecks DISCHARGED at brief-time (below); the 4th (cycle/LOC)
-  is an impl-time measurement.
-- PI continuity: **PI-7** (`loader.hpp` zero-diff) CONTINUES — the new header is private
-  (`src/lib/`, like `apply_internal.hpp`), `loader.hpp` is untouched (verified: it names no
-  `populate_*`/`materialize`/`Compiled` symbol). **PI-mvp-4.27-DATAPATH-IDENTICAL** (insn
-  baseline 3437 ×3 arms) CONTINUES and is the decisive cheap oracle.
+  Slice 1 (CompiledRuleset bundle, B40/§5.73) SHIPPED `b874e3a`. This is slice 2, **spike-discharged**.
+- Spike result (this session): verbatim-liftability PROVEN; the §5.35 PRESERVE counter-monotonicity
+  surface holds under the lift. The O(n²)→O(n) optimization is explicitly DEFERRED (64-rule scale).
+- Phase-2 brief-author grep verification: see evidence footer (def/call-sites/classification-block
+  line-anchored; new header + new test confirmed absent; no name collision).
+- PI continuity: **PI-7** (`loader.hpp` zero-diff) CONTINUES (new header is private; loader.hpp
+  untouched). **PI-3.4b-2 / §5.35 PRESERVE-across-apply** (Prometheus counter-monotonicity) is the
+  load-bearing invariant this slice must hold byte-identically. **PI-mvp-4.27-DATAPATH-IDENTICAL**
+  is untouched — this slice changes NO BPF datapath and NO compile path (insn 3437 stays by
+  construction; the change is purely the host-side counter copy-forward).
+- 3 deferred OOT test-polish items from B40's review (review.md) ride along in the tester scope.
 
 ## Workflow rules (brownfield)
 
-- **Architect**: read `apply_request` (`loader.cpp:2189+`), the lowering block
-  (`:1165–1474`), both `populate_all_axes` call sites (`:2472` reattach / `:2589` fresh),
-  and `architecture-loader-datamodel.md`. EDIT `mint/design.md` in place; append **§5.73**.
-- **Impl**: FileList per brownfield mode (NEW headers + EDIT loader.cpp + NEW test + CMake).
-- **Tester**: NEW offline unit test (bare-`main`, no gtest — precedent `bitvec_harness`,
-  `tests/CMakeLists.txt:1092`); the datapath byte-identity gate (`T_INSN_BASELINE_GATE.sh`,
-  `T_*_ORACLE_AGREEMENT`) is REUSED unchanged, not re-authored.
-- **Reviewer**: 5-point brownfield framework. Special attention: (a) datapath byte-identity
-  (insn 3437 ×3 + oracle-agreement); (b) guard #15 boundary intact (counter copy-forward
-  NOT folded into `materialize`); (c) guard #36 (CompiledRuleset is a dumb aggregate).
+- **Architect**: read `copy_rule_counters_forward` (`loader.cpp:1488`, the doc-comment §5.35/B30
+  semantics at `:1456–1487`, the classification scan `:1505–1515`, both call sites `:2135` reattach
+  / `:2233` fresh), the spike result (this brief + handoff), and `architecture-loader-datamodel.md`.
+  EDIT `mint/design.md` in place; append **§5.74**.
+- **Impl**: FileList per brownfield DIFF (NEW delta header/TU, EDIT loader.cpp consumer + CMake).
+- **Tester**: NEW `T_RULESET_DELTA_TRUTHTABLE` (bare-`main`, no libbpf, no gtest — precedent
+  `compile_harness`, `tests/CMakeLists.txt:1627`) + the existing counter-preservation ctests
+  (T_RULE_COUNTER_SURVIVES_REORDER/APPLY, T_RULE_COUNTERS_ATOMIC_SWAP) are the REUSED byte-identity
+  gate. Plus the 3 ride-along OOT polish items in `compile_harness.cpp`.
+- **Reviewer**: 5-point brownfield. Special attention: (a) **behaviour preserved** — the consumer's
+  64-slot map write-set is byte-identical (diff the new `copy_rule_counters_forward` body against
+  `git show HEAD~1`); (b) guard #15 boundary (copy-forward stays EXPLICIT at both call sites,
+  branch-divergent args — NOT folded); (c) guard #9 (classification lifted verbatim, not altered);
+  (d) §5.35 counter-monotonicity holds (counter ctests green).
 
 ## Human-gate decisions (defaults applied — architect overrides at Phase A with evidence)
 
-### HG-mvp-4.33-1: `materialize()` scope → **wraps `populate_all_axes` ONLY**
-`copy_rule_counters_forward` (PRESERVE, branch-divergent args — guard #15 / D-mvp-4.8-BOUNDARY)
-and `populate_action_table` (shared static table) **STAY EXPLICIT at each call site**, NOT
-folded into `materialize`. Verified separation: counter copy-forward is called at `:2519`
-(reattach) and `:2619` (fresh self-copy), distinct from the `populate_all_axes` calls.
-`materialize(skel, slot, cr)` is exactly the branch-INVARIANT 12-local consumer.
+### HG-mvp-4.34-1: `RulesetDelta` + `diff()` placement → **NEW libbpf-free TU `src/lib/ruleset_delta.{hpp,cpp}`**
+A SEPARATE model from `CompiledRuleset` (counter-reconciliation across two applies, NOT compile
+output) → its own header reads cleaner and matches the "name the models" thesis. Architect MAY
+instead co-locate in `compiled_ruleset.{hpp,cpp}` if it prefers one libbpf-free TU — either way
+`diff()` MUST be libbpf-free/no-throw so `T_RULESET_DELTA_TRUTHTABLE` links it without libbpf
+(the compile_harness linkage pattern).
 
-### HG-mvp-4.33-2: file placement → **NEW `src/lib/compiled_ruleset.{hpp,cpp}`; `compile()` libbpf-free**
-`compile()` (pure, no `skel`/fd/libbpf) lives in the new TU so the unit test links it WITHOUT
-dragging libbpf into the test binary (testability lens's clean-linkage point). `materialize()`
-needs `xdpfilter_bpf*` → its definition MAY stay in `loader.cpp` (architect's call); only its
-signature changes. `struct CompiledRuleset` is header-only in `compiled_ruleset.hpp`.
+### HG-mvp-4.34-2: `copy_rule_counters_forward` stays the consumer; write-set byte-identical
+`diff()` is called inside (or just before) `copy_rule_counters_forward`; the precomputed delta
+drives the SAME 64-slot loop — per-slot zero, lookup-at-source (only when the delta names a source),
+`lk<0 → re-zero`, every-slot `bpf_map_update_elem`. The two call sites `:2135`/`:2233` (PRESERVE,
+branch-divergent args) stay EXPLICIT and UNCHANGED (guard #15 / D-mvp-4.8-BOUNDARY).
 
-### HG-mvp-4.33-3: naming → **mint `CompiledRuleset`** (grounder-discharged; no "Rule IR" collision)
+### HG-mvp-4.34-3: O(n²)→O(n) optimization → **DEFERRED (not this slice)**
+The classification scan is lifted VERBATIM (the spike's byte-identity rests on identical results).
+An O(n) hash-map rewrite is a separate optional follow-up; at 64-rule scale it buys nothing real
+and would trade byte-identity-by-construction for byte-identity-by-argument. Keep the O(n²) scan.
 
-### HG-mvp-4.33-4: VERSION → **no bump** (0.16.0 held across B37/B38/B39; internal refactor, no operator-visible surface)
+### HG-mvp-4.34-4: VERSION → **no bump** (0.16.0 held; internal refactor, no operator-visible surface)
 
-### HG-mvp-4.33-5: `CompiledRuleset` value-equality for the test → **compare the deterministic lowering fields**
-`id_to_slot` is a `std::unordered_map` (non-deterministic iteration); the 11 other fields are
-insertion-ordered vectors/arrays/scalars (deterministic per D-mvp-4.10-ORDER). The offline
-bit-identity assertion compares the **lowering outputs** (entries/wildcard/prefixes — the
-datapath-bearing bits); `id_to_slot` is an intermediate compared by key-set if at all.
-Architect designs the exact assertion shape.
+## Open mechanism questions (architect decides; document in §5.74)
 
-## Open mechanism questions (architect decides; document in §5.73)
+### Q1: `RulesetDelta` shape
+- **A1**: minimal — a per-new-slot `source[64]` precompute (old-slot to copy from, or a NONE
+  sentinel). Directly byte-identity-preserving (the spike's proven form).
+- **A2**: richer — explicit `{survived/moved, added, dropped}` sets/spans, with `source[]` derived.
+- **Recommendation**: architect's call, bounded by TWO hard constraints: (i) the consumer's map
+  write-set stays byte-identical; (ii) the shape lets `T_RULESET_DELTA_TRUTHTABLE` assert
+  survived/moved/new/dropped + the B30 moved-keeps-counter case directly. A1 is the safest for (i);
+  a richer (A2) form is fine if it drives the identical writes and is a dumb aggregate (guard #36).
 
-### Q1: `CompiledRuleset.rules` member type
-- **A1**: `std::span<const Rule>` (non-owning — points into the caller's `Config.rules`).
-- **A2**: own a copy / hold `const Config&`.
-- **Recommendation**: **A1 `std::span<const Rule>`** per the action-axis-stays-RAW
-  non-foreclosure invariant (forward-compat lens). NB lifetime: the span must outlive the
-  `CompiledRuleset` — in `apply_request`, `compile()`'s result is consumed within the same
-  scope as `req.config`, so the span is valid; architect confirms no escape.
-
-### Q2: does `compile()` keep the bound-checks (`:2260–2293`, count > XDPMF_ALLOWLIST_MAX)?
-- **A1**: yes — bound-checks are part of "is this Config compilable", belong in `compile()`.
-- **A2**: leave them in `apply_request` after `compile()`.
-- **Recommendation**: **A1** — they throw `LoaderError::LoadFailed` on the lowering outputs;
-  keeping them in `compile()` makes the offline test able to assert the throw-on-overflow
-  contract too. Architect confirms the throw-site error strings are unchanged (byte-identity
-  of operator-visible stderr).
+### Q2: NONE-sentinel for "no source" (if A1)
+- The spike reused `XDPMF_SLOT_ID_EMPTY` (0xFFFF_FFFF); valid old_slot ∈ [0,64) never collides.
+- Architect confirms the sentinel choice + that EMPTY/new/dropped all map to NONE → zeros written.
 
 ## Scope (cycle 1 — concrete items; estimates are UPPER BOUNDS)
 
-### Item CR-1 — NEW `src/lib/compiled_ruleset.hpp`
-**Where**: `src/lib/compiled_ruleset.hpp` (verified absent).
-`struct CompiledRuleset` — a **dumb value-aggregate** (no methods, guard #36) of the 12
-compile locals: `id_to_slot`, `slot_to_id`, `mac_low`, `dst_low`, `src_low`, `dst6_low`,
-`src6_low`, `proto_low`, `port_low`, `vlan_low`, `eth_low`, `default_action`, plus `rules`
-(`std::span<const Rule>` per Q1). Declares `CompiledRuleset compile(const Config&)`.
-The per-axis `*Lowering` types (`AxisLowering` `:1256`, `AxisLowering6` `:1347`,
-`AxisAggregate<>` `:1387`, `PortLowering` `:1448`) are REUSED — this slice does NOT redefine
-them. (Architect decides whether they move to the header or stay in loader.cpp with a fwd
-include; moving risks needless churn — default: leave in loader.cpp, the header includes what
-it needs.)
+### Item RD-1 — NEW `src/lib/ruleset_delta.{hpp,cpp}` (or co-located per HG-1)
+**Where**: `src/lib/ruleset_delta.hpp` + `.cpp` (verified absent).
+`struct RulesetDelta` (dumb aggregate, no methods — guard #36) + pure
+`RulesetDelta diff(std::span<const std::uint32_t> old_slot_to_id, std::span<const std::uint32_t> new_slot_to_id)`.
+**Libbpf-free, no-throw.** The classification logic is lifted VERBATIM from `loader.cpp:1505–1515`
+(the `old_slot_to_id[old_slot] == new_id` scan, unique-id break) — guard #9 (move, not alter).
 
-### Item CR-2 — NEW `src/lib/compiled_ruleset.cpp`
-**Where**: `src/lib/compiled_ruleset.cpp`.
-`CompiledRuleset compile(const Config&)` = verbatim lift of the compile block
-`loader.cpp:2206–2293` (the 11 `lower_*`/`aggregate_axis` calls + `compute_id_to_slot`/
-`compute_slot_to_id` + bound-checks per Q2). **Pure, no libbpf.** The lowering helper
-functions it calls must be reachable (architect: keep them in loader.cpp and declare, or
-co-locate — whichever preserves byte-identity with least churn).
+### Item RD-2 — EDIT `src/lib/loader.cpp`
+**Where**: `copy_rule_counters_forward` body (`:1488`).
+Replace the inline nested classification with `const RulesetDelta d = diff(old_slot_to_id, new_slot_to_id);`
+then the SAME 64-slot write loop consuming `d` (lookup at the named source, `lk<0 → re-zero`,
+every-slot update — byte-identical map I/O sequence). `#include "ruleset_delta.hpp"`. The 2 call
+sites `:2135`/`:2233` UNCHANGED (guard #15). NO other loader.cpp change.
 
-### Item CR-3 — EDIT `src/lib/loader.cpp`
-**Where**: `apply_request` body + `populate_all_axes` definition `:1903` + both call sites
-`:2472` / `:2589`.
-- `populate_all_axes(16 args)` → `materialize(xdpfilter_bpf* skel, std::uint32_t slot, const CompiledRuleset& cr)`; body reads `cr.mac_low` etc. (mechanical positional→member rename).
-- `apply_request`: replace the 12-local block with `const CompiledRuleset cr = compile(req.config);`
-  then `materialize(skel.get(), inactive|0u, cr)` at each branch.
-- `copy_rule_counters_forward` + `populate_action_table` call sites **UNCHANGED** (guard #15).
+### Item RD-3 — NEW offline truth-table test
+**Where**: `tests/<dir>/ruleset_delta_harness.cpp` (architect/tester names the dir) + ctest
+registration. Bare-`main`, NO gtest, NO libbpf (links the `diff()` TU only). `T_RULESET_DELTA_TRUTHTABLE`
+asserts `diff()` over a corpus covering all four classes: **survived** (id in both, same slot),
+**moved** (id in both, slot changed — B30 moved-keeps-counter: source follows the id), **new** (id
+only in new → NONE), **dropped** (id only in old → never a source), plus EMPTY slots → NONE. Include
+a smoke + a negation control (mandatory).
 
-### Item CR-4 — NEW offline unit test
-**Where**: `tests/<dir>/compile_harness.cpp` (architect/tester names the dir) + ctest
-registration. Bare-`main`, no gtest (precedent `bitvec_harness`). Builds a `Config` corpus
-including **≥1 Pass and ≥1 Drop rule** (exercises the `action_id` ternary `loader.cpp:1713` —
-recheck #4) across representative axes, runs `compile()`, asserts the lowering-bit outputs
-match a golden expectation. Links `compiled_ruleset.cpp` + `config` (NOT libbpf).
+### Item RD-4 — CMake wiring
+**Where**: `src/` lib target (add `ruleset_delta.cpp` to `xdpmf_internal`) + `tests/CMakeLists.txt`
+(`add_executable` + `add_test`, mirroring the `compile_harness` block `:1627` — libbpf-free).
 
-### Item CR-5 — CMake wiring
-**Where**: `src/` lib target (add `compiled_ruleset.cpp` to the lib sources) +
-`tests/CMakeLists.txt` (`add_executable` + `add_test` for the compile harness, mirroring the
-`bitvec_harness` block `:1092`). Guard #11 N/A (no VERSION bump).
+### Item RD-5 — ride-along: 3 deferred OOT test-polish (from B40 review.md)
+**Where**: `tests/compile/compile_harness.cpp`.
+- **OOT-1**: add an offline assertion on the derived v6 `host_addr6` sub-field (v4 path asserts
+  `host_addr` at `:211`; v6 `ExpPrefix6` `:196` omits it).
+- **OOT-2** (optional): a direct unit exercise of `close_prefixes`/`close_prefixes6` if cheap.
+- **OOT-3**: a one-line comment near the v4-oracle masking (`host_order_v4 & host_mask4`, `:211`)
+  noting it is test-derivation-only (production stores unmasked; equivalent under the host-bits-zero
+  config invariant). These are LOW-priority; do NOT let them expand the slice.
 
 ## Out of scope (explicit)
 
-- **`RulesetDelta` / `diff()` extraction** — spike-gated **slice 2**. The required spike
-  (verbatim-liftability of `loader.cpp:1820–1835` leaving the 64-slot write-set byte-identical)
-  must PASS first; hard gate (defer entirely if not pure code-motion).
-- **`copy_rule_counters_forward`** — untouched this slice (guard #15 boundary).
-- **Any BPF-side / map-shape change** — none; insn-count must stay 3437.
-- **O(n²)→O(n) optimization** of anything — deferred (64-rule scale makes it irrelevant).
+- **O(n²)→O(n) optimization** of `diff()` — deferred (HG-3; 64-rule scale).
+- **`CompiledRuleset` changes** — shipped in B40, untouched here.
+- **Any BPF datapath / compile-path change** — none; insn 3437 stays by construction.
+- **`copy_rule_counters_forward` call-site / args change** — the 2 sites stay byte-identical (guard #15).
 - **`apply --dry-run` / preview**, **mirror/redirect / TC**, **the 64-rule ceiling** — all OOS.
 
 ## Definition of done
 
-- §5.73 amendment in `mint/design.md`.
-- PI-7 (`loader.hpp` zero-diff) CONTINUES; PI-mvp-4.27-DATAPATH-IDENTICAL CONTINUES.
-- Datapath byte-identity: `T_INSN_BASELINE_GATE.sh` stays **3437** ×3 arms;
-  `T_*_ORACLE_AGREEMENT` corpus holds (verdict-identity).
-- NEW `T_COMPILE_*` offline unit ctest green (Config→CompiledRuleset bit-identity, both action_ids).
-- Full ctest baseline unchanged + the one new test (count: current baseline + 1).
+- §5.74 amendment in `mint/design.md`.
+- PI-7 (`loader.hpp` zero-diff) CONTINUES; §5.35 PRESERVE counter-monotonicity holds byte-identically.
+- Behaviour preserved: `copy_rule_counters_forward` map write-set byte-identical (diff vs HEAD~1);
+  existing counter ctests (T_RULE_COUNTER_SURVIVES_REORDER/APPLY, T_RULE_COUNTERS_ATOMIC_SWAP, bump
+  tests) green; datapath insn 3437 untouched.
+- NEW `T_RULESET_DELTA_TRUTHTABLE` green (survived/moved/new/dropped + B30 moved-keeps-counter).
+- 3 ride-along OOT polish items applied (OOT-1/OOT-3 mandatory, OOT-2 optional).
 - `mint/review.md` round-1 verdict = pass.
 - One git commit per phase boundary.
 
 ## Dependencies
 
-- Build: C++23 (existing), libbpf (existing — but the new `compile()` TU + the unit test do
-  NOT link it). No new third-party deps (no gtest).
-- Runtime/kernel: none new (host-side refactor).
+- Build: C++23 (existing), libbpf (existing — but the new `diff()` TU + the truth-table test do NOT
+  link it). No new third-party deps.
+- Runtime/kernel: none new (host-side refactor). Counter ctests need root (BPF) — local gate.
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 
@@ -175,52 +167,36 @@ packs:
 
 ## Pre-brief sanity check (per mint-hld-scope-discipline)
 
-**MECHANICAL** — single-architect `/mint-dev` is correct. The design-space was resolved by
-the mint-hld round (`f37b63d`); this slice carries a **discharged** decision (reviewer pass +
-grounder clean-with-gates). Multi-axis? No — the carving, naming, placement, and test scaffold
-are all decided/discharged. Expensive-to-undo? Low — pure struct-pack with the insn-3437 gate.
-No `/mint-hld` re-run needed. PRESERVE-vs-RESET sub-check: **N/A** — no stateful map is promoted
-to atomic-swap; `copy_rule_counters_forward` (PRESERVE) is explicitly untouched.
-
-**Rolling-wave re-discharge of the inherited hld plan**: discharge ledger present in
-`architecture-loader-datamodel.md`. The required spike gates **slice 2 only** — slice 1 has no
-undischarged spike. Slice-time rechecks discharged at brief-time: see footer.
+**MECHANICAL** — single-architect `/mint-dev`. The design-space was resolved by the mint-hld round
+(`f37b63d`), and the slice's one gating uncertainty (verbatim-liftability) was **discharged by the
+spike (PASS)** this session. Multi-axis? No. Expensive-to-undo? Low — byte-identity code-motion with
+the counter-ctest gate. PRESERVE-vs-RESET sub-check: `copy_rule_counters_forward` is the EXISTING
+PRESERVE helper (PI-3.4b-2 / §5.35); this slice does NOT promote any map — it refactors the helper's
+internals as pure code-motion, semantic stays **PRESERVE-UNCHANGED**. Rolling-wave: discharge ledger
+present; the required spike is DISCHARGED (no undischarged gate remains).
 
 ## Notes for architect Phase A code-grep discipline
 
 Brief author ran these; architect re-verifies + extends:
-- `grep -nE 'populate_all_axes' src/lib/loader.cpp` — def `:1903`, calls `:2472`/`:2589` (16 args each, confirmed).
-- `grep -nE 'copy_rule_counters_forward' src/lib/loader.cpp` — calls `:2519`/`:2619`, SEPARATE from populate (guard #15).
-- `test -f src/lib/compiled_ruleset.hpp` — absent (NEW).
-- `grep -nE 'struct (AxisLowering|AxisLowering6|AxisAggregate|PortLowering)' src/lib/loader.cpp` — the lowering types to REUSE (`:1256/:1347/:1387/:1448`).
-- `grep -nE 'XDPMF_PROD_INSN_BASELINE' tests/T_INSN_BASELINE_GATE.sh` — baseline `3437` (`:71`).
-- `grep -niE 'gtest|catch2|doctest' tests/CMakeLists.txt` — empty (bare-main is the only path).
-- **Architect MUST re-run** the discharge-ledger rechecks #2 (CompiledRuleset fields ↔ live
-  `*Lowering` shapes — one `unordered_map`, rest deterministic) and #4 (corpus covers both
-  action_ids) at design time, and confirm the `compile()` callees are pure/side-effect-free
-  (hidden-assumption #2) and touch no BPF-side code (hidden-assumption #1).
+- `grep -nE 'copy_rule_counters_forward' src/lib/loader.cpp` — def `:1488`, calls `:2135`/`:2233`, guard-#15 boundary `:1581/:2089/:2204`.
+- the classification scan to lift: `loader.cpp:1505–1515` (`old_slot_to_id[old_slot] == new_id` + unique-id break).
+- `test -f src/lib/ruleset_delta.hpp` — absent (NEW); `ls tests/ | grep -i ruleset_delta` — absent (NEW test).
+- `grep -nE 'add_executable\(compile_harness' tests/CMakeLists.txt` — `:1627` (libbpf-free test precedent).
+- **Architect MUST** diff the proposed new `copy_rule_counters_forward` body against `git show HEAD~1:src/lib/loader.cpp` to confirm the write-set is byte-identical, and confirm `diff()` touches no fd/BPF/throw (the spike's pure-function property).
 
 ### Anti-misdiagnosis guards applicable to this slice (per Phase 3)
 
-- **Guard #15 (PRESERVE branch-boundary / D-mvp-4.8-BOUNDARY)**: `copy_rule_counters_forward`
-  has branch-divergent args (reattach reads old slot_rule_id; fresh passes empty) and stays
-  EXPLICIT at the call site — do NOT fold it into `materialize`. Reviewer special-attention.
-- **Guard #36 (macros-over-helpers for BPF byte-identity)**: `CompiledRuleset` is a dumb data
-  aggregate — no methods, no logic; the lowering stays where it is. Earn-its-keep test:
-  it kills a 16-arg signature + names a real seam (passes), it is not a thin wrapper.
-- **Guard #9 (helper-location: duplication-over-extraction)**: if `compile()` needs a lowering
-  helper currently file-local in loader.cpp, prefer declaring/sharing over re-implementing;
-  do NOT duplicate logic (byte-identity risk).
-- **Guard #37 (module-split precedent, B34b 3-header split)**: the private-header pattern is
-  blessed; `compiled_ruleset.hpp` follows it. PI-7 (`loader.hpp` zero-diff) must hold.
+- **Guard #15 (PRESERVE branch-boundary / D-mvp-4.8-BOUNDARY)**: `copy_rule_counters_forward` stays
+  EXPLICIT at both call sites with branch-divergent args; `diff()` lives INSIDE it, NOT hoisted to
+  the call sites. Reviewer special-attention.
+- **Guard #9 (move byte-identical, not alter)**: the classification scan is lifted VERBATIM into
+  `diff()`; any logic change = [INVARIANT-VIOLATED]. The O(n²) scan is preserved (HG-3).
+- **Guard #36 (dumb aggregate)**: `RulesetDelta` carries data only — no methods, no logic.
 
-### Evidence footer — discharge-ledger slice-time rechecks (brief-time status)
+### Evidence footer — spike discharge (slice-2 gate)
 
-1. **insn baseline still 3437?** — DISCHARGED ✓ (`T_INSN_BASELINE_GATE.sh:71`
-   `${XDPMF_PROD_INSN_BASELINE:-3437}`; rebaselined 3658→3437 in B35).
-2. **CompiledRuleset fields ↔ live `*Lowering` shapes?** — VERIFIED ✓ with caveat: 5
-   deterministic structs + 1 `unordered_map` (`id_to_slot`) → drives HG-mvp-4.33-5 test design.
-3. **cycle/LOC from real diff** — DEFERRED to impl-time (planning hypothesis: ~1 TTFW cycle,
-   LOC net-neutral-to-slightly-positive; new header+test offsets the collapsed args).
-4. **corpus covers both action_ids?** — site VERIFIED ✓ (`loader.cpp:1713` Pass/Drop ternary);
-   tester MUST include ≥1 Pass + ≥1 Drop in the compile corpus.
+The HLD's required pre-slice spike ("prove verbatim-lift of the classification leaves the 64-slot
+write-set byte-identical") **PASSED** this session: analytical (classification is pure, separable
+from the write-set) + empirical (throwaway lift built clean; REORDER ×3 / SURVIVES_APPLY /
+ATOMIC_SWAP / bump ctests green in isolation; host-side only → insn 3437 untouched). The throwaway
+was reverted; this slice ships the proper named form + the truth-table the spike did not write.
