@@ -932,3 +932,59 @@ tripped the T7 grep since `src/` is in scope). Reworded to "after the B33 rename
 to xdpfilter" + "now under /sys/fs/bpf/xdpfilter". `CHANGELOG.md` (OUT of T7
 scope) keeps explicit `xdpmacfilter→xdpfilter` migration prose — a migration note
 must name the old surface.
+
+## §5.75 MVP-4.35 / B42 redirect verb — impl notes (2026-06-05)
+
+Brownfield DIFF. Impl-owned items landed; tester owns sink_xdp.bpf.c + the
+2-iface harness + the new ctest registration (team-lead split). NO silent
+deviations.
+
+1. **insn RE-BASELINE (D-mvp-4.35-REBASELINE, PI-mvp-4.35-INSN-REBASELINE):
+   3437 → 3477 (+40).** Measured at Phase 2.5 via the gate's own path
+   (`llvm-objdump-19 -d --section=xdp xdpfilter.bpf.o | grep -cE '^\s+[0-9a-f]+:'`).
+   The +40 is the redirect branch: the `if (a && a->action_type==ACTION_REDIRECT)`
+   test + `bump_stat(STAT_REDIRECT)` + the `bpf_redirect_map(&redirect_devmap,0,XDP_PASS)`
+   call. Intentional, documented — NOT a regression. The surviving invariant is
+   PASS/DROP verdict-identity (all `T_*_ORACLE_AGREEMENT` + PASS/DROP ctests GREEN).
+2. **SECOND insn-baseline literal found (FileList gap, escalated to architect).**
+   `tests/T_PROD_VERIFIER_LOAD.sh:125` carries the SAME `${XDPMF_PROD_INSN_BASELINE:-3437}`
+   literal as the FileList-listed `T_INSN_BASELINE_GATE.sh:71`. With actual=3477 it
+   hard-FAILs (the verifier ACCEPTS the load rc=0 — only the literal trips). Both are
+   the same byte-identity gate mechanism. Peer-DM'd mint-dev-architect for approval to
+   extend the DIFF to that one line (3437→3477) rather than silently edit an unlisted
+   file. **RESOLVED:** architect confirmed (genuine FileList omission — §5.70's
+   precedent moved BOTH sites), amended design.md §5.75.2 (added the EDITED row) +
+   D-mvp-4.35-REBASELINE (names both sites) + PI-mvp-4.35-INSN-REBASELINE (both gates
+   green at 3477). Edited T_PROD_VERIFIER_LOAD.sh:125 `3437`→`3477` + §5.75 comment.
+   Both gates (#102, #105) now PASS at 3477.
+3. **Spike #3 (D-mvp-4.35-FALLBACK) = PASS on kernel 6.1.** Standalone: apply a
+   redirect rule (devmap[0]←ifindex resolved, verified == ifindex(IFACE_C)), CLEAR
+   devmap[0], inject a matching frame → STAT_REDIRECT=+1, DROP=0, PASS=0. The
+   `bpf_redirect_map(&map,0,XDP_PASS)` miss returns XDP_PASS (original-flow degrade,
+   no blackhole). ⇒ the optional `T_REDIRECT_TARGET_DOWN` CAN ship;
+   PI-mvp-4.35-MISS-DEFERRED is NOT triggered. Nuance relayed to tester: STAT_REDIRECT
+   bumps even on a miss (the bump precedes the helper call).
+4. **populate_redirect_devmap placement (MAY-level, §5.75.7a hint #4).** Called in
+   BOTH apply branches (reattach + fresh) adjacent to `populate_action_table`, in-place
+   before the active_idx flip (D-mvp-4.35-DEVMAP-SHARED). Not folded into a shared
+   helper — kept parallel to populate_action_table's existing two-site structure for
+   diff legibility.
+5. **No-steering path** deletes devmap[0] (swallowing ENOENT) so a stale ifindex from a
+   prior apply cannot persist; cross-validation guarantees no-steering ⇒ no redirect
+   rule ⇒ devmap unused.
+6. **action_id ternary** is the 3-way Pass→0 / Redirect→2 / else(Drop)→1 exactly per
+   §5.75.4. `populate_action_table` appends REDIRECT[2] only (no [3]=MIRROR — reserved
+   hole). PASS[0]/DROP[1] writes byte-identical (PI-mvp-4.35-ACTIONTABLE-01).
+7. **No struct widen** — action_entry/rule_entry sizeof==4 static_asserts untouched;
+   green build is the assertion (PI-mvp-4.35-NO-STRUCT-WIDEN).
+8. **Environmental (NOT my change):** #48 T_EXPORTER_EXITS_6_ALL_IFACES_EACCES + #63
+   T_LOG_JSON_EXPORTER_EVENTS fail on the HK-17 sub-case (exporter run as an
+   unprivileged user, exit 999=Killed). Cause: `nobody` cannot execute the binary under
+   `/home/user/.../build` (sandbox/home-dir perms — `sudo -u nobody env true` works but
+   `sudo -u nobody .../xdpmf-exporter` → "Permission denied"). Orthogonal to redirect
+   (my exporter change is an additive verdict label + one brace-init zero). Pre-existing.
+9. **Stale global pins** at `/sys/fs/bpf/{action_table,stats,…}` (old `action_table`
+   max_entries=2, June-1 junk from prior manual sessions) caused first-run #102/#105
+   reuse-mismatch FAILs after ACTION_MAX 2→4 / STAT_MAX 4→5. Cleaned the bare top-level
+   pins (NOT the `xdpfilter/` attach subdir); #105 then PASSED. The harness pins
+   per-iface under `/sys/fs/bpf/xdpfilter/<iface>/`, so this was pure environment hygiene.

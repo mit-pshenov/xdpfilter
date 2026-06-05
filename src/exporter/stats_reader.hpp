@@ -31,7 +31,7 @@ namespace xdpmf::exporter {
 
 struct StatsSample {
     std::string   iface;
-    std::uint64_t stats[STAT_MAX] = {0, 0, 0, 0};   // index ≡ enum xdpfilter_stat
+    std::uint64_t stats[STAT_MAX] = {0, 0, 0, 0, 0}; // index ≡ enum xdpfilter_stat (§5.75 +STAT_REDIRECT)
 };
 
 /* §5.30 HK-17 (MVP-3.4.5) — per-scrape discovery accounting populated by

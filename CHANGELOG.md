@@ -3,6 +3,16 @@
 All notable changes to this project are documented in this file. The
 format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.17.0] - 2026-06-05
+
+### Added
+- **MVP-4.35 (B42, §5.75) — `redirect` verb: XDP-native steer-to-DPI (Option 1, single global tap).** The first *steering* action — traffic matched by the 9-axis match-model is actively diverted (`bpf_redirect_map` + a single `BPF_MAP_TYPE_DEVMAP`) to one operator-configured DPI-feed interface, turning the filter from a terminal allow/drop into a selector.
+  - **New config grammar (`schema_version: 3`, additive):** rule `action: redirect` plus a top-level `steering: { redirect_to: <iface> }` block (the single global tap). A redirect rule requires `steering.redirect_to` (cross-validated → exit 9). `schema_version` now accepts **2 or 3** — a steering-less v2 config still validates unchanged (HG-1 additive widening, NOT a hard cutover).
+  - **New stat / metric:** `STAT_REDIRECT` (`STAT_MAX 4→5`); `/metrics` gains the `verdict="redirect"` series.
+  - **New datapath branch:** APPENDED after the `ACTION_DROP` test, so PASS/DROP verdicts are byte-identical for every non-redirect rule (the surviving invariant). The xdp instruction count intentionally **re-baselines** (3437 → new measured N) as the cost of the one new branch + helper call. `bpf_redirect_map(..., 0, XDP_PASS)` degrades to the original flow on a missing/down devmap entry (PASS-on-miss); the loader fails closed at apply on an unresolvable target.
+  - **ABI:** `enum xdpmf_action_type` gains `ACTION_REDIRECT=2` (+`ACTION_MIRROR=3` reserved hole, unshipped; `ACTION_MAX 2→4`). `action_entry`/`rule_entry` stay `sizeof==4` (no per-rule target — Option 2 is OOS). NEW pinned map `redirect_devmap` (`DEVMAP[1]`).
+  - **Out of scope:** mirror (clone-and-continue, needs TC/TCX), per-rule redirect targets, DEVMAP_HASH / multi-entry / broadcast devmap.
+
 ## [0.16.0] - 2026-06-03
 
 ### Changed

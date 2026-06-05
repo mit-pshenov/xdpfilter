@@ -16,7 +16,7 @@ field, line, and column. Max file size: 1 MiB.
 ## Top-level structure
 
 ```yaml
-schema_version: 2          # REQUIRED, must be exactly 2
+schema_version: 3          # REQUIRED, must be 2 or 3 (3 enables steering)
 interface: eth0            # optional (redundant with --iface)
 default_action: drop       # REQUIRED: drop | pass
 rules:                     # optional list of rule mappings
@@ -24,14 +24,17 @@ rules:                     # optional list of rule mappings
     action: pass
     match:
       src_cidr: "10.0.0.0/8"
+steering:                  # optional; REQUIRED iff any rule uses action: redirect
+  redirect_to: dpi0        # single global DPI-feed interface (the tap)
 ```
 
 | Key | Required | Type / values | Notes |
 |---|---|---|---|
-| `schema_version` | **yes** | integer, must be `2` | v1 is retired — absent or `1` both error. |
+| `schema_version` | **yes** | integer, `2` or `3` | v1 is retired — absent or `1` both error. `3` enables the `steering:` block (§5.75); a steering-less `2` config still validates (additive). |
 | `interface` | no | string | Redundant with `--iface`; informational. |
 | `default_action` | **yes** | `drop` \| `pass` | Verdict for frames matching no rule. |
 | `rules` | no | list of rule mappings | Absent/empty ⇒ every frame gets `default_action`. |
+| `steering` | no¹ | mapping `{ redirect_to: <iface> }` | The single global redirect tap. ¹**Required** if any rule has `action: redirect`. Only `redirect_to` is accepted (any other sub-key errors). |
 
 ## Rule mapping
 
@@ -46,7 +49,7 @@ rules:                     # optional list of rule mappings
 | Key | Required | Type / values | Notes |
 |---|---|---|---|
 | `id` | **yes** | any u32 except `4294967295` (`0xFFFFFFFF`, reserved sentinel) | Sparse, operator-assigned. First-match-by-`id` (lowest wins); also the stable counter key (Prometheus `rule_id`). Need not be dense or zero-based — `id: 100` is valid. Duplicate ids rejected. The **rule count** (not the id value) is capped at 64. |
-| `action` | **yes** | `pass` \| `drop` | Verdict when this rule matches. |
+| `action` | **yes** | `pass` \| `drop` \| `redirect` | Verdict when this rule matches. `redirect` (§5.75) steers the frame out the `steering.redirect_to` tap via `bpf_redirect_map`; degrades to the original flow (pass) if the tap is missing/down. Requires a top-level `steering:` block. |
 | `match` | **yes** | mapping | Must contain **at least one** of the 9 axes below. An unknown key in `match` is an error. |
 
 ## Match axes (9)
@@ -76,10 +79,41 @@ classifier walks extension headers to read the true L4 header before
 reading `protocol`/`dst_port`. `mac`, `vlan`, and `ethertype` are
 family-blind and fire across all arms.
 
+## Steering: `redirect` (schema_version 3)
+
+A rule with `action: redirect` actively diverts matched traffic out a single
+global DPI-feed interface — the **tap** — using XDP-native `bpf_redirect_map`.
+This is the first *steering* verb (the filter becomes a selector, not just a
+terminal allow/drop). The tap is configured once at the top level:
+
+```yaml
+schema_version: 3
+default_action: pass
+rules:
+  - id: 0
+    action: redirect          # steer this traffic to the DPI feed
+    match:
+      dst_cidr: "203.0.113.0/24"
+steering:
+  redirect_to: dpi0           # the single global tap interface
+```
+
+- **Single global tap.** All `redirect` rules steer to the same
+  `steering.redirect_to` interface — there is no per-rule target (that is a
+  future Option-2 superset, out of scope).
+- **Validation.** Any `action: redirect` rule **requires** a top-level
+  `steering.redirect_to` (else config error, exit 9). `steering:` accepts only
+  `redirect_to`; any other sub-key errors. An unresolvable target interface
+  fails closed at `apply` time.
+- **Miss behaviour.** If the tap is missing/down at runtime, the redirect
+  degrades to the original flow (`XDP_PASS`) rather than blackholing.
+- **Mirror (clone-and-continue) is NOT this verb** — redirect is terminal
+  (XOR with pass/drop); mirror is deferred (needs a TC/TCX program).
+
 ## Full example
 
 ```yaml
-schema_version: 2
+schema_version: 3
 interface: eth0
 default_action: drop
 rules:
@@ -90,6 +124,12 @@ rules:
       src_cidr: "10.10.0.0/16"
       protocol: tcp
       dst_port: "22"
+
+  # Steer flagged subnet traffic to the DPI feed.
+  - id: 4
+    action: redirect
+    match:
+      dst_cidr: "198.51.100.0/24"
 
   # Admit HTTPS to the service VIP range.
   - id: 1
@@ -111,6 +151,9 @@ rules:
     match:
       vlan: 100
       dst_cidr6: "2001:db8::/32"
+
+steering:
+  redirect_to: dpi0          # required because rule id 4 uses action: redirect
 ```
 
 ## Operational notes

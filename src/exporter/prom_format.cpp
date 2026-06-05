@@ -29,6 +29,7 @@ namespace {
         case STAT_DROP_DENY:      return "drop_deny";
         case STAT_DROP_MALFORMED: return "drop_malformed";
         case STAT_PASS_CIDR:      return "pass_cidr";
+        case STAT_REDIRECT:       return "redirect";  // §5.75
         default:                  return "unknown";
     }
 }

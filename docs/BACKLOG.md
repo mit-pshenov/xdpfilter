@@ -182,7 +182,7 @@ The S1→S6 gate ladder + C3 fast-follow are COMPLETE on origin/main. Match mode
 
 ## Architectural debt + cleanup workstream (2026-06-02/03 — PO: tidiness before mirror/redirect)
 
-Source: user's 5-point datapath review + the 2026-06-01 hybrid review (PERF-M1/ARCH-H1). Full planning context in memory `project_datapath_cleanup_workstream.md`. Sequence: comments-collapse → rename → MEASURE → datapath workstream. Mirror/redirect deferred behind this by PO choice ("чище будет; mirror не убежит").
+Source: user's 5-point datapath review + the 2026-06-01 hybrid review (PERF-M1/ARCH-H1). Full planning context in memory `project_datapath_cleanup_workstream.md`. Sequence: comments-collapse → rename → MEASURE → datapath workstream. Mirror/redirect were deferred behind this by PO choice ("чище будет; mirror не убежит"); the cleanup arc has since closed and **redirect shipped** (B42/MVP-4.35, §5.75). Mirror remains deferred (needs TC/TCX).
 
 ### B32 — ✅ SHIPPED MVP-4.25 (`1d31f51`, §5.65) — comment-collapse / archaeology pass
 −274 comment-lines across `.bpf.c` + `loader.cpp`; KEEP WHY + invariant-tripwires (PI/guard), CUT D-mvp narration + net-delta archaeology + §-tag stacking. Traceability audit: 0 governing-anchor loss. xdp 3658 byte-identical; round-1.
@@ -198,3 +198,6 @@ B34a/MVP-4.28 (`8c9a110`, §5.68) helper-extraction (4/5 folds byte-identical, m
 
 ### B37 — ✅ SHIPPED MVP-4.27 (`bb62891`, §5.67) — decorative regression gates made real
 (a) `T_PROD_VERIFIER_LOAD.sh` insn-count print→**FATAL** assert == `${XDPMF_PROD_INSN_BASELINE:-3658}` (consciously reversed `D-mvp-4.23-H3-PRODOBJ`); (b) NEW `T_LOADER_STDERR_GOLDEN.sh` + 3 goldens pinning operator-facing error-string shapes. guard #35 + tester teeth-layer (`T_INSN_BASELINE_GATE.sh`/`T_LOADER_STDERR_SHAPE.sh`). This gate is what every byte-identity slice since leans on (and B35's sanctioned re-baseline rides). round-1.
+
+### B42 — ✅ SHIPPED MVP-4.35 (§5.75) — `redirect` verb: XDP-native steer-to-DPI (Option 1, single global tap)
+First **steering** verb (filter→selector). New `action: redirect` + top-level `steering: { redirect_to }` block (`schema_version` {2}→{2,3} additive); `bpf_redirect_map` + a single `BPF_MAP_TYPE_DEVMAP` (`redirect_devmap[0]` = resolved tap ifindex, fail-closed at apply, PASS-on-miss). New `STAT_REDIRECT`/`verdict="redirect"`. Classifier branch APPENDED after `ACTION_DROP` ⇒ PASS/DROP **verdict-identity** held (surviving invariant); xdp insn re-baselined 3437→N (one branch + helper, documented per D-mvp-4.30-REBASELINE precedent). No struct widen (`action_entry`/`rule_entry` stay sizeof==4 — no per-rule target). VERSION 0.16.0→**0.17.0**. **Mirror (clone-and-continue) + per-rule targets remain deferred (Option 2+, need TC/TCX).**

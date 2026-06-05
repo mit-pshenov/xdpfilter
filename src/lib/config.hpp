@@ -1,18 +1,20 @@
 /*
  * config.hpp — typed schema for the §5.26/§5.27 YAML config.
  *
- * The schema (schema_version 2; v1 retired §5.43) is a top-level block mapping with:
- *   schema_version: 2     (REQUIRED; MUST be 2; supported set {2} — §5.43
- *                          HG-mvp-4.3-3 hard cutover from {1})
+ * The schema (schema_version {2,3}; v1 retired §5.43) is a top-level block mapping with:
+ *   schema_version: 2|3   (REQUIRED; supported set {2,3} — §5.75 HG-1 additive;
+ *                          3 introduces the optional steering: block)
  *   interface: <name>     (optional; redundant with CLI --iface)
  *   default_action: drop|pass    (REQUIRED)
  *   rules:                (optional; list of rule mappings)
  *     - id: <u32>         (REQUIRED; range [0, XDPMF_ALLOWLIST_MAX-1])
- *       action: pass|drop (REQUIRED)
+ *       action: pass|drop|redirect (REQUIRED; §5.75 +redirect)
  *       match:            (REQUIRED mapping; rule 7: at-least-one of the 9
  *                          match axes required — see config.cpp error string)
  *         mac: "AA:BB:..."         (§5.47 — src-MAC exact-match axis; re-accepted in v2)
  *         src_cidr: "10.0.0.0/8"   (§5.27 — IPv4 dotted-decimal CIDR; v6 rejected)
+ *   steering:             (§5.75 — optional; REQUIRED iff any rule uses redirect)
+ *     redirect_to: <iface>       (single global DPI-feed tap; non-empty)
  *
  * All validation failures throw std::system_error{LoaderError::ConfigError, ...}
  * with stderr starting "xdpfilter: config error: ..." per §5.26/§5.27.
@@ -31,7 +33,8 @@
 namespace xdpmf {
 
 enum class DefaultAction : std::uint8_t { Drop = 0, Pass = 1 };
-enum class RuleAction    : std::uint8_t { Drop = 0, Pass = 1 };
+// §5.75 (MVP-4.35): +Redirect — steer matched traffic out the single global tap.
+enum class RuleAction    : std::uint8_t { Drop = 0, Pass = 1, Redirect = 2 };
 
 // §5.44 (MVP-4.4) D-mvp-4.4-PORT-GRAMMAR: an inclusive dst_port range
 // [lo,hi] (a single port is lo==hi). Both endpoints ∈ [0,65535], lo ≤ hi
@@ -59,11 +62,19 @@ struct Rule {
     RuleMatch     match;
 };
 
+// §5.75 (MVP-4.35): the single global redirect target. Present iff the config
+// carries a top-level `steering:` block; cross-validation requires it whenever
+// any rule uses action: redirect. NO per-rule target (Option 2, OOS).
+struct Steering {
+    std::string redirect_to;  // DPI-feed interface name (non-empty)
+};
+
 struct Config {
     std::uint32_t              schema_version = 2;
     std::optional<std::string> iface;
     DefaultAction              default_action = DefaultAction::Drop;
     std::vector<Rule>          rules;
+    std::optional<Steering>    steering;  // §5.75 — absent in a steering-less v2/v3 config
 };
 
 /* Validates `root` against the §5.26 cycle-1 schema and produces a Config.

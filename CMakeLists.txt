@@ -10,7 +10,7 @@ endif()
 
 project(xdpfilter
     LANGUAGES C CXX
-    VERSION   0.16.0
+    VERSION   0.17.0
     DESCRIPTION "MVP-4.7 L2/L3/L4 XDP filter (AND-compose: mac + dst-CIDR + src-CIDR + proto + dst-port + vlan bit-vector) + Prometheus exporter + per-rule counters + exporter per-axis rule_info labels + structured logging + explicit drop-rule action dispatch + reset-counters CLI + rule_counters atomic-swap"
 )
 

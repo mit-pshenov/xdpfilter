@@ -19563,7 +19563,8 @@ construction. Mirror (clone-and-continue, needs TC/TCX) and per-rule targets are
 | `src/exporter/stats_reader.hpp` | brace-init `stats[STAT_MAX] = {0,0,0,0}`→`{0,0,0,0,0}` (:34, the load-bearing literal — recheck #5) | C++ hdr | ~1 |
 | `tests/lib/common.sh` | `setup_veth`/`cleanup_veth` grow a SECOND veth pair (`IFACE_C`/`IFACE_D`) + attach `sink_xdp`; NEW `read_sink` + `read_stats_with_redirect`/`wait_for_stats_sum_with_redirect` siblings | bash | ~50 |
 | `tests/lib/read_stats.py` | `--include-redirect` 5-column mode (precedent: `--include-pass-cidr`) | python | ~6 |
-| `tests/T_INSN_BASELINE_GATE.sh` | `XDPMF_PROD_INSN_BASELINE` 3437→N (re-baseline; impl measures N at Phase 2.5, documents delta = redirect-branch cost) | bash | ~1 |
+| `tests/T_INSN_BASELINE_GATE.sh` | `XDPMF_PROD_INSN_BASELINE` 3437→N (re-baseline; impl measures N at Phase 2.5, documents delta = redirect-branch cost). **N=3477 measured (Δ+40, redirect branch)** | bash | ~1 |
+| `tests/T_PROD_VERIFIER_LOAD.sh` | SAME re-baseline literal at :125 (`${XDPMF_PROD_INSN_BASELINE:-3437}`→`:-3477`) — the FATAL teeth-layer sibling of the gate (§5.67); both carry the D-mvp-4.30-REBASELINE comment, BOTH must move together (added §5.75 amend per impl Phase-2.5 grep) | bash | ~1 |
 | `tests/T_EXPORTER_METRICS_FORMAT.sh` | `--version` literal `0.16.0`→`0.17.0` (:105, comment :21-22) — guard #11 | bash | ~2 |
 | `CMakeLists.txt` | `VERSION 0.16.0`→`0.17.0` (:13, source of truth) + add the 2 new ctests + `sink_xdp.bpf.c` to the BPF-object build | cmake | ~8 |
 | `tests/CMakeLists.txt` | register `T_REDIRECT_DELIVERY` + `T_REDIRECT_COUNTER_AND_MAP` (local/root gate; SELECT-A subset rides `XDPMF_CI_BUILD_ONLY` where applicable) | cmake | ~10 |
@@ -19738,7 +19739,11 @@ entry.action_id =
   existing gate harness (`bpftool prog dump xlated` insn count of `xdpfilter_prog`, the same path the
   gate already uses). Expected: N modestly > 3437 (one branch + one helper call); the delta is recorded
   in `impl-notes` as the redirect-branch cost. NO peer-DM needed for the measurement (it is a literal
-  update, not a fork).
+  update, not a fork). **Measured N=3477 (Δ+40)** at Phase 2.5. The re-baseline literal lives at TWO
+  sites that move together (precedent §5.70 touched both): `T_INSN_BASELINE_GATE.sh:73` (tester gate)
+  AND `T_PROD_VERIFIER_LOAD.sh:125` (the FATAL teeth-layer sibling, §5.67) — both carry the
+  D-mvp-4.30-REBASELINE comment. [FileList §5.75.2 amended per impl Phase-2.5 grep to add the second
+  site — a design-gap fix, within the sanctioned re-baseline escape-hatch intent.]
 - **D-mvp-4.35-FEAS (PASS-on-miss happy-path ships by precedent)** — *because* `bpf_redirect_map`'s
   low-flag-bits miss-fallback (`flags=XDP_PASS` ⇒ return XDP_PASS on a missing devmap entry) is the
   documented kernel contract since the DEVMAP redirect API (≥4.14, well below any plausible target-fleet
@@ -19828,10 +19833,12 @@ parameterization.
   `T_*_ORACLE_AGREEMENT` + PASS/DROP ctests GREEN; `git diff` on classifier.h shows ONLY the appended
   REDIRECT branch (the DROP test + STAT_PASS_CIDR/XDP_PASS fallthrough untouched). Any PASS/DROP drift =
   `[INVARIANT-VIOLATED]`.
-- **PI-mvp-4.35-INSN-REBASELINE (insn 3437→N, documented + intentional)** — `T_INSN_BASELINE_GATE`
-  passes at the new N; the delta is documented as the redirect-branch cost. **Check**: gate green at N
-  AND an impl-notes line records `3437→N (+Δ redirect branch)`. (This REPLACES the prior
-  PI-mvp-4.27-DATAPATH-IDENTICAL for this slice — a deliberate shift, precedent §5.70.)
+- **PI-mvp-4.35-INSN-REBASELINE (insn 3437→3477, documented + intentional)** — BOTH insn-gate sites
+  pass at the new N=3477: `T_INSN_BASELINE_GATE.sh:73` AND `T_PROD_VERIFIER_LOAD.sh:125` (the FATAL
+  teeth-layer; both move together — precedent §5.70). **Check**: both gates green at 3477 AND an
+  impl-notes line records `3437→3477 (+40 redirect branch)`. (This REPLACES the prior
+  PI-mvp-4.27-DATAPATH-IDENTICAL for this slice — a deliberate shift, precedent §5.70.) A stale `3437`
+  left at EITHER site = the contradiction impl flagged (gate hard-FAIL vs "all pre-existing green").
 - **PI-7 (`loader.hpp` byte-identical — zero new public symbols)** — `git diff -- src/lib/loader.hpp` =
   ∅. `Steering`/`redirect_devmap`/`populate_redirect_devmap` are private (config.hpp / loader.cpp
   internals); `loader.hpp` names none.

@@ -70,7 +70,8 @@ enum xdpfilter_stat {
     STAT_DROP_DENY      = 1,
     STAT_DROP_MALFORMED = 2,
     STAT_PASS_CIDR      = 3,  /* §5.27: frame passed via CIDR-axis match */
-    STAT_MAX            = 4,  /* sentinel = stats max_entries */
+    STAT_REDIRECT       = 4,  /* §5.75: frame steered out the redirect devmap tap */
+    STAT_MAX            = 5,  /* sentinel = stats max_entries */
 };
 
 /* HG-4 (MVP-4.26/B33): the `XDPMF_*` macro/env namespace is KEPT as an
@@ -270,9 +271,11 @@ struct action_entry {
 };
 
 enum xdpmf_action_type {
-    ACTION_PASS = 0,
-    ACTION_DROP = 1,
-    ACTION_MAX  = 2,           /* sentinel; future MVP-3.8+ may extend (MIRROR/RL/TAG) */
+    ACTION_PASS     = 0,
+    ACTION_DROP     = 1,
+    ACTION_REDIRECT = 2,       /* §5.75: XDP-native steer to the single global tap */
+    ACTION_MIRROR   = 3,       /* reserved hole, unshipped (needs TC/TCX) — no datapath branch */
+    ACTION_MAX      = 4,       /* sentinel = action_table max_entries (reserves MIRROR slot) */
 };
 
 /* §5.34 rules axis: ARRAY_OF_MAPS (inner template + 2 pinned inners + outer);
@@ -281,6 +284,11 @@ enum xdpmf_action_type {
 #define XDPMF_MAP_RULES_INNER_A_NAME  "rules_a"         /* inner slot 0, ARRAY of struct rule_entry */
 #define XDPMF_MAP_RULES_INNER_B_NAME  "rules_b"         /* inner slot 1, ARRAY of struct rule_entry */
 #define XDPMF_MAP_ACTION_TABLE_NAME   "action_table"    /* ARRAY[ACTION_MAX] of struct action_entry */
+
+/* §5.75 (MVP-4.35): single global redirect tap. BPF_MAP_TYPE_DEVMAP, max_entries=1,
+ * key=__u32 index (always 0), value=__u32 target ifindex. Non-double-buffered
+ * (mutated in-place at apply, like action_table). bpf_redirect_map(&...,0,XDP_PASS). */
+#define XDPMF_MAP_REDIRECT_DEVMAP_NAME "redirect_devmap" /* DEVMAP[1], key 0 = target ifindex */
 
 /* §5.31 (MVP-3.4b): inner-map value layout carrying per-rule id. VESTIGIAL since
  * §5.43 — the inner-map value was reshaped to a bare `__u64` rule-bitmask, so the

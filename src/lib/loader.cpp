@@ -190,6 +190,11 @@ constexpr ManagedMapEntry kManagedMaps[] = {
     { &SkelMapsT::rules_b,          XDPMF_MAP_RULES_INNER_B_NAME },
     { &SkelMapsT::rules_outer,      XDPMF_MAP_RULES_OUTER_NAME },
     { &SkelMapsT::action_table,     XDPMF_MAP_ACTION_TABLE_NAME },
+    /* §5.75 (MVP-4.35) B42: single global redirect tap (DEVMAP[1]). Single,
+     * NON-double-buffered map (no _a/_b) — rides the uniform clear/pin/reuse walk
+     * like the other singles (active_idx, stats, ruleset_state, slot_rule_id);
+     * filled in-place at apply by populate_redirect_devmap (D-mvp-4.35-DEVMAP-SHARED). */
+    { &SkelMapsT::redirect_devmap,  XDPMF_MAP_REDIRECT_DEVMAP_NAME },
     /* §5.35 rule_counters axis trio (rule_counters_a/_b + rule_counters_outer,
      * PERCPU_ARRAY inners). The LIBBPF_PIN_BY_NAME + bpf_map__reuse_fd discipline
      * preserves per-CPU counter values across apply (Prometheus counter-
@@ -1394,9 +1399,11 @@ void populate_rules_inner_slot(int rules_inner_fd, std::span<const Rule> rules,
     for (const Rule& r : rules) {
         struct rule_entry entry{};
         entry.present   = 1;
-        entry.action_id = (r.action == RuleAction::Pass)
-            ? static_cast<unsigned char>(ACTION_PASS)
-            : static_cast<unsigned char>(ACTION_DROP);
+        /* §5.75: 3-way — Pass→0, Redirect→2, else (Drop)→1. */
+        entry.action_id =
+            (r.action == RuleAction::Pass)     ? static_cast<unsigned char>(ACTION_PASS)     :
+            (r.action == RuleAction::Redirect) ? static_cast<unsigned char>(ACTION_REDIRECT) :
+                                                 static_cast<unsigned char>(ACTION_DROP);
         const std::uint32_t slot = id_to_slot.at(r.id);
         const int rc = bpf_map_update_elem(rules_inner_fd, &slot, &entry, BPF_ANY);
         if (rc < 0) {
@@ -1526,9 +1533,10 @@ void copy_rule_counters_forward(int old_active_inner_fd, int inactive_inner_fd,
     }
 }
 
-/* §5.29 (MVP-3.4): pre-populate action_table with the two reserved actions
- * (PASS=0, DROP=1) per §5.29 apply step 8.5. Idempotent (write-same-value).
- * The action_id field stored in `rules` is an index into THIS array. */
+/* §5.29 (MVP-3.4): pre-populate action_table with the reserved actions per §5.29
+ * apply step 8.5. Idempotent (write-same-value). The action_id field stored in
+ * `rules` is an index into THIS array. §5.75 appends REDIRECT[2]; [0]/[1]
+ * (PASS/DROP) UNCHANGED, no [3]=MIRROR (reserved hole). */
 void populate_action_table(int action_table_fd)
 {
     struct action_entry pass_entry{};
@@ -1548,6 +1556,45 @@ void populate_action_table(int action_table_fd)
         throw_loader(classify(rc, LoaderError::LoadFailed),
                      std::format("bpf_map_update_elem(action_table[DROP]): {}",
                                  std::strerror(-rc)));
+    }
+    struct action_entry redirect_entry{};
+    redirect_entry.action_type = static_cast<unsigned char>(ACTION_REDIRECT);
+    const std::uint32_t k_redirect = static_cast<std::uint32_t>(ACTION_REDIRECT);
+    rc = bpf_map_update_elem(action_table_fd, &k_redirect, &redirect_entry, BPF_ANY);
+    if (rc < 0) {
+        throw_loader(classify(rc, LoaderError::LoadFailed),
+                     std::format("bpf_map_update_elem(action_table[REDIRECT]): {}",
+                                 std::strerror(-rc)));
+    }
+}
+
+/* §5.75 (MVP-4.35) D-mvp-4.35-Q2-A1 / DEVMAP-SHARED: fill the single global
+ * redirect tap (devmap[0] = resolved steering target ifindex). Called in BOTH
+ * apply branches alongside populate_action_table, BEFORE the active_idx flip.
+ * Fail-closed at apply (HG-3): an unresolvable target throws (config
+ * cross-validation guarantees steering exists iff a redirect rule exists). With
+ * no steering, key 0 is deleted so a stale ifindex from a prior apply cannot
+ * persist (the devmap is unused then — no redirect rule references it). */
+void populate_redirect_devmap(int devmap_fd, const Config& cfg)
+{
+    const std::uint32_t k0 = 0;
+    if (cfg.steering.has_value()) {
+        const std::uint32_t idx = static_cast<std::uint32_t>(
+            resolve_ifindex(cfg.steering->redirect_to, LoaderError::AttachFailed));
+        const int rc = bpf_map_update_elem(devmap_fd, &k0, &idx, BPF_ANY);
+        if (rc < 0) {
+            throw_loader(classify(rc, LoaderError::AttachFailed),
+                         std::format("bpf_map_update_elem(redirect_devmap[0]): {}",
+                                     std::strerror(-rc)));
+        }
+    } else {
+        const int rc = bpf_map_delete_elem(devmap_fd, &k0);
+        // ENOENT is benign — there was simply no prior entry to clear.
+        if (rc < 0 && errno != ENOENT) {
+            throw_loader(classify(-errno, LoaderError::AttachFailed),
+                         std::format("bpf_map_delete_elem(redirect_devmap[0]): {}",
+                                     std::strerror(errno)));
+        }
     }
 }
 
@@ -2097,6 +2144,14 @@ std::uint32_t apply_request(const ApplyRequest& req)
                              "action_table fd unavailable (reattach)");
             }
             populate_action_table(at_fd);
+            // §5.75 (MVP-4.35) D-mvp-4.35-DEVMAP-SHARED: fill the single global
+            // redirect tap in-place before the flip, like action_table.
+            const int dm_fd = bpf_map__fd(skel->maps.redirect_devmap);
+            if (dm_fd < 0) {
+                throw_loader(LoaderError::LoadFailed,
+                             "redirect_devmap fd unavailable (reattach)");
+            }
+            populate_redirect_devmap(dm_fd, req.config);
         }
 
         // §5.35 (MVP-3.4d) D-3.4d-3: copy-forward per-CPU rule_counters
@@ -2209,6 +2264,13 @@ std::uint32_t apply_request(const ApplyRequest& req)
             throw_loader(LoaderError::LoadFailed, "action_table map fd unavailable");
         }
         populate_action_table(at_fd);
+        // §5.75 (MVP-4.35) D-mvp-4.35-DEVMAP-SHARED: fill the redirect tap on
+        // fresh attach too (resolved steering target, fail-closed on miss).
+        const int dm_fd = bpf_map__fd(skel->maps.redirect_devmap);
+        if (dm_fd < 0) {
+            throw_loader(LoaderError::LoadFailed, "redirect_devmap map fd unavailable");
+        }
+        populate_redirect_devmap(dm_fd, req.config);
     }
 
     // §5.35 (MVP-3.4d) D-3.4d-3: fresh-attach uniform code path — copy-

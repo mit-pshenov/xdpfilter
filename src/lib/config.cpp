@@ -119,12 +119,13 @@ namespace {
 {
     if (v.kind != yaml::Node::Kind::Scalar) {
         throw_cfg("rule action", file, v.line, v.col,
-                  "rule action must be 'pass' or 'drop'");
+                  "rule action must be 'pass', 'drop', or 'redirect'");
     }
-    if (v.scalar == "drop") return RuleAction::Drop;
-    if (v.scalar == "pass") return RuleAction::Pass;
+    if (v.scalar == "drop")     return RuleAction::Drop;
+    if (v.scalar == "pass")     return RuleAction::Pass;
+    if (v.scalar == "redirect") return RuleAction::Redirect;  // §5.75
     throw_cfg("rule action", file, v.line, v.col,
-              "rule action must be 'pass' or 'drop'");
+              "rule action must be 'pass', 'drop', or 'redirect'");
 }
 
 /* §5.44 (MVP-4.4) shared bounded base-10 parse of a non-negative integer
@@ -350,22 +351,22 @@ Config validate(const yaml::Node& root, std::string_view file)
 
     Config out;
 
-    // §5.43 (MVP-4.3) HG-mvp-4.3-3 M.1 hard cutover: supported set {1}→{2}.
-    // schema_version is now REQUIRED and MUST be 2 — both absent AND v1
-    // (and any other value) hard-reject with a re-author diagnostic
-    // (ConfigError exit 9). PO-confirmed safe (0 deployments).
+    // §5.43 hard cutover dropped {1}; §5.75 HG-1 ADDITIVE widening {2}→{2,3}:
+    // schema_version is REQUIRED and MUST be 2 or 3. v3 introduces the optional
+    // top-level steering: block; a steering-less v2 config still validates
+    // unchanged (NOT a hard cutover — contrast §5.43). Absent/other → exit 9.
     if (const yaml::Node* sv = find_key(root, "schema_version")) {
         const std::uint32_t v = parse_u32_or_throw(*sv, file, "schema_version");
-        if (v != 2u) {
+        if (v != 2u && v != 3u) {
             throw_cfg("schema_version", file, sv->line, sv->col,
-                      std::format("unsupported schema_version: {} (supported: 2); "
-                                  "re-author config to schema_version 2", v));
+                      std::format("unsupported schema_version: {} (supported: 2 or 3); "
+                                  "re-author config to schema_version 2 or 3", v));
         }
         out.schema_version = v;
     } else {
         throw_cfg("schema_version", file, root.line, root.col,
-                  "schema_version is required and must be 2; "
-                  "re-author config to schema_version 2");
+                  "schema_version is required and must be 2 or 3; "
+                  "re-author config to schema_version 2 or 3");
     }
 
     // interface (optional).
@@ -574,11 +575,48 @@ Config validate(const yaml::Node& root, std::string_view file)
         }
     }
 
+    // §5.75 (MVP-4.35): optional top-level steering: block — a Mapping with a
+    // REQUIRED non-empty `redirect_to` scalar (the single global DPI-feed tap).
+    // Any OTHER sub-key is rejected (forward-compat fence: per-rule target etc.
+    // are Option-2, OOS). Absent steering: ⇒ Config.steering == nullopt.
+    if (const yaml::Node* st = find_key(root, "steering")) {
+        if (st->kind != yaml::Node::Kind::Mapping) {
+            throw_cfg("steering", file, st->line, st->col,
+                      "steering must be a mapping");
+        }
+        const yaml::Node* rt = find_key(*st, "redirect_to");
+        if (rt == nullptr) {
+            throw_cfg("steering", file, st->line, st->col,
+                      "steering.redirect_to is required");
+        }
+        if (rt->kind != yaml::Node::Kind::Scalar || rt->scalar.empty()) {
+            throw_cfg("steering redirect_to", file, rt->line, rt->col,
+                      "steering.redirect_to must be a non-empty string");
+        }
+        for (const std::pair<std::string, yaml::Node>& kv : st->mapping) {
+            if (kv.first != "redirect_to") {
+                throw_cfg("unknown steering field", file, kv.second.line, kv.second.col,
+                          std::format("unknown steering field '{}'", kv.first));
+            }
+        }
+        out.steering = Steering{rt->scalar};
+    }
+
+    // §5.75 cross-validation: a redirect action requires a steering target.
+    for (const Rule& r : out.rules) {
+        if (r.action == RuleAction::Redirect
+            && (!out.steering.has_value() || out.steering->redirect_to.empty())) {
+            throw_cfg("steering", file, root.line, root.col,
+                      "action: redirect requires a top-level steering.redirect_to");
+        }
+    }
+
     // Reject unknown top-level keys (forward-compat hinge; new top-level fields
     // require schema_version bump per §5.26 Q5 migration policy).
     for (const std::pair<std::string, yaml::Node>& kv : root.mapping) {
         if (kv.first != "schema_version" && kv.first != "interface"
-            && kv.first != "default_action" && kv.first != "rules") {
+            && kv.first != "default_action" && kv.first != "rules"
+            && kv.first != "steering") {
             throw_cfg("unknown top-level field", file, kv.second.line, kv.second.col,
                       std::format("unknown top-level field '{}'", kv.first));
         }

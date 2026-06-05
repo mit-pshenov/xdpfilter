@@ -117,12 +117,14 @@ if [[ "${rc}" -eq 0 ]]; then
     # kernel's post-verifier xlated bytes). FATAL-assert it == the baseline,
     # naming the XDPMF_PROD_INSN_BASELINE escape hatch on mismatch. SKIP-SAFE:
     # absent objdump / unparseable count → NOTE + continue (never FAIL).
-    # §5.70 (MVP-4.30) B35 D-mvp-4.30-REBASELINE: re-baselined 3658 → 3437 (the
-    # MEASURED post-pack count) — the SANCTIONED escape-hatch use for the
-    # intentional ruleset_state map-schema VALUE-pack (NOT a silent weakening;
-    # the gate stays FATAL at the NEW count). Correctness now held by
-    # verdict-identity (T_*_ORACLE_AGREEMENT), not byte-identity.
-    expected="${XDPMF_PROD_INSN_BASELINE:-3437}"
+    # §5.70 (MVP-4.30) B35 D-mvp-4.30-REBASELINE: re-baselined 3658 → 3437 for the
+    # ruleset_state VALUE-pack. §5.75 (MVP-4.35) B42 D-mvp-4.35-REBASELINE:
+    # re-baselined 3437 → 3477 (+40, MEASURED) for the redirect verb's new datapath
+    # branch — the SANCTIONED escape-hatch use (this FATAL teeth-layer + its sibling
+    # T_INSN_BASELINE_GATE.sh:73 move together; NOT a silent weakening, the gate
+    # stays FATAL at N). Correctness held by verdict-identity (T_*_ORACLE_AGREEMENT
+    # + PASS/DROP), not byte-identity.
+    expected="${XDPMF_PROD_INSN_BASELINE:-3477}"
     objdump_bin=""
     for cand in llvm-objdump-19 llvm-objdump; do
         if command -v "${cand}" >/dev/null 2>&1; then objdump_bin="${cand}"; break; fi

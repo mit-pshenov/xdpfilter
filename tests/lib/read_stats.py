@@ -5,18 +5,28 @@ read_stats.py — read the pinned `stats` BPF_MAP_TYPE_PERCPU_ARRAY via bpftool.
 Usage:
     sudo python3 read_stats.py <pin_path>
     sudo python3 read_stats.py --include-pass-cidr <pin_path>   # §5.27 (MVP-3.2)
+    sudo python3 read_stats.py --include-redirect  <pin_path>   # §5.75 (MVP-4.35)
 
-The map (per design §3.4, post-§5.23 MVP-2 Perf, post-§5.27 MVP-3.2) is a
-PERCPU array of u64 counters keyed by u32 indices STAT_PASS=0,
-STAT_DROP_DENY=1, STAT_DROP_MALFORMED=2, STAT_PASS_CIDR=3 (§5.27 NEW).
-Each entry has a per-CPU `values` array (plural — schema differs from
-non-PERCPU maps' singular `value`); we SUM across CPUs.
+The map (per design §3.4, post-§5.23 MVP-2 Perf, post-§5.27 MVP-3.2,
+post-§5.75 MVP-4.35) is a PERCPU array of u64 counters keyed by u32 indices
+STAT_PASS=0, STAT_DROP_DENY=1, STAT_DROP_MALFORMED=2, STAT_PASS_CIDR=3
+(§5.27), STAT_REDIRECT=4 (§5.75 NEW). Each entry has a per-CPU `values`
+array (plural — schema differs from non-PERCPU maps' singular `value`); we
+SUM across CPUs.
 
 Default output (back-compat with all pre-§5.27 callers — PI-13-3.2):
     "<pass> <drop_deny> <drop_malformed>"
 
 With --include-pass-cidr (§5.27 opt-in 4-column reader):
     "<pass> <drop_deny> <drop_malformed> <pass_cidr>"
+
+With --include-redirect (§5.75 opt-in 5-column reader — superset of the
+4-column shape; appends the STAT_REDIRECT=4 slot):
+    "<pass> <drop_deny> <drop_malformed> <pass_cidr> <redirect>"
+
+This same reader also serves the §5.75 sink counter (a single-entry
+PERCPU_ARRAY at key 0): the default 3-column output's FIRST column is the
+summed key-0 count, which `read_sink` in common.sh consumes.
 
 Exit codes:
     0  on success
@@ -57,15 +67,20 @@ def main() -> int:
     # IDENTICAL to pre-§5.27 — PI-13-3.2 back-compat for the 27 existing
     # ctests that read the 3-column shape.
     include_pass_cidr = False
+    include_redirect = False
     argv = sys.argv[1:]
     filtered = []
     for arg in argv:
         if arg == "--include-pass-cidr":
             include_pass_cidr = True
+        elif arg == "--include-redirect":
+            # §5.75: 5-column superset (implies the pass_cidr column too).
+            include_redirect = True
         else:
             filtered.append(arg)
     if len(filtered) != 1:
-        print("usage: read_stats.py [--include-pass-cidr] <pin_path>", file=sys.stderr)
+        print("usage: read_stats.py [--include-pass-cidr|--include-redirect] <pin_path>",
+              file=sys.stderr)
         return 1
     pin = filtered[0]
 
@@ -129,7 +144,10 @@ def main() -> int:
 
         stats[k] = total
 
-    if include_pass_cidr:
+    if include_redirect:
+        print(stats.get(0, 0), stats.get(1, 0), stats.get(2, 0),
+              stats.get(3, 0), stats.get(4, 0))
+    elif include_pass_cidr:
         print(stats.get(0, 0), stats.get(1, 0), stats.get(2, 0), stats.get(3, 0))
     else:
         print(stats.get(0, 0), stats.get(1, 0), stats.get(2, 0))

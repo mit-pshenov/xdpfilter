@@ -359,6 +359,20 @@ struct {
     __uint(pinning, LIBBPF_PIN_BY_NAME);
 } action_table SEC(".maps");
 
+/* §5.75 redirect tap (D-mvp-4.35-Q1-A1 / DEVMAP-SHARED): single global
+ * BPF_MAP_TYPE_DEVMAP, one entry at key 0 = the operator-chosen DPI-feed
+ * ifindex. Non-double-buffered — mutated in-place at apply like action_table
+ * (the operator initiates the change; the brief old-prog-reads-new-target
+ * window is benign). The classifier issues bpf_redirect_map(&redirect_devmap,
+ * 0, XDP_PASS) so a missing/down entry degrades to XDP_PASS (original flow). */
+struct {
+    __uint(type, BPF_MAP_TYPE_DEVMAP);
+    __type(key, __u32);
+    __type(value, __u32);
+    __uint(max_entries, 1);
+    __uint(pinning, LIBBPF_PIN_BY_NAME);
+} redirect_devmap SEC(".maps");
+
 /* §5.35 rule_counters axis: ARRAY_OF_MAPS with PERCPU_ARRAY inners, committed
  * with the other axes by the active_idx u32 store. PI-3.4b-2 counter-
  * monotonicity-across-apply is PRESERVED by a per-CPU copy-forward from the

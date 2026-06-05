@@ -196,6 +196,10 @@ static __always_inline __u16 l3_after_vlan(void *eth, void *data_end, void **l3h
                     bump_stat(STAT_DROP_DENY); \
                     return XDP_DROP; \
                 } \
+                if (a && a->action_type == ACTION_REDIRECT) { \
+                    bump_stat(STAT_REDIRECT); \
+                    return bpf_redirect_map(&redirect_devmap, 0, XDP_PASS); \
+                } \
             } \
         } \
         bump_stat(STAT_PASS_CIDR); \

@@ -31,6 +31,17 @@ MAC_GOOD="02:00:00:00:00:01"
 MAC_BAD="02:00:00:00:00:02"
 MAC_DST="ff:ff:ff:ff:ff:ff"
 
+# §5.75 (MVP-4.35 / B42): the redirect delivery oracle needs a SECOND veth
+# pair in the SAME ${NETNS}. xdpfilter redirects matched traffic OUT IFACE_C
+# (devmap[0]=ifindex(IFACE_C)); a frame egressing IFACE_C arrives RX on its
+# peer IFACE_D where the counting sink (sink_xdp.bpf.o) runs. These names are
+# DEFINED for every test but the pair is only CREATED by the opt-in
+# setup_redirect_sink() helper, so the 60+ pre-§5.75 ctests run in a
+# byte-identical single-pair topology (PI-mvp-4.35-VERDICT-IDENTITY — do not
+# perturb the existing corpus's fixture environment).
+IFACE_C=xdpmf_c_$$
+IFACE_D=xdpmf_d_$$
+
 # §5.25 P1: per-PID netns owns the veth pair + sysctl mutations.  Pin
 # paths stay host-global (bpffs is not netns-isolated in 5.15+, see
 # §5.25 "Pin-path host-globalness invariant").  NSEXEC pre-includes
@@ -56,6 +67,10 @@ NSEXEC="sudo -n nsenter --net=/var/run/netns/${NETNS}"
 source "${PINS_SH:?PINS_SH not set — invoke tests via ctest, not directly}"
 : "${PIN_ROOT:?PIN_ROOT not set in pins.sh — CMake codegen failed}"
 PIN_DIR=${PIN_ROOT}/${IFACE_A}
+# §5.75: bpffs dir holding the sink program + its pinned `sink_count` map
+# (PID-scoped so concurrent ctest -jN runs never collide). Removed by
+# cleanup_veth alongside PIN_DIR.
+SINK_DIR=${PIN_ROOT}/sink_${IFACE_A}
 
 # ── Passwordless-sudo precondition (per §5.21 C2) ─────────────────────────
 # Tests that require root call this near the top after sourcing common.sh.
@@ -184,7 +199,128 @@ cleanup_veth() {
     # we remove it explicitly.
     sudo -n ip netns del "${NETNS}" 2>/dev/null
     sudo -n rm -rf "${PIN_DIR}"     2>/dev/null
+    # §5.75: the sink prog/map pin dir is host-global like PIN_DIR (bpffs is
+    # not netns-isolated). Idempotent — absent for every non-redirect test.
+    sudo -n rm -rf "${SINK_DIR}"    2>/dev/null
     set -e
+}
+
+# ── §5.75 (MVP-4.35 / B42) redirect delivery-oracle harness ───────────────
+# setup_redirect_sink — OPT-IN extension called AFTER setup_veth by the
+# T_REDIRECT_* tests. Creates the second veth pair (IFACE_C/IFACE_D) inside
+# the SAME ${NETNS} and loads+pins+attaches the counting sink on IFACE_D.
+# Topology: production filter on IFACE_A (inject on IFACE_B → RX on IFACE_A);
+# redirect target = IFACE_C; sink on IFACE_D (the peer) counts delivered
+# frames. Pre-§5.75 tests never call this → their environment is unchanged.
+#
+# Requires: ${BUILD_DIR}/sink_xdp.bpf.o (add_bpf_object sink_xdp). If the
+# object is missing the caller should treat it as a build-gap FAIL, not a
+# silent skip — the delivery oracle cannot run without it.
+setup_redirect_sink() {
+    local sink_obj="${BUILD_DIR}/sink_xdp.bpf.o"
+    if [[ ! -f "${sink_obj}" ]]; then
+        echo "FAIL: sink object missing at ${sink_obj} (build add_bpf_object sink_xdp)" >&2
+        return 1
+    fi
+
+    # Defensive wipe of any stale sink pin dir from a crashed prior run.
+    sudo -n rm -rf "${SINK_DIR}" 2>/dev/null || true
+
+    # Second veth pair, same quiesce discipline as the A/B pair (IPv6 off,
+    # addrgen none, arp off) so no kernel-emitted frames pollute the sink.
+    ${NSEXEC} ip link add "${IFACE_C}" type veth peer name "${IFACE_D}"
+    ${NSEXEC} sysctl -w "net.ipv6.conf.${IFACE_C}.disable_ipv6=1" >/dev/null 2>&1 || true
+    ${NSEXEC} sysctl -w "net.ipv6.conf.${IFACE_D}.disable_ipv6=1" >/dev/null 2>&1 || true
+    ${NSEXEC} ip link set "${IFACE_C}" addrgenmode none 2>/dev/null || true
+    ${NSEXEC} ip link set "${IFACE_D}" addrgenmode none 2>/dev/null || true
+    ${NSEXEC} ip link set "${IFACE_C}" arp off           2>/dev/null || true
+    ${NSEXEC} ip link set "${IFACE_D}" arp off           2>/dev/null || true
+    ${NSEXEC} ip link set "${IFACE_C}" up
+    ${NSEXEC} ip link set "${IFACE_D}" up
+
+    # The sink prog/map pin dir lives on the host-global bpffs root, which
+    # the loader normally creates on apply. Create it here (apply may run
+    # after this helper) so `bpftool prog loadall` has a parent to pin into.
+    sudo -n mkdir -p "${PIN_ROOT}" 2>/dev/null || true
+
+    # Load + pin prog AND maps under ${SINK_DIR}; attach the pinned prog on
+    # IFACE_D in generic mode (XDP RX path on the target's peer must be live
+    # for the redirected frame to be counted). bpftool creates ${SINK_DIR}.
+    sudo -n bpftool prog loadall "${sink_obj}" "${SINK_DIR}" type xdp \
+        pinmaps "${SINK_DIR}"
+    ${NSEXEC} ip link set "${IFACE_D}" xdpgeneric pinned "${SINK_DIR}/sink_count_prog"
+    sleep 0.2
+}
+
+# read_sink [pin] — echoes the summed (across CPUs) key-0 value of the sink's
+# pinned PERCPU_ARRAY counter. Reuses read_stats.py (column 0 == the key-0
+# sum for a single-entry map), mirroring read_stats's bpftool/percpu plumbing.
+read_sink() {
+    local pin="${1:-${SINK_DIR}/sink_count}"
+    sudo -n python3 "${TEST_DIR}/lib/read_stats.py" "${pin}" 2>/dev/null \
+        | awk '{print $1+0}'
+}
+
+# ifindex_of <iface> — echoes the kernel ifindex of an iface inside ${NETNS}
+# (the devmap[0] value the loader writes for steering.redirect_to == that
+# iface). Empty if the iface does not resolve.
+#
+# NB: we read the ifindex via `ip -o link show` (the leading "<N>:" field),
+# NOT via /sys/class/net/<iface>/ifindex — `nsenter --net=<ns>` enters ONLY
+# the network namespace and does NOT re-associate sysfs, so the per-netns
+# /sys/class/net/<iface> nodes are NOT visible (ENOENT). `ip` queries the
+# ifindex over netlink inside the netns, which works.
+ifindex_of() {
+    local iface="$1"
+    ${NSEXEC} ip -o link show "${iface}" 2>/dev/null \
+        | awk -F: '{print $1}' | tr -d '[:space:]'
+}
+
+# §5.75 5-column stats reader — pass drop_deny drop_malformed pass_cidr
+# redirect. Parallel sibling of read_stats_with_cidr; the existing 3-/4-column
+# helpers stay UNCHANGED for the pre-§5.75 ctests (PI-mvp-4.35-VERDICT-IDENTITY).
+read_stats_with_redirect() {
+    local pin="${1:-${PIN_DIR}/stats}"
+    sudo -n python3 "${TEST_DIR}/lib/read_stats.py" --include-redirect "${pin}"
+}
+
+# §5.75 parallel sibling of wait_for_stats_sum: sums all 5 counters
+# (pass + drop_deny + drop_malformed + pass_cidr + redirect). Used by the
+# T_REDIRECT_* tests; the 3-/4-column waiters stay UNCHANGED.
+wait_for_stats_sum_with_redirect() {
+    local iface="$1" expected="$2"
+    local timeout_ms="${3:-2000}" poll_ms="${4:-20}"
+    local pin="${PIN_ROOT}/${iface}/stats"
+    local waited_ms=0
+    local p d m c r sum
+    while (( waited_ms < timeout_ms )); do
+        if read -r p d m c r < <(sudo -n python3 "${TEST_DIR}/lib/read_stats.py" --include-redirect "${pin}" 2>/dev/null); then
+            sum=$(( p + d + m + c + r ))
+            if (( sum == expected )); then
+                return 0
+            fi
+        fi
+        sleep "$(awk -v ms="${poll_ms}" 'BEGIN{printf "%.3f", ms/1000.0}')"
+        waited_ms=$(( waited_ms + poll_ms ))
+    done
+    return 1
+}
+
+# wait_for_sink <expected> [timeout_ms=2000] [poll_ms=20] — poll the sink
+# counter until it reaches >= expected or timeout. Returns 0 on match.
+wait_for_sink() {
+    local expected="$1"
+    local timeout_ms="${2:-2000}" poll_ms="${3:-20}"
+    local waited_ms=0 cur
+    while (( waited_ms < timeout_ms )); do
+        cur=$(read_sink)
+        if [[ -n "${cur}" ]] && (( cur >= expected )); then
+            return 0
+        fi
+        sleep "$(awk -v ms="${poll_ms}" 'BEGIN{printf "%.3f", ms/1000.0}')"
+        waited_ms=$(( waited_ms + poll_ms ))
+    done
+    return 1
 }
 
 # ── Stats reader (delegates to read_stats.py) ─────────────────────────────

@@ -65,6 +65,16 @@ add_bpf_object(xdpfilter_alt ${CMAKE_SOURCE_DIR}/tests/fixtures/xdpfilter_alt.bp
 # SKIP-probe `bpftool prog load` and the active-branch loader invocation).
 add_bpf_object(xdpfilter_bad ${CMAKE_SOURCE_DIR}/tests/fixtures/xdpfilter_bad.bpf.c)
 
+# §5.75 (MVP-4.35 / B42): counting RX-sink for the redirect delivery oracle
+# (SELECT-B, T_REDIRECT_DELIVERY). Attached on the redirect-target peer
+# (IFACE_D) and counts frames physically diverted out IFACE_C by the
+# production XDP_REDIRECT path. Same sanitizer-isolation invariant as the
+# other fixtures (XDPMF_SANITIZERS does NOT propagate into the BPF compile);
+# the test loads + pins it via `bpftool prog loadall … pinmaps …` and reads
+# the pinned `sink_count` map — no skeleton header (no C++ code opens it).
+# Output: ${CMAKE_BINARY_DIR}/sink_xdp.bpf.o.
+add_bpf_object(sink_xdp ${CMAKE_SOURCE_DIR}/tests/inject/sink_xdp.bpf.c)
+
 # T_BUILD performs an isolated clean rebuild in /tmp and greps for warnings;
 # it does NOT need the veth fixture (no xdp_fixture lock). B19 (§5.49): it
 # DOES take the shared compile-serialization RESOURCE_LOCK (see below) so it
@@ -1684,3 +1694,49 @@ set_tests_properties(T_RULESET_DELTA_TRUTHTABLE PROPERTIES
     ENVIRONMENT "${TEST_ENV}"
     TIMEOUT 30
 )
+
+# ─────────────────────────────────────────────────────────────────────────
+# MVP-4.35 / B42 additions (§5.75 — redirect verb: XDP-native steer-to-DPI).
+#
+# T_REDIRECT_DELIVERY (§5.75.6 SELECT-B — THE headline delivery oracle): a
+#   2-iface RX-sink topology proving a redirect-matched frame PHYSICALLY lands
+#   on the steering target (sink counter bumps) AND the redirect verdict was
+#   terminal (STAT_REDIRECT bumps, PASS/DROP slots unmoved). Negation control:
+#   a non-matching frame is dropped, never delivered. Needs the second veth
+#   pair + the sink_xdp.bpf.o fixture; local/root gate (SKIP 77 under
+#   XDPMF_CI_BUILD_ONLY or no passwordless sudo).
+# T_REDIRECT_COUNTER_AND_MAP (§5.75.6 SELECT-A — counter + devmap dump):
+#   STAT_REDIRECT bumps on a redirect match AND redirect_devmap[0] ==
+#   ifindex(IFACE_C) (the loader-resolved steering target). Does NOT depend on
+#   live delivery (the counter bump is classifier-side); isolates the
+#   decision + map-programming contract. Negation: a non-matching frame leaves
+#   STAT_REDIRECT unmoved.
+#
+# Both touch the veth fixture (+ host-global bpffs) → share RESOURCE_LOCK
+# xdp_fixture, serialized against the rest of the datapath corpus. They also
+# create a SECOND PID-suffixed veth pair inside the same per-PID netns and
+# pin the sink under a PID-scoped bpffs dir, so concurrent ctest -jN runs
+# never collide. SKIP_RETURN_CODE 77 honours the require_passwordless_sudo /
+# CI-build-only skip path.
+# T_REDIRECT_TARGET_DOWN (§5.75.6 OPTIONAL — shipped: D-mvp-4.35-FALLBACK
+#   spike confirmed PASS-on-miss on the target kernel, so PI-mvp-4.35-MISS-
+#   DEFERRED is NOT triggered). Two-phase: populated devmap delivers (control)
+#   → cleared devmap[0] degrades to XDP_PASS (sink unmoved, STAT_REDIRECT still
+#   bumps, no PASS/DROP bucket). Same fixture + locks as the other two.
+foreach(T IN ITEMS
+    T_REDIRECT_DELIVERY
+    T_REDIRECT_COUNTER_AND_MAP
+    T_REDIRECT_TARGET_DOWN
+)
+    add_test(
+        NAME ${T}
+        COMMAND bash ${TEST_DIR}/${T}.sh
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    set_tests_properties(${T} PROPERTIES
+        ENVIRONMENT "${TEST_ENV}"
+        RESOURCE_LOCK xdp_fixture
+        TIMEOUT 60
+        SKIP_RETURN_CODE 77
+    )
+endforeach()
