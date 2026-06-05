@@ -1,7 +1,7 @@
 # Review — MVP-4.35/B42 redirect verb §5.75 (mint triangulation, brownfield 5-point)
 
 ## Verdict
-`needs-rework` (round 1) — single narrowly-scoped finding (SPEC-UNTESTED negative config-validation paths). Code + 3 redirect tests triangulate cleanly; gap is 2 missing config-error unit tests the §5.75.6 TestStrategy lists.
+`pass` (round 2). Round 1 = needs-rework (one [SPEC-UNTESTED] finding); fixed test-only in round 2 and re-reviewed clean. See "Round 2" addendum at the bottom.
 
 ## Triangulation matrix
 
@@ -61,3 +61,17 @@ Full suite: 98% (2 fails = #48/#63 pre-existing env, 2 skips pre-existing).
 
 ## Out-of-triangulation findings
 None.
+
+---
+
+## Round 2 — re-review (fresh reviewer) — `pass`
+
+The round-1 [SPEC-UNTESTED] finding is GENUINELY CLOSED; test-only fix, no new drift, all round-1 pass items hold.
+
+- **Finding closed**: `tests/T_EXIT_CODE_9_ON_CONFIG_ERROR.sh` now covers both §5.75.6 negative paths via `run_redirect_cfg_subcase`: (e) schema_version:3 + `action: redirect` + no steering → exit 9 (cross-validation, "action: redirect requires a top-level steering.redirect_to"); (f) steering block with valid `redirect_to` + unknown sub-key `target_id` → exit 9 (forward-compat fence, "unknown steering field 'target_id'"). (f) keeps `redirect_to` valid so the ONLY defect is the unknown key — genuinely isolates the fence, not the cross-validation.
+- **Assertions genuine, not vacuous**: each sub-case pins THREE conjuncts — rc==9 hard (not rc!=0), `^xdpfilter: config error:` prefix, and a `steering|redirect` reason-anchor (an unrelated exit-9 fails the anchor). No existing assertion weakened (git diff = 95 ins / 2 del, both deletions non-assertion: a comment + the trap widened to 3 temp files).
+- **Scope test-only**: `git diff -- src/` = EMPTY; only `T_EXIT_CODE_9_ON_CONFIG_ERROR.sh` changed.
+- **Round-1 pass items re-confirmed**: verdict-identity (T_AND_ORACLE_AGREEMENT green, classifier src/ ∅), insn both gates at 3477 (no revert to 3437), PI-7 / compiled_ruleset / ruleset_delta ∅.
+- Execution: #28 T_EXIT_CODE_9_ON_CONFIG_ERROR Passed (sub-cases e/f both rc=9); spot-check T_AND_ORACLE_AGREEMENT + T_INSN_BASELINE_GATE green. #48/#63 pre-existing sandbox-exec env-fails, not this slice.
+
+No rework. Ready to ship §5.75.
