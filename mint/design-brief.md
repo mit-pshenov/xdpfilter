@@ -1,164 +1,161 @@
-# Design Brief — Rule-model classification architecture (Wave B)
+# Design-brief — loader data-model cleanup (pre-mirror/redirect tidy)
 
 ## Topic
 
-Choose the **packet-classification architecture** for `xdpfilter`'s real match model — the
-structure that lets a rule match on **multiple fields AND-composed** (dst-IP + L4 port + VLAN +
-EtherType + src-IP + MAC + …), evaluated **first-match** with an explicit default, on the XDP
-datapath. This is the pivotal decision flagged by the Wave A discovery catalog
-(`mint/selection-scenarios.md` §6.2): the current datapath is **axis-keyed independent maps**
-(MAC-HASH, CIDR-LPM_TRIE) that structurally produce **OR-compose** and cannot express
-multi-field AND. Moving to the industry-standard AND-compose is therefore an **architecture
-change** (the classic packet-classification problem), not a schema bump.
+`src/lib/loader.cpp` (2819 LOC) drives the whole `Config → kernel` apply path. Its
+**compile** half (pure, side-effect-free lowering of a validated `Config` into per-axis
+bit-structures) is already physically separated from its **runtime** half (skeleton load,
+pin classification, attach/reattach, double-buffer flip). But the apply pipeline carries
+**four-plus distinct data models, several of which have never received a name or a
+boundary** — and that, not the size of `loader.cpp`, is the load-bearing source of
+complexity going into the next workstream.
 
-This is a **brownfield** architecture round: the design must EVOLVE the existing datapath
-(parallel `ARRAY_OF_MAPS` per axis + a single shared `active_idx` atomic swap + `rule_id →
-rules_inner → action_table` dispatch), not greenfield-replace it.
+This round answers ONE question, framed as a **pure, byte-identical cleanup**:
 
-## Motivating context
+> Given the loader's apply pipeline already contains these partly-unnamed data models,
+> what is the right set of **named entities + boundaries** to introduce as a tidy-up
+> **before** the mirror/redirect (XDP→TC) workstream begins — and, critically, **is it
+> worth doing now at all**, or is some of it gold-plating that should wait until TC forces
+> the boundaries?
 
-Read `mint/selection-scenarios.md` in full — it is the demand-side catalog this round serves.
-Key anchors:
-- **Narrow path, expansion-friendly.** Target = the narrow **Gi-DPI pass/drop pre-selector**.
-  Near-term action vocabulary is pass/drop + explicit default; steering (mirror/redirect/tag),
-  rate-limit, L7 (SNI/JA3) and stateful (conntrack) are **deferred / out of scope** — but the
-  chosen structure must not FORECLOSE them (see catalog Appendix B "expansion-door" items).
-- **eBPF = model-validation vehicle.** DPDK/AF_XDP and perf-validation are deferred; do NOT
-  design for them, but keep the classification semantics separable from XDP specifics so a
-  future datapath swap can reuse the rule model (portability boundary, not a port).
-- **Match-field target set** (catalog §4): Tier-1 5-tuple (dst/src IP-CIDR, proto, dst/src port)
-  + Tier-2 (VLAN, EtherType, MAC, iface) reducible to six encoding primitives (prefix/LPM,
-  exact, range, set, bitmask, negation). dst-IP is the #1 gap.
-- **Latent bug to fix in-architecture** (catalog §6.4): VLAN-tagged IP frames currently skip the
-  CIDR axis (`mac_filter.bpf.c:367` gates on `h_proto == ETH_P_IP`). VLAN support must fix the
-  tagged-frame L3 parse path.
+This is **NOT** a forward-architecture round. TC-redirect is, per PO, "nothing special —
+everything as before"; the forward constraint here is *non-foreclosure only*, not design.
 
-The candidate classification structures to enumerate, score, and select among (catalog §6.2 +
-Appendix B.1) — NONE pre-selected; diversify by trade-off:
-1. Sequential per-rule scan (AND fields, first-match by id).
-2. Bit-vector / bitset intersection (per-axis map → rule-bitmask, AND, ffsll → lowest id).
-3. Composite-key map (concatenated tuple; breaks on mixed LPM/range/exact).
-4. Decision-tree (HiCuts/HyperCuts) — likely over-engineering for the vehicle stage.
-5. Layered-pipeline via eBPF tail calls (per-layer first-match, chained) — a peer candidate
-   surfaced by an external artifact; treat as ONE option, do NOT promote because it was seen.
+## The models, as they exist today (grounding — architects: verify against code, don't trust this verbatim)
 
-## Scope
+1. **Validated `Config`** — `src/lib/config.hpp:62` (`Config{schema_version, iface,
+   default_action, rules}`). Produced by `validate()` (config.cpp). This is the
+   "normalized ruleset". Named, bounded, already test-covered. *Probably fine as-is.*
 
-- **In scope**: the classification structure choice (above) with explicit trade-off scoring;
-  how it AND-composes arbitrary subsets of the field set with the six primitives + "absent field
-  = wildcard"; first-match ordering semantics (id-as-priority vs most-specific-wins) and how it
-  binds to the structure; the OR→AND migration story for existing v1 rules; how it evolves the
-  current `ARRAY_OF_MAPS` + shared-`active_idx` atomic-swap and the `rules_inner→action_table`
-  dispatch; rule cardinality bound (`XDPMF_ALLOWLIST_MAX`) and its effect on the choice; the
-  VLAN-tagged parse-path fix; IPv6 second-LPM shape (when, not full design); the eBPF-verifier
-  feasibility of each candidate; the portability boundary (separable rule semantics) WITHOUT
-  designing AF_XDP/DPDK; the per-packet cost-envelope (instruction/lookup count) of each
-  candidate as a **relative structural selection criterion** + performance **non-foreclosure**
-  (see Amendment 2026-05-30); a recommended `/mint-dev` slice sequence consistent with the choice.
-- **Out of scope**: the action model beyond pass/drop (mirror/RL/tag/redirect — deferred);
-  L7/stateful match; dynamic feed-backed objects + their refresh (object-lifecycle — note as an
-  open question only, it's orthogonal); the YAML config-grammar surface details (Wave A §7
-  already sketched the direction; this round is the DATAPATH/structure, not the parser); perf
-  optimization / benchmarking / absolute throughput numbers / µ-tuning of shipped code (NOTE:
-  per-packet cost-envelope as a *relative structural selection axis* is now IN scope — see
-  Amendment 2026-05-30); DPDK/AF_XDP datapath design.
+2. **Per-axis lowerings** — `loader.cpp:1387` (`AxisAggregate<Key>`, with aliases
+   `MacLowering`/`ProtoLowering`/`VlanLowering`/`EthertypeLowering`), `AxisLowering`/
+   `AxisLowering6`, `PortLowering` (`loader.cpp:1448`), `BitPrefix` (`loader.cpp:1165`,
+   already `#include`d from `tests/bitvec`). These **have names** and are produced by pure
+   functions (`aggregate_axis` `loader.cpp:1415`, `lower_axis`, `lower_port_axis`). The
+   compile block in `apply_request` is `loader.cpp:2206–2293`; runtime begins at the
+   `kernel_version_probe()` call (`loader.cpp:2296`).
 
-## Current datapath (read before designing)
+3. **The compiled aggregate — UNNAMED.** There is no `struct CompiledRuleset`. Instead the
+   compile output is **12 anonymous locals** in `apply_request` (`id_to_slot`, `slot_to_id`,
+   `mac_low`, `dst_low`, `src_low`, `dst6_low`, `src6_low`, `proto_low`, `port_low`,
+   `vlan_low`, `eth_low`, `default_action`) threaded **positionally** into the
+   **16-argument** `populate_all_axes` (`loader.cpp:1903`). This is the sharpest smell.
 
-- `src/bpf/mac_filter.bpf.c` — the XDP program: axis-keyed lookups, 5 parallel `ARRAY_OF_MAPS`
-  (allowlist/cidr/rules/rule_counters + defaults) sharing one `active_idx`, `rule_id →
-  rules_inner[rule_id] → action_table[action_id]` dispatch, OR-compose (MAC short-circuit, CIDR
-  on MAC-miss + IPv4-only).
-- `src/lib/config.{hpp,cpp}` — schema, strict unknown-key gate, `id` range/uniqueness, schema_version.
-- `src/lib/loader.cpp` — `kManagedMaps[]`, per-iface pin loop, apply/atomic-swap, copy-forward.
-- `mint/selection-scenarios.md` — the Wave A catalog (THE demand anchor).
-- `docs/REQUIREMENTS.md` — canonical spec + implementation-status table.
-- `mint/design.md` §5.27/§5.34/§5.35 — the axis-map + atomic-swap + dispatch history (brownfield context).
+4. **The id-reconciliation delta — UNNAMED, and hidden in plain sight.** `copy_rule_counters_forward`
+   (`loader.cpp:1805`) is, in effect, a hand-rolled **CurrentState→DesiredState diff** over
+   operator-id space: for each new slot it classifies the id as *survived* (copy counter),
+   *new* (zero), *dropped* (discard), and handles *moved* (id kept its counter across a slot
+   change — the whole point of B30 slot↔id decouple, §5.61). It is an **O(n²) nested loop**
+   over two raw `std::span` arrays (`old_slot_to_id` / `new_slot_to_id`, `loader.cpp:1816–1834`),
+   driven by a real requirement (Prometheus counter monotonicity, §5.35). The apply is
+   therefore **not** a clean stateless recompute — this is the one place two state-versions
+   meet, and the concept has no name.
+
+5. **Kernel map materialization** — `populate_*_inner_slot` / `populate_all_axes`
+   (`loader.cpp:1493+`, `1903`), writing the inactive double-buffer half + the single atomic
+   `active_idx` flip (`write_ruleset_state`, §5.70 B35). This is runtime; stays runtime.
+
+## Design space (seeds — enumerate ALL viable carvings, then select 2-3 by diversification)
+
+Non-exhaustive starting points; the band must enumerate beyond these and score them:
+
+- **Minimal**: name only the compiled aggregate (`CompiledRuleset` bundling the 12 locals),
+  kill the 16-arg signature, leave the delta as-is.
+- **Compile/materialize split**: `CompiledRuleset compile(const Config&)` (pure, = lines
+  2206–2293) + `void materialize(skel, slot, const CompiledRuleset&)` (consumes the
+  16-arg body). Explicit compile|runtime seam.
+- **Name the delta**: extract a pure `RulesetDelta diff(old_slot_to_id, new_slot_to_id)`
+  ({survived+remap, added, dropped}) from `copy_rule_counters_forward`; the counter copy
+  becomes a thin consumer. (Bonus: O(n²)→O(n) with one map — but identity of *behavior*,
+  not of code, is what's mandatory.)
+- **Full staged pipeline**: `NormalizedRuleset → CompiledRuleset → RuntimeImage →
+  materialize`, with `RuntimeImage` as a standalone in-memory map-image. (Likely overkill —
+  the band should say so if so; `RuntimeImage`-as-snapshot has no current consumer.)
+- **Where it lives**: in-place in `loader.cpp`; a new `compiled_ruleset.hpp`; or a small
+  module. Weigh against the project's header/byte-identity ethos.
+
+## Hard invariants (non-negotiable — this is cleanup)
+
+- **Datapath byte-identity.** Zero behavior change. The project gates on **BPF instruction
+  count identical across all 3 family arms** and **oracle-agreement on the test corpus**
+  (see prior slices B30/B35: "3658→3437 −221 insns ×3, oracle-agreement held"). Any carving
+  whose *only* defense is "it's cleaner" but that risks datapath drift is disqualified.
+- **No new BPF-side anything.** Host-side C++ refactor of `loader.cpp` data models only.
+- **Behavioral identity of `copy_rule_counters_forward`** if the delta is extracted: the
+  survived/moved/new/dropped semantics + counter-monotonicity (§5.35) must hold exactly.
+- **Project ethos**: macros-over-helpers where byte-identity demands it (guard #36); named
+  abstractions must earn their keep, not become thin wrappers that obscure (the contrarian
+  owns this critique).
+
+## Forward constraint (LIGHT — non-foreclosure, NOT design)
+
+The next workstream is **mirror/redirect (XDP→TC)**. PO: "TC появится… ничего особенного,
+всё как было." The carving chosen here must **not foreclose** cheaply adding a redirect
+action/target later (action space may grow from the pass/drop verdict). The forward-compat
+lens checks **only non-foreclosure** — it must **NOT** design the TC entity, propose its
+schema, or add machinery for it. A carving that would force a redo during mirror/redirect is
+a strike; building *for* TC now is equally a strike (gold-plating).
+
+## Explicitly OUT of scope
+
+- **`apply --dry-run` / preview / `--diff`** — an additive *product* feature (it would print
+  the `RulesetDelta`). Genuinely cheap once the delta is named, but it is NOT "tidy what
+  exists"; parked for a later product decision. Do not design it here.
+- **Plan-as-execution-engine** (incremental map create/update/remove) — rejected: maps are a
+  fixed managed table (`kManagedMaps`), double-buffer flip already gives atomic swap +
+  rollback. No forcing function.
+- **mirror/redirect / TC design itself** — the next workstream, not this one.
+- **The 64-rule ceiling** (`XDPMF_ALLOWLIST_MAX=64`) — a fixed architectural limit, not a
+  work item.
+
+## What a good outcome looks like
+
+A recommended **named-entity set + boundary map** for the loader's data models, scored on
+clarity / coupling-reduction / testability / non-foreclosure, with an explicit
+**worth-it-now verdict** per entity (which to introduce before mirror/redirect, which to
+defer, which to drop), a **byte-identity cutover oracle**, and a **suggested slice
+decomposition** (this likely lands as 1-2 `/mint-dev` slices). Convergence is only a signal
+if the lenses are independent — the synthesis must flag any carving where structure,
+testability, and non-foreclosure disagree.
 
 ```yaml
 architects:
   parallel:
-    - name: classifier
-      lens: "Datapath classification-structure architect. You own the central decision: which packet-classification structure realizes AND-composed multi-field first-match on XDP. Enumerate ALL viable candidates (sequential scan, bit-vector/bitset intersection, composite-key, decision-tree, layered-pipeline-tail-call, plus any you find), score each on: AND-compose correctness, first-match ordering, support for all six encoding primitives (prefix/LPM, exact, range, set, bitmask, negation) including mixed primitives in one rule, eBPF-verifier feasibility (bounded loops, map-in-map, stack), rule-cardinality scaling, and compatibility with the existing ARRAY_OF_MAPS + shared active_idx atomic-swap. Select 2-3 by trade-off diversification, not by favorite; the layered-pipeline option is a peer candidate, do NOT privilege it because it appears in an external artifact."
-      scope: "Cover the structure + how it evolves the current 5-axis ARRAY_OF_MAPS datapath. Do NOT design the YAML parser, the action model beyond pass/drop, or AF_XDP/DPDK. Viability filter: must be implementable in XDP under the verifier on the project's kernel; must preserve the single-u32 active_idx atomic-swap promise."
+    - name: structure
+      lens: "Data-model cartographer. You see the apply pipeline as a sequence of typed values and the transformations between them. You own the question: WHICH of the 4+ models deserve a name, WHERE exactly the boundaries fall (compile|runtime seam; aggregate-vs-module vs minimal), and what each named entity owns vs leaks. You see coupling and conceptual-surface that the test/forward/skeptic lenses structurally cannot weigh."
+      scope: "Enumerate ALL viable carvings of the loader data models (minimal -> compile/materialize split -> name-the-delta -> full staged pipeline), score each on conceptual clarity + coupling reduction + fit with the EXISTING named lowerings (AxisAggregate et al.), select 2-3 BY DIVERSIFICATION (not favorites), justify, detail the entity definitions + boundaries + where they live (in-place / new header / module). Do NOT decide testability (testability's call), non-foreclosure of TC (forward-compat's call), or worth-it-now (contrarian's call) — defer each explicitly. Read loader.cpp / config.hpp / apply_internal.hpp first-hand; verify the brief's line cites."
       sources:
-        - "mint/selection-scenarios.md (THE demand anchor — §4 fields, §6 realizability, Appendix B)"
-        - "src/bpf/mac_filter.bpf.c (current axis-keyed datapath to evolve)"
-        - "Packet classification survey — Gupta & McKeown; tuple space search; Lakshman-Stiliadis bit-vector; HiCuts/HyperCuts (web)"
-        - "Cilium / Katran XDP policy datapath + bpf map-in-map / tail-call patterns (web)"
-        - "RFC 8955/8956 FlowSpec component model + most-specific precedence (web)"
-    - name: semantics
-      lens: "Rule-semantics & ordering architect. You own what a rule MEANS and how rules combine: first-match-by-ascending-id vs most-specific-wins (FlowSpec), and how that binds to each classification structure; 'absent field = wildcard' representation; negation semantics; and the OR→AND migration of existing v1 rules (auto-split a 2-axis OR rule into two? load-time rewrite? require v2 re-author? what breaks?). Also: the dual role of `id` (operator-assigned priority AND rule_counters[] index) and whether multi-axis stresses it."
-      scope: "Cover ordering + composition + v1→v2 migration semantics + default-action. Do NOT design the datapath structure (that's classifier's) — but state which ordering models each structure supports. Do NOT design the action model beyond pass/drop. Viability filter: migration must not silently change the meaning of a deployed v1 file without an explicit, detectable bump."
-      sources:
-        - "mint/selection-scenarios.md (§5 composition, §6.1-6.2 OR-structural finding, §7 ordering)"
-        - "src/lib/config.cpp (id range/uniqueness, schema_version gate, strict unknown-key)"
-        - "tests/fixtures/config_valid_mac_or_cidr.yaml (the load-bearing OR-compose fixture)"
-        - "RFC 8955 most-specific precedence algorithm; nftables/Calico/VyOS ordering models (web)"
-    - name: realizability
-      lens: "eBPF-realizability & forward-portability architect. You pressure-test feasibility and keep the door open. For each classification candidate: verifier constraints (bounded loops, map-in-map nesting, stack/instruction limits), map-topology evolution from the current 5-axis ARRAY_OF_MAPS, hot-reload/atomic-swap compatibility, rule cardinality (XDPMF_ALLOWLIST_MAX growth; the large-cardinality feed-object door), the VLAN-tagged parse-path fix (catalog §6.4), and IPv6 second-LPM shape. Define the PORTABILITY BOUNDARY: which rule semantics stay datapath-agnostic so a future AF_XDP/DPDK swap reuses them — WITHOUT designing those datapaths."
-      scope: "Cover feasibility + map topology + VLAN/IPv6 parse + portability boundary + cardinality. Do NOT pick the structure (defer to classifier) — instead give a feasibility verdict per candidate. Do NOT design AF_XDP/DPDK, perf, or the action model. Viability filter: every claim must be checkable against the verifier / current loader mechanism."
-      sources:
-        - "src/bpf/mac_filter.bpf.c + src/lib/loader.cpp (kManagedMaps, pin loop, atomic swap, copy-forward)"
-        - "mint/selection-scenarios.md (§6.3 per-field XDP cost, §6.4 VLAN gap, Appendix B.2 feed-object cardinality)"
-        - "Linux BPF verifier docs; XDP VLAN/802.1Q parsing (xdp-tutorial); bpf map-in-map limits (web)"
-        - "mint/design.md §5.27/§5.34/§5.35 (axis-map + atomic-swap + dispatch brownfield history)"
+        - "src/lib/loader.cpp — the apply pipeline (compile block ~2206-2293; populate_all_axes:1903; copy_rule_counters_forward:1805; lowerings 1165-1480)"
+        - "src/lib/config.hpp / src/lib/apply_internal.hpp — the validated Config + the internal apply entry"
+        - "mint/architecture-rule-model.md — prior rule-model architecture (Wave A/B), for the existing model vocabulary"
     - name: testability
-      lens: "Verification & test-oracle architect. You own ONE question per candidate structure: how is its correctness PROVEN, and what MUST be tested? Per candidate: (a) differential-oracle friendliness — can a simple reference impl (SCAN) run side-by-side and be asserted bit-identical on every fixture (the existing T_AND*_ORACLE_AGREEMENT / T_BITVEC_ORACLE_AGREEMENT pattern); (b) the test surface for load-bearing invariants — prefix-closure correctness, the wildcard-half mutual-exclusion invariant (rule in axis-map XOR wildcard-half), first-match-by-id, AND-compose-as-intersection; (c) negation-correctness verification (how to test a negated /16 is NOT cover-closed like a positive one); (d) verifier-load gating of the PRODUCTION object on the kernel floor; (e) fuzzability of the YAML->per-axis-mask lowering. Recommend WHAT to test and HOW per structure; name who owns prefix-closure/mask correctness + its oracle."
-      scope: "Verification strategy + oracle design + invariant test surface + negation test difficulty + verifier-load gating. Do NOT pick the structure or design the datapath. Viability filter: every check expressible as a ctest against the current harness (shell T_*.sh, bpftool prog load, fixture-driven oracle agreement)."
+      lens: "Verification engineer. You own the PAYOFF axis the structure lens can't price: what offline test surface each carving unlocks, and how the cutover is PROVEN byte-identical. Naming CompiledRuleset/RulesetDelta is worthless unless it lets us assert Config->bits and the survived/moved/new/dropped delta WITHOUT a kernel. You also own the cutover oracle: how the existing insn-count-x3 + oracle-corpus gate proves zero datapath drift across a pure refactor."
+      scope: "For each candidate carving (take the structure lens's space as given — do NOT re-decide the shape), evaluate the testability/provability delta: what NEW offline unit tests become possible (e.g. Config->CompiledRuleset bit-identity; RulesetDelta truth-table without BPF), what the MINIMUM test scaffold is, and what the byte-identity cutover oracle should be (insn-count x3 arms + oracle-agreement corpus — cite how B30/B35 proved it). Recommend the carving that maximizes provable-correctness-per-effort. Defer structure shape to `structure`, non-foreclosure to `forward-compat`, worth-it to the contrarian."
       sources:
-        - "tests/T_AND*_ORACLE_AGREEMENT.sh + T_BITVEC_ORACLE_AGREEMENT.sh (differential-oracle pattern)"
-        - "tests/T_BITVEC_VERIFIER_LOAD.sh (verifier-load gate); tests/fixtures/* (corpus)"
-        - "mint/selection-scenarios.md §6; src/lib/loader.cpp (mask lowering / prefix-closure callsites)"
-    - name: perf-envelope
-      lens: "Per-packet cost-envelope & performance-foreclosure architect (Amendment 2026-05-30). For EACH candidate structure score the per-packet INSTRUCTION/LOOKUP-count envelope and whether the choice FORECLOSES good performance later. Flag structural anti-patterns (e.g. re-reading packet-invariant data every packet; O(N) scans where O(1) is structurally available; redundant map lookups). RELATIVE comparison only — no absolute numbers."
-      scope: "Non-foreclosure + relative structural cost-envelope. Do NOT benchmark, produce absolute throughput numbers, µ-optimize shipped code, or design AF_XDP/DPDK. Feasibility is realizability's call — assume it, score ONLY the cost-envelope. Viability filter: every claim must be a per-packet instruction/lookup count or a named structural anti-pattern."
+        - "tests/ — existing test harness; how bitvec/oracle/corpus tests are structured (BitPrefix is already #include'd from tests/bitvec per loader.cpp:1173)"
+        - "src/lib/loader.cpp:1805 copy_rule_counters_forward — the un-unit-tested id-reconciliation"
+        - "CHANGELOG / mint/design.md §5.70 §5.61 — how B30/B35 proved -221 insns x3 + oracle-agreement (the byte-identity gate to reuse)"
+    - name: forward-compat
+      lens: "Non-foreclosure sentry. You own ONLY one question: does each candidate carving paint us into a corner for the NEXT workstream (mirror/redirect, XDP->TC), where the per-rule action may grow from a pass/drop verdict to a redirect/mirror target? You are NOT a TC designer — you check seams, you do not build them."
+      scope: "For each candidate carving, judge non-foreclosure ONLY: would naming the compiled action/verdict model THIS way make adding a redirect action/target later cheap or expensive? Flag any carving that would force a redo during mirror/redirect (a strike) — AND equally flag any carving that builds machinery FOR TC now (gold-plating, also a strike; PO: 'nothing special, all as before'). Recommend the cheapest non-foreclosing seam. Do NOT design the TC entity, its schema, or its maps. Do NOT weigh clarity (structure's) or testability (testability's) or worth-it (contrarian's)."
       sources:
-        - "src/bpf/mac_filter.bpf.c (per-packet datapath: axis lookups, wildcard reads, port_scan, AND-compose)"
-        - "mint/selection-scenarios.md §6.3 (per-field XDP cost)"
-        - "Gupta & McKeown survey (per-structure query-cost framing); BV vs decision-tree vs scan per-packet cost (web)"
+        - "memory: project_real_requirements_and_strategy + project_dpi_pre_filter_purpose — the action/steering space (allow/drop/mirror/redirect/tag) at the spec level, for non-foreclosure context ONLY"
+        - "src/bpf/defs.h + src/common/xdpfilter.h — current action representation (RuleAction / action_table) the TC work would extend"
+        - "src/lib/loader.cpp populate_action_table:1851 + rules_inner population — where action lives in the compiled form today"
   sequential:
     - name: contrarian
-      lens: "Skeptical engineer / integrator. Read classifier + semantics + realizability. Poke holes: is the recommended structure the MINIMUM that proves the AND match-model on the eBPF vehicle, or is it over-engineered (decision-tree-class complexity for a model-validation stage)? Does it serve the NARROW Gi-DPI pass/drop path while not foreclosing the expansion-door items? Does the slice sequence (dst-IP → proto+port → AND-architecture → VLAN → objects) still hold under the choice? Is the OR→AND migration honest about what breaks? Flag any place the design quietly enforces a seen external approach."
-      scope: "Critique + integrate into a single coherent recommendation-with-caveats. Do NOT introduce a brand-new structure unless the three parallels missed an obviously-superior one. Viability filter: complexity must be justified by the narrow path's actual needs, not the expansion vision."
-      inputs: [classifier, semantics, realizability, testability, perf-envelope]
+      lens: "Skeptical staff engineer. You read structure + testability + forward-compat and ask the question none of them is incentivized to: is this cleanup worth doing BEFORE mirror/redirect at all, or is part of it gold-plating a 64-rule, microsecond-recompute problem? Does CompiledRuleset/RulesetDelta over-abstract, or become thin wrappers that fight the project's macros-over-helpers / byte-identity ethos (guard #36)? Where is the leanest cut that still earns its keep?"
+      scope: "Read the three parallel outputs. Poke holes: which named entity is genuinely load-bearing vs decorative; whether the delta-extraction risks datapath/behavior drift for marginal gain; whether any of it should DEFER until TC forces the boundary (let the next workstream pay for the abstraction it needs). Integrate into a single recommendation: the MINIMAL defensible entity-set to introduce now + an explicit per-entity now/defer/drop verdict + the worth-it-now argument. If the honest answer for some entity is 'do nothing until mirror/redirect', say so plainly."
+      inputs: [structure, testability, forward-compat]
       sources:
-        - "mint/selection-scenarios.md (esp. framing + Appendix B 'do not enforce seen approach')"
+        - "memory: feedback_convergence_thrash_freeze_first + project_mint_workflow_status — the project's bias toward byte-identity and earned abstraction"
+        - "mint/architecture-rule-model.md — to check the proposed entities against the already-committed model vocabulary (avoid renaming churn)"
 
 output:
-  path: "mint/architecture-rule-model.md"
+  path: "mint/architecture-loader-datamodel.md"
   mode: create
 
 options:
   skip_design_reviewer: false
   max_rework_rounds: 2
 ```
-
-## Amendment — 2026-05-30 (perf-envelope + added lenses)
-
-- **Performance posture relaxed from "out of scope" to "non-foreclosure + structural cost as a
-  selection axis".** Rationale: eBPF is the model-validation vehicle and will NOT meet the full
-  throughput requirements (a future AF_XDP/DPDK datapath is the production target) — but within
-  what the technology allows, the structure choice should still not be perf-hostile. We do NOT
-  optimize, benchmark, or produce absolute numbers this round; we DO score each candidate's
-  per-packet instruction/lookup-count envelope and refuse structures that foreclose good perf —
-  exactly mirroring the brief's existing "narrow now, door open later" non-foreclosure principle.
-  Concrete motivation: a prior code review found the shipped BV datapath re-reads 6 packet-invariant
-  wildcard masks per packet and does up to 64 port lookups per L4 packet — structural costs a
-  design-time perf-envelope lens would have flagged before they shipped.
-- **Two lenses added to the parallel roster**: `testability` (verification/oracle — owns "how is
-  correctness PROVEN per structure", incl. the prefix-closure oracle that open-Q #3 flagged as
-  load-bearing) and `perf-envelope` (above). Both are independent Phase-1 lenses (no sibling reads).
-- **Provenance**: lens-roster expansion driven by the Workflow-port A/B of this round (runs/hld-*).
-  Each added lens is on empirical trial — kept only if its synthesis delta surfaces signal the
-  original three lenses missed; dropped as noise otherwise.
-
-## Notes for architects
-
-- **Dual purpose**: this serves the product (real match model) AND trains the mint band. Weigh
-  recommendations on both — a clean, teachable structure beats a clever opaque one.
-- **Brownfield discipline**: evolve the existing datapath; cite `file:line` for what you change.
-- **External artifacts are weak signals**: the layered-pipeline candidate came from a reviewed
-  third-party config; treat it as one option among peers, never as a template to enforce.
-- **Narrow now, door open later**: optimize for the Gi-DPI pass/drop selector; the only duty to
-  the expansion vision is non-foreclosure, not implementation.
