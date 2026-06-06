@@ -20460,7 +20460,7 @@ firm: dry-run = ZERO kernel calls / ZERO map writes / ZERO attach; live = byte-i
 | `src/lib/map_image.hpp` | `render_dryrun_image(const Config&) -> std::string` decl + the formatter decl (trace→`# xdpfilter-image v1`). libbpf-free. | C++23 | ~25 |
 | `src/lib/map_image.cpp` | The formatter (the SINGLE producer of the image text, §5.76.4(6) — relocated from the harness, guard #36 capture-vs-format split) + `render_dryrun_image` orchestration (compile→sentinel-skel→`RecordingScope`→3-call render→format). libbpf-free. | C++23 | ~130 |
 | `tests/dryrun/dryrun_cli.yaml` | CLI-test corpus YAML (tester-owned; ideally compiles to the §5.76.6 `build_corpus` Config so dry-run stdout == the frozen golden). | YAML | ~40 |
-| `tests/dryrun/T_CLI_APPLY_DRYRUN.sh` | NEW CLI ctest: offline `apply --dry-run` → asserts printed image + exit 0 + ZERO kernel side-effects + MANDATORY negation. Tester-owned. | bash | ~90 |
+| `tests/T_CLI_APPLY_DRYRUN.sh` | NEW CLI ctest: offline `apply --dry-run` → asserts printed image + exit 0 + ZERO kernel side-effects + MANDATORY negation. Tester-owned. (Review r1 OOT inline-merge: landed at `tests/` not `tests/dryrun/`, matching the other `T_*.sh` convention; the `dryrun_cli.yaml` corpus stays under `tests/dryrun/`.) | bash | ~90 |
 
 ### EDITED
 | Path | Role (one line) | Language | LOC est |
