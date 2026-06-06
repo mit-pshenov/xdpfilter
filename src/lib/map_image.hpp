@@ -17,10 +17,19 @@
 #include <string>
 #include <vector>
 
-#include "config.hpp"      // Config
-#include "map_writer.hpp"  // RecordedWrite
+#include "config.hpp"            // Config
+#include "compiled_ruleset.hpp"  // CompiledRuleset (§5.78 human view)
+#include "map_writer.hpp"        // RecordedWrite
 
 namespace xdpmf {
+
+/* §5.78 (MVP-4.38 / B45): render the OPERATOR-facing human-decoded dry-run view
+ * (the DEFAULT `apply --dry-run` output; the golden moved behind --format=golden).
+ * Pure / libbpf-free / side-effect-free. Renders ONLY from the TESTED compile()
+ * output (`cr`) + `cfg` (NO trace, NO materialize, NO fresh lowering — guard #9 /
+ * PI-mvp-4.38-SSOT). First line is `# xdpfilter dry-run` (DISTINCT from the
+ * golden's `# xdpfilter-image v1` — the default-switch is observable). */
+[[nodiscard]] std::string format_dryrun_human(const Config& cfg, const CompiledRuleset& cr);
 
 /* §5.77.4(3): render the frozen offline map-image for `cfg`, OFFLINE. Drives the
  * production materialize/populate_* via the RecordingMapWriter — ZERO kernel

@@ -82,7 +82,7 @@ std::string usage_text()
         "Usage:\n"
         "  {0} attach --iface <IFNAME> [--allow <MAC>[,<MAC>...] ...] [--mode <M>]\n"
         "  {0} detach --iface <IFNAME>\n"
-        "  {0} apply  --iface <IFNAME> -f <PATH> [--mode <M>]\n"
+        "  {0} apply  --iface <IFNAME> -f <PATH> [--mode <M>] [--dry-run [--format human|golden]]\n"
         "  {0} bypass --iface <IFNAME> [--unsafe] [--reason \"<text>\"]\n"
         "  {0} reset-counters --iface <IFNAME> [--rule-id <N>]\n"
         "  {0} --help | --version\n"
@@ -220,6 +220,17 @@ ParsedCommand parse_attach(std::span<char* const> args)
     return cfg;
 }
 
+/* §5.78 (MVP-4.38) B45: map a `--format` value token → DryrunFormat. `human`
+ * (default) = operator view; `golden`/`image` = the machine map-image. Unknown
+ * value → CliError (load-bearing for the tester's reject assertion). */
+[[nodiscard]] DryrunFormat parse_format_token(std::string_view tok)
+{
+    if (tok == "human")                       return DryrunFormat::Human;
+    if (tok == "golden" || tok == "image")    return DryrunFormat::Golden;
+    throw CliError(std::format(
+        "apply: --format: expected one of {{human, golden, image}}, got '{}'", tok));
+}
+
 /* §5.26 Q4 G1: `apply -f <path> --iface <iface> [--mode <m>]`. Both
  * --iface and -f are REQUIRED; --mode is optional (forwarded to first attach
  * only; ignored when an existing link pin is reused). */
@@ -227,6 +238,10 @@ ParsedCommand parse_apply(std::span<char* const> args)
 {
     ApplyConfig cfg;
     std::size_t i = 0;
+    // §5.78 D-mvp-4.38-FMT-REQUIRES-DRYRUN: `--format` is only meaningful on a
+    // dry-run; track whether it appeared so a live `apply --format=...` errors
+    // (silently ignoring it on a live apply is an operator footgun).
+    bool format_seen = false;
     while (i < args.size()) {
         std::string_view tok{args[i]};
         if (tok == "--iface" || tok.starts_with("--iface=")) {
@@ -248,6 +263,11 @@ ParsedCommand parse_apply(std::span<char* const> args)
             // §5.77 (MVP-4.37) B44: render the offline map-image, no kernel touch.
             cfg.dry_run = true;
             ++i;
+        } else if (tok == "--format" || tok.starts_with("--format=")) {
+            // §5.78 (MVP-4.38) B45: select the dry-run output format.
+            std::string_view v = consume_flag_value(args, i, "format");
+            cfg.format  = parse_format_token(v);
+            format_seen = true;
         } else {
             throw CliError(std::format("unknown apply flag: '{}'", tok));
         }
@@ -257,6 +277,10 @@ ParsedCommand parse_apply(std::span<char* const> args)
     }
     if (cfg.config_path.empty()) {
         throw CliError("apply requires -f <PATH>");
+    }
+    // §5.78 D-mvp-4.38-FMT-REQUIRES-DRYRUN: reject `--format` on a live apply.
+    if (format_seen && !cfg.dry_run) {
+        throw CliError("apply: --format requires --dry-run");
     }
     return cfg;
 }

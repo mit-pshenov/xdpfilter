@@ -22,15 +22,24 @@
 
 namespace xdpmf {
 
+/* §5.78 (MVP-4.38) B45: the dry-run output format. `Human` (default) is the
+ * operator-decoded per-rule view; `Golden`/`image` is the byte-faithful
+ * `# xdpfilter-image v1` machine oracle (now behind --format=golden). */
+enum class DryrunFormat : std::uint8_t { Human = 0, Golden = 1 };
+
 struct ApplyConfig {
-    std::string iface;
-    std::string config_path;
-    XdpMode     mode = XdpMode::Generic;
+    std::string  iface;
+    std::string  config_path;
+    XdpMode      mode = XdpMode::Generic;
     /* §5.77 (MVP-4.37) B44 D-mvp-4.37-BRANCH-SITE: `apply --dry-run` renders the
      * frozen offline map-image and exits WITHOUT touching the kernel. The flag
      * lives ONLY here (NOT in ApplyRequest) so the dry-run branch sits ABOVE the
      * kernel-touch flow — keeping loader.cpp/apply_internal.hpp byte-identical. */
-    bool        dry_run = false;
+    bool         dry_run = false;
+    /* §5.78 (MVP-4.38) B45: which dry-run formatter to run. Default = Human
+     * (HG-1 baked). Only meaningful when dry_run; --format without --dry-run is
+     * a CliError (D-mvp-4.38-FMT-REQUIRES-DRYRUN). */
+    DryrunFormat format = DryrunFormat::Human;
 };
 
 /* Read + parse + validate the YAML at cfg.config_path, reconcile its
@@ -44,10 +53,12 @@ struct ApplyConfig {
                                                   const Config&      parsed,
                                                   XdpMode            mode);
 
-/* §5.77 (MVP-4.37) B44: read+parse+validate+iface-reconcile cfg.config_path
- * (SAME errors/exit-codes as live apply for a bad file/schema/iface), then
- * render the frozen offline map-image. ZERO kernel calls (PI-mvp-4.37-ZERO-
- * TOUCH). Returns the `# xdpfilter-image v1` text. */
-[[nodiscard]] std::string dryrun_image_for_file(const ApplyConfig& cfg);
+/* §5.77 (MVP-4.37) B44 + §5.78 (MVP-4.38) B45: read+parse+validate+iface-reconcile
+ * cfg.config_path (SAME errors/exit-codes as live apply for a bad file/schema/iface),
+ * then render the dry-run output in cfg.format — Human (default, operator view) or
+ * Golden (the `# xdpfilter-image v1` machine image). ZERO kernel calls
+ * (PI-mvp-4.38-ZERO-TOUCH; compile() is pure). Renamed from dryrun_image_for_file
+ * (D-mvp-4.38-RENAME — now format-aware). */
+[[nodiscard]] std::string dryrun_render_for_file(const ApplyConfig& cfg);
 
 }  // namespace xdpmf

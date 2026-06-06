@@ -1,0 +1,15 @@
+# dryrun_empty.yaml — §5.78 (MVP-4.38 / B45) NEGATION fixture.
+#
+# A VALID config (schema_version 2, default_action: drop) with ZERO rules — the
+# "blackhole footgun": per CONFIG_SCHEMA an absent/empty `rules:` list means
+# EVERY frame gets default_action, so default_action: drop ⇒ ALL traffic is
+# dropped. This compiles cleanly (exit 0), so it reaches the human formatter,
+# which MUST flag it (§5.78.4(a) empty-ruleset warning / §5.78.6 #5 MANDATORY
+# NEGATION). No `steering:` (schema_version 2 is steering-less, additive).
+#
+# The `rules:` key is OMITTED entirely (an absent list = zero rules). NOTE: do NOT
+# write `rules: []` — the project's yaml_subset parser rejects flow-style sequences
+# (`[...]`), so an inline-empty list is a PARSE error (exit 9), not a valid
+# zero-rule config. Omission is the supported spelling for "no rules".
+schema_version: 2
+default_action: drop

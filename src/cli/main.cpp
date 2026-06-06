@@ -58,7 +58,7 @@ int run_apply(const xdpmf::ApplyConfig& cfg)
     // frozen offline map-image and returns BEFORE any kernel-touch flow
     // (apply_config/apply_request never reached) — PI-mvp-4.37-ZERO-TOUCH.
     if (cfg.dry_run) {
-        std::fputs(xdpmf::dryrun_image_for_file(cfg).c_str(), stdout);
+        std::fputs(xdpmf::dryrun_render_for_file(cfg).c_str(), stdout);
         return kExitOk;
     }
     const auto prog_id = xdpmf::apply_config(cfg);

@@ -3,6 +3,34 @@
 Notes for team-lead/architect/tester about implementation decisions and
 deviations made during impl phase.
 
+## §5.78 MVP-4.38 / B45 `apply --dry-run` human-decoded view — impl notes (2026-06-06)
+
+Brownfield. NO silent deviations. Two choices within §5.78 design latitude:
+
+1. **Per-rule axis value spelling = VALUE-FIRST** (`protocol=6(tcp)`,
+   `ethertype=0x806(arp)`). §5.78.4(a) makes "the number" the CONTRACT base and the
+   name-annotation a MAY nicety. The tester's per-axis greps pin on the bare value
+   (`protocol=6`, `ethertype=0x806` — hex, no fixed-width leading zeros), commented
+   "name annotation optional, pin on value". My first draft was name-first
+   (`tcp(6)`/`arp(0x0806)`) → failed the tester's substring greps (caught in
+   Phase 2.5). Corrected to value-first so the contract value is a substring AND the
+   operator keeps the readable name. Conforms to the §5.78.4(a) base contract + the
+   tester's documented intent — NOT a design deviation, no architect ruling needed.
+
+2. **`dryrun_empty.yaml` OMITS the `rules:` key (NOT `rules: []`).** The project's
+   `yaml_subset` parser rejects flow-style sequences (`[...]`), so `rules: []` is a
+   PARSE error (exit 9), not a valid zero-rule config. An absent `rules:` key = zero
+   rules = exit 0 → reaches the human formatter → emits the blackhole WARNING. The
+   fixture is in the §5.78.2 NEW FileList (impl scope); the tester had drafted it
+   with `rules: []`; I corrected the spelling and notified the tester.
+
+Gates (all green): build clean / zero warnings; PI invariant files git-diff ∅
+(materialize.{cpp,hpp}, map_writer.{cpp,hpp}, live_map_writer.cpp, loader.{cpp,hpp},
+apply_internal.hpp, compiled_ruleset.{hpp,cpp}, src/bpf); PI-GOLDEN-UNCHANGED
+(map_image.cpp diff additive-only, render_dryrun_image/format_dryrun_image byte-
+identical, dryrun_image.golden byte-unchanged); ctest #112 + #113 pass; full suite
+111/113 (2 fails = pre-existing exporter env-fails #48/#63, unrelated). NO VERSION bump.
+
 ## §5.77 MVP-4.37 / B44 `apply --dry-run` object seam — impl notes (2026-06-06)
 
 Brownfield. NO silent deviations. Mechanism choices within the design contract

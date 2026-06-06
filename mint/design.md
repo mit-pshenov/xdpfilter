@@ -20901,21 +20901,48 @@ latitude (MAY). The view is operator-facing stdout (guard #8 — not a structure
 - If `cfg.steering` present: a line containing `steering: redirect_to=<iface>`.
 - (MAY) `schema_version: <v>`.
 
-**Per-rule block** — one entry per rule, in `cr.rules` (config) order. Each entry MUST contain, on its rule line:
-- `id=<id>` , `slot=<slot>` (slot = `cr.id_to_slot.at(rule.id)`), `action=<pass|drop|redirect>`.
-- For a redirect rule additionally `target=<steering.redirect_to>`.
-- A following `match:` line listing the constrained axes as `<axis>=<value>` space-separated, using the EXACT
-  operator axis names (`mac`,`dst_cidr`,`src_cidr`,`dst_cidr6`,`src_cidr6`,`protocol`,`dst_port`,`vlan`,
-  `ethertype`). Values rendered faithfully from `rule.match` (CIDR as `A.B.C.D/len` / v6 canonical `…/len`; MAC
-  as `XX:XX:XX:XX:XX:XX`; port as `lo-hi`; vlan/ethertype/protocol as the number; name-annotation e.g.
-  `protocol=tcp(6)` / `ethertype=arp(0x0806)` is a MAY nicety).
+**Per-rule block** — one entry per rule, in `cr.rules` (config) order. Each entry is a CONTIGUOUS two-line block:
+a **rule line** then immediately a **`match:` line** (no blank line between — so `grep -A1 'id=<N> '` reliably
+captures the match line; this contiguity is CONTRACT, not latitude). Tokens:
+
+- **Rule line** MUST contain, space-separated, in this order: `id=<id>` `slot=<slot>` `action=<pass|drop|redirect>`
+  (slot = `cr.id_to_slot.at(rule.id)`). For a redirect rule, additionally `target=<steering.redirect_to>` after
+  `action=redirect`. (Tester pin example: the line for rule id 1 contains `id=1 slot=0 action=pass`; rule id 10
+  contains `id=10 slot=9 action=redirect target=dpi0`.)
+- **`match:` line** MUST start with `match:` and list the constrained axes as `<axis>=<value>` tokens
+  (space-separated), using the EXACT operator axis names: `mac` `dst_cidr` `src_cidr` `dst_cidr6` `src_cidr6`
+  `protocol` `dst_port` `vlan` `ethertype`. Only axes the rule constrains appear (a wildcard axis is omitted).
+
+**Axis `<value>` rendering — PINNED (the guaranteed grep target; impl renders EXACTLY these forms):**
+| Axis | Value form (CONTRACT) | Fixture (`dryrun_cli.yaml`) example token |
+|---|---|---|
+| `mac` | lowercase colon-hex `xx:xx:xx:xx:xx:xx` | `mac=aa:bb:cc:dd:ee:ff` (id5), `mac=11:22:33:44:55:66` (id10) |
+| `dst_cidr` / `src_cidr` | dotted-decimal `A.B.C.D/len` | `dst_cidr=10.0.0.0/8` (id1), `dst_cidr=10.1.2.0/24` (id2) |
+| `dst_cidr6` / `src_cidr6` | canonical-compressed lowercase v6 `addr/len` | `dst_cidr6=2001:db8::/32` (id8), `src_cidr6=fe80::/10` (id9) |
+| `protocol` | **decimal** number | `protocol=6` (id3, id4) |
+| `dst_port` | inclusive range `lo-hi` (single port ⇒ `N-N`) | `dst_port=80-443` (id4) |
+| `vlan` | **decimal** number | `vlan=100` (id6) |
+| `ethertype` | **hex** `0x` + 4-digit zero-padded lowercase | `ethertype=0x0806` (id7) |
+
+- **MAY name-annotation (must NOT break the `axis=value` substring):** impl MAY append a trailing ` (<name>)`
+  AFTER the pinned value for protocol/ethertype — e.g. `protocol=6 (tcp)`, `ethertype=0x0806 (arp)`. Because the
+  name is a SUFFIX, `grep 'protocol=6'` / `grep 'ethertype=0x806'` still match. **Tester: pin on the value form in
+  the table above (always present), NEVER on the parenthesized name (optional).**
+- **Slot values for the fixture:** ids 1..10 in config order → dense slots 0..9 (id1→slot0 … id10→slot9), per
+  `dryrun_cli.yaml`'s build_corpus layout. Tester MAY pin exact `slot=<n>` per rule, or just assert `slot=` is
+  present on every rule line.
 
 **Diagnostics block (HG-2 bounded — §5.78.5 D-mvp-4.38-DIAG):**
 - **Redirect note** — if any redirect rule exists, a line containing `RESOLVED-AT-APPLY` AND the target name,
   conveying "verify the tap is up" (reuses the golden's resolution vocabulary). MUST appear.
-- **Empty-ruleset warning** — if `cr.rules` is empty, a line containing `WARNING` AND `no rules` AND the default
-  verdict, conveying that every frame gets `default_action` (drop ⇒ "all traffic dropped"). MUST appear when and
-  only when there are zero rules.
+- **Empty-ruleset warning** — if `cr.rules` is empty, ONE line MUST contain ALL THREE substrings (same line):
+  `WARNING` (literal, case-sensitive) AND `no rules` AND the default-verdict word (`drop` or `pass`, matching
+  `cr.default_action`). It MUST appear when and ONLY when there are zero rules. The phrase "all traffic dropped"
+  in earlier prose was an illustrative gloss — NOT a pinned token; do not grep it.
+  **Recommended exact line (impl determinism; tester may pin it verbatim):**
+  `WARNING: no rules defined — every frame gets default_action=<drop|pass>`
+  *Tester contract: assert the WARNING line carries `WARNING` + `no rules` + the verdict word (`drop` for the
+  empty fixture). That is non-vacuous (3 tokens) without coupling to exact prose.*
 
 ## §5.78.5 Decisions (with rationale)
 
@@ -20994,7 +21021,8 @@ All tests run OFFLINE / UNPRIVILEGED (host-side formatting; dry-run is ZERO-touc
    with `RESOLVED-AT-APPLY` AND `dpi0`. Mechanism: `grep -qE`.
 5. **MANDATORY NEGATION — empty-ruleset blackhole warning** — trigger: default human run on NEW fixture
    `dryrun_empty.yaml` (`schema_version: 2`, `default_action: drop`, ZERO rules — VALID, compiles, exit 0).
-   Observable: stdout contains a `WARNING` line with `no rules` AND conveys "all traffic dropped"; AND `rules: 0`.
+   Observable: ONE line contains all three of `WARNING` + `no rules` + `drop` (the default verdict); AND
+   `rules: 0` in the header. (Do NOT grep the gloss "all traffic dropped" — not a pinned token; see §5.78.4(a).)
    Mechanism: `grep -qE`.
 6. **Comparator-can-fail control (the negation is not vacuous)** — trigger: default human run on `dryrun_cli.yaml`
    (10 rules). Observable: the `WARNING`/`no rules` line is ABSENT (`grep -q ... ; [[ $? -ne 0 ]]`), proving the

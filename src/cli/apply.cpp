@@ -26,9 +26,10 @@
 #include "cli.hpp"   // CliError — usage-error exit (exit 1) for file-IO failure
 
 #include "lib/apply_internal.hpp"
+#include "lib/compiled_ruleset.hpp"  // §5.78 (MVP-4.38) B45: compile() for the human view
 #include "lib/config.hpp"
 #include "lib/loader.hpp"
-#include "lib/map_image.hpp"  // §5.77 (MVP-4.37) B44: render_dryrun_image (offline)
+#include "lib/map_image.hpp"  // §5.77 B44 render_dryrun_image; §5.78 B45 format_dryrun_human
 #include "lib/yaml_subset.hpp"
 
 #include <cstddef>
@@ -126,14 +127,19 @@ std::uint32_t apply_config(const ApplyConfig& cfg)
     return apply_config_inmemory(cfg.iface, parsed, cfg.mode);
 }
 
-/* §5.77 (MVP-4.37) B44 D-mvp-4.37-BRANCH-SITE: the offline dry-run render. Same
- * load/validate/reconcile path as live apply (so a bad file/schema/iface errors
- * identically — exit 1/9), then render the frozen map-image with ZERO kernel
- * calls. Never reaches apply_config/apply_request. */
-std::string dryrun_image_for_file(const ApplyConfig& cfg)
+/* §5.77 B44 D-mvp-4.37-BRANCH-SITE + §5.78 (MVP-4.38) B45 D-mvp-4.38-NOSPLIT: the
+ * offline dry-run render. Same load/validate/reconcile path as live apply (so a bad
+ * file/schema/iface errors identically — exit 1/9), then render the requested format
+ * with ZERO kernel calls. Only ONE format runs per invocation, so the golden
+ * orchestration is byte-untouched (PI-mvp-4.38-GOLDEN-UNCHANGED) and compile() runs
+ * once on the human path. Never reaches apply_config/apply_request. */
+std::string dryrun_render_for_file(const ApplyConfig& cfg)
 {
     const Config parsed = load_and_reconcile(cfg);
-    return render_dryrun_image(parsed);
+    if (cfg.format == DryrunFormat::Golden) {
+        return render_dryrun_image(parsed);
+    }
+    return format_dryrun_human(parsed, compile(parsed));
 }
 
 }  // namespace xdpmf
