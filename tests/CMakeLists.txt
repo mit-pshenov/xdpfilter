@@ -1740,3 +1740,65 @@ foreach(T IN ITEMS
         SKIP_RETURN_CODE 77
     )
 endforeach()
+
+# ─────────────────────────────────────────────────────────────────────────
+# §5.76 (MVP-4.36 / B43) — dryrun_harness: offline map-image golden.
+#
+# T_DRYRUN_IMAGE_IDENTITY drives the PRODUCTION render subset
+# (xdpmf::materialize -> populate_action_table -> populate_redirect_devmap)
+# ENTIRELY OFFLINE against the recording fake (tests/dryrun/fake_bpf.cpp):
+# bare-main, NO gtest, NO veth, NO libbpf LINK, NO loader.cpp, NO skeleton
+# OBJECT (compile_harness / ruleset_delta_harness mold). The harness compiles
+# the MOVED render TUs (materialize.cpp + compiled_ruleset.cpp + loader_error.cpp)
+# DIRECTLY together with the test-double. The libbpf-FREE link IS the OPS-canary
+# contract (§5.76.6): if the render subset ever acquires a real libbpf /
+# skeleton / loader.cpp-local dependency, this binary FAILS TO LINK — a signal
+# no existing libbpf-linked test gives.
+add_executable(dryrun_harness
+    ${CMAKE_SOURCE_DIR}/tests/dryrun/dryrun_harness.cpp
+    ${CMAKE_SOURCE_DIR}/tests/dryrun/fake_bpf.cpp
+    ${CMAKE_SOURCE_DIR}/src/lib/materialize.cpp
+    ${CMAKE_SOURCE_DIR}/src/lib/compiled_ruleset.cpp
+    ${CMAKE_SOURCE_DIR}/src/lib/loader_error.cpp
+)
+set_target_properties(dryrun_harness PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+# The harness lives in tests/dryrun/, so it needs src on the path to resolve
+# "common/xdpfilter.h" and src/lib for "config.hpp"/"compiled_ruleset.hpp"/
+# "loader.hpp". "fake_bpf.hpp" resolves quote-relative (same dir).
+target_include_directories(dryrun_harness PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/src/lib
+)
+# bpftool-generated xdpfilter.skel.h lives in the build root and uses C-style
+# casts; treat the build dir as a SYSTEM include so its diagnostics don't trip
+# the -Werror floor (mirrors bitvec_harness / xdpmf_internal). <bpf/libbpf.h>
+# resolves from the system path (/usr/include) for the type DECLARATIONS only —
+# the harness links NO libbpf (SPIKE-1: the skel's libbpf-calling fns are inline
+# + unreferenced => zero libbpf link symbols).
+target_include_directories(dryrun_harness SYSTEM PRIVATE
+    ${CMAKE_BINARY_DIR}
+)
+# DELIBERATELY no target_link_libraries(... PkgConfig::LIBBPF), no xdpmf_internal,
+# no loader.cpp — the libbpf-free link IS the test contract (§5.76.6 OPS-canary).
+# The one dep below is ORDER-ONLY: materialize.cpp #includes the generated
+# xdpfilter.skel.h, so its HEADER must exist before this target's TUs compile.
+# add_dependencies affects build ORDER only, never the link line, so the
+# libbpf-free contract holds (the moved subset links NO skeleton object). This
+# is the build-correctness reading of §5.76.2's "NO *_skel dep" (which fences the
+# link/OPS-canary, not header-generation ordering) — flagged to the architect.
+add_dependencies(dryrun_harness xdpfilter_skel)
+
+add_test(
+    NAME T_DRYRUN_IMAGE_IDENTITY
+    COMMAND dryrun_harness
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+# Guard #12: touches NO shared host state (no bpffs/iface/port/root) => no
+# RESOURCE_LOCK (mirrors compile/delta harnesses). TEST_DIR (from TEST_ENV) is
+# consumed by the harness to locate tests/dryrun/dryrun_image.golden.
+set_tests_properties(T_DRYRUN_IMAGE_IDENTITY PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    TIMEOUT 30
+)

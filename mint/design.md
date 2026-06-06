@@ -19967,7 +19967,7 @@ is EXCLUDED from the image (reads the live old-active inner — irreducibly live
 | `src/lib/materialize.cpp` | the render subset MOVED from loader.cpp: `materialize` + file-local `populate_hash_inner_slot`/`populate_bitvec_inner_slot`/`populate_port_inner_slot`/`populate_rules_inner_slot`/`write_ruleset_state`/`write_slot_rule_id`/`inactive_axis_fd` + `populate_action_table` + `populate_redirect_devmap`. `#include "xdpfilter.skel.h"` (for `xdpfilter_bpf` type — compile-path libbpf only, SPIKE-1) + `compiled_ruleset.hpp` + `loader_error.hpp` + `materialize.hpp`. Whole-cloth relocation (byte-identical writes). | C++23 | ~360 (moved, ~0 net new) |
 | `tests/dryrun/dryrun_harness.cpp` | bare-`main` offline unit (no gtest; `compile_harness` mold). Builds the in-memory `Config` corpus, runs `compile()` → `cr`, drives the 3-call sequence on the fake skel, formats the recorded write-set per the `# xdpfilter-image v1` spec, compares to the golden. SMOKE + NEGATION inside. | C++23 | ~220 |
 | `tests/dryrun/fake_bpf.cpp` (+ `fake_bpf.hpp`) | the recording fake + fd-tag descriptor table (Q3): `#include "xdpfilter.skel.h"` for the real `xdpfilter_bpf` type; builds a fake skel (all `maps.*` set to sentinel `bpf_map*` tags); defines fake `bpf_map__fd`/`bpf_map_update_elem`/`bpf_map_get_next_key`/`bpf_map_delete_elem` + the `constexpr` `{tag → name,key_sz,val_sz}` table + the recording sink (ordered `(map,key,val)` capture) + fake `resolve_ifindex` (sentinel + name record). | C++23 | ~200 |
-| `tests/dryrun/dryrun_image.golden` | the canonical `# xdpfilter-image v1` fixture for the corpus (checked in; the frozen format slice 1b reuses) | text | ~90 |
+| `tests/dryrun/dryrun_image.golden` | the canonical `# xdpfilter-image v1` fixture for the corpus (checked in; the frozen format slice 1b reuses). DENSE ARRAY image ⇒ ~210 lines (the 3 ARRAY axes contribute 64 rows each) | text | ~210 |
 
 ### EDITED
 
@@ -20006,8 +20006,15 @@ struct RecordedWrite {
     // delete-vs-update discriminant if a delete is ever recorded (harness corpus has steering ⇒ none)
 };
 ```
-Capture order = issue order; **within-map** ordering for the golden is imposed at FORMAT time (sort rows
-by stored-key bytes), not at capture (guard #36 — capture is dumb, format is the policy).
+Capture is DUMB (guard #36): the sink appends the raw ordered write trace, nothing more. The golden is
+the **FAITHFUL FINAL MAP-IMAGE** — imposed at FORMAT time (D-mvp-4.36-IMAGE-FINAL-STATE, §5.76.5): the
+formatter collapses per `(map,key)` to the **last value written** (last-write-wins, order-robust) and
+renders EVERY key that received ≥1 write, sorted by stored-key bytes. **NO per-map content filter** — the
+formatter stays dumb (guard #36): collapse + render, no map-specific sentinel knowledge. This makes the
+golden equal the resident kernel ARRAY/HASH state after the 3 calls: **ARRAY maps come out DENSE** (all 64
+slots — the explicit clear-writes are real resident cells, occupied + cleared-sentinel); **HASH/LPM come
+out SPARSE** (only inserted keys — their `get_next_key→delete` clear no-ops on the empty fake). The
+asymmetry faithfully mirrors how each map type clears. See §5.76.4(6a) for per-map row counts.
 
 **fd-tag descriptor table (Q3 — `constexpr` array in `fake_bpf.cpp`; guard #10 catalog arithmetic):**
 ```
@@ -20059,8 +20066,9 @@ symbols).
    - `int bpf_map_update_elem(int fd, const void* key, const void* value, std::uint64_t flags)` → **RECORD**
      `{decode(fd), key[key_sz], value[val_sz]}` into the ordered sink; return 0.
    - `int bpf_map_get_next_key(int fd, const void* prev, void* next)` → return **-1 / `ENOENT`** (the fake
-     inners are EMPTY ⇒ the populate helpers' bulk-clear loop is a no-op → occupied-writes-only, by
-     construction; D-mvp-4.36-CLEAR-EMPTY).
+     inners are EMPTY ⇒ the HASH/LPM `get_next_key→delete` clear is a no-op; D-mvp-4.36-CLEAR-EMPTY). The
+     ARRAY clears do NOT use this path — they are explicit `update` writes captured + collapsed by the
+     final-state formatter (D-mvp-4.36-IMAGE-FINAL-STATE).
    - `int bpf_map_delete_elem(int fd, const void* key)` → no-op return 0 (the corpus carries `steering` ⇒
      `populate_redirect_devmap`'s delete branch is NOT reached; provided for completeness).
    - `resolve_ifindex` fake (per #3). **`libbpf_num_possible_cpus` is NOT needed** — it lives only in the
@@ -20078,17 +20086,104 @@ symbols).
    ```
    - **Map order** = the live call order: the 9 axes in `materialize`'s issue order
      (mac, dst, src, proto, port, vlan, dst6, src6, ethertype), THEN `ruleset_state`, `rules`,
-     `slot_rule_id`, THEN `action_table`, THEN `redirect_devmap`.
-   - **Within-map**: rows sorted by stored-key bytes; each row fixed-width hex of the stored key+value bytes
-     (per the descriptor `key_sz`/`val_sz`).
+     `slot_rule_id`, THEN `action_table`, THEN `redirect_devmap`. (Map header line `map=<name> key_sz=<k>
+     val_sz=<v> rows=<n>`; omit a map entirely if it received zero writes — i.e. a wildcard-only axis
+     whose HASH/LPM inner has no entries renders no `map=` block, only its wildcard bit in `ruleset_state`.)
+   - **Within-map**: rows = the FAITHFUL FINAL MAP-IMAGE (last-write-wins per key, render every written key,
+     NO content filter — D-mvp-4.36-IMAGE-FINAL-STATE), sorted by stored-key bytes via **`memcmp` over the
+     in-memory key bytes** (NOT semantic value; scalars are little-endian on x86 so e.g. proto key 6 sorts as
+     `06000000`). Each row = two-space indent +
+     contiguous lowercase hex of the stored key bytes (memory order) + single space + contiguous lowercase
+     hex of the stored value bytes (memory order).
    - **LPM masks are POST-closure** — captured naturally because the harness drives the real
      `populate_bitvec_inner_slot`, whose `close_prefixes`/`close_prefixes6` (compiled_ruleset.cpp) runs
      inside the populate (a `CompiledRuleset`-print would assert a PRE-closure fiction — killed).
-   - **redirect_devmap[0] value** rendered symbolically as `<redirect_to-name> RESOLVED-AT-APPLY` (the fake
-     `resolve_ifindex` records the requested name; the sentinel value is NEVER printed as a number) —
-     **zero kernel calls**.
-   - **Occupied-writes-only** — the bulk-clear `get_next_key→delete` traffic is excluded (empty fake inners
-     ⇒ no clear records; kernel-state-dependent, carries no config→image truth).
+   - **redirect_devmap[0] value** rendered symbolically: the row is `  <keyhex> <iface-name> RESOLVED-AT-APPLY`
+     where `<iface-name>` is the literal `cfg.steering->redirect_to` string (e.g. `dpi0`); the sentinel
+     ifindex is NEVER printed as a number (the fake `resolve_ifindex` records the requested name) — **zero
+     kernel calls**. Exact token spelling: a single space between key-hex and name, a single space between
+     name and `RESOLVED-AT-APPLY`.
+
+**§5.76.4(6a) — per-map row-count + value-layout pin (the golden is fully spec-derivable; answers tester Q1–Q6):**
+
+The FINAL MAP-IMAGE rows for a **slot-0 fresh apply** (`inactive=0`). Two map families differ:
+- **HASH/LPM inners** (mac/proto/vlan/ethertype HASH; dst/src/dst6/src6 LPM) clear via `get_next_key→delete`
+  (a no-op on the empty fake → no records) then `update` each entry ⇒ rows = the **#inserted entries only**
+  (the aggregated `cr.<axis>.entries`/closed `prefixes`). Wildcard-only axis ⇒ 0 rows ⇒ no `map=` block.
+- **ARRAY inners** (`port_ranges_a`, `rules_a`, `slot_rule_id`, `ruleset_state`) have **no delete**; the
+  clear is an explicit `update` over EVERY slot to a sentinel/empty, then occupied slots are overwritten.
+  Under last-write-wins ⇒ rows = **every key the apply wrote** (the resident ARRAY image), NOT occupied-only.
+
+| Map | Type | key_sz | val_sz | rows (slot-0) | value layout (stored bytes, render order) |
+|---|---|---|---|---|---|
+| `allowlist_a` (mac) | HASH | 6 | 8 | #distinct mac entries | key=`xdpmf_mac.octets[6]` (network order); val=`__u64` mask LE |
+| `dst_bitmask_a` (dst) | LPM | 8 | 8 | #closed v4 prefixes | key=`prefixlen`(u32 LE)++`addr`(net-order 4B); val=POST-closure `__u64` LE |
+| `cidr_allowlist_a` (src) | LPM | 8 | 8 | #closed v4 prefixes | same as dst |
+| `proto_bitmask_a` | HASH | 4 | 8 | #distinct protos | key=`__u32` proto LE; val=`__u64` mask LE |
+| `port_ranges_a` | ARRAY | 4 | 16 | **64** (`XDPMF_ALLOWLIST_MAX` — dense) | key=`__u32` idx LE; val=`lo`(u32 LE)++`hi`(u32 LE)++`bit`(u64 LE). Used `[0,N)`=ranges; cleared tail `[N,64)`=sentinel `{lo=1,hi=0,bit=0}` = `01000000`+`00000000`+`0000000000000000` (real resident cells — rendered) |
+| `vlan_bitmask_a` | HASH | 4 | 8 | #distinct vlans | key=`__u32` VID LE; val=`__u64` LE |
+| `dst6_bitmask_a` | LPM | 20 | 8 | #closed v6 prefixes | key=`prefixlen`(u32 LE)++`addr6[16]`(net-order); val=POST-closure `__u64` LE |
+| `src6_bitmask_a` | LPM | 20 | 8 | #closed v6 prefixes | same as dst6 |
+| `ethertype_bitmask_a` | HASH | 4 | 8 | #distinct ethertypes | key=`__u32` host-order ethertype LE; val=`__u64` LE |
+| `ruleset_state` | ARRAY | 4 | 80 | **1** (key 0 only) | val=`wc[9]`(u64 LE each, order BV_AXIS DST,SRC,PROTO,PORT,VLAN,MAC,DST6,SRC6,ETHERTYPE)++`default_action`(u32 LE: 1=Pass,0=Drop)++`_pad`(u32=0) |
+| `rules_a` | ARRAY | 4 | 4 | **64** (dense) | key=`__u32` slot LE; val=`{present(u8),action_id(u8),_pad[2]=00 00}`. Occupied slot `[0,count)`=`01`+`<aid>`+`0000`; cleared tail `[count,64)`=`00000000` (`present==0` — real resident cells, rendered) |
+| `slot_rule_id` | ARRAY | 4 | 4 | **64** (inactive half, keys `[0,64)`, dense) | key=`__u32` (=`inactive*64+slot`=`slot` at slot 0) LE; val=`__u32` id LE for occupied, or `ffffffff` (`XDPMF_SLOT_ID_EMPTY`) for the cleared tail (real resident cells, rendered). The map is 128 total but a slot-0 apply writes one half |
+| `action_table` | ARRAY | 4 | 4 | **3** (keys 0,1,2) | key=`__u32` LE; val=`{action_type(u8)=key,_pad[3]=00 00 00}`. NO key 3 (MIRROR reserved, never written) |
+| `redirect_devmap` | DEVMAP | 4 | 4 | **1** (key 0) | key=`00000000`; val=symbolic `<iface-name> RESOLVED-AT-APPLY` |
+
+   - **action_id mapping (Q1/Q2):** `RuleAction::Pass→0`, `Drop→1`, `Redirect→2` (the `rules_a` 3-way ternary
+     `loader.cpp:1405-1408`). `action_table` is the identity table `action_entry{action_type=key}`.
+   - **Q3 (the load-bearing one — RULED 2026-06-06: FAITHFUL FINAL MAP-IMAGE, full written slots, NO content
+     filter).** The golden renders the last-write-wins collapsed trace for EVERY written key. **ARRAY maps are
+     DENSE** (the explicit per-slot clear-writes are real resident cells): `rules_a`=**64**, `port_ranges_a`=
+     **64**, `slot_rule_id`=**64** (the inactive half `[0,64)` — the map is 128 total but a slot-0 apply writes
+     one half), `ruleset_state`=**1** (key 0). **HASH/LPM are SPARSE** (their `get_next_key→delete` clear
+     no-ops on the empty fake → only inserted keys recorded). `action_table`=**3**. **Why render the cleared
+     tail (NOT an occupied-only filter):** (a) FAITHFULNESS — a BPF ARRAY genuinely holds 64 resident slots at
+     all times; the cleared tail literally contains the sentinel, so it IS the map-image (occupied-only would
+     impose lossy HASH semantics on an ARRAY); (b) COVERAGE — rendering all 64 catches a removed/broken
+     clear-loop regression OFFLINE/CI-green (the trace would lose the cleared-tail writes → golden mismatch),
+     which an occupied-only filter hides; (c) DUMB FORMATTER (guard #36) — collapse+render needs no per-map
+     sentinel knowledge, whereas an occupied filter injects map-specific content policy into the formatter.
+     The asymmetry (ARRAY dense, HASH/LPM sparse) is correct — it mirrors how each map type actually clears.
+   - **Q4/Q5/Q6:** confirmed — `memcmp`-over-stored-bytes sort; lowercase contiguous hex in memory order
+     (LE scalars; network-order address fields as stored); two-space indent, single-space key/val separator;
+     v4 LPM key `prefixlen`(LE)++`addr`(net) e.g. `10.0.0.0/8`→`080000000a000000`; v6 `prefixlen`(LE)++16
+     net-order bytes; LPM value = POST-closure `__u64` LE.
+   - **VALUE DERIVATION (so the golden is hand-derivable WITHOUT impl's formatter — the OPS-canary depends
+     on a spec-derived golden, NOT a captured one):** the §5.76.4(6a) table pins the byte LAYOUT; the VALUES
+     come from the SAME `compile()` model already specified in §5.73/§5.74 — the tester computes them by hand
+     from the corpus:
+     - **slot model** (§5.73): `slot` = the rank of a rule's `id` in ascending-unique-`id` order (`[0,count)`);
+       a rule's **bit** = `1ULL << slot`. `id_to_slot[id]=slot`; `slot_to_id[slot]=id`, tail `[count,64)` =
+       `XDPMF_SLOT_ID_EMPTY` (`0xffffffff`). This drives `rules_a[slot]`, `slot_rule_id[slot]`, and which bit
+       each axis entry/prefix/range carries.
+     - **HASH aggregation** (§5.73): rules sharing one exact key (proto/vlan/mac/ethertype) OR their bits into
+       ONE `entries` row: `val = Σ (1<<slot)` over the rules with that key. Row count = #distinct keys.
+     - **LPM closure** (§5.74 / `close_prefixes`): each stored prefix's `__u64` = OR of every COVERING rule's
+       bit (a covered prefix inherits the covering prefix's bit too). Duplicate exact prefixes collapse to one
+       row with the merged mask. Compute closure BY HAND per §5.74 to get the post-closure value.
+     - **wildcard halves** (`ruleset_state.wc[axis]`): OR of `1<<slot` over every rule that constrains
+       NOTHING on that axis (a rule with no dst/src/proto/… term contributes its bit to that axis's wildcard).
+     - **port ranges**: `cr.port_low.ranges` are the port-constrained rules' `{lo,hi,bit=1<<slot}` in
+       lowering order, written dense-at-front `[0,N)`; `default_action = 1` iff the config default is Pass.
+     This is the SAME data `compile_harness` (§5.73) already asserts field-by-field — reuse that derivation;
+     the dryrun golden is its serialized-to-map-bytes form. If any corpus axis needs a worked value beyond
+     §5.76.4(6b), the tester asks the architect (do NOT capture-then-checkin — that mirrors impl and voids
+     the OPS-canary).
+
+**§5.76.4(6b) — worked rows (illustrative; tester derives the full golden from the corpus):**
+```
+# xdpfilter-image v1
+map=proto_bitmask_a key_sz=4 val_sz=8 rows=1
+  06000000 0100000000000000          # proto 6 (TCP) → slot-0 bit 1<<0
+map=action_table key_sz=4 val_sz=4 rows=3
+  00000000 00000000                  # [0] PASS
+  01000000 01000000                  # [1] DROP
+  02000000 02000000                  # [2] REDIRECT
+map=redirect_devmap key_sz=4 val_sz=4 rows=1
+  00000000 dpi0 RESOLVED-AT-APPLY     # symbolic; never a numeric ifindex
+```
 
 ## §5.76.5 Decisions (with rationale)
 
@@ -20132,12 +20227,39 @@ symbols).
   call sites, breaking the byte-identity claim). The fake returns a sentinel ifindex + records the name so
   the golden renders `<name> RESOLVED-AT-APPLY` symbolically → **zero kernel calls** (no `if_nametoindex`).
 
-- **D-mvp-4.36-CLEAR-EMPTY (occupied-writes-only by construction; fake `get_next_key` → ENOENT)** —
-  *because* the bulk-clear `get_next_key→delete` loop lives INSIDE the populate helpers (verified:
+- **D-mvp-4.36-CLEAR-EMPTY (HASH/LPM clear is a no-op; fake `get_next_key` → ENOENT)** — *because* the
+  HASH/LPM bulk-clear is a `get_next_key→delete` loop INSIDE the populate helpers (verified:
   populate_hash_inner_slot loader.cpp:1186-1203, populate_bitvec_inner_slot :1245-1257); driving them with
-  EMPTY fake inners (`get_next_key` returns `ENOENT`) makes the clear a no-op → only the `bpf_map_update_elem`
-  occupied writes are recorded. This is the natural offline boundary (clear traffic is kernel-state-dependent,
-  carries no config→image truth — HG-1 occupied-writes-only).
+  EMPTY fake inners (`get_next_key` returns `ENOENT`) makes that clear a no-op → for HASH/LPM only the
+  `bpf_map_update_elem` inserted entries are recorded. **NOTE — this does NOT apply to the ARRAY maps**
+  (`port_ranges_a`/`rules_a`/`slot_rule_id`): BPF ARRAYs have no delete, so their clear is an EXPLICIT
+  `bpf_map_update_elem` over EVERY slot to a sentinel/empty (verified populate_port_inner_slot :1303-1310,
+  populate_rules_inner_slot :1388-1394, write_slot_rule_id :1431-1441), and `port_ranges`/`rules` then
+  OVERWRITE the occupied front slots — a real double-write the fake records. The final-state collapse
+  (next decision) is what reconciles this into the resident ARRAY image.
+
+- **D-mvp-4.36-IMAGE-FINAL-STATE (the golden = the FAITHFUL FINAL MAP-IMAGE — full written slots, NO content
+  filter)** — *because* the feature is a *map-image* golden: the right oracle is the resident kernel map
+  state after the 3-call sequence. ONE formatter step over the dumb raw-write-trace (guard #36 — capture
+  stays dumb): **last-write-wins** per `(map,key)` [order-robustness — collapses the ARRAY
+  sentinel-then-override double-write to the resident value], then render EVERY written key sorted by `memcmp`
+  over stored key bytes — **no per-map content/sentinel filter**. This makes the golden equal the resident
+  kernel state: **ARRAY maps are DENSE** (`rules_a`=64, `port_ranges_a`=64, `slot_rule_id`=64 [inactive half],
+  `ruleset_state`=1 — the explicit per-slot clear-writes are real resident cells); **HASH/LPM are SPARSE**
+  (`get_next_key→delete` clear no-ops on the empty fake → inserted keys only); `action_table`=3.
+  **RULED 2026-06-06** (team-lead + architect, resolving an architect↔tester fork). Three reasons full-slots
+  beats an occupied-only filter: **(a) FAITHFULNESS** — a BPF ARRAY genuinely holds 64 resident slots; the
+  cleared tail literally contains the sentinel, so it IS the map-image; occupied-only imposes lossy HASH
+  semantics on an ARRAY. **(b) COVERAGE** — rendering all 64 catches a removed/broken clear-loop regression
+  OFFLINE/CI-green (a regression that skips the tail-clear drops those writes → golden mismatch); the
+  occupied filter hides exactly those cells. **(c) DUMB FORMATTER (guard #36)** — collapse+render needs zero
+  map-specific knowledge; an occupied filter injects per-map sentinel policy (`present==0`/`lo>hi`/
+  `==0xffffffff`) into the formatter — a drift surface. The ARRAY-dense / HASH-sparse asymmetry is correct: it
+  mirrors how each map type actually clears (impl render data confirms: port raw 65, rules raw 74,
+  slot_rule_id raw 64 → after last-write-wins collapse: 64/64/64 dense). Rejected occupied-only (lossy, loses
+  clear-loop coverage, adds filter policy) and the raw-uncollapsed-trace (non-image, unstable order). Cost: a
+  ~196-row golden vs ~51 — acceptable for a deterministic, diffable checked-in fixture. Per-map row-count +
+  byte-layout pin = §5.76.4(6a); sort + byte-rendering = §5.76.4(6).
 
 - **D-mvp-4.36-SLOT0 (harness drives the FRESH-apply shape: `materialize(fake_skel, 0u, cr)`)** —
   *because* the fresh apply path (`loader.cpp:2258`) uses slot 0, touching the `_a` side; this makes the
@@ -20157,7 +20279,7 @@ symbols).
 
 - **D-mvp-4.36-HG1-CONFIRM (golden format `# xdpfilter-image v1` — confirmed, refined)** — the HG-1 default
   is ADOPTED with the §5.76.4(6) concrete shape (apply-issue map order, within-map key-byte sort, fixed-width
-  hex, POST-closure masks, symbolic ifindex, occupied-writes-only). The format is FROZEN this slice; slice 1b
+  hex, POST-closure masks, symbolic ifindex, FINAL map-image last-write-wins per §5.76.4(6a)). The format is FROZEN this slice; slice 1b
   (CLI verb + human view) reuses the same underlying image. The fixture is the contract; the harness formatter
   is the single producer (SSoT).
 
@@ -20285,7 +20407,10 @@ and NOT thread-a-param — preserves frozen prod signatures + the libbpf-free co
 3. **`resolve_ifindex` 3 callers** — def :873; calls :1583 (populate_redirect_devmap → moves), :1813
    (detach → stays), :1969 (attach → stays). → the promote-to-external link seam (D-mvp-4.36-RESOLVE-SEAM). ✓
 4. **bulk-clear inside the populates** — `bpf_map_get_next_key`→`bpf_map_delete_elem` at :1191-1203 (hash) /
-   :1245-1257 (bitvec) → fake `get_next_key`=ENOENT ⇒ occupied-writes-only. ✓
+   :1245-1257 (bitvec) → fake `get_next_key`=ENOENT ⇒ HASH/LPM clear no-op (SPARSE). ARRAY maps clear via
+   explicit per-slot `update` (port :1303-1310, rules :1388-1394, slot_rule_id :1431-1441) → real resident
+   cells, captured + collapsed last-write-wins → DENSE 64 (D-mvp-4.36-IMAGE-FINAL-STATE; full written slots,
+   no content filter). ✓
 5. **`libbpf_num_possible_cpus` only in the EXCLUDED copy-forward** — :1500 inside
    `copy_rule_counters_forward` (stays in loader.cpp); NOT referenced by the render subset → harness does
    not need it. ✓

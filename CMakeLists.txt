@@ -111,6 +111,8 @@ add_bpf_skeleton(xdpfilter)
 # surface (library promotion is MVP-3.6+ optional branch).
 add_library(xdpmf_internal STATIC
     src/lib/loader.cpp
+    src/lib/loader_error.cpp  # §5.76 (MVP-4.36) B43 — host-only std::error_category (moved, libbpf-free)
+    src/lib/materialize.cpp  # §5.76 (MVP-4.36) B43 — config→map-cell render subset (moved, byte-identical writes)
     src/lib/compiled_ruleset.cpp  # §5.73 (MVP-4.33) B40 — pure Config→CompiledRuleset lowering
     src/lib/ruleset_delta.cpp  # §5.74 (MVP-4.34) B41 — pure libbpf-free id-reconciliation diff()
     src/lib/config.cpp
