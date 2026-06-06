@@ -244,6 +244,10 @@ ParsedCommand parse_apply(std::span<char* const> args)
         } else if (tok == "--mode" || tok.starts_with("--mode=")) {
             std::string_view v = consume_flag_value(args, i, "mode");
             cfg.mode = parse_mode_token(v);
+        } else if (tok == "--dry-run") {
+            // §5.77 (MVP-4.37) B44: render the offline map-image, no kernel touch.
+            cfg.dry_run = true;
+            ++i;
         } else {
             throw CliError(std::format("unknown apply flag: '{}'", tok));
         }

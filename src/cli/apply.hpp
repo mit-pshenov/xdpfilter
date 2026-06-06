@@ -26,6 +26,11 @@ struct ApplyConfig {
     std::string iface;
     std::string config_path;
     XdpMode     mode = XdpMode::Generic;
+    /* §5.77 (MVP-4.37) B44 D-mvp-4.37-BRANCH-SITE: `apply --dry-run` renders the
+     * frozen offline map-image and exits WITHOUT touching the kernel. The flag
+     * lives ONLY here (NOT in ApplyRequest) so the dry-run branch sits ABOVE the
+     * kernel-touch flow — keeping loader.cpp/apply_internal.hpp byte-identical. */
+    bool        dry_run = false;
 };
 
 /* Read + parse + validate the YAML at cfg.config_path, reconcile its
@@ -38,5 +43,11 @@ struct ApplyConfig {
 [[nodiscard]] std::uint32_t apply_config_inmemory(const std::string& iface,
                                                   const Config&      parsed,
                                                   XdpMode            mode);
+
+/* §5.77 (MVP-4.37) B44: read+parse+validate+iface-reconcile cfg.config_path
+ * (SAME errors/exit-codes as live apply for a bad file/schema/iface), then
+ * render the frozen offline map-image. ZERO kernel calls (PI-mvp-4.37-ZERO-
+ * TOUCH). Returns the `# xdpfilter-image v1` text. */
+[[nodiscard]] std::string dryrun_image_for_file(const ApplyConfig& cfg);
 
 }  // namespace xdpmf

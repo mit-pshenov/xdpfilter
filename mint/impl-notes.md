@@ -3,6 +3,47 @@
 Notes for team-lead/architect/tester about implementation decisions and
 deviations made during impl phase.
 
+## §5.77 MVP-4.37 / B44 `apply --dry-run` object seam — impl notes (2026-06-06)
+
+Brownfield. NO silent deviations. Mechanism choices within the design contract
+(MAY-level latitude, no architect fork required):
+
+1. **`set_active_writer`/`active_writer` exposed as free fns** in `map_writer.hpp`.
+   §5.77.3(6) specifies `g_active_writer` ptr in `map_writer.cpp` + a
+   `RecordingScope` RAII. Kept `g_active_writer` file-local in `map_writer.cpp`;
+   exposed `set_active_writer(MapWriter*) -> MapWriter*` (returns previous) +
+   `active_writer()` so `RecordingScope` is a clean header-inline RAII and
+   `install_live_map_writer()` (separate libbpf TU) installs without touching the
+   global directly. FAIL-CLOSED unaffected — wrappers still abort on null writer.
+
+2. **`format_dryrun_image`** is the public name for the relocated `format_image`
+   ("the formatter"). Exposed in `map_image.hpp` so the harness oracle path
+   (oracle_expected_records → format → golden) AND the production render share the
+   SSoT formatter (guard #9 / PI-mvp-4.37-SSOT).
+
+3. **`load_and_reconcile` helper** extracted in `apply.cpp` (anon-ns) — the SINGLE
+   read+parse+validate+iface-reconcile path now shared by live `apply_config` AND
+   `dryrun_image_for_file`, so a dry-run of an invalid config errors EXACTLY as
+   live apply (exit 1/9). Behavior-preserving for `apply_config`.
+
+4. `materialize.cpp` diff is body-only: the `bpf_*`→`map_*` /
+   `resolve_ifindex`→`map_resolve_ifindex` swaps + one `#include "map_writer.hpp"`.
+   All 4 declared signatures byte-identical; `<bpf/bpf.h>` retained ONLY for the
+   `BPF_ANY` macro (no `bpf_*` call remains in the TU).
+
+### Smoke / gates
+- Full build clean, zero warnings (incl. libbpf-free `dryrun_harness`: `ldd`/`nm`
+  show no libbpf dep / no undefined `bpf_*` — OPS-canary holds).
+- `git diff` = ZERO on loader.cpp / apply_internal.hpp / materialize.hpp /
+  loader.hpp / src/bpf (PI-mvp-4.37-LIVE-IDENTITY structural + PI-7 + insn 3477).
+- `dryrun_image.golden` byte-unchanged.
+- Full ctest (root, -j1): 111/113 passed; only 2 fails (#48/#63 exporter env-fails)
+  are pre-existing, reference none of this slice's symbols. All live-apply +
+  redirect witnesses + #112 + new #113 GREEN. Test total 112→113 (+1).
+- Manual: `apply -f <cfg> --iface nonexist0 --dry-run` → image + exit 0, no bpffs
+  pin; same without `--dry-run` → exit 3 (if_nametoindex fails) ⇒ genuine
+  zero-touch (negation holds; also proves the LIVE writer IS installed).
+
 ## §5.73 MVP-4.33 / B40 CompiledRuleset bundle — impl notes (2026-06-05)
 
 Brownfield, PURE host-side refactor. 3 NEW (`src/lib/compiled_ruleset.{hpp,cpp}` +

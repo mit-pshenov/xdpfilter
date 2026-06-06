@@ -20543,8 +20543,13 @@ Anything NOT in NEW/EDITED is off-limits for impl. If impl needs to edit a file 
    - `int map_next_key(int fd, const void* prev, void* next);`
    - `int map_delete(int fd, const void* key);`
    - `[[nodiscard]] int map_resolve_ifindex(const std::string& iface, LoaderError on_fail);`
-   **Contract:** if `g_active_writer == nullptr`, the wrapper `std::abort()`s with `"map writer not installed"`
-   (loud fail — see D-mvp-4.37-INSTALL). Wrappers carry NO libbpf reference (the libbpf-free TU).
+   **Contract (FAIL-CLOSED — load-bearing, reviewer-checked, PI-mvp-4.37-FAILCLOSED):** every wrapper MUST,
+   as its FIRST action, hard-fail if `g_active_writer == nullptr` — `std::abort()` (or throw) with the literal
+   diagnostic `"map writer not installed"`. It MUST NEVER null-deref, NEVER silently no-op, and NEVER fall back
+   to a default libbpf call. Rationale: a render path reached WITHOUT going through `main()`'s
+   `install_live_map_writer()` (live) or a `RecordingScope` (dry-run / harness) is a programming error that
+   must surface loudly, not corrupt the kernel or emit a false image. This closes the one real hole in the
+   global-dispatch design (D-mvp-4.37-INSTALL). Wrappers carry NO libbpf reference (the libbpf-free TU).
 
 2. **`void install_live_map_writer();`** (`map_writer.hpp`; defined `live_map_writer.cpp`) — installs a
    process-lifetime `LiveMapWriter` as `g_active_writer`. Called ONCE from `main()` before dispatch.
@@ -20569,6 +20574,14 @@ Anything NOT in NEW/EDITED is off-limits for impl. If impl needs to edit a file 
    `# xdpfilter-image v1`, maps in apply-issue order, last-write-wins final image, within-map memcmp key sort,
    fixed-width lowercase hex, POST-closure masks, symbolic `redirect_devmap[0]` — §5.76.4(6)/(6a) VERBATIM.
    It is now the SINGLE producer for BOTH the CLI verb AND the harness (SSoT; guard #9).
+   **PUBLIC decl in `map_image.hpp` (NOT file-local anon-ns)** — signature:
+   `std::string format_dryrun_image(const std::vector<RecordedWrite>& recs, const std::string& devmap_target);`
+   (`RecordedWrite` from `map_writer.hpp`, §5.77.3(4)). [Name `format_dryrun_image` is impl's choice, Phase-B —
+   originally specced `format_image`; the load-bearing contract is the PUBLIC visibility + signature, not the name.] It MUST be callable by the harness so the
+   `oracle_expected_records` (independent, hand-derived) side AND the `--emit-golden` generator format through
+   the SAME production formatter — this is what makes TestStrategy #1's three-way agreement (oracle == golden ==
+   production render) meaningful. Making it anon-ns/file-local would collapse the check to render-vs-golden only
+   and is FORBIDDEN (confirmed to tester Phase-B).
 
 ## §5.77.5 Decisions (with rationale)
 
@@ -20706,6 +20719,11 @@ Resolution rule for this amendment: if any §5.77.7a prose conflicts with this P
   `map_image.cpp` are libbpf-free (no `bpf_*` calls; `#include xdpfilter.skel.h` for the type only — SPIKE-1).
   If the render subset acquires a real libbpf/skeleton dependency, the harness FAILS TO LINK. **Check:** the
   harness link line.
+- **PI-mvp-4.37-FAILCLOSED (the global-dispatch must fail loud, never silent)** — every `map_*` wrapper
+  hard-fails (`abort`/throw `"map writer not installed"`) when `g_active_writer == nullptr`; NEVER null-derefs,
+  silently no-ops, or defaults to a libbpf call. **Check:** reviewer reads each wrapper's first statement;
+  `[INVARIANT-VIOLATED]` if any wrapper can be reached with a null writer without a hard failure. (Per
+  team-lead Phase-A note: this is the one real risk in the dispatch design.)
 - **PI-7 (loader.hpp ZERO diff)** — all new symbols in NEW private `src/lib/{map_writer,map_image}.hpp`.
   **Check:** `git diff main -- src/lib/loader.hpp` = ZERO.
 - **insn 3477 (src/bpf ZERO diff)** — host-loader-only slice. **Check:** `git diff main -- src/bpf/` = ZERO +

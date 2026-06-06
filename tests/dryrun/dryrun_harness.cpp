@@ -1,62 +1,64 @@
 /*
- * dryrun_harness.cpp — §5.76 (MVP-4.36 / B43) offline map-image golden test.
+ * dryrun_harness.cpp — §5.76/§5.77 (MVP-4.36/B43 → MVP-4.37/B44) offline
+ * map-image golden test.
  *
- * T_DRYRUN_IMAGE_IDENTITY. Drives the PRODUCTION render subset
- * (xdpmf::materialize → populate_action_table → populate_redirect_devmap) over
- * an in-memory Config corpus, ENTIRELY OFFLINE against the recording fake
- * (fake_bpf.cpp) — NO libbpf, NO loader.cpp, NO real skeleton. The recorded
- * (map,key,value) write-set is formatted to the canonical `# xdpfilter-image v1`
- * text (§5.76.4(6)) and asserted BYTE-EQUAL to the checked-in golden
- * tests/dryrun/dryrun_image.golden.
+ * T_DRYRUN_IMAGE_IDENTITY. §5.77 Q2 reconciliation: the harness now drives the
+ * PRODUCTION object seam — xdpmf::render_dryrun_image(Config) (which internally:
+ * compile → make_dryrun_skel → RecordingScope → the SAME 3-call apply sequence
+ * → format) — instead of the retired link-time fake (fake_bpf.{cpp,hpp}, DELETED
+ * §5.77.2). This is strictly stronger SSoT than B43: the harness now exercises
+ * the EXACT code the `apply --dry-run` CLI verb runs.
  *
- * Bare-main, NO gtest (compile_harness / ruleset_delta_harness mold). The clean
- * libbpf-free link IS the OPS-canary contract (§5.76.6): if the render subset
- * ever acquires a real libbpf / skeleton / loader.cpp-local dependency, this
+ * Still libbpf-FREE (the OPS-canary, PI-mvp-4.37-LIBBPF-FREE): this TU links
+ * {dryrun_harness.cpp, materialize.cpp, map_writer.cpp, map_image.cpp,
+ * compiled_ruleset.cpp, loader_error.cpp} — NO PkgConfig::LIBBPF, NO
+ * live_map_writer.cpp (the ONLY libbpf-calling TU), NO loader.cpp, NO *_skel
+ * OBJECT. If the render subset acquires a real libbpf/skeleton dependency this
  * binary FAILS TO LINK.
  *
- *   default run  →  IDENTITY test: render impl's write-set, compare to golden.
- *                   plus SMOKE (minimal config renders a sane image) + NEGATION
- *                   (the comparator provably catches a wrong golden).
+ *   default run  →  IDENTITY: render the corpus via the PRODUCTION seam, compare
+ *                   to the frozen golden. plus SMOKE (minimal config renders a
+ *                   sane image) + NEGATION (the comparator provably catches a
+ *                   one-byte-corrupted image).
  *   --emit-golden → print the INDEPENDENTLY-DERIVED expected image (the tester's
- *                   oracle, NOT impl's render) to stdout — the generator that
- *                   produced the checked-in golden. The golden is thus a
- *                   spec-derived contract, not an impl snapshot.
+ *                   oracle, NOT the production render) through the SAME
+ *                   production formatter (xdpmf::format_dryrun_image). This is the
+ *                   generator that produced the checked-in golden — the golden
+ *                   is thus a spec-derived contract, not an impl snapshot.
+ *                   THREE-WAY AGREEMENT: oracle == golden == production render.
+ *   --emit-live   → DEBUG: print the production render of the corpus.
+ *
+ * Test independence (D-mvp-4.37-FORMATTER-MOVE): the formatter is now production
+ * code shared by BOTH sides, so the independence that makes this test meaningful
+ * lives ENTIRELY in the hand-derived oracle (oracle_expected_records) + the
+ * FROZEN checked-in golden. Do NOT regenerate the golden via --emit-golden after
+ * a formatter change without independent review.
  *
  * Tester-owned (all of tests/dryrun/, settled peer-to-peer with mint-dev-impl).
- * The three production fns are forward-declared here from the §5.76.4 pinned
- * signatures (NOT #include'd from the in-flight private materialize.hpp), to keep
- * Phase-A isolation; a signature mismatch surfaces as a Phase-B link error.
+ * The production symbols are consumed from the NEW private headers map_writer.hpp
+ * / map_image.hpp per the §5.77.4 pinned signatures; a signature mismatch
+ * surfaces as a Phase-B compile/link error.
  */
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
-#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
 
-#include <bpf/libbpf.h>         // bpf_map__fd (fake def in fake_bpf.cpp); compile-path only
-#include "xdpfilter.skel.h"     // the REAL generated struct xdpfilter_bpf (for skel->maps.*)
-
 #include "common/xdpfilter.h"   // map key/value structs + XDPMF_* + enum xdpmf_action_type
 #include "config.hpp"           // Config, Rule, RuleMatch, RuleAction, DefaultAction, PortRange, Steering
 #include "compiled_ruleset.hpp" // xdpmf::compile(), CompiledRuleset, close_prefixes/6
-#include "fake_bpf.hpp"         // dryrun:: recording fake surface
-
-// ── production render subset (forward-decl per §5.76.4; defined in materialize.cpp) ──
-namespace xdpmf {
-void materialize(xdpfilter_bpf* skel, std::uint32_t slot, const CompiledRuleset& cr);
-void populate_action_table(int action_table_fd);
-void populate_redirect_devmap(int devmap_fd, const Config& cfg);
-}  // namespace xdpmf
+#include "map_writer.hpp"       // xdpmf::RecordedWrite, MapDesc, kMapCatalog (the production catalog)
+#include "map_image.hpp"        // xdpmf::render_dryrun_image(Config), xdpmf::format_dryrun_image(trace, target)
 
 using namespace xdpmf;
 
 namespace {
 
 // ─────────────────────────── corpus builders ────────────────────────────────
-// (CIDR/mac helpers transcribed from compile_harness — guard #9 test-side).
+// (CIDR/mac helpers transcribed from compile_harness — guard #9 test-side.)
 
 xdpmf_cidr_v4 cidr4(std::uint8_t a, std::uint8_t b, std::uint8_t c,
                     std::uint8_t d, std::uint32_t prefixlen)
@@ -89,6 +91,9 @@ xdpmf_mac mac(std::uint8_t a, std::uint8_t b, std::uint8_t c,
 // dst6 + src6, same-proto HASH aggregation, a dst_port range, an unconstrained
 // (wildcard) axis on every rule, >=1 Pass + >=1 Drop, and a steering:redirect
 // rule with Config.steering{redirect_to}. ids 1..10 → dense slots 0..9.
+// MUST stay in lock-step with tests/dryrun/dryrun_cli.yaml (the CLI verb's
+// corpus, §5.77.6 #2) — both compile to THIS Config so CLI render == harness
+// render == golden.
 Config build_corpus()
 {
     Config cfg;
@@ -115,93 +120,17 @@ Config build_corpus()
     return cfg;
 }
 
-// ───────────────────────────── formatter (SSoT) ──────────────────────────────
-// The SINGLE producer of the image text (§5.76.4(6) / D-mvp-4.36-HG1-CONFIRM).
-// Policy: canonical map order = kFakeMaps order; within-map rows sorted by raw
-// stored-key bytes (memcmp); fixed-width lowercase hex of stored bytes in memory
-// order; redirect_devmap value rendered SYMBOLICALLY (never a numeric ifindex);
-// every catalog map emitted (rows possibly 0) for a slot-agnostic frozen shape.
-
-std::string hex_of(const std::vector<std::uint8_t>& bytes)
-{
-    static const char* k = "0123456789abcdef";
-    std::string s;
-    s.reserve(bytes.size() * 2);
-    for (std::uint8_t b : bytes) { s.push_back(k[b >> 4]); s.push_back(k[b & 0xF]); }
-    return s;
-}
-
-std::string format_image(const std::vector<dryrun::RecordedWrite>& recs,
-                         const std::string& devmap_target)
-{
-    std::ostringstream out;
-    out << "# xdpfilter-image v1\n";
-
-    for (std::size_t mi = 0; mi < dryrun::kFakeMapsCount; ++mi) {
-        const dryrun::MapDesc& d = dryrun::kFakeMaps[mi];
-
-        // FAITHFUL FINAL MAP-IMAGE (D-mvp-4.36-IMAGE-FINAL-STATE, RULED 2026-06-06):
-        // ONE step — last-write-wins per (map,key) over the dumb raw trace, then
-        // render EVERY written key (NO per-map content filter; the formatter stays
-        // dumb, guard #36). The collapse dedups the ARRAY clear-then-set
-        // double-write to the resident value; the cleared-tail sentinels are REAL
-        // resident cells and ARE rendered ⇒ ARRAY maps come out DENSE (64 slots),
-        // HASH/LPM come out SPARSE (only inserted keys — their get_next_key→delete
-        // clear no-ops on the empty fake). std::map keyed by the stored key bytes
-        // ALSO imposes the within-map sort (memcmp == lexicographic for the fixed
-        // key_sz this map records).
-        std::map<std::vector<std::uint8_t>, std::vector<std::uint8_t>> image;
-        for (const dryrun::RecordedWrite& r : recs) {
-            if (r.map_tag == d.map_tag) { image[r.key] = r.value; }
-        }
-
-        // Omit a map that received NO writes at all (a wildcard-only HASH/LPM axis,
-        // or redirect_devmap absent steering) — §5.76.4(6). ARRAY maps always wrote
-        // all 64 slots ⇒ never empty here.
-        if (image.empty()) { continue; }
-
-        out << "map=" << d.name << " key_sz=" << d.key_sz
-            << " val_sz=" << d.val_sz << " rows=" << image.size() << "\n";
-
-        const bool is_devmap = (std::strcmp(d.name, "redirect_devmap") == 0);
-        for (const auto& [key, value] : image) {
-            out << "  " << hex_of(key) << " ";
-            if (is_devmap) {
-                // symbolic: the operator-chosen target name, resolved AT APPLY
-                // (the live render passes the name the fake recorded; the
-                // sentinel ifindex is NEVER printed) — D-mvp-4.36-RESOLVE-SEAM.
-                out << devmap_target << " RESOLVED-AT-APPLY";
-            } else {
-                out << hex_of(value);
-            }
-            out << "\n";
-        }
-    }
-    return out.str();
-}
-
-// ─────────────────── drive the production 3-call sequence ─────────────────────
-// Returns the formatted image of impl's recorded write-set for `cfg`.
+// ─────────────────── drive the production render seam ────────────────────────
+// Returns the formatted image of the PRODUCTION render of `cfg` — the EXACT
+// path the `apply --dry-run` CLI verb runs (compile → make_dryrun_skel →
+// RecordingScope → materialize/populate_action_table/populate_redirect_devmap →
+// format). An UNEXPECTED-map sentinel write would corrupt the recorded trace and
+// thus the rendered image ⇒ the golden byte-compare below is the unexpected-write
+// guard (no separate accessor needed; the harness stays decoupled from the
+// RecordingMapWriter internals).
 std::string render_live(const Config& cfg)
 {
-    dryrun::reset_recording();
-    xdpfilter_bpf* skel = dryrun::make_fake_skel();
-
-    const CompiledRuleset cr = compile(cfg);
-
-    // The SAME order + calls the fresh-apply site issues (D-mvp-4.36-SLOT0):
-    materialize(skel, 0u, cr);
-    populate_action_table(bpf_map__fd(skel->maps.action_table));
-    if (cfg.steering.has_value()) {
-        populate_redirect_devmap(bpf_map__fd(skel->maps.redirect_devmap), cfg);
-    }
-
-    // The symbolic devmap name = the iface the production code handed the fake
-    // resolve_ifindex (so a wrong target passed by impl surfaces as a diff).
-    std::string img = format_image(dryrun::recorded_writes(),
-                                   dryrun::resolved_ifindex_name());
-    dryrun::free_fake_skel(skel);
-    return img;
+    return render_dryrun_image(cfg);
 }
 
 // ─────────────────────── independent oracle (golden generator) ────────────────
@@ -237,23 +166,24 @@ std::uint8_t action_id_of(RuleAction a)
 // (production compile() + close_prefixes — allowed) + the map struct layouts,
 // per the architect-pinned write-set policy (§5.76.4(6)). NO reference to impl's
 // materialize.cpp. Produces (map,key,value) triples in any order — the formatter
-// sorts within-map and orders maps canonically.
-std::vector<dryrun::RecordedWrite> oracle_expected_records(const Config& cfg)
+// sorts within-map and orders maps canonically. The map identities come from the
+// PRODUCTION catalog xdpmf::kMapCatalog (the relocated kFakeMaps, §5.77.3(5)).
+std::vector<RecordedWrite> oracle_expected_records(const Config& cfg)
 {
     const CompiledRuleset cr = compile(cfg);
-    std::vector<dryrun::RecordedWrite> recs;
+    std::vector<RecordedWrite> recs;
 
     auto find_tag = [](const char* name) -> std::uint32_t {
-        for (std::size_t i = 0; i < dryrun::kFakeMapsCount; ++i) {
-            if (std::strcmp(dryrun::kFakeMaps[i].name, name) == 0) {
-                return dryrun::kFakeMaps[i].map_tag;
+        for (std::size_t i = 0; i < kMapCatalogCount; ++i) {
+            if (std::strcmp(kMapCatalog[i].name, name) == 0) {
+                return kMapCatalog[i].tag;
             }
         }
         std::fprintf(stderr, "oracle: unknown map '%s'\n", name); std::abort();
     };
     auto push = [&](const char* name, std::vector<std::uint8_t> key,
                     std::vector<std::uint8_t> val) {
-        recs.push_back(dryrun::RecordedWrite{find_tag(name), std::move(key), std::move(val)});
+        recs.push_back(RecordedWrite{find_tag(name), std::move(key), std::move(val)});
     };
 
     // ── 9 axis inners ─────────────────────────────────────────────────────────
@@ -402,16 +332,15 @@ void report_first_diff(const std::string& got, const std::string& want)
     }
 }
 
-// IDENTITY: impl's rendered write-set == the checked-in golden, byte-for-byte.
+// IDENTITY: the PRODUCTION render of the corpus == the checked-in golden,
+// byte-for-byte. The golden is FROZEN from B43 (§5.77.7: byte-unchanged); a diff
+// is a REAL discrepancy in the production render — investigate, do NOT rebless.
 void test_image_identity(const std::string& golden_path)
 {
     const Config cfg = build_corpus();
     const std::string got  = render_live(cfg);
     const std::string want = read_file(golden_path);
 
-    if (dryrun::unexpected_write()) {
-        fail("impl wrote to an UNEXPECTED map (not one of the 14 slot-0 targets)");
-    }
     if (got != want) {
         fail("rendered image != golden (" + golden_path + ")");
         report_first_diff(got, want);
@@ -440,7 +369,6 @@ void test_smoke_minimal()
     if (img.find("\n  ") == std::string::npos) {
         fail("smoke: image has no occupied rows (totally-broken render)");
     }
-    if (dryrun::unexpected_write()) { fail("smoke: unexpected-map write"); }
 }
 
 // NEGATION CONTROL: prove the byte-compare can FAIL. Take the real rendered
@@ -476,16 +404,17 @@ int main(int argc, char** argv)
 {
     if (argc >= 2 && std::strcmp(argv[1], "--emit-golden") == 0) {
         // Regenerate the spec-derived golden from the tester's independent oracle
-        // (NOT impl's render). The devmap target name comes from the corpus.
+        // (NOT the production render) through the SAME production formatter
+        // (xdpmf::format_dryrun_image). The devmap target name comes from the corpus.
         const Config cfg = build_corpus();
         const std::string target = cfg.steering ? cfg.steering->redirect_to : std::string{};
-        std::fputs(format_image(oracle_expected_records(cfg), target).c_str(), stdout);
+        std::fputs(format_dryrun_image(oracle_expected_records(cfg), target).c_str(), stdout);
         return 0;
     }
 
     if (argc >= 2 && std::strcmp(argv[1], "--emit-live") == 0) {
-        // DEBUG affordance: print the PRODUCTION render of the corpus (drives
-        // impl's materialize against the fake). Used to diff impl-vs-oracle.
+        // DEBUG affordance: print the PRODUCTION render of the corpus. Used to
+        // diff production-render-vs-oracle.
         std::fputs(render_live(build_corpus()).c_str(), stdout);
         return 0;
     }

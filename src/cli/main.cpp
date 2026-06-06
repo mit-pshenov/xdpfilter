@@ -17,6 +17,7 @@
 #include "cli.hpp"
 #include "common/logger.hpp"  // §5.32 (MVP-3.5): structured-logging surface
 #include "lib/loader.hpp"
+#include "lib/map_writer.hpp"  // §5.77 (MVP-4.37) B44: install_live_map_writer (D-mvp-4.37-INSTALL)
 
 namespace {
 
@@ -53,6 +54,13 @@ int run_detach(const xdpmf::DetachConfig& cfg)
  * implementation backing the legacy attach path). */
 int run_apply(const xdpmf::ApplyConfig& cfg)
 {
+    // §5.77 (MVP-4.37) B44 D-mvp-4.37-BRANCH-SITE: the dry-run branch renders the
+    // frozen offline map-image and returns BEFORE any kernel-touch flow
+    // (apply_config/apply_request never reached) — PI-mvp-4.37-ZERO-TOUCH.
+    if (cfg.dry_run) {
+        std::fputs(xdpmf::dryrun_image_for_file(cfg).c_str(), stdout);
+        return kExitOk;
+    }
     const auto prog_id = xdpmf::apply_config(cfg);
     const std::string line = std::format("applied config '{}' to {} (prog id {})\n",
                                          cfg.config_path, cfg.iface, prog_id);
@@ -106,6 +114,14 @@ int exit_code_from(const std::system_error& e) noexcept
 
 int main(int argc, char* argv[])
 {
+    // §5.77 (MVP-4.37) B44 D-mvp-4.37-INSTALL: install the LIVE map writer as the
+    // process-global object-seam sink BEFORE any dispatch. Every live apply path
+    // (apply -f, attach --allow → loader::attach → apply_request) routes its
+    // bpf_map_* writes through this writer; a render path reached without an
+    // installed writer FAILS LOUD (PI-mvp-4.37-FAILCLOSED). The dry-run branch
+    // overrides this with a RecordingScope for the duration of its render.
+    xdpmf::install_live_map_writer();
+
     xdpmf::ParsedCommand cmd;
     try {
         cmd = xdpmf::parse(argc, argv);

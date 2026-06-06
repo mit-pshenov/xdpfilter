@@ -20,6 +20,7 @@
 #include "compiled_ruleset.hpp"  // §5.73 close_prefixes / close_prefixes6
 #include "config.hpp"
 #include "loader_error.hpp"      // §5.76 classify / throw_loader
+#include "map_writer.hpp"        // §5.77 object seam: map_* wrappers + map_resolve_ifindex (D-mvp-4.37-Q1-OBJSEAM)
 
 #include <array>
 #include <cerrno>
@@ -70,7 +71,7 @@ void populate_hash_inner_slot(int inner_fd,
     Key  cur{};
     bool have_prev = false;
     while (true) {
-        const int rc = bpf_map_get_next_key(inner_fd,
+        const int rc = map_next_key(inner_fd,
                                             have_prev ? &prev : nullptr,
                                             &cur);
         if (rc != 0) {
@@ -79,7 +80,7 @@ void populate_hash_inner_slot(int inner_fd,
                          std::format("bpf_map_get_next_key({}_inner): {}",
                                      what, std::strerror(-rc)));
         }
-        const int drc = bpf_map_delete_elem(inner_fd, &cur);
+        const int drc = map_delete(inner_fd, &cur);
         if (drc != 0 && -drc != ENOENT) {
             throw_loader(classify(drc, LoaderError::LoadFailed),
                          std::format("bpf_map_delete_elem({}_inner): {}",
@@ -91,7 +92,7 @@ void populate_hash_inner_slot(int inner_fd,
     for (const std::pair<Key, std::uint64_t>& e : entries) {
         const Key           key  = e.first;
         const std::uint64_t mask = e.second;
-        const int rc = bpf_map_update_elem(inner_fd, &key, &mask, BPF_ANY);
+        const int rc = map_update(inner_fd, &key, &mask, BPF_ANY);
         if (rc < 0) {
             throw_loader(classify(rc, LoaderError::LoadFailed),
                          std::format("bpf_map_update_elem({}_inner): {}",
@@ -124,7 +125,7 @@ void populate_bitvec_inner_slot(int                        inner_fd,
     Key  cur{};
     bool have_prev = false;
     while (true) {
-        const int rc = bpf_map_get_next_key(inner_fd,
+        const int rc = map_next_key(inner_fd,
                                             have_prev ? &prev : nullptr,
                                             &cur);
         if (rc != 0) {
@@ -133,7 +134,7 @@ void populate_bitvec_inner_slot(int                        inner_fd,
                          std::format("bpf_map_get_next_key({}): {}",
                                      what, std::strerror(-rc)));
         }
-        const int drc = bpf_map_delete_elem(inner_fd, &cur);
+        const int drc = map_delete(inner_fd, &cur);
         if (drc != 0 && -drc != ENOENT) {
             throw_loader(classify(drc, LoaderError::LoadFailed),
                          std::format("bpf_map_delete_elem({}): {}",
@@ -149,7 +150,7 @@ void populate_bitvec_inner_slot(int                        inner_fd,
     for (std::size_t i = 0; i < prefixes.size(); ++i) {
         const Key           key  = prefixes[i].cidr;  // addr already network order
         const std::uint64_t mask = closed[i];
-        const int rc = bpf_map_update_elem(inner_fd, &key, &mask, BPF_ANY);
+        const int rc = map_update(inner_fd, &key, &mask, BPF_ANY);
         if (rc < 0) {
             throw_loader(classify(rc, LoaderError::LoadFailed),
                          std::format("bpf_map_update_elem({}): {}",
@@ -181,7 +182,7 @@ void populate_port_inner_slot(int inner_fd, const std::vector<xdpmf_port_range>&
     unused.hi  = 0;
     unused.bit = 0;
     for (std::uint32_t k = 0; k < static_cast<std::uint32_t>(XDPMF_ALLOWLIST_MAX); ++k) {
-        const int rc = bpf_map_update_elem(inner_fd, &k, &unused, BPF_ANY);
+        const int rc = map_update(inner_fd, &k, &unused, BPF_ANY);
         if (rc < 0) {
             throw_loader(classify(rc, LoaderError::LoadFailed),
                          std::format("bpf_map_update_elem(port_inner[{}] clear): {}",
@@ -192,7 +193,7 @@ void populate_port_inner_slot(int inner_fd, const std::vector<xdpmf_port_range>&
      * XDPMF_ALLOWLIST_MAX (bounded by apply_request's pre-check). */
     for (std::uint32_t i = 0; i < ranges.size(); ++i) {
         const xdpmf_port_range slot = ranges[i];
-        const int rc = bpf_map_update_elem(inner_fd, &i, &slot, BPF_ANY);
+        const int rc = map_update(inner_fd, &i, &slot, BPF_ANY);
         if (rc < 0) {
             throw_loader(classify(rc, LoaderError::LoadFailed),
                          std::format("bpf_map_update_elem(port_inner[{}]): {}",
@@ -229,7 +230,7 @@ void write_ruleset_state(int ruleset_state_fd, std::uint32_t inactive,
     val.wc[BV_AXIS_ETHERTYPE] = wc_eth;
     val.default_action = (default_action == DefaultAction::Pass) ? 1u : 0u;
 
-    const int rc = bpf_map_update_elem(ruleset_state_fd, &inactive, &val, BPF_ANY);
+    const int rc = map_update(ruleset_state_fd, &inactive, &val, BPF_ANY);
     if (rc < 0) {
         throw_loader(classify(rc, LoaderError::LoadFailed),
                      std::format("bpf_map_update_elem(ruleset_state[{}]): {}",
@@ -253,7 +254,7 @@ void populate_rules_inner_slot(int rules_inner_fd, std::span<const Rule> rules,
      * applies; the prior occupant must not survive. */
     const struct rule_entry empty{};
     for (std::uint32_t k = 0; k < static_cast<std::uint32_t>(XDPMF_ALLOWLIST_MAX); ++k) {
-        const int rc = bpf_map_update_elem(rules_inner_fd, &k, &empty, BPF_ANY);
+        const int rc = map_update(rules_inner_fd, &k, &empty, BPF_ANY);
         if (rc < 0) {
             throw_loader(classify(rc, LoaderError::LoadFailed),
                          std::format("bpf_map_update_elem(rules_inner[{}] clear): {}",
@@ -274,7 +275,7 @@ void populate_rules_inner_slot(int rules_inner_fd, std::span<const Rule> rules,
             (r.action == RuleAction::Redirect) ? static_cast<unsigned char>(ACTION_REDIRECT) :
                                                  static_cast<unsigned char>(ACTION_DROP);
         const std::uint32_t slot = id_to_slot.at(r.id);
-        const int rc = bpf_map_update_elem(rules_inner_fd, &slot, &entry, BPF_ANY);
+        const int rc = map_update(rules_inner_fd, &slot, &entry, BPF_ANY);
         if (rc < 0) {
             throw_loader(classify(rc, LoaderError::LoadFailed),
                          std::format("bpf_map_update_elem(rules_inner[{}]): {}",
@@ -299,7 +300,7 @@ void write_slot_rule_id(int slot_rule_id_fd, std::uint32_t inactive,
          slot < static_cast<std::uint32_t>(XDPMF_ALLOWLIST_MAX); ++slot) {
         const std::uint32_t key = base + slot;
         const std::uint32_t val = slot_to_id[slot];  // id or XDPMF_SLOT_ID_EMPTY
-        const int rc = bpf_map_update_elem(slot_rule_id_fd, &key, &val, BPF_ANY);
+        const int rc = map_update(slot_rule_id_fd, &key, &val, BPF_ANY);
         if (rc < 0) {
             throw_loader(classify(rc, LoaderError::LoadFailed),
                          std::format("bpf_map_update_elem(slot_rule_id[{}]): {}",
@@ -320,7 +321,7 @@ void write_slot_rule_id(int slot_rule_id_fd, std::uint32_t inactive,
 int inactive_axis_fd(bpf_map* a, bpf_map* b, std::uint32_t slot, const char* what)
 {
     bpf_map*  inner = (slot == 0) ? a : b;
-    const int fd    = bpf_map__fd(inner);
+    const int fd    = map_fd(inner);
     if (fd < 0) {
         throw_loader(LoaderError::LoadFailed, what);
     }
@@ -341,13 +342,13 @@ void populate_action_table(int action_table_fd)
     drop_entry.action_type = static_cast<unsigned char>(ACTION_DROP);
     const std::uint32_t k_pass = static_cast<std::uint32_t>(ACTION_PASS);
     const std::uint32_t k_drop = static_cast<std::uint32_t>(ACTION_DROP);
-    int rc = bpf_map_update_elem(action_table_fd, &k_pass, &pass_entry, BPF_ANY);
+    int rc = map_update(action_table_fd, &k_pass, &pass_entry, BPF_ANY);
     if (rc < 0) {
         throw_loader(classify(rc, LoaderError::LoadFailed),
                      std::format("bpf_map_update_elem(action_table[PASS]): {}",
                                  std::strerror(-rc)));
     }
-    rc = bpf_map_update_elem(action_table_fd, &k_drop, &drop_entry, BPF_ANY);
+    rc = map_update(action_table_fd, &k_drop, &drop_entry, BPF_ANY);
     if (rc < 0) {
         throw_loader(classify(rc, LoaderError::LoadFailed),
                      std::format("bpf_map_update_elem(action_table[DROP]): {}",
@@ -356,7 +357,7 @@ void populate_action_table(int action_table_fd)
     struct action_entry redirect_entry{};
     redirect_entry.action_type = static_cast<unsigned char>(ACTION_REDIRECT);
     const std::uint32_t k_redirect = static_cast<std::uint32_t>(ACTION_REDIRECT);
-    rc = bpf_map_update_elem(action_table_fd, &k_redirect, &redirect_entry, BPF_ANY);
+    rc = map_update(action_table_fd, &k_redirect, &redirect_entry, BPF_ANY);
     if (rc < 0) {
         throw_loader(classify(rc, LoaderError::LoadFailed),
                      std::format("bpf_map_update_elem(action_table[REDIRECT]): {}",
@@ -376,15 +377,15 @@ void populate_redirect_devmap(int devmap_fd, const Config& cfg)
     const std::uint32_t k0 = 0;
     if (cfg.steering.has_value()) {
         const std::uint32_t idx = static_cast<std::uint32_t>(
-            resolve_ifindex(cfg.steering->redirect_to, LoaderError::AttachFailed));
-        const int rc = bpf_map_update_elem(devmap_fd, &k0, &idx, BPF_ANY);
+            map_resolve_ifindex(cfg.steering->redirect_to, LoaderError::AttachFailed));
+        const int rc = map_update(devmap_fd, &k0, &idx, BPF_ANY);
         if (rc < 0) {
             throw_loader(classify(rc, LoaderError::AttachFailed),
                          std::format("bpf_map_update_elem(redirect_devmap[0]): {}",
                                      std::strerror(-rc)));
         }
     } else {
-        const int rc = bpf_map_delete_elem(devmap_fd, &k0);
+        const int rc = map_delete(devmap_fd, &k0);
         // ENOENT is benign — there was simply no prior entry to clear.
         if (rc < 0 && errno != ENOENT) {
             throw_loader(classify(-errno, LoaderError::AttachFailed),
@@ -462,7 +463,7 @@ void materialize(xdpfilter_bpf* skel, std::uint32_t slot, const CompiledRuleset&
     //   wildcard halves + folded default_action in ONE struct write (replaces the
     //   prior `wildcard` + `defaults` two-block populate). (D-mvp-4.8-FD-HELPER-SCOPE)
     {
-        const int ruleset_state_fd = bpf_map__fd(skel->maps.ruleset_state);
+        const int ruleset_state_fd = map_fd(skel->maps.ruleset_state);
         if (ruleset_state_fd < 0) {
             throw_loader(LoaderError::LoadFailed, "ruleset_state fd unavailable");
         }
@@ -481,7 +482,7 @@ void materialize(xdpfilter_bpf* skel, std::uint32_t slot, const CompiledRuleset&
     // 10 slot_rule_id — SINGLE map indexed by slot (§5.61 B30 D-mvp-4.21-Q1);
     // RESET-on-apply, mirrors wildcard/defaults. Userspace-only.
     {
-        const int sri_fd = bpf_map__fd(skel->maps.slot_rule_id);
+        const int sri_fd = map_fd(skel->maps.slot_rule_id);
         if (sri_fd < 0) {
             throw_loader(LoaderError::LoadFailed, "slot_rule_id fd unavailable");
         }

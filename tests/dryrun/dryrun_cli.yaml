@@ -1,0 +1,78 @@
+# dryrun_cli.yaml — §5.77 (MVP-4.37 / B44) CLI dry-run corpus.
+#
+# Authored to compile to the EXACT same Config as the harness `build_corpus()`
+# (tests/dryrun/dryrun_harness.cpp, §5.76.6), so that
+#
+#   xdpfilter apply -f dryrun_cli.yaml --iface <any> --dry-run
+#
+# prints stdout BYTE-EQUAL to tests/dryrun/dryrun_image.golden — proving the
+# production CLI render path == the harness render path == the frozen golden
+# (§5.77.6 #2, strongest assertion). If a future grammar change makes this YAML
+# no longer round-trip to build_corpus(), T_CLI_APPLY_DRYRUN's byte-compare
+# fails LOUDLY (do NOT rebless the golden to match — investigate, per
+# D-mvp-4.37-FORMATTER-MOVE / §5.77.7a).
+#
+# The 10 rules carry ids 1..10 (id order → dense slots 0..9, the build_corpus
+# layout); each exercises a distinct match axis so every inner map is occupied:
+#   id 1  pass     dst_cidr  10.0.0.0/8     (v4 LPM covering — closure pair)
+#   id 2  drop     dst_cidr  10.1.2.0/24    (v4 LPM covered  — closure pair)
+#   id 3  pass     protocol  tcp (6)        (proto HASH aggregate A)
+#   id 4  drop     protocol  tcp + port 80-443  (aggregate B + a port range)
+#   id 5  pass     mac       aa:bb:cc:dd:ee:ff  (mac HASH)
+#   id 6  pass     vlan      100            (vlan HASH)
+#   id 7  drop     ethertype arp (0x0806)   (ethertype HASH)
+#   id 8  pass     dst_cidr6 2001:db8::/32  (v6 dst LPM)
+#   id 9  drop     src_cidr6 fe80::/10      (v6 src LPM)
+#   id 10 redirect mac       11:22:33:44:55:66  (redirect verb → devmap[0])
+# default_action: drop ; steering.redirect_to: dpi0 (the symbolic devmap target).
+#
+# NB: no `interface:` key — the apply --iface comes from the CLI arg, and the
+# devmap target rendered in the image is steering.redirect_to (dpi0), NOT the
+# apply iface, so the image is independent of which (nonexistent) iface the
+# dry-run test points at.
+schema_version: 3
+default_action: drop
+steering:
+  redirect_to: dpi0
+rules:
+  - id: 1
+    action: pass
+    match:
+      dst_cidr: "10.0.0.0/8"
+  - id: 2
+    action: drop
+    match:
+      dst_cidr: "10.1.2.0/24"
+  - id: 3
+    action: pass
+    match:
+      protocol: tcp
+  - id: 4
+    action: drop
+    match:
+      protocol: tcp
+      dst_port: "80-443"
+  - id: 5
+    action: pass
+    match:
+      mac: "aa:bb:cc:dd:ee:ff"
+  - id: 6
+    action: pass
+    match:
+      vlan: 100
+  - id: 7
+    action: drop
+    match:
+      ethertype: arp
+  - id: 8
+    action: pass
+    match:
+      dst_cidr6: "2001:db8::/32"
+  - id: 9
+    action: drop
+    match:
+      src_cidr6: "fe80::/10"
+  - id: 10
+    action: redirect
+    match:
+      mac: "11:22:33:44:55:66"

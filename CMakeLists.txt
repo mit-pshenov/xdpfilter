@@ -113,6 +113,9 @@ add_library(xdpmf_internal STATIC
     src/lib/loader.cpp
     src/lib/loader_error.cpp  # §5.76 (MVP-4.36) B43 — host-only std::error_category (moved, libbpf-free)
     src/lib/materialize.cpp  # §5.76 (MVP-4.36) B43 — config→map-cell render subset (moved, byte-identical writes)
+    src/lib/map_writer.cpp  # §5.77 (MVP-4.37) B44 — object-seam dispatch + RecordingMapWriter + CATALOG + dry-run skel (libbpf-free)
+    src/lib/live_map_writer.cpp  # §5.77 (MVP-4.37) B44 — LiveMapWriter (the ONLY new libbpf-calling TU)
+    src/lib/map_image.cpp  # §5.77 (MVP-4.37) B44 — offline render_dryrun_image + SSoT formatter (libbpf-free)
     src/lib/compiled_ruleset.cpp  # §5.73 (MVP-4.33) B40 — pure Config→CompiledRuleset lowering
     src/lib/ruleset_delta.cpp  # §5.74 (MVP-4.34) B41 — pure libbpf-free id-reconciliation diff()
     src/lib/config.cpp

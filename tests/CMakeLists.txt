@@ -1754,10 +1754,19 @@ endforeach()
 # contract (§5.76.6): if the render subset ever acquires a real libbpf /
 # skeleton / loader.cpp-local dependency, this binary FAILS TO LINK — a signal
 # no existing libbpf-linked test gives.
+# §5.77 (MVP-4.37 / B44) Q2 reconciliation: the harness now drives the
+# PRODUCTION object seam (map_writer.cpp + map_image.cpp) instead of the
+# retired link-time fake (tests/dryrun/fake_bpf.cpp — DELETED). The render
+# subset is still libbpf-FREE: NO PkgConfig::LIBBPF, NO live_map_writer.cpp
+# (the ONLY libbpf-calling TU), NO loader.cpp, NO *_skel OBJECT — so the
+# clean link IS the strengthened OPS-canary (PI-mvp-4.37-LIBBPF-FREE). If the
+# render subset acquires a real libbpf/skeleton/loader dependency, this binary
+# FAILS TO LINK.
 add_executable(dryrun_harness
     ${CMAKE_SOURCE_DIR}/tests/dryrun/dryrun_harness.cpp
-    ${CMAKE_SOURCE_DIR}/tests/dryrun/fake_bpf.cpp
     ${CMAKE_SOURCE_DIR}/src/lib/materialize.cpp
+    ${CMAKE_SOURCE_DIR}/src/lib/map_writer.cpp
+    ${CMAKE_SOURCE_DIR}/src/lib/map_image.cpp
     ${CMAKE_SOURCE_DIR}/src/lib/compiled_ruleset.cpp
     ${CMAKE_SOURCE_DIR}/src/lib/loader_error.cpp
 )
@@ -1801,4 +1810,23 @@ add_test(
 set_tests_properties(T_DRYRUN_IMAGE_IDENTITY PROPERTIES
     ENVIRONMENT "${TEST_ENV}"
     TIMEOUT 30
+)
+
+# §5.77 (MVP-4.37 / B44) — T_CLI_APPLY_DRYRUN: the `apply --dry-run` CLI verb,
+# OFFLINE + UNPRIVILEGED. Renders the frozen map-image to stdout with ZERO
+# kernel side-effects (no map create / no bpffs pin / no XDP attach), realized
+# by pointing --iface at a nonexistent device and running unprivileged; the
+# mandatory negation (same args WITHOUT --dry-run → non-zero) proves the env
+# makes a kernel-touch observably fail. Guard #12: touches NO shared host state
+# (no veth / no bpffs write / no root) → NO RESOURCE_LOCK, NO
+# require_passwordless_sudo. Runs in the CI build-only subset (§5.72) — needs
+# no kernel.
+add_test(
+    NAME T_CLI_APPLY_DRYRUN
+    COMMAND bash ${TEST_DIR}/T_CLI_APPLY_DRYRUN.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_CLI_APPLY_DRYRUN PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    TIMEOUT 20
 )
