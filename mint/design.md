@@ -20922,10 +20922,10 @@ captures the match line; this contiguity is CONTRACT, not latitude). Tokens:
 | `protocol` | **decimal** number | `protocol=6` (id3, id4) |
 | `dst_port` | inclusive range `lo-hi` (single port ⇒ `N-N`) | `dst_port=80-443` (id4) |
 | `vlan` | **decimal** number | `vlan=100` (id6) |
-| `ethertype` | **hex** `0x` + 4-digit zero-padded lowercase | `ethertype=0x0806` (id7) |
+| `ethertype` | **hex** `0x` + lowercase, no leading-zero pad (`0x{:x}`) | `ethertype=0x806` (id7) |
 
 - **MAY name-annotation (must NOT break the `axis=value` substring):** impl MAY append a trailing ` (<name>)`
-  AFTER the pinned value for protocol/ethertype — e.g. `protocol=6 (tcp)`, `ethertype=0x0806 (arp)`. Because the
+  AFTER the pinned value for protocol/ethertype — e.g. `protocol=6 (tcp)`, `ethertype=0x806 (arp)`. Because the
   name is a SUFFIX, `grep 'protocol=6'` / `grep 'ethertype=0x806'` still match. **Tester: pin on the value form in
   the table above (always present), NEVER on the parenthesized name (optional).**
 - **Slot values for the fixture:** ids 1..10 in config order → dense slots 0..9 (id1→slot0 … id10→slot9), per

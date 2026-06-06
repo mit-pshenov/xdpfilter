@@ -1,4 +1,4 @@
-# Review — MVP-4.37/B44 `apply --dry-run` (mint triangulation)
+# Review — MVP-4.38/B45 `apply --dry-run` human-decoded operator view (mint triangulation)
 
 ## Verdict
 `pass` (round 1)
@@ -7,62 +7,54 @@
 
 | Framework point | Findings | Tags |
 |---|---|---|
-| 1. Spec ↔ Code | 0 | — |
-| 2. Spec ↔ Tests | 0 | (negation control PRESENT ×2) |
-| 3. Code ↔ Tests | 0 | — |
+| 1. Spec ↔ Code | 0 blocking | — |
+| 2. Spec ↔ Tests | 0 | (negation control present ✓) |
+| 3. Code ↔ Tests | 0 | #112 + #113 green; no UNEXERCISED-EXPORT |
 | 4. Out-of-Scope Drift | 0 | — |
-| 5. Behaviour preserved (brownfield) | 0 | — |
+| 5. Behaviour preserved (brownfield) | 0 | no REGRESSION / UNRELATED-EDIT / INVARIANT-VIOLATED |
 
-OOT: 1 (`inline-merge`, non-verdict-affecting).
+Plus 1 `[OUT-OF-TRIANGULATION]` (design-internal inconsistency, non-blocking, disposition `inline-merge`).
 
-## Point-by-point evidence
+## Point 1 — Spec ↔ Code
+- `format_dryrun_human(const Config&, const CompiledRuleset&)` — `map_image.hpp:32`, body `map_image.cpp:218-270`. Header block + per-rule block match §5.78.4(a) exactly.
+- `DryrunFormat{Human=0,Golden=1}` + `ApplyConfig::format=Human` — `apply.hpp:28,42`. Default Human (HG-1) ✓.
+- `dryrun_render_for_file` — `apply.cpp:136-143`: `Golden→render_dryrun_image(parsed)` else `format_dryrun_human(parsed, compile(parsed))`. Renamed per D-mvp-4.38-RENAME; single call site `main.cpp:61` ✓.
+- `parse_apply --format` — `cli.cpp:226-232` (human/golden/image, unknown→CliError) + `format_seen && !dry_run → CliError` (`cli.cpp:282-284`) ✓.
+- **PI-SSOT / guard #9 (central check) — HOLDS.** `format_dryrun_human` reads ONLY `cr.rules` / `cr.id_to_slot.at(r.id)` / `cr.default_action` / `cfg.steering` / `cfg.schema_version` / `r.match`. No `bpf_*`, no `materialize`/`populate_*`, no re-lowering of bits/prefixes. Axis renderers (`map_image.cpp:52-104`) ECHO validated stored values, do not re-derive lowering. The golden stays the byte-faithful SSoT.
+- Decisions honored: NOSPLIT, DIAG (bounded), EMPTYMATCH-NA, NOVER.
 
-**1. Spec ↔ Code — all §5.77.3/.4 contracts present & matching**
-- `MapWriter` base + `map_*` free-fn wrappers: `map_writer.hpp:39-58`. Signatures match §5.77.4(1).
-- **PI-mvp-4.37-FAILCLOSED ✓ (hard gate):** every wrapper's FIRST statement is `if (g_active_writer == nullptr) { no_writer_installed(); }` (`map_writer.cpp:61,67,73,79,85`); `no_writer_installed()` is `[[noreturn]]` → `fputs("xdpfilter: map writer not installed")` + `std::abort()` (`map_writer.cpp:42-46`). No null-deref / no silent no-op / no libbpf fallback on any wrapper.
-- `LiveMapWriter` forwards VERBATIM to real libbpf (`live_map_writer.cpp:31-51`). `install_live_map_writer()` at `live_map_writer.cpp:59`, called once at `main.cpp:122` before `std::visit`.
-- `kMapCatalog` = EXACTLY 14 entries via `sizeof` (no magic numbers) `map_writer.cpp:100-115` → guard #10 ✓.
-- `render_dryrun_image` drives the SAME 3-call sequence (`map_image.cpp:109-113`) under `RecordingScope`; D-mvp-4.37-BRANCH-SITE honored — dry-run branches at `run_apply` (`main.cpp:58-62`) BEFORE `apply_config`/`apply_request`; `ApplyConfig.dry_run` is the only new field (`apply.hpp:31`), `ApplyRequest` untouched.
-- `dryrun_image_for_file` shares `load_and_reconcile` with live `apply_config` (`apply.cpp:93-117,129-135`) → invalid-config dry-run errors with identical exit codes 1/9.
-- impl-notes 3 MAY-level choices (`set_active_writer`/`active_writer` free-fns; `format_dryrun_image` public name; `load_and_reconcile` extraction) — all within-contract, no silent drift.
+## Point 2 — Spec ↔ Tests
+Every §5.78.6 item (1)-(10) has a matching outcome-targeted assertion (golden behind `--format=golden` byte-EQ; default human observable switch; 10 per-rule decode + 9 axis value-forms; redirect note; MANDATORY empty-ruleset blackhole negation 3-token same-line; comparator-can-fail control; `--format` requires `--dry-run`; unknown format rejected; zero-touch negation; golden corrupt-comparator). NO-NEGATION-CONTROL satisfied; no CIRCULAR-TEST.
 
-**2. Spec ↔ Tests — TestStrategy fully covered + negation controls present**
-- #112 `T_DRYRUN_IMAGE_IDENTITY`: drives production `render_dryrun_image(build_corpus())`, byte-compares frozen golden (`dryrun_harness.cpp:338-348`). SMOKE (`:352`) + NEGATION (`:377`) + three-way oracle agreement via production `format_dryrun_image` (`:411`).
-- #113 `T_CLI_APPLY_DRYRUN`: exit 0, image header, symbolic `dpi0 RESOLVED-AT-APPLY` devmap, byte-equals golden, ZERO side-effects (`T_CLI_APPLY_DRYRUN.sh:69-127`); **MANDATORY NEGATION** = same args without `--dry-run` → non-zero (`:142`) + **secondary negation** = corrupted-golden comparator proof (`:176`). No CIRCULAR-TEST.
+## Point 3 — Code ↔ Tests
+- `T_DRYRUN_IMAGE_IDENTITY` (#112) + `T_CLI_APPLY_DRYRUN` (#113) Passed (re-run independently, `/tmp/mint-review-tests-1780765635.log`).
+- No UNEXERCISED-EXPORT: `format_dryrun_human`←`apply.cpp:142`, `dryrun_render_for_file`←`main.cpp:61`, both exercised by #113.
 
-**3. Code ↔ Tests — re-ran independently**
-- `/tmp/mint-review-tests-1780751301.log`: #112 + #113 PASS (offline subset, no competing run live).
-- No UNEXERCISED-EXPORT: `LiveMapWriter`/`install_live_map_writer` exercised by full-suite live apply (test-run.log #21/#23/#109-111 GREEN); render path by #112/#113.
+## Point 4 — Out-of-Scope Drift
+None. No JSON/typed output, no heavy linting, no empty-match diagnostic, no per-rule targets, no VERSION bump. Diagnostics bounded to the 2 sanctioned notes (`map_image.cpp:253-267`).
 
-**4. Out-of-Scope — clean**
-- No human-decode/pretty-print/mirror/rate-limit tokens in new code. `--dry-run` wired ONLY into `parse_apply` (`cli.cpp:247`) + `run_apply` — NOT `attach`. No VERSION bump (D-mvp-4.37-NOVER).
+## Point 5 — Behaviour preserved (brownfield)
+- **PI-LIVE-IDENTITY**: `git diff 474c041 --` materialize.{cpp,hpp}/map_writer.{cpp,hpp}/live_map_writer.cpp/loader.{cpp,hpp}/apply_internal.hpp/compiled_ruleset.{cpp,hpp}/src/bpf = **∅**. PI-7 + insn 3477 + FAILCLOSED carried.
+- **PI-GOLDEN-UNCHANGED**: `map_image.cpp` diff = 151 ins / 0 del (purely additive); `format_dryrun_image` + `render_dryrun_image` bodies byte-identical (md5 match); `dryrun_image.golden` byte-unchanged; #112 green.
+- **No REGRESSION**: 111/113. The 2 fails (#48 + #63) are identical pre-existing exporter env-fails (prior `mint/test-run.log:97,165`); both test files git-unchanged vs 474c041; reference no slice symbols.
+- **No UNRELATED-EDIT**: changed set = exactly §5.78.2 FileList + mint docs.
+- The golden→`--format=golden` migration is the PO-baked default switch (D-mvp-4.38-DEFAULT-BREAK), correctly NOT a regression.
+- **2 impl deviations (impl-notes.md) within contract:** (a) value-first axis spelling `protocol=6(tcp)` — pinned value `protocol=6` is a substring (§5.78.4(a) base), name is a MAY suffix; (b) `dryrun_empty.yaml` omits `rules:` key (yaml_subset rejects flow-style `[]`) → omission = zero rules = exit 0 reaches the formatter.
 
-**5. Behaviour preserved (brownfield) — all invariants hold**
-- **PI-mvp-4.37/4.36-LIVE-IDENTITY ✓:** `git diff c30200d` = ZERO on `loader.cpp`, `apply_internal.hpp`, `materialize.hpp`, `loader.hpp`, `src/bpf/`. `materialize.cpp` diff is body-only `bpf_*`→`map_*` swaps + 1 include, all 4 signatures byte-identical.
-- **PI-mvp-4.37-LIBBPF-FREE ✓:** `ldd build/dryrun_harness` → no libbpf; `nm -u` → no undefined `bpf_*`. Harness links neither `PkgConfig::LIBBPF` nor `live_map_writer.cpp` nor `loader.cpp` (tests/CMakeLists.txt:1768-1772).
-- **PI-mvp-4.37-SSOT ✓ (guard #9):** sole `# xdpfilter-image v1` producer = `map_image.cpp`; `format_dryrun_image` defined once; harness has NO own image builder.
-- golden `dryrun_image.golden` BYTE-UNCHANGED (git diff = 0); `fake_bpf.{cpp,hpp}` deleted; test total +1.
-- **#48/#63 are NOT regressions:** `git diff c30200d` = ZERO on both test scripts + `src/exporter/`; env-rooted (host `/sys/fs/bpf/xdpfilter` absent → exporter exit 999/Killed). Pre-existing floor matches prior cycle. No `[REGRESSION]`.
-
-## Test execution (last lines)
+## Test execution (tail)
 ```
-1/2 Test #112: T_DRYRUN_IMAGE_IDENTITY ..........   Passed    0.01 sec
-2/2 Test #113: T_CLI_APPLY_DRYRUN ...............   Passed    0.14 sec
-100% tests passed, 0 tests failed out of 2
-golden byte-unchanged vs c30200d: 0 diff lines ; fake_bpf.*: deleted
-dryrun_harness libbpf-free: ldd CLEAN, nm -u CLEAN
+#112 T_DRYRUN_IMAGE_IDENTITY Passed ; #113 T_CLI_APPLY_DRYRUN Passed
+98% tests passed, 2 failed out of 113
+FAILED: 48 T_EXPORTER_EXITS_6_ALL_IFACES_EACCES, 63 T_LOG_JSON_EXPORTER_EVENTS (pre-existing env-fails, git-unchanged)
 ```
-(Full-suite live witnesses in tester's mint/test-run.log: 111/113, only #48/#63 env-fails.)
 
 ## Out-of-triangulation findings
 
-### [OUT-OF-TRIANGULATION] CLI test script path differs from FileList
-**Location**: `tests/T_CLI_APPLY_DRYRUN.sh` (actual) vs `design.md` §5.77.2 FileList row `tests/dryrun/T_CLI_APPLY_DRYRUN.sh`
-**Evidence**: Design FileList places the script under `tests/dryrun/`; tester landed it at `tests/` (registered via `${TEST_DIR}/T_CLI_APPLY_DRYRUN.sh`, tests/CMakeLists.txt:1823) — consistent with where the other `T_*.sh` scripts live. The `dryrun_cli.yaml` corpus IS at `tests/dryrun/` as specced. Purely a test-harness file location, not a contract/PI/behavioral surface; test runs green.
-**Recommended disposition**: `inline-merge` (amend the design FileList path to match the landed location)
-**Rationale**: Tester-owned path with zero load-bearing impact; flagged so the FileList drift is disposed of visibly.
-
-No rework assignments — all 5 framework points pass.
+### [OUT-OF-TRIANGULATION] Design §5.78.4(a) ethertype value-form is internally inconsistent
+**Location**: `design.md` §5.78.4(a) pinned value-form table line vs the design's own grep-target example two lines down (impl `map_image.cpp:90-97`, test `T_CLI_APPLY_DRYRUN.sh:234`)
+**Evidence**: The PINNED value-form table says ethertype renders `0x` + **4-digit zero-padded** → `0x0806`. The design's OWN grep-target example uses non-padded `ethertype=0x806`. Impl emits `0x{:x}` → `0x806`; the tester pins `0x806`. So impl + test + the design's operative grep example all agree on `0x806`; only the table line is the outlier (`0x0806` is not a substring of `0x806`). Isolated to the one corpus ethertype (arp); cosmetic.
+**Recommended disposition**: `inline-merge`
+**Rationale**: The system is self-consistent (impl ↔ test ↔ the design's grep example); the lone inconsistent artifact is the table's "4-digit zero-padded" wording, which contradicts §5.78.4(a)'s own example. Per §5.78.7a the fix is to reconcile the design table line to `0x806`. Non-blocking — the load-bearing test is green and the contract base ("the number") is satisfied.
 
 ### Post-review sweep — round 1
-- OOT "CLI test script path" → `mint/design.md` §5.77.2 FileList edited → corrected the row path `tests/dryrun/T_CLI_APPLY_DRYRUN.sh` → `tests/T_CLI_APPLY_DRYRUN.sh` (matches the landed location + the other `T_*.sh` convention; `dryrun_cli.yaml` stays under `tests/dryrun/`). Rides in the Phase 6 final commit.
+- OOT "ethertype value-form inconsistency" → `mint/design.md` §5.78.4(a) ethertype table line edited → `0x` + 4-digit-zero-padded (`0x0806`) corrected to the non-padded `0x{:x}` form (`0x806`), matching impl (`map_image.cpp:90-97`), the test (`T_CLI_APPLY_DRYRUN.sh:234`), and the design's own grep-target example. Rides in the Phase 6 final commit.
