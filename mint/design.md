@@ -19916,3 +19916,383 @@ This is **§5.75**. No new guard minted — exercises #10 (catalog arithmetic: A
 buffered DEVMAP rides the apply walk + pin-name uniqueness). Datapath re-baseline follows the §5.70
 D-mvp-4.30-REBASELINE precedent (deliberate shift, not a guard). Guards #1..#37 + §5.70 candidate #38 +
 §5.73 candidate #39 unchanged.
+
+---
+
+# §5.76 (MVP-4.36 / B43) — `dryrun_harness`: offline map-image golden (Option 1 "Recording-fake floor", GOLDEN-ONLY)
+
+> Brownfield amendment. Highest prior section §5.75; this is **§5.76**. Realizes roadmap-① **slice 1**
+> ("Option 1 — Recording-fake floor", GOLDEN-ONLY) of `mint/architecture-dryrun.md` (mint-hld
+> 2026-06-06, reviewer pass r2, grounder clean-with-gates; SPIKE-1 PASS — the fake `xdpfilter_bpf*`
+> links libbpf-free). PO ruling ①: golden-only, NO `apply --dry-run` CLI verb, NO human view this slice.
+> **Test-infra + a near-pure host-side MOVE** (B40/B34b precedent): extract `materialize` + its render
+> helpers + `populate_action_table` + `populate_redirect_devmap` into a libbpf-free
+> `src/lib/materialize.{hpp,cpp}`, plus the error machinery into `src/lib/loader_error.{hpp,cpp}` (Q1-A1),
+> and drive the **3-call apply write-set sequence** offline against a canonical golden. **ZERO datapath
+> change** — no `src/bpf` touch; xdp insn stays **3477 ×3 arms**; the LIVE apply path produces
+> byte-identical writes (the hard gate). PI-7 (`loader.hpp` zero-diff) CONTINUES. VERSION 0.17.0 held
+> (no bump). All Phase-A greps re-run against HEAD at design time (evidence inline §5.76.9).
+
+## §5.76.1 Problem statement
+
+The step between `CompiledRuleset` (named in B40/§5.73) and the kernel — `materialize()` plus the two
+apply-site writes `populate_action_table` + `populate_redirect_devmap` — is today welded to a live
+`xdpfilter_bpf*` skeleton and tested ONLY live (netns + root + BPF). `compile_harness` (§5.73) proves
+`Config → CompiledRuleset` offline but stops BEFORE lowering-to-map-cells (the post-closure LPM masks,
+the `action_table`/`redirect_devmap` writes). This slice renders the **full apply write-set** (the
+ordered `(map, key, value)` triples `materialize` + the two apply-site populates issue) **offline** via a
+recording fake (fake `xdpfilter_bpf*` + fake `bpf_map__fd`/`bpf_map_*`/`resolve_ifindex`), formats it as
+a canonical `# xdpfilter-image v1` text, and asserts it byte-equal to a checked-in golden — advancing the
+B39 CI boundary one stage toward the kernel and closing the last host-side correctness gap (the
+config→map-image class) into a CI-green, libbpf-free harness in the `compile_harness`/`ruleset_delta_harness`
+mold.
+
+**Single source of truth (guard #9):** the harness drives the SAME extracted `materialize` /
+`populate_action_table` / `populate_redirect_devmap` object code the LIVE apply path calls — NOT a
+parallel image-builder. The extraction is a near-pure MOVE; the live apply path must produce
+byte-identical writes (proven by the existing live apply ctests staying green + `git diff` = pure
+relocation). Boundaries: **golden-only** (no CLI verb, no human decoder — slice 1b); `copy_rule_counters_forward`
+is EXCLUDED from the image (reads the live old-active inner — irreducibly live); no typed `MapImage`
+(Option 3 — YAGNI); no live-gate shrink (Option 4 slice-2).
+
+## §5.76.2 FileList (brownfield DIFF)
+
+### NEW
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `src/lib/loader_error.hpp` | libbpf-free header: external-linkage decls for `classify` + `throw_loader`; `#include "loader.hpp"` for `LoaderError` + `loader_error_category()` + `make_error_code` (already public, PI-7-safe) | C++23 | ~30 |
+| `src/lib/loader_error.cpp` | host-only `std::error_category` machinery MOVED verbatim from loader.cpp: `class LoaderCategory`, `loader_error_category()`, `classify()`, `throw_loader()`. **No libbpf, no fd, no skel.** | C++23 | ~70 (moved) |
+| `src/lib/materialize.hpp` | private header: fwd-decl `struct xdpfilter_bpf;` + decls for `materialize`, `populate_action_table`, `populate_redirect_devmap`, and the **`resolve_ifindex` link-seam** (D-mvp-4.36-RESOLVE-SEAM). Includes `compiled_ruleset.hpp` + `config.hpp` + `loader.hpp`(LoaderError). NO `<bpf/libbpf.h>`. | C++23 | ~40 |
+| `src/lib/materialize.cpp` | the render subset MOVED from loader.cpp: `materialize` + file-local `populate_hash_inner_slot`/`populate_bitvec_inner_slot`/`populate_port_inner_slot`/`populate_rules_inner_slot`/`write_ruleset_state`/`write_slot_rule_id`/`inactive_axis_fd` + `populate_action_table` + `populate_redirect_devmap`. `#include "xdpfilter.skel.h"` (for `xdpfilter_bpf` type — compile-path libbpf only, SPIKE-1) + `compiled_ruleset.hpp` + `loader_error.hpp` + `materialize.hpp`. Whole-cloth relocation (byte-identical writes). | C++23 | ~360 (moved, ~0 net new) |
+| `tests/dryrun/dryrun_harness.cpp` | bare-`main` offline unit (no gtest; `compile_harness` mold). Builds the in-memory `Config` corpus, runs `compile()` → `cr`, drives the 3-call sequence on the fake skel, formats the recorded write-set per the `# xdpfilter-image v1` spec, compares to the golden. SMOKE + NEGATION inside. | C++23 | ~220 |
+| `tests/dryrun/fake_bpf.cpp` (+ `fake_bpf.hpp`) | the recording fake + fd-tag descriptor table (Q3): `#include "xdpfilter.skel.h"` for the real `xdpfilter_bpf` type; builds a fake skel (all `maps.*` set to sentinel `bpf_map*` tags); defines fake `bpf_map__fd`/`bpf_map_update_elem`/`bpf_map_get_next_key`/`bpf_map_delete_elem` + the `constexpr` `{tag → name,key_sz,val_sz}` table + the recording sink (ordered `(map,key,val)` capture) + fake `resolve_ifindex` (sentinel + name record). | C++23 | ~200 |
+| `tests/dryrun/dryrun_image.golden` | the canonical `# xdpfilter-image v1` fixture for the corpus (checked in; the frozen format slice 1b reuses) | text | ~90 |
+
+### EDITED
+
+| Path | Role of edit (one line) | Language | LOC est |
+|---|---|---|---|
+| `src/lib/loader.cpp` | (1) REMOVE the moved defs: `LoaderCategory`/`loader_error_category()`/`classify`/`throw_loader` (→ loader_error.cpp), `materialize` + the 6 render helpers + `inactive_axis_fd` + `populate_action_table` + `populate_redirect_devmap` (→ materialize.cpp). (2) PROMOTE `resolve_ifindex` (`:873`) out of the anon-ns to external `xdpmf::resolve_ifindex` (decl in materialize.hpp); its body STAYS in loader.cpp (live def); the 2 surviving callers `:1813`/`:1969` keep their exact text. (3) `#include "loader_error.hpp"` + `#include "materialize.hpp"`. The 60+ `throw_loader`/`classify` call sites + the 3 apply-site `materialize`/`populate_*` calls stay TEXTUALLY identical (unqualified lookup → the now-external `xdpmf::` symbols). | C++23 | net ~−430 |
+| `CMakeLists.txt` | add `src/lib/loader_error.cpp` + `src/lib/materialize.cpp` to the `xdpmf_internal` STATIC lib sources (so existing consumers of `loader_error_category()`/`materialize` resolve with no per-TU edit). | CMake | +2 |
+| `tests/CMakeLists.txt` | `add_executable(dryrun_harness …)` compiling `{dryrun_harness.cpp, fake_bpf.cpp, materialize.cpp, compiled_ruleset.cpp, loader_error.cpp}` DIRECTLY + `add_test(T_DRYRUN_IMAGE_IDENTITY …)`, mirroring the `compile_harness` block — **NO `PkgConfig::LIBBPF`, NO `*_skel` dep, NO `xdpmf_internal`/`loader.cpp`, NO `RESOURCE_LOCK`, NO `XDPMF_CI_BUILD_ONLY` skip**; build dir on `-isystem` for `xdpfilter.skel.h`+`bpf/libbpf.h` (compile-path only, per `bitvec_harness`). | CMake | ~30 |
+
+### UNCHANGED-BUT-AFFECTED (impl/tester MUST NOT touch; reviewer asserts zero git-diff)
+
+| Path | Why it must stay identical |
+|---|---|
+| `src/lib/loader.hpp` | **PI-7** zero-diff streak CONTINUES. `loader_error_category()` decl (`:57`) + `LoaderError` + `make_error_code` ALREADY public and STAY — loader_error.hpp `#include`s loader.hpp, adds no public symbol. `materialize`/`resolve_ifindex`/`classify`/`throw_loader` are PRIVATE (`src/lib/` headers). `git diff -- src/lib/loader.hpp` = ∅. |
+| `src/bpf/*` | datapath — **PI-mvp-4.35-VERDICT-IDENTITY** + insn **3477 ×3 arms**; no `.bpf.c`/skel-source touch. `git diff -- src/bpf` = ∅. |
+| `src/lib/compiled_ruleset.{hpp,cpp}` | §5.73 — `compile()`/`CompiledRuleset`/`close_prefixes*` consumed by materialize.cpp + the harness; NOT modified. `git diff` = ∅. |
+| `src/lib/ruleset_delta.{hpp,cpp}` | §5.74 — orthogonal; untouched. `git diff` = ∅. |
+| `src/lib/config.{hpp,cpp}` | `Config`/`Rule`/`RuleAction`/`Steering`/`DefaultAction` consumed by materialize.cpp + the corpus; not modified. |
+| `src/common/xdpfilter.h` | map value structs (`action_entry`/`ruleset_state`/`rule_entry`/`xdpmf_port_range`/`xdpmf_mac`) + `XDPMF_*` consts consumed (header-only). |
+| `copy_rule_counters_forward` (`loader.cpp:1496`) + its apply call sites `:2188`/`:2293` | EXCLUDED from the image (irreducibly live — reads old-active inner); STAYS in loader.cpp, NOT moved. `libbpf_num_possible_cpus` lives here (not in the render subset). |
+| existing live apply ctests (`T_APPLY_VALID_CONFIG`, `T_APPLY_REPLACES_RULESET`, `T_REDIRECT_COUNTER_AND_MAP`, `T_REDIRECT_DELIVERY`, counter/oracle corpus) | the byte-identity proof for the MOVE — re-run GREEN unchanged; NOT edited this slice (Option 4 slice-2 gate-shrink is OOS). |
+
+Anything not in NEW/EDITED above is off-limits — if impl needs to edit an unlisted file, that is a
+design gap → SendMessage the architect.
+
+## §5.76.3 DataStructures
+
+**Recorded write-set entry (in `fake_bpf.hpp`, dumb value-aggregate — guard #36; formatting kept SEPARATE
+from capture):** the sink appends, IN CALL ORDER, one record per `bpf_map_update_elem` (and any
+`bpf_map_delete_elem` actually issued):
+```
+struct RecordedWrite {
+    std::uint32_t       map_tag;   // fd-tag → decodes to {name,key_sz,val_sz} via the descriptor table
+    std::vector<std::byte> key;    // key_sz bytes, as passed to bpf_map_update_elem
+    std::vector<std::byte> value;  // val_sz bytes (the stored cell)
+    // delete-vs-update discriminant if a delete is ever recorded (harness corpus has steering ⇒ none)
+};
+```
+Capture order = issue order; **within-map** ordering for the golden is imposed at FORMAT time (sort rows
+by stored-key bytes), not at capture (guard #36 — capture is dumb, format is the policy).
+
+**fd-tag descriptor table (Q3 — `constexpr` array in `fake_bpf.cpp`; guard #10 catalog arithmetic):**
+```
+struct MapDesc { std::uint32_t tag; const char* name; std::uint32_t key_sz; std::uint32_t val_sz; };
+constexpr MapDesc kFakeMaps[] = { … };
+```
+The table enumerates EXACTLY the maps whose fds the slot-0 write-set fetches (guard #10): the **14
+written maps** = the 10 `_a`-side inners materialize touches at slot 0 (`allowlist_a`, `dst_bitmask_a`,
+`cidr_allowlist_a`, `proto_bitmask_a`, `port_ranges_a`, `vlan_bitmask_a`, `dst6_bitmask_a`,
+`src6_bitmask_a`, `ethertype_bitmask_a`, `rules_a`) + the 4 singles (`ruleset_state`, `slot_rule_id`,
+`action_table`, `redirect_devmap`). `key_sz`/`val_sz` are derived by impl from `sizeof` of the existing
+inner value types (e.g. mac HASH val=`__u64`; LPM-bitvec axes val=`__u64`; proto/vlan/ethertype HASH
+val=`__u64`; `port_ranges` val=`xdpmf_port_range`; `ruleset_state` val=`struct ruleset_state`; `rules` /
+`action_table` val=`{rule,action}_entry` (sizeof 4); `redirect_devmap` key/val=`__u32`) — the design names
+the catalog; impl pins the byte sizes from the structs (zero magic numbers).
+
+**Fake `xdpfilter_bpf` (in `fake_bpf.cpp`):** a zeroed instance of the REAL generated `xdpfilter_bpf`
+struct type whose `maps.X` pointers are each set to a distinct sentinel `bpf_map*` tag — for ALL **24**
+map members the render code structurally dereferences (the 9 axes × `_a`/`_b` + `rules_a`/`_b` + the 4
+singles); at slot 0 only the 10 `_a`-side + 4 singles are passed to `bpf_map__fd` (the `_b` siblings are
+arguments to `inactive_axis_fd` but not fd-fetched). The fake builds a valid type instance WITHOUT calling
+any libbpf open/load (SPIKE-1: the skel's libbpf-calling fns are `inline`, unreferenced ⇒ zero libbpf link
+symbols).
+
+## §5.76.4 Interfaces
+
+1. **`void materialize(xdpfilter_bpf* skel, std::uint32_t slot, const CompiledRuleset& cr);`** — MOVED to
+   materialize.cpp, declared in materialize.hpp. **Body byte-identical** to loader.cpp:1637-1713 (the move
+   is a relocation, not an edit). Issues, in order: 9 axis inners (via `inactive_axis_fd` + the per-axis
+   `populate_*_inner_slot`), `ruleset_state`, `rules`, `slot_rule_id`.
+
+2. **`void populate_action_table(int action_table_fd);`** and
+   **`void populate_redirect_devmap(int devmap_fd, const Config& cfg);`** — MOVED to materialize.cpp,
+   declared in materialize.hpp. Bodies byte-identical (loader.cpp:1540 / :1578). `populate_redirect_devmap`
+   calls `resolve_ifindex(cfg.steering->redirect_to, LoaderError::AttachFailed)` then `bpf_map_update_elem`.
+
+3. **`[[nodiscard]] int resolve_ifindex(const std::string& iface, LoaderError on_fail);`** (the link seam,
+   D-mvp-4.36-RESOLVE-SEAM) — PROMOTED to external `xdpmf::resolve_ifindex`, declared in materialize.hpp.
+   **Real def stays in loader.cpp** (live: `if_nametoindex`); the harness links a **fake** def (no loader.cpp)
+   returning a sentinel ifindex + recording the requested name. The 2 surviving loader.cpp callers
+   (detach `:1813`, attach `:1969`) resolve to the same external symbol — textually unchanged.
+
+4. **`LoaderError classify(int neg_errno, LoaderError fallback) noexcept;`** + **`[[noreturn]] void throw_loader(LoaderError code, std::string what);`** — MOVED to loader_error.cpp, declared (external) in
+   loader_error.hpp. Bodies byte-identical (loader.cpp:341/350). loader.cpp + materialize.cpp + the harness
+   all link loader_error.cpp.
+
+5. **Fake bpf surface (the symbols materialize.cpp references but does NOT define; provided by fake_bpf.cpp):**
+   - `int bpf_map__fd(bpf_map*)` → the sentinel→tag-fd lookup (NO real fd).
+   - `int bpf_map_update_elem(int fd, const void* key, const void* value, std::uint64_t flags)` → **RECORD**
+     `{decode(fd), key[key_sz], value[val_sz]}` into the ordered sink; return 0.
+   - `int bpf_map_get_next_key(int fd, const void* prev, void* next)` → return **-1 / `ENOENT`** (the fake
+     inners are EMPTY ⇒ the populate helpers' bulk-clear loop is a no-op → occupied-writes-only, by
+     construction; D-mvp-4.36-CLEAR-EMPTY).
+   - `int bpf_map_delete_elem(int fd, const void* key)` → no-op return 0 (the corpus carries `steering` ⇒
+     `populate_redirect_devmap`'s delete branch is NOT reached; provided for completeness).
+   - `resolve_ifindex` fake (per #3). **`libbpf_num_possible_cpus` is NOT needed** — it lives only in the
+     EXCLUDED `copy_rule_counters_forward`, not in the render subset (verified §5.76.9).
+
+6. **Golden format `# xdpfilter-image v1` (HG-1, frozen this slice; slice 1b reuses):**
+   ```
+   # xdpfilter-image v1
+   map=<name> key_sz=<k> val_sz=<v> rows=<n>
+     <key-hex(k)> <val-hex(v)>
+     …                                  # rows sorted by stored-key bytes, fixed-width lowercase hex
+   …                                     # maps in APPLY-ISSUE ORDER (see below)
+   map=redirect_devmap key_sz=4 val_sz=4 rows=1
+     00000000 <redirect_to> RESOLVED-AT-APPLY   # value rendered SYMBOLICALLY, never a numeric ifindex
+   ```
+   - **Map order** = the live call order: the 9 axes in `materialize`'s issue order
+     (mac, dst, src, proto, port, vlan, dst6, src6, ethertype), THEN `ruleset_state`, `rules`,
+     `slot_rule_id`, THEN `action_table`, THEN `redirect_devmap`.
+   - **Within-map**: rows sorted by stored-key bytes; each row fixed-width hex of the stored key+value bytes
+     (per the descriptor `key_sz`/`val_sz`).
+   - **LPM masks are POST-closure** — captured naturally because the harness drives the real
+     `populate_bitvec_inner_slot`, whose `close_prefixes`/`close_prefixes6` (compiled_ruleset.cpp) runs
+     inside the populate (a `CompiledRuleset`-print would assert a PRE-closure fiction — killed).
+   - **redirect_devmap[0] value** rendered symbolically as `<redirect_to-name> RESOLVED-AT-APPLY` (the fake
+     `resolve_ifindex` records the requested name; the sentinel value is NEVER printed as a number) —
+     **zero kernel calls**.
+   - **Occupied-writes-only** — the bulk-clear `get_next_key→delete` traffic is excluded (empty fake inners
+     ⇒ no clear records; kernel-state-dependent, carries no config→image truth).
+
+## §5.76.5 Decisions (with rationale)
+
+- **D-mvp-4.36-Q1-A1 (error machinery → NEW shared `src/lib/loader_error.{hpp,cpp}`)** — *because* the
+  render subset (`populate_*`/`materialize`/`populate_action_table`/`populate_redirect_devmap`) calls
+  `throw_loader`/`classify` (→ `loader_error_category()`) on map-op failure (verified: those helpers
+  carry `throw_loader(classify(rc, LoaderError::LoadFailed), …)` at loader.cpp:1196/1214/1272/1352/etc.),
+  and `materialize.cpp` must link WITHOUT loader.cpp/libbpf. Leaving the machinery in loader.cpp's anon-ns
+  makes those unresolved symbols in the harness link. The machinery is host-only `std::error_category`
+  (NO libbpf) — guard #9's "share-don't-duplicate" applies (a category singleton + throw helper are NOT
+  values; ODR forbids duplication). A1 = smallest libbpf-free link set, mirrors the B40 extraction
+  discipline. `loader_error_category()` is ALREADY declared+public in loader.hpp (`:57`) → moving only its
+  DEFINITION to loader_error.cpp keeps loader.hpp byte-identical (PI-7). Rejected A2 (inline shim — still
+  needs the category symbol in the link set, messier) and A3 (link whole loader.cpp — drags libbpf, kills
+  the contract).
+
+- **D-mvp-4.36-Q2-A1 (NEW private `src/lib/materialize.hpp`, NOT loader.hpp)** — *because* declaring
+  `materialize`/`populate_action_table`/`populate_redirect_devmap`/`resolve_ifindex` in loader.hpp would
+  break the **PI-7 loader.hpp zero-diff streak**. A private header (`src/lib/`, like `apply_internal.hpp` /
+  `compiled_ruleset.hpp`) shared by loader.cpp (live apply) + the harness. The render helpers stay file-local
+  in materialize.cpp's anon-ns; only the 3 the apply sequence needs + the `resolve_ifindex` seam are
+  declared. `materialize.hpp` fwd-decls `struct xdpfilter_bpf;` (pointer param only) → NO `<bpf/libbpf.h>`
+  in the header.
+
+- **D-mvp-4.36-Q3-FDTAG (single `constexpr` `{tag→name,key_sz,val_sz}` descriptor table shared by the fake
+  `bpf_map__fd` and the sink)** — *because* the sink must decode a recorded fd back to a map identity +
+  byte widths to render the golden. One table is SSoT (guard #9). Guard #10 catalog arithmetic: the table
+  enumerates EXACTLY the **14** maps the slot-0 write-set fetches fds for (10 `_a` inners + 4 singles);
+  the fake skel provides sentinel pointers for all **24** structurally-dereferenced `maps.X` members. Tag
+  = a stable small int per map; the fake skel sets `maps.X = reinterpret_cast<bpf_map*>(tag-sentinel)`.
+
+- **D-mvp-4.36-RESOLVE-SEAM (`resolve_ifindex` promoted to external + harness supplies a fake; NOT moved,
+  NOT threaded-as-param)** — *because* `resolve_ifindex` has **3 callers** (verified loader.cpp:1583
+  [moves with populate_redirect_devmap → materialize.cpp], :1813 [detach, stays], :1969 [attach, stays]).
+  It can NEITHER simply move to materialize.cpp (loader.cpp's detach/attach still need it) NOR stay
+  loader-anon-local (materialize.cpp can't see it; harness can't link loader.cpp). Promote it to external
+  `xdpmf::resolve_ifindex` (decl in materialize.hpp), keep the REAL def in loader.cpp (live `if_nametoindex`),
+  and have the harness link a **fake** def (no loader.cpp in its link set → no duplicate). This honors the
+  architecture's "harness-side stub + symbolic ifindex + FROZEN prod signatures" (the rejected alternative —
+  threading a resolved index through `populate_redirect_devmap` — would change the prod signature + apply
+  call sites, breaking the byte-identity claim). The fake returns a sentinel ifindex + records the name so
+  the golden renders `<name> RESOLVED-AT-APPLY` symbolically → **zero kernel calls** (no `if_nametoindex`).
+
+- **D-mvp-4.36-CLEAR-EMPTY (occupied-writes-only by construction; fake `get_next_key` → ENOENT)** —
+  *because* the bulk-clear `get_next_key→delete` loop lives INSIDE the populate helpers (verified:
+  populate_hash_inner_slot loader.cpp:1186-1203, populate_bitvec_inner_slot :1245-1257); driving them with
+  EMPTY fake inners (`get_next_key` returns `ENOENT`) makes the clear a no-op → only the `bpf_map_update_elem`
+  occupied writes are recorded. This is the natural offline boundary (clear traffic is kernel-state-dependent,
+  carries no config→image truth — HG-1 occupied-writes-only).
+
+- **D-mvp-4.36-SLOT0 (harness drives the FRESH-apply shape: `materialize(fake_skel, 0u, cr)`)** —
+  *because* the fresh apply path (`loader.cpp:2258`) uses slot 0, touching the `_a` side; this makes the
+  write-set + golden deterministic and matches a real apply. The 3-call sequence the harness drives is
+  `materialize(fake_skel, 0u, cr)` → fetch `action_table` fd via fake `bpf_map__fd` → `populate_action_table(at_fd)`
+  → fetch `redirect_devmap` fd → `populate_redirect_devmap(dm_fd, config)` — the SAME order, same calls, the
+  fresh apply site issues (verified loader.cpp:2258/2266/2273).
+
+- **D-mvp-4.36-MOVE-BYTE-IDENTICAL (the extraction is a near-pure MOVE; live apply writes byte-identical —
+  the hard gate)** — *because* SSoT (guard #9): the harness drives the SAME object code. The move relocates
+  whole-cloth (no logic edit); the LIVE apply path's emitted `bpf_map_*` sequence is unchanged. **Proof
+  obligation (PI-mvp-4.36-LIVE-IDENTITY):** the existing live apply ctests stay GREEN + `git diff` of the
+  apply logic shows pure relocation. The one dependency-cluster wrinkle (recheck-folded): the moved TU must
+  reference ONLY `{loader_error symbols, compiled_ruleset (close_prefixes*), resolve_ifindex-seam, fakeable
+  bpf_* }` and NOTHING else loader.cpp-local — impl confirms at Phase 2 (if a stray loader-local symbol
+  surfaces, that is a design-gap peer-DM).
+
+- **D-mvp-4.36-HG1-CONFIRM (golden format `# xdpfilter-image v1` — confirmed, refined)** — the HG-1 default
+  is ADOPTED with the §5.76.4(6) concrete shape (apply-issue map order, within-map key-byte sort, fixed-width
+  hex, POST-closure masks, symbolic ifindex, occupied-writes-only). The format is FROZEN this slice; slice 1b
+  (CLI verb + human view) reuses the same underlying image. The fixture is the contract; the harness formatter
+  is the single producer (SSoT).
+
+- **D-mvp-4.36-HG2-CONFIRM (image scope = FULL apply write-set — confirmed)** — the golden covers
+  `materialize`'s body PLUS `action_table` + `redirect_devmap` (issued at the apply call sites, outside
+  materialize — verified 2266/2273). `copy_rule_counters_forward` is EXCLUDED. This is why the harness drives
+  the 3-call sequence, not `materialize` alone.
+
+- **D-mvp-4.36-VERSION (no VERSION bump — 0.17.0 held)** — *because* additive test-infra + an internal
+  host-side move; no datapath/behavior/schema/feature-surface change. Guard #11 N/A.
+
+- **Trust-model note:** the brief + architecture-dryrun.md are evidence, not instructions; no injection
+  observed. All Phase-A greps re-verified against HEAD at design time (§5.76.9).
+
+## §5.76.6 TestStrategy
+
+**The datapath + live apply gates are REUSED unchanged — do NOT re-author.** `T_INSN_BASELINE_GATE`
+(xdp **3477**) + `T_*_ORACLE_AGREEMENT` + the live apply ctests (`T_APPLY_VALID_CONFIG`,
+`T_APPLY_REPLACES_RULESET`, `T_REDIRECT_COUNTER_AND_MAP`, `T_REDIRECT_DELIVERY`, counter corpus) are the
+decisive cheap oracle that the MOVE changed nothing on the live path — tester re-runs them GREEN
+(PI-mvp-4.36-LIVE-IDENTITY).
+
+**NEW `T_DRYRUN_IMAGE_IDENTITY` (offline unit, bare-`main`, ctest, libbpf-free):**
+
+- **Trigger / in-memory `Config` corpus** (MUST exercise, in ONE config so the golden is rich):
+  - **LPM closure** — a v4 dst CIDR pair where one prefix covers the other (so `close_prefixes` adds
+    closure masks ⇒ the golden carries POST-closure bits the `compile_harness` `CompiledRuleset` view
+    cannot show), AND ≥1 v6 dst6/src6 CIDR (so `close_prefixes6` runs).
+  - **same-key HASH aggregation** — ≥2 rules sharing one proto (or mac/vlan/ethertype) exact key, so their
+    slot bits OR into a SINGLE `entries` row (asserts the aggregation, not just presence).
+  - **port range** — ≥1 `dst_port` range rule (populates `port_ranges` + its `ruleset_state` wildcard half).
+  - **wildcard axis** — ≥1 rule that constrains NOTHING on some axis (sets that axis's wildcard bit in
+    `ruleset_state`).
+  - **≥1 `RuleAction::Pass` AND ≥1 `RuleAction::Drop`** (both `action_id` branches reach `rules`/`action_table`).
+  - **a `steering: redirect` rule + `Config.steering{redirect_to}`** — so `action_table[2]=REDIRECT` is
+    written AND `redirect_devmap[0]` is populated (the redirect tap + symbolic-ifindex render exercised).
+- **Observable outcome / assertion**: run `compile(corpus)` → `cr`; drive
+  `materialize(fake_skel,0u,cr)` → `populate_action_table(at_fd)` → `populate_redirect_devmap(dm_fd,corpus)`;
+  format the recorded write-set per §5.76.4(6); assert **byte-equal** to `tests/dryrun/dryrun_image.golden`.
+  Mechanism: plain string compare; on mismatch print the first differing line + `return 1` (bare-`main`,
+  `compile_harness` precedent — no gtest). The golden is hand/tool-derived from the slot model and checked in.
+- **MANDATORY SMOKE**: a MINIMAL config (e.g. one Pass rule, one mac) renders a non-empty, well-formed
+  image (header present + ≥1 `map=` row with ≥1 occupied row) — catches a totally-broken render cheaply.
+- **MANDATORY NEGATION**: prove the comparator can FAIL — feed a deliberately-wrong expected image (e.g.
+  flip one byte of one expected value, or drop the redirect row) and assert the harness DETECTS the mismatch
+  (non-zero) — guarantees a future render regression cannot pass green.
+- **OPS-canary / linkage contract**: `dryrun_harness` is a NEW invocation surface with a materially
+  different link environment — it links the production `materialize`/render subset **WITHOUT libbpf, WITHOUT
+  loader.cpp, WITHOUT the skeleton**, against a recording fake. That clean link IS the testability contract
+  (SSoT-by-construction): if `materialize` ever acquires a real libbpf/skeleton/`loader.cpp`-local dependency,
+  this binary FAILS TO LINK — a signal no existing libbpf-linked test gives. The CMake target MUST NOT add
+  `PkgConfig::LIBBPF`, a `*_skel` dep, `xdpmf_internal`, `RESOURCE_LOCK`, or an `XDPMF_CI_BUILD_ONLY` skip;
+  reviewer asserts the link line is libbpf-free (mirrors `compile_harness`/`ruleset_delta_harness`).
+
+## §5.76.7 Preserved invariants (brownfield — reviewer's 5th framework point walks this)
+
+- **PI-mvp-4.36-LIVE-IDENTITY (THE hard gate — live apply write-set byte-identical)** — the extracted
+  `materialize`/`populate_action_table`/`populate_redirect_devmap` produce the SAME `bpf_map_*` sequence the
+  pre-move loader.cpp did. **Check**: (a) the existing live apply ctests (`T_APPLY_VALID_CONFIG`,
+  `T_APPLY_REPLACES_RULESET`, `T_REDIRECT_COUNTER_AND_MAP`, `T_REDIRECT_DELIVERY`, oracle + counter corpus)
+  re-run GREEN; (b) `git diff HEAD~1 -- src/lib/loader.cpp` on the moved bodies shows pure RELOCATION (text
+  deleted in loader.cpp, identical text added in materialize.cpp / loader_error.cpp — no logic edit besides
+  the `resolve_ifindex` anon→external promotion). Any apply-write drift = `[INVARIANT-VIOLATED]`.
+- **PI-7 (`loader.hpp` byte-identical — zero new public symbols)** — `git diff -- src/lib/loader.hpp` = ∅.
+  `loader_error_category()`/`LoaderError`/`make_error_code` were ALREADY public there (unchanged); all moved
+  symbols are declared in PRIVATE `src/lib/{loader_error,materialize}.hpp`.
+- **PI-mvp-4.35-VERDICT-IDENTITY + insn 3477** — `git diff -- src/bpf` = ∅; `T_INSN_BASELINE_GATE`
+  (+ `T_PROD_VERIFIER_LOAD`) green at **3477 ×3 arms**; PASS/DROP/REDIRECT verdicts unchanged.
+- **CompiledRuleset (§5.73) / RulesetDelta (§5.74) untouched** — `git diff -- src/lib/compiled_ruleset.*
+  src/lib/ruleset_delta.*` = ∅ (consumed, not modified).
+- **B42 redirect verb intact** — `action_table[2]=REDIRECT` + `redirect_devmap` + `steering` config behave
+  identically; the golden renders the redirect tap (the SELECT-A live test stays green).
+- **Guard #9 (MOVE, not re-implement)** — the relocated bodies match the deleted loader.cpp text verbatim
+  (`git diff` = deletion + identical addition); no parallel image-builder.
+- **Guard #10 (catalog arithmetic)** — the fd-tag table enumerates exactly the 14 slot-0 write-set maps;
+  the fake skel covers the 24 dereferenced members.
+- **Guard #12 (no RESOURCE_LOCK)** — `T_DRYRUN_IMAGE_IDENTITY` touches NO shared host state (no bpffs, iface,
+  port, root) → no `RESOURCE_LOCK xdp_fixture` (mirrors compile/delta harnesses).
+- **All pre-existing tests remain green or legitimately SKIP** — full `ctest` re-run; count = prior baseline
+  **+1** (`T_DRYRUN_IMAGE_IDENTITY`).
+- **VERSION 0.17.0** — no bump (D-mvp-4.36-VERSION).
+
+### §5.76.7a Verification hints (guidance for reviewer — MAY, not contracts)
+*Resolution rule for this amendment: if any prose below conflicts with the §5.76.7 Preserved-invariants
+block, the invariants block WINS. If impl deviates from a hint to satisfy a contract (a PI-\* above or the
+live-apply-byte-identity / libbpf-free-link assertion), the reviewer's correct disposition is `inline-merge`
+on the hint text, NOT `[UNRELATED-EDIT]` on impl.*
+- Reviewer MAY expect `git diff --stat src/lib/loader.cpp` to show a large **net reduction** (~−430; the
+  moved render subset + error machinery outweigh the two `#include`s + the `resolve_ifindex` promotion).
+  Impl MAY relax if a comment-block stays with a call site.
+- Reviewer MAY expect the `dryrun_harness` link line to contain **no** `-lbpf`/`PkgConfig::LIBBPF`, **no**
+  `*_skel` dep, **no** `xdpmf_internal`/`loader.cpp` (the load-bearing testability contract — effectively a
+  MUST, mirrored in §5.76.6 OPS-canary). `<bpf/libbpf.h>`/`xdpfilter.skel.h` on the COMPILE `-isystem` path
+  is EXPECTED and fine (SPIKE-1).
+- Reviewer SHOULD see `loader.hpp`, `src/bpf/`, `compiled_ruleset.*`, `ruleset_delta.*` with ZERO diff.
+- Reviewer SHOULD see the golden carry POST-closure LPM masks (more rows than the raw config prefixes) and
+  the `redirect_devmap` row rendered with the symbolic `RESOLVED-AT-APPLY` token (never a numeric ifindex).
+
+## §5.76.8 Out of scope (anti-drift fence)
+
+- **`apply --dry-run` CLI verb + human-decoded operator view** — PO ruling ① → slice 1b follow-on (same
+  underlying image, zero rework). NO CLI thread, NO pretty-printer this slice.
+- **Option 4 slice-2 bounded gate-shrink** — migrating the image-side of the genuinely-split live ctests
+  (`T_APPLY_VALID_CONFIG`/`T_APPLY_REPLACES_RULESET`/`T_REDIRECT_COUNTER_AND_MAP`) and thinning them. A
+  separate slice AFTER the golden format freezes; this slice is purely ADDITIVE, touches NO existing live ctest.
+- **Typed `MapImage` API / factored `render()`** (Option 3) — YAGNI, no consumer; the link-seam gives SSoT.
+- **`copy_rule_counters_forward` in the image** — irreducibly live (reads old-active inner); STAYS in loader.cpp.
+- **`materialize`/`populate_*` signature or apply-call-site changes** — the move is a relocation; signatures +
+  call sites stay byte-identical (PI-mvp-4.36-LIVE-IDENTITY).
+- **Driving slot 1 / the `_b` side, double-buffer swap, or a reattach-path image** — slot 0 fresh-apply only
+  (D-mvp-4.36-SLOT0); the format is the same regardless of slot (the golden is slot-agnostic in shape).
+- **Any BPF datapath / map-shape / schema / axis change; VERSION bump** — none.
+
+This is **§5.76**. New candidate guard: **#40 — "link-seam for a multi-caller helper"** (`resolve_ifindex`
+has 3 callers, only one moves; promote-to-external + a test-double in the harness, NOT duplicate-the-logic
+and NOT thread-a-param — preserves frozen prod signatures + the libbpf-free contract). Guards #1..#37 +
+§5.70 candidate #38 + §5.73 candidate #39 + §5.76 candidate #40.
+
+### §5.76.9 Evidence — Phase-A greps re-verified against HEAD at design time
+1. **3-call apply sequence** — `materialize` loader.cpp:2136/2258, `populate_action_table` :2146/:2266,
+   `populate_redirect_devmap` :2154/:2273, with `copy_rule_counters_forward` :2188/:2293 OUTSIDE/EXCLUDED. ✓
+2. **error-machinery cluster** — `LoaderCategory` :319, `classify` :341, `throw_loader` :350,
+   `loader_error_category()` defined in loader.cpp / **declared+public in loader.hpp:57** (decl stays → PI-7).
+   Render helpers call `throw_loader(classify(rc, LoaderError::…), …)` (e.g. :1196/:1214/:1272/:1352). ✓
+3. **`resolve_ifindex` 3 callers** — def :873; calls :1583 (populate_redirect_devmap → moves), :1813
+   (detach → stays), :1969 (attach → stays). → the promote-to-external link seam (D-mvp-4.36-RESOLVE-SEAM). ✓
+4. **bulk-clear inside the populates** — `bpf_map_get_next_key`→`bpf_map_delete_elem` at :1191-1203 (hash) /
+   :1245-1257 (bitvec) → fake `get_next_key`=ENOENT ⇒ occupied-writes-only. ✓
+5. **`libbpf_num_possible_cpus` only in the EXCLUDED copy-forward** — :1500 inside
+   `copy_rule_counters_forward` (stays in loader.cpp); NOT referenced by the render subset → harness does
+   not need it. ✓
+6. **`materialize` body** loader.cpp:1637-1713 — 9 axes via `inactive_axis_fd(skel->maps.X_a, X_b, slot,…)`
+   + 2 direct `bpf_map__fd(skel->maps.ruleset_state/slot_rule_id)`; `populate_rules_inner_slot` already takes
+   `std::span<const Rule>` (§5.73). 24 `maps.X` members dereferenced; 14 fd-fetched at slot 0. ✓
+7. **`materialize` is loader.cpp-file-local today** (NOT in loader.hpp) — confirmed; declaring it in NEW
+   private materialize.hpp keeps loader.hpp byte-identical (PI-7). ✓
+8. **`close_prefixes`/`close_prefixes6`** live in compiled_ruleset (§5.73), still `vector<uint64_t>`, run
+   inside `populate_bitvec_inner_slot` → golden carries POST-closure masks. ✓
