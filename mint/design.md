@@ -20785,3 +20785,304 @@ libbpf-free."** Guards #1..#37 + §5.70 #38 + §5.73 #39 + §5.76 #40 + §5.77 c
    HARNESS-link property (the harness lists individual TUs, omitting `live_map_writer.cpp`) ✓.
 8. **`compile()`** (`compiled_ruleset.hpp:121`) is pure/libbpf-free → the dry-run branch's `compile(cfg)→cr`
    makes zero kernel calls ✓.
+
+---
+
+# §5.78 (MVP-4.38 / B45) — `apply --dry-run` human-decoded operator view
+
+*Brownfield amendment. Extends §5.76 (B43 `dryrun_harness` golden) + §5.77 (B44 `apply --dry-run` verb +
+production render seam). Prior sections are immutable history; this block appends. Highest prior § was §5.77 →
+this is §5.78. Subsection convention mirrors §5.77 (.1 problem … .7 PIs, .7a hints, .8 OOS, .9 evidence).*
+
+## §5.78.1 Problem statement
+
+B44/§5.77 shipped `apply --dry-run`, but its sole output is the `# xdpfilter-image v1` machine golden — a raw,
+last-write-wins hex map-dump that is a TEST ORACLE (consumed byte-for-byte by `T_DRYRUN_IMAGE_IDENTITY` /
+`T_CLI_APPLY_DRYRUN`), not something an operator can read. An operator running dry-run wants to answer "did my
+config compile to what I meant?" — wrong redirect target, an unintended `default_action`, a CIDR that lowered to
+unexpected bits, a config that drops everything. This slice adds a **human-decoded view**: a readable, operator-
+vocabulary, per-rule decode that becomes the **DEFAULT** output of `apply --dry-run`; the machine golden moves
+behind `--format=golden`.
+
+Boundaries: this is **host-side output-formatting ONLY**. ZERO change to the live apply path, `materialize.cpp`,
+the object seam (`map_writer.cpp` / `live_map_writer.cpp`), or the golden formatter (`format_dryrun_image`). A new
+formatter + a new flag. Dry-run stays ZERO kernel calls / ZERO map writes / ZERO attach. The human formatter
+renders from the **TESTED `compile()` output** (`CompiledRuleset` + the validated `Config`), NOT a fresh lowering
+reimplementation (guard #9 / PI-SSOT — the golden remains the byte-faithful SSoT).
+
+## §5.78.2 FileList (DIFF — brownfield)
+
+### NEW
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `tests/dryrun/dryrun_empty.yaml` | NEGATION fixture: a VALID config with `default_action: drop` and ZERO rules (the blackhole footgun) — drives the empty-ruleset warning. | YAML | ~4 |
+
+### EDITED
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `src/lib/map_image.hpp` | Declare `format_dryrun_human(const Config&, const CompiledRuleset&) -> std::string` (sibling to `format_dryrun_image`). `format_dryrun_image` + `render_dryrun_image` decls UNCHANGED. | C++23 | ~8 |
+| `src/lib/map_image.cpp` | Define `format_dryrun_human` (A1 — renders from `cr`+`Config`; per-rule decode + header summary + redirect note + empty-ruleset warning). `format_dryrun_image` + `render_dryrun_image` bodies BYTE-IDENTICAL. | C++23 | ~90 |
+| `src/cli/apply.hpp` | `enum class DryrunFormat { Human, Golden };`; `ApplyConfig` gains `DryrunFormat format = DryrunFormat::Human;`. Rename decl `dryrun_image_for_file` → `dryrun_render_for_file` (format-aware). | C++23 | ~6 |
+| `src/cli/apply.cpp` | `dryrun_render_for_file`: branch on `cfg.format` → golden = `render_dryrun_image(parsed)` (unchanged); human = `format_dryrun_human(parsed, compile(parsed))`. +`#include` compiled_ruleset.hpp. | C++23 | ~10 |
+| `src/cli/cli.cpp` | `parse_apply`: accept `--format=<human\|golden\|image>` → `cfg.format`; error if `--format` given without `--dry-run`. (MAY) extend the apply usage line. | C++23 | ~14 |
+| `src/cli/main.cpp` | `run_apply` dry-run branch calls `dryrun_render_for_file` (renamed). One-line change. | C++23 | ~1 |
+| `tests/T_CLI_APPLY_DRYRUN.sh` | Migrate golden assertions (1)-(6) behind `--format=golden`; ADD default-run (human) assertions; ADD the empty-ruleset NEGATION + comparator-can-fail control. | bash | ~+60 |
+| `tests/CMakeLists.txt` | Register `dryrun_empty.yaml` as a fixture/copy if needed (only if the test references it by path). | CMake | ~2 |
+
+### UNCHANGED-BUT-AFFECTED (impl/tester MUST NOT touch; reviewer asserts zero git-diff)
+| Path | Why it must stay byte-identical |
+|---|---|
+| `src/lib/materialize.cpp` / `materialize.hpp` | Live + render write-set; PI-mvp-4.38-LIVE-IDENTITY. |
+| `src/lib/map_writer.cpp` / `map_writer.hpp` / `live_map_writer.cpp` | The object seam; no live/seam change this slice. |
+| `src/lib/loader.cpp` / `loader.hpp` | PI-7 (loader.hpp zero-diff streak); apply path untouched. |
+| `src/lib/apply_internal.hpp` | `ApplyRequest` untouched (D-mvp-4.37-BRANCH-SITE holds). |
+| `src/lib/compiled_ruleset.{hpp,cpp}` | `compile()` consumed READ-ONLY; no new lowering. |
+| `src/bpf/*` | Datapath untouched — **insn 3477** unchanged. |
+| `tests/dryrun/dryrun_image.golden` | Golden BYTE-UNCHANGED (now produced via `--format=golden`). |
+| `tests/dryrun/dryrun_harness.cpp` / `dryrun_cli.yaml` | `T_DRYRUN_IMAGE_IDENTITY` (#112) + the golden round-trip corpus — unaffected. |
+| `format_dryrun_image` / `render_dryrun_image` (bodies) | Golden formatter + orchestration BYTE-IDENTICAL (PI-mvp-4.38-GOLDEN-UNCHANGED). |
+
+Anything not in one of these three categories is off-limits. If impl needs to edit a file not listed → it's a
+design gap → SendMessage the architect (Phase B).
+
+## §5.78.3 DataStructures
+
+No new cross-module data structures; the human formatter consumes the EXISTING tested contracts:
+- **`CompiledRuleset`** (`compiled_ruleset.hpp`, §5.73) — the tested `compile()` output. The formatter reads:
+  `rules` (non-owning `std::span<const Rule>` over `Config.rules` — id/action/match per rule, in config order),
+  `id_to_slot` (`unordered_map<u32,u32>` — id → dense slot rank), `default_action`.
+- **`Config`** (`config.hpp`) — read for `steering.redirect_to` (the redirect tap name) and as the lifetime owner
+  of `cr.rules`. `RuleMatch`'s 9 optionals (`mac/dst_cidr/src_cidr/protocol/dst_port/vlan/dst_cidr6/src_cidr6/
+  ethertype`) are the operator-vocabulary axes the formatter echoes.
+
+NEW (CLI-local only):
+- **`enum class DryrunFormat : std::uint8_t { Human = 0, Golden = 1 };`** (`apply.hpp`). `Human` is the default
+  (HG-1 baked). `--format=golden` and `--format=image` both map to `Golden`.
+
+## §5.78.4 Interfaces
+
+1. **`[[nodiscard]] std::string format_dryrun_human(const Config& cfg, const CompiledRuleset& cr);`**
+   (`map_image.hpp`) — the NEW human formatter (A1). Pure, libbpf-free, side-effect-free. Renders from `cr`+`cfg`
+   ONLY (NO trace, NO `materialize`, NO fresh lowering). Output contract = §5.78.4(a) below.
+
+2. **`format_dryrun_image` / `render_dryrun_image`** (`map_image.hpp`/`.cpp`) — decls + bodies BYTE-IDENTICAL.
+   `render_dryrun_image` stays the golden path's single entry; NO split is required (see D-mvp-4.38-NOSPLIT).
+
+3. **`enum class DryrunFormat` + `ApplyConfig::format`** (`apply.hpp`) — default `Human`.
+
+4. **`[[nodiscard]] std::string dryrun_render_for_file(const ApplyConfig& cfg);`** (`apply.hpp`/`apply.cpp`) —
+   renamed from `dryrun_image_for_file` (now format-aware). Body:
+   `Config parsed = load_and_reconcile(cfg);` then
+   `if (cfg.format == DryrunFormat::Golden) return render_dryrun_image(parsed);` else
+   `return format_dryrun_human(parsed, compile(parsed));`. SAME load/validate/reconcile errors (exit 1/9) as
+   live apply, both formats. ZERO kernel calls (compile() is pure).
+
+5. **`parse_apply`** (`cli.cpp`) — accept `--format <V>` / `--format=<V>` (V ∈ {`human`,`golden`,`image`}; unknown
+   → `CliError`). Set `cfg.format`. If a `--format` token appeared but `--dry-run` did not → `CliError`
+   ("apply: --format requires --dry-run"). `--dry-run` parse unchanged. (MAY) extend the apply usage line
+   (`cli.cpp:85`) to `... [--dry-run [--format human|golden]]` — discoverability only; no test pins it.
+
+6. **`run_apply`** (`main.cpp`) — the dry-run branch calls `dryrun_render_for_file(cfg)` (renamed). No other
+   change. The `install_live_map_writer()` install site is irrelevant on the dry-run branch (returns before it
+   matters; live path untouched).
+
+### §5.78.4(a) Human-view output contract (the load-bearing tokens tester asserts on)
+
+The formatter emits, in order: a **header block**, then a **per-rule block**, then **diagnostics**. The exact
+substrings below are CONTRACT (tester greps them); whitespace / column alignment / blank-line framing is impl
+latitude (MAY). The view is operator-facing stdout (guard #8 — not a structured-log event).
+
+**Header block:**
+- First line MUST be `# xdpfilter dry-run` (a stable human header, DISTINCT from the golden's
+  `# xdpfilter-image v1` — so the default-format switch is observable: the human first line MUST NOT equal the
+  golden header).
+- A line containing `default_action: <drop|pass>` (operator vocabulary, exact).
+- A line containing `rules: <N>` (the rule count).
+- If `cfg.steering` present: a line containing `steering: redirect_to=<iface>`.
+- (MAY) `schema_version: <v>`.
+
+**Per-rule block** — one entry per rule, in `cr.rules` (config) order. Each entry MUST contain, on its rule line:
+- `id=<id>` , `slot=<slot>` (slot = `cr.id_to_slot.at(rule.id)`), `action=<pass|drop|redirect>`.
+- For a redirect rule additionally `target=<steering.redirect_to>`.
+- A following `match:` line listing the constrained axes as `<axis>=<value>` space-separated, using the EXACT
+  operator axis names (`mac`,`dst_cidr`,`src_cidr`,`dst_cidr6`,`src_cidr6`,`protocol`,`dst_port`,`vlan`,
+  `ethertype`). Values rendered faithfully from `rule.match` (CIDR as `A.B.C.D/len` / v6 canonical `…/len`; MAC
+  as `XX:XX:XX:XX:XX:XX`; port as `lo-hi`; vlan/ethertype/protocol as the number; name-annotation e.g.
+  `protocol=tcp(6)` / `ethertype=arp(0x0806)` is a MAY nicety).
+
+**Diagnostics block (HG-2 bounded — §5.78.5 D-mvp-4.38-DIAG):**
+- **Redirect note** — if any redirect rule exists, a line containing `RESOLVED-AT-APPLY` AND the target name,
+  conveying "verify the tap is up" (reuses the golden's resolution vocabulary). MUST appear.
+- **Empty-ruleset warning** — if `cr.rules` is empty, a line containing `WARNING` AND `no rules` AND the default
+  verdict, conveying that every frame gets `default_action` (drop ⇒ "all traffic dropped"). MUST appear when and
+  only when there are zero rules.
+
+## §5.78.5 Decisions (with rationale)
+
+- **D-mvp-4.38-Q1 (render source = A1, from `Config`+`CompiledRuleset`)** — *because* `compile()` is already an
+  offline-TESTED transform (`compile_harness` / `T_COMPILE_LOWERING_IDENTITY`) producing a `CompiledRuleset` that
+  carries per-rule id→slot + the match (via the `rules` span) + `default_action` in named, ordered form. That is
+  the natural source for a readable "your rule X → slot Y" view, and it is NOT a fresh lowering reimplementation
+  (guard #9 satisfied). A2 (decode the `(map,key,value)` trace) is REJECTED: the trace is the GLOBAL lowered
+  structure with `action_table` identity-keyed by action_type (B42 single-tap model), so reconstructing an ordered
+  per-rule semantic view from it is lossy/fiddly and needs to cross-join `Config` anyway.
+- **D-mvp-4.38-NOA3 (no trace cross-check)** — *because* A3 (annotate the A1 view against the trace for
+  faithfulness) couples the human formatter to the trace (more code, closer to a parallel image-builder) for
+  marginal benefit: the byte-faithful trace view ALREADY exists as `--format=golden`. The human view's job is
+  readability; the golden retains the byte-faithful SSoT role. Operators wanting bit-exact verification run
+  `--format=golden`.
+- **D-mvp-4.38-NOSPLIT (Q2: no split of `render_dryrun_image`)** — *because* A1 makes the human path independent
+  of the trace: the CLI branches on `format` and calls EITHER `render_dryrun_image(parsed)` (golden, byte-
+  identical orchestration+formatter) OR `format_dryrun_human(parsed, compile(parsed))` (human). Only one format
+  runs per invocation, so `compile()` runs once. This is cleaner than the brief's suggested render/format split
+  AND strengthens PI-GOLDEN-UNCHANGED (the golden orchestration is untouched, not merely the formatter). The
+  brief's Q2 split was predicated on a shared trace source (A2); A1 dissolves the need.
+- **D-mvp-4.38-RENAME (`dryrun_image_for_file` → `dryrun_render_for_file`)** — *because* the function now returns
+  either format; "image" is misleading for the human view. Single call site (`main.cpp:61`); no test pins the
+  name. Honesty > minimal-diff for a one-line rename. (If impl prefers minimal-diff, keeping the old name is an
+  acceptable inline-merge — not a contract.)
+- **D-mvp-4.38-FMT-REQUIRES-DRYRUN (`--format` without `--dry-run` → CliError)** — *because* silently ignoring
+  `--format` on a live apply is an operator footgun. Cheap guard (a `bool` "format seen" local in `parse_apply` +
+  one post-loop check). Prevents "I asked for golden but got a live apply" confusion.
+- **D-mvp-4.38-DIAG (HG-2 depth = bounded)** — *because* the bar is "an operator can spot a config mistake," not
+  "a full linter." Shipped diagnostics: (1) the always-present header summary makes `default_action` / redirect
+  target / each rule's parsed match axes eyeball-auditable (covers "unintended default action", "wrong redirect
+  target", "CIDR lowered to unexpected bits" — the operator reads the decode and spots the mistake); (2) the
+  redirect-target resolution note; (3) the empty-ruleset blackhole warning. DEFERRED: rule-overlap / shadowing /
+  unreachable-rule analysis (heavy linting → future slice).
+- **D-mvp-4.38-EMPTYMATCH-NA (the "rule matches nothing / empty match" footgun is a PARSE-TIME error, NOT a
+  human-view diagnostic)** — *because* `validate()` (config.cpp rule 7) already rejects a rule with zero match
+  axes (exit 9), and `steering`-iff-`redirect` cross-validation rejects a redirect-without-steering (exit 9), so
+  NEITHER can reach the formatter via a valid config. The brief's negation examples ("empty match" / "redirect
+  with no steering") are therefore validation errors surfaced by `load_and_reconcile` (shared with live apply,
+  exit 1/9) BEFORE rendering — they are NOT what the human view renders. The realizable cheap "footgun the human
+  view itself surfaces" is the **empty-ruleset blackhole** (`default_action: drop`, zero rules → drops all
+  traffic): a VALID config the human view flags. This is the MANDATORY negation (§5.78.6). *Tester: do NOT expect
+  the human view to print an "empty match" diagnostic — that config never compiles.*
+- **D-mvp-4.38-DEFAULT-BREAK (default dry-run output CHANGES from golden to human)** — PO-BAKED (HG-1, not a
+  fork). The default `apply --dry-run` stdout was the golden in B44; it is now the human view. Any script relying
+  on the old default MUST add `--format=golden`. This is an intended, PO-approved behavior change for a 0.x tool;
+  reviewer must NOT flag the migrated golden assertions as a regression. *Resolution rule for this amendment: if
+  §5.78.4(a) prose conflicts with a §5.78.7 PI, the PI block wins; if impl deviates from a §5.78.4(a) MAY hint to
+  satisfy a PI or a load-bearing test assertion, the reviewer's correct disposition is `inline-merge` on the hint
+  — NOT `[UNRELATED-EDIT]` on impl.*
+- **D-mvp-4.38-NOVER (no VERSION bump)** — *because* this is additive read-only output formatting (consistent with
+  B44's D-mvp-4.37-NOVER); a bump would touch the guard-#11 version-literal test sites for zero functional gain.
+  Default no-bump per brief.
+- **Trust-model note (no injection found)** — the brief, fixtures, and source read as evidence only; nothing
+  instructed deviating from the FileList/PI constraints. No flagged injection.
+
+## §5.78.6 TestStrategy (verification spec — WHAT to test)
+
+All tests run OFFLINE / UNPRIVILEGED (host-side formatting; dry-run is ZERO-touch). `T_CLI_APPLY_DRYRUN.sh`
+(#113) is the home; `T_DRYRUN_IMAGE_IDENTITY` (#112) stays green untouched.
+
+1. **Golden assertions migrate behind `--format=golden`** — trigger: `apply --iface <NODEV> -f dryrun_cli.yaml
+   --dry-run --format=golden`. Observable: stdout BYTE-EQUALS `dryrun_image.golden`; first line
+   `== "# xdpfilter-image v1"`; `^map=redirect_devmap `, `dpi0 RESOLVED-AT-APPLY`, `^map=allowlist_a ` present;
+   `<NODEV>` absent. Mechanism: `diff -u` + `grep -qE`. (The existing B44 assertions (1)-(6), now with
+   `--format=golden`.) Asserts PI-GOLDEN-UNCHANGED end-to-end.
+2. **Default output is the human view** — trigger: same command WITHOUT `--format` (default). Observable: exit 0;
+   first line `== "# xdpfilter dry-run"` AND `!= "# xdpfilter-image v1"` (the default-switch is observable);
+   stdout contains `default_action: drop`, `rules: 10`, `steering: redirect_to=dpi0`. Mechanism: `head -n1` +
+   `grep -qE`.
+3. **Per-rule decode present + operator vocabulary** — trigger: default human run on `dryrun_cli.yaml`. Observable:
+   per-rule lines for the fixture's ids — e.g. `id=1` with `dst_cidr=10.0.0.0/8`; `id=4` with `protocol=` AND
+   `dst_port=80-443`; `id=10` with `action=redirect` AND `target=dpi0`; each rule line carries `slot=`. Axis
+   names match CONFIG_SCHEMA vocabulary. Mechanism: `grep -qE` per token.
+4. **Redirect resolution note** — trigger: default human run on a config with a redirect rule. Observable: a line
+   with `RESOLVED-AT-APPLY` AND `dpi0`. Mechanism: `grep -qE`.
+5. **MANDATORY NEGATION — empty-ruleset blackhole warning** — trigger: default human run on NEW fixture
+   `dryrun_empty.yaml` (`schema_version: 2`, `default_action: drop`, ZERO rules — VALID, compiles, exit 0).
+   Observable: stdout contains a `WARNING` line with `no rules` AND conveys "all traffic dropped"; AND `rules: 0`.
+   Mechanism: `grep -qE`.
+6. **Comparator-can-fail control (the negation is not vacuous)** — trigger: default human run on `dryrun_cli.yaml`
+   (10 rules). Observable: the `WARNING`/`no rules` line is ABSENT (`grep -q ... ; [[ $? -ne 0 ]]`), proving the
+   warning is conditional on the empty ruleset, not always-printed. Symmetric control for the redirect note: a
+   non-redirect config (or assert the note absent when no redirect rule) MAY be added.
+7. **`--format` requires `--dry-run`** (D-mvp-4.38-FMT-REQUIRES-DRYRUN) — trigger:
+   `apply --iface <NODEV> -f <cfg> --format=golden` (NO `--dry-run`). Observable: exit non-zero, stderr names the
+   constraint. Mechanism: capture rc + `grep`. (SHOULD; small.)
+8. **Unknown `--format` value rejected** — trigger: `... --dry-run --format=bogus`. Observable: exit non-zero
+   (CliError). Mechanism: rc check. (MAY.)
+9. **Invalid-config parity holds** — trigger: `... --dry-run` (either format) on a missing / malformed / iface-
+   mismatched config. Observable: SAME exit codes 1/9 + `xdpfilter: config error:` prefix as live apply (both
+   formats share `load_and_reconcile`). Mechanism: rc + stderr grep. (Regression guard; MAY reuse existing.)
+10. **`T_DRYRUN_IMAGE_IDENTITY` (#112) unchanged + green** — it calls `format_dryrun_image` directly; this slice
+    must not perturb it. Re-run + assert green (PI-GOLDEN-UNCHANGED).
+
+**OPS-canary note:** this slice introduces NO new runtime invocation environment (same offline / unprivileged /
+no-netns / same-uid invocation as B44's `apply --dry-run`). No new capability mask / namespace / uid is
+exercised, so NO OPS canary is required (the load-bearing-OPS-canary heuristic does not trigger). The
+zero-touch realization (nonexistent iface + no sudo + non-dry-run negation exits non-zero) carries over from B44.
+
+## §5.78.7 Preserved invariants (brownfield)
+
+| ID | Property | Check mechanism |
+|---|---|---|
+| **PI-mvp-4.38-LIVE-IDENTITY** | The live apply path is byte-identical: `materialize.{cpp,hpp}`, `map_writer.{cpp,hpp}`, `live_map_writer.cpp`, `loader.{cpp,hpp}`, `apply_internal.hpp` have ZERO git-diff. Inherits PI-mvp-4.36/4.37-LIVE-IDENTITY. | `git diff` of each path = ∅. |
+| **PI-mvp-4.38-GOLDEN-UNCHANGED** | `format_dryrun_image` AND `render_dryrun_image` bodies byte-identical; `tests/dryrun/dryrun_image.golden` byte-unchanged; the golden produced via `--format=golden` byte-EQUALS the frozen golden. | `git diff` of the two fn bodies + the golden = ∅; T_CLI_APPLY_DRYRUN assertion (1); T_DRYRUN_IMAGE_IDENTITY (#112) green. |
+| **PI-mvp-4.38-SSOT** | The human formatter renders from the TESTED `compile()` output (`CompiledRuleset`+`Config`), NOT a fresh lowering / parallel image-builder. (guard #9) | Reviewer reads `format_dryrun_human`: no `bpf_*`, no `materialize`/`populate_*` call, no re-derivation of bits/prefixes; only reads `cr.rules`/`cr.id_to_slot`/`cr.default_action`/`cfg.steering`. |
+| **PI-mvp-4.38-ZERO-TOUCH** | Dry-run (both formats) makes ZERO kernel calls / map writes / attach; `compile()` is pure. | T_CLI_APPLY_DRYRUN: nonexistent-iface unprivileged exit-0 + no pin dir + non-dry-run negation exits non-zero. |
+| **PI-mvp-4.38-FORMAT-DEFAULT** | Default `apply --dry-run` (no `--format`) = human view; `--format=golden`/`=image` = the machine image. | T_CLI_APPLY_DRYRUN assertions (1)+(2). |
+| **PI-mvp-4.37-FAILCLOSED** (carried) | The `map_*` wrappers still hard-abort if no writer installed — untouched (seam not modified). | `git diff` map_writer.cpp = ∅. |
+| **PI-7** (carried) | `loader.hpp` zero-diff streak preserved. | `git diff src/lib/loader.hpp` = ∅. |
+| **insn 3477** (carried) | `src/bpf/*` untouched → datapath insn count unchanged. | `git diff src/bpf` = ∅; existing insn gate. |
+| **B42 redirect verb** (carried) | redirect semantics unchanged (host-side formatting only). | no datapath/materialize change. |
+
+Reviewer's framework point 5 walks this list and reports `[INVARIANT-VIOLATED]` per failed check.
+
+### §5.78.7a Verification hints (guidance for reviewer — MAY, not contracts)
+*Resolution rule: if any hint here conflicts with §5.78.7, the PI block wins. If impl deviates from a hint to
+satisfy a §5.78.7 PI or a load-bearing test assertion, the reviewer's correct disposition is `inline-merge` on the
+hint text — NOT `[UNRELATED-EDIT]` on impl.*
+- Reviewer MAY expect `map_image.cpp`'s diff to be PURELY the new `format_dryrun_human` body + its decl in the
+  header — no edit inside `format_dryrun_image` / `render_dryrun_image`.
+- Reviewer MAY expect `apply.cpp`'s diff to be the format branch + one `#include "lib/compiled_ruleset.hpp"` + the
+  rename; `load_and_reconcile` UNCHANGED.
+- Reviewer MAY expect `cli.cpp` to gain one `--format` arm + one "requires --dry-run" check (+ optionally the
+  usage line); `main.cpp` to change exactly one call (the rename).
+- Reviewer SHOULD see `dryrun_image.golden` BYTE-UNCHANGED. If regenerated, that is a smell to challenge — not
+  auto-`[INVARIANT-VIOLATED]`, but a question.
+- Reviewer MAY expect the human first line `# xdpfilter dry-run` ≠ golden `# xdpfilter-image v1` (the observable
+  default-switch). Exact human header wording is impl latitude IF tester's grep is updated in lockstep
+  (inline-merge if so).
+
+## §5.78.8 Out of scope (anti-drift fence)
+- **Heavy config-linting** — rule-overlap / shadowing / unreachable-rule analysis, contradiction proofs (HG-2
+  bounded → future slice).
+- **An "empty match" / "redirect-without-steering" human-view diagnostic** — these are PARSE-TIME errors (exit 9),
+  surfaced by `validate()` before rendering; NOT human-view content (D-mvp-4.38-EMPTYMATCH-NA).
+- **Any live / datapath / materialize / seam change** — host-side formatting only.
+- **A typed `MapImage` / structured machine output (JSON, etc.)** — only the two text formats this slice
+  (human default, golden behind the flag).
+- **`--dry-run` / `--format` for the `attach --allow` shorthand path** — `apply` verb only (carries B44's fence).
+- **Multi-slot / reattach-shape dry-run** — slot-0 fresh-apply shape only (D-mvp-4.36-SLOT0).
+- **VERSION bump** (D-mvp-4.38-NOVER).
+- **② per-rule redirect targets / ③ mirror costing / ④ rate-limit** (later roadmap).
+
+This is **§5.78**. No new guard candidate (reuses #9 SSoT, #36 capture-vs-format split, #8 output-surface). Guards
+#1..#37 + §5.70 #38 + §5.73 #39 + §5.76 #40 + §5.77 candidate #41.
+
+## §5.78.9 Evidence — slice-time greps re-verified against HEAD at design time
+1. **B44 seam** — `render_dryrun_image(const Config&)` @ `map_image.hpp:29`/`map_image.cpp:99`;
+   `format_dryrun_image(recs, target)` @ `map_image.hpp:36`/`map_image.cpp:53` ✓. `dryrun_image_for_file` @
+   `apply.hpp:51`/`apply.cpp:133`, called @ `main.cpp:61` (the single call site to rename) ✓.
+2. **`CompiledRuleset` carries everything A1 needs** (`compiled_ruleset.hpp:102-116`): `id_to_slot`, `slot_to_id`,
+   `default_action`, `rules` (`std::span<const Rule>` over `Config.rules`, lifetime = caller's `Config`) ✓. NO
+   fresh lowering needed → guard-#9 line holds.
+3. **`Config`/`Rule`/`RuleMatch`** (`config.hpp:47-78`): `RuleAction{Drop,Pass,Redirect}`, the 9 `RuleMatch`
+   optionals, `Steering.redirect_to`, `default_action` ✓ — the operator vocabulary the human view echoes.
+4. **`parse_apply`** @ `cli.cpp:226`; `--dry-run` arm @ `:247-250`; `consume_flag_value` @ `:161`; apply usage
+   line @ `:85` (currently lists no `--dry-run` — B44 omitted it; the usage extension is a MAY) ✓.
+5. **`run_apply` dry-run branch** @ `main.cpp:55-69` (`if (cfg.dry_run) std::fputs(dryrun_image_for_file(...))`) ✓.
+6. **`T_CLI_APPLY_DRYRUN.sh`** asserts on DEFAULT stdout: first line `== "# xdpfilter-image v1"` (`:76`),
+   `^map=redirect_devmap ` (`:85`), `dpi0 RESOLVED-AT-APPLY` (`:89`), NODEV absent (`:94`), golden byte-diff
+   (`:109`), the non-dry-run negation (`:136`), the comparator-can-fail control (`:159-179`) — these (1)-(6)
+   migrate behind `--format=golden` ✓.
+7. **`T_DRYRUN_IMAGE_IDENTITY`** (#112) drives `format_dryrun_image` directly (`dryrun_harness.cpp:338-411`) →
+   UNAFFECTED by the default-format change ✓.
+8. **Only 4 test files reference dry-run** (`dryrun_harness.cpp`, `CMakeLists.txt`, `T_CLI_APPLY_DRYRUN.sh`,
+   `dryrun_cli.yaml`) — no other test pins the default dry-run stdout ✓.
+9. **`compile()`** (`compiled_ruleset.hpp:121`) pure/libbpf-free → human path `compile(parsed)` makes zero kernel
+   calls ✓.
