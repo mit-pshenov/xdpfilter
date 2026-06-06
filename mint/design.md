@@ -20215,7 +20215,10 @@ map=redirect_devmap key_sz=4 val_sz=4 rows=1
   the fake skel provides sentinel pointers for all **24** structurally-dereferenced `maps.X` members. Tag
   = a stable small int per map; the fake skel sets `maps.X = reinterpret_cast<bpf_map*>(tag-sentinel)`.
 
-- **D-mvp-4.36-RESOLVE-SEAM (`resolve_ifindex` promoted to external + harness supplies a fake; NOT moved,
+- **D-mvp-4.36-RESOLVE-SEAM** `[SUPERSEDED-IN-PART BY §5.77 — see D-mvp-4.37-RESOLVE: the render path now
+  calls the object-dispatched `map_resolve_ifindex`; the harness no longer LINKS a fake `resolve_ifindex`.
+  The external-symbol PROMOTION below still stands — loader.cpp detach/attach + the new `LiveMapWriter` call
+  the real `xdpmf::resolve_ifindex`.]** **(`resolve_ifindex` promoted to external + harness supplies a fake; NOT moved,
   NOT threaded-as-param)** — *because* `resolve_ifindex` has **3 callers** (verified loader.cpp:1583
   [moves with populate_redirect_devmap → materialize.cpp], :1813 [detach, stays], :1969 [attach, stays]).
   It can NEITHER simply move to materialize.cpp (loader.cpp's detach/attach still need it) NOR stay
@@ -20421,3 +20424,346 @@ and NOT thread-a-param — preserves frozen prod signatures + the libbpf-free co
    private materialize.hpp keeps loader.hpp byte-identical (PI-7). ✓
 8. **`close_prefixes`/`close_prefixes6`** live in compiled_ruleset (§5.73), still `vector<uint64_t>`, run
    inside `populate_bitvec_inner_slot` → golden carries POST-closure masks. ✓
+
+---
+
+# §5.77 — MVP-4.37 / B44: `apply --dry-run` — production offline map-image render (brownfield amendment)
+
+> Amends, does NOT replace, §5.76 (B43). Extends the B43 render subset (`materialize` + `populate_action_table`
+> + `populate_redirect_devmap` + `resolve_ifindex`) with a PRODUCTION runtime mechanism that renders the
+> frozen `# xdpfilter-image v1` image OFFLINE (zero kernel calls). Carries forward `mint/architecture-dryrun.md`
+> (image-render lens, SPIKE-1 PASS). Resolves Q1 (render mechanism), Q2 (harness reconciliation), Q3 (sizing),
+> HG-mvp-4.37-1 (golden-only) and HG-mvp-4.37-2 (live unchanged). Slice-time greps re-verified at §5.77.9.
+
+## §5.77.1 Problem statement
+
+B43 shipped the offline golden + the libbpf-free `materialize.cpp`, but it renders the image only via a
+**test-only LINK seam**: `dryrun_harness` links `fake_bpf.cpp` (fake `bpf_map__fd`/`bpf_map_*_elem`/
+`resolve_ifindex`) against `materialize.cpp`, choosing the recording behaviour at LINK time. The PRODUCTION
+`xdpfilter` binary links the REAL libbpf, so it cannot select a fake at link time. This slice builds the
+PRODUCTION render path — a RUNTIME indirection (object seam) that lets the ONE binary issue either the live
+`bpf_map_*` writes (normal `apply`) or a recorded `(map,key,value)` trace (dry-run) — plus the thin
+`apply --dry-run` CLI verb that triggers it, and reconciles the B43 harness to drive that same production path
+(stronger SSoT than the link-time fake).
+
+The output FORMAT is frozen (B43 ruling B / §5.76.4(6)); this slice does NOT redesign it. The boundary is
+firm: dry-run = ZERO kernel calls / ZERO map writes / ZERO attach; live = byte-identical writes to today.
+
+## §5.77.2 FileList (DIFF — brownfield)
+
+### NEW
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `src/lib/map_writer.hpp` | The object seam: `MapWriter` interface (4 map ops + ifindex resolve), free-fn wrappers (`map_fd/map_update/map_next_key/map_delete/map_resolve_ifindex`), `RecordingMapWriter`, `RecordingScope` RAII, the production map CATALOG decl + sentinel-skel-builder decl. **libbpf-free** (fwd-decl `struct bpf_map;`). | C++23 | ~80 |
+| `src/lib/map_writer.cpp` | Seam impl: `g_active_writer` ptr + the wrappers' dispatch, `RecordingMapWriter` (records dumb `(tag,key,value)` + resolve-name), the CATALOG (14 slot-0 maps: name/key_sz/val_sz/tag), `make_dryrun_skel()`/`free_dryrun_skel()` (sentinel `xdpfilter_bpf`). **libbpf-free** (`#include xdpfilter.skel.h` for the type only — SPIKE-1). | C++23 | ~160 |
+| `src/lib/live_map_writer.cpp` | `LiveMapWriter` (forwards verbatim to real `bpf_map_update_elem`/`get_next_key`/`delete_elem`/`bpf_map__fd`/`resolve_ifindex`) + `install_live_map_writer()`. **The ONLY new TU that calls libbpf.** | C++23 | ~60 |
+| `src/lib/map_image.hpp` | `render_dryrun_image(const Config&) -> std::string` decl + the formatter decl (trace→`# xdpfilter-image v1`). libbpf-free. | C++23 | ~25 |
+| `src/lib/map_image.cpp` | The formatter (the SINGLE producer of the image text, §5.76.4(6) — relocated from the harness, guard #36 capture-vs-format split) + `render_dryrun_image` orchestration (compile→sentinel-skel→`RecordingScope`→3-call render→format). libbpf-free. | C++23 | ~130 |
+| `tests/dryrun/dryrun_cli.yaml` | CLI-test corpus YAML (tester-owned; ideally compiles to the §5.76.6 `build_corpus` Config so dry-run stdout == the frozen golden). | YAML | ~40 |
+| `tests/dryrun/T_CLI_APPLY_DRYRUN.sh` | NEW CLI ctest: offline `apply --dry-run` → asserts printed image + exit 0 + ZERO kernel side-effects + MANDATORY negation. Tester-owned. | bash | ~90 |
+
+### EDITED
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `src/lib/materialize.cpp` | ~40 call-site swaps: `bpf_map_update_elem/get_next_key/delete_elem`→`map_*`; `bpf_map__fd`→`map_fd`; `resolve_ifindex`→`map_resolve_ifindex`. **All function SIGNATURES byte-identical** (the swap is body-only; live behaviour identical). `#include "map_writer.hpp"`. | C++23 | ~42 |
+| `src/cli/cli.cpp` | `parse_apply` (@:226) accepts `--dry-run` → sets `ApplyConfig.dry_run = true`. | C++23 | ~4 |
+| `src/cli/apply.hpp` | `struct ApplyConfig` gains `bool dry_run = false;`. | C++23 | ~1 |
+| `src/cli/main.cpp` | `xdpmf::install_live_map_writer();` at top of `main()` (before `std::visit`); `run_apply` branch: on `cfg.dry_run` → `std::fputs(render of the file's Config, stdout); return kExitOk;`. | C++23 | ~8 |
+| `src/cli/apply.cpp` | NEW helper `dryrun_image_for_file(const ApplyConfig&) -> std::string` (read+parse+validate+iface-reconcile → `render_dryrun_image(Config)`), reusing the existing `read_file_or_throw`/`validate` path. | C++23 | ~14 |
+| `CMakeLists.txt` | Add `map_writer.cpp`, `live_map_writer.cpp`, `map_image.cpp` to `xdpmf_internal` STATIC lib. | CMake | ~3 |
+| `tests/CMakeLists.txt` | `dryrun_harness` link set: DROP `fake_bpf.cpp`, ADD `map_writer.cpp` + `map_image.cpp` (still libbpf-free, still `add_dependencies(... xdpfilter_skel)` order-only). Register `T_CLI_APPLY_DRYRUN`. | CMake | ~12 |
+| `tests/dryrun/dryrun_harness.cpp` | Q2 reconciliation: drive the PRODUCTION seam (`RecordingScope` + production `make_dryrun_skel` + production formatter via `render_dryrun_image`/`map_image`) instead of `fake_bpf`. Keep the independent `oracle_expected_records` + `--emit-golden` (three-way agreement). Tester-owned. | C++23 | ~-60 net |
+
+### DELETED
+| Path | Reason |
+|---|---|
+| `tests/dryrun/fake_bpf.cpp` + `fake_bpf.hpp` | Retired — the production object seam (`RecordingMapWriter` + CATALOG + `make_dryrun_skel`) subsumes the link-time fakes. The harness no longer fakes ANY `bpf_*`/`resolve_ifindex` symbol (Q2). Tester-owned. |
+
+### UNCHANGED-BUT-AFFECTED (reviewer asserts zero git-diff; impl/tester MUST NOT touch)
+| Path | Invariant |
+|---|---|
+| `src/lib/loader.cpp` | `apply_request` + the 3 apply call sites (`materialize`/`populate_action_table`/`populate_redirect_devmap`) + `copy_rule_counters_forward` + the real `resolve_ifindex` def + detach/attach: **byte-identical** (PI-mvp-4.36-LIVE-IDENTITY; D-mvp-4.37-BRANCH-SITE keeps the dry-run branch OUT of the kernel-touch path). |
+| `src/lib/apply_internal.hpp` | `ApplyRequest` UNCHANGED — **NO `dry_run` field** (D-mvp-4.37-BRANCH-SITE overrides the brief's B44-2 suggestion). ZERO diff. |
+| `src/lib/materialize.hpp` | The 4 declared signatures UNCHANGED (`materialize`/`populate_action_table`/`populate_redirect_devmap`/`resolve_ifindex`). ZERO diff. |
+| `src/lib/loader.hpp` | PI-7 — ZERO diff (the seam lives in NEW private headers, never `loader.hpp`). |
+| `src/bpf/**` | insn 3477 — ZERO diff (host-loader-only slice). |
+| `tests/dryrun/dryrun_image.golden` | UNCHANGED — the production render MUST reproduce the frozen golden BYTE-FOR-BYTE. Any diff = a real discrepancy to investigate; do NOT blind-rebless. |
+
+Anything NOT in NEW/EDITED is off-limits for impl. If impl needs to edit a file not listed → design gap → SendMessage architect.
+
+## §5.77.3 DataStructures (contracts crossing the seam)
+
+1. **`struct MapWriter`** (`map_writer.hpp`) — abstract base; the runtime render sink. Methods (pure virtual):
+   - `int fd(bpf_map* m)` — resolve a map handle to an int the op methods accept.
+   - `int update(int fd, const void* key, const void* value, std::uint64_t flags)`
+   - `int next_key(int fd, const void* prev, void* next)`
+   - `int del(int fd, const void* key)`
+   - `int resolve_ifindex(const std::string& iface, LoaderError on_fail)`
+   The contract: a writer abstracts EVERY kernel-facing render primitive. No other libbpf call exists in the
+   render subset (verified §5.76.9 #5: `libbpf_num_possible_cpus` is only in the EXCLUDED copy-forward).
+
+2. **`class LiveMapWriter : MapWriter`** (`live_map_writer.cpp`) — each method forwards VERBATIM to the
+   real libbpf symbol / the real `xdpmf::resolve_ifindex` (loader.cpp `if_nametoindex`). `fd`→`bpf_map__fd`.
+   This is the ONLY new symbol that references libbpf ⇒ the harness never links it (Q2 libbpf-free).
+
+3. **`class RecordingMapWriter : MapWriter`** (`map_writer.cpp`) — the dumb capture (guard #36):
+   - `fd(m)` → decode the sentinel `bpf_map*` (from `make_dryrun_skel`) to its CATALOG tag; register
+     `tag → {name, key_sz, val_sz}`; return the tag as the int handle. An UNKNOWN sentinel → flag
+     `unexpected_write()` (the §5.76 OPS check survives).
+   - `update(tag, k, v, _)` → append `RecordedWrite{tag, copy(k, key_sz), copy(v, val_sz)}`; return 0.
+   - `next_key(...)` → `-1`/`ENOENT` (empty sentinel inners ⇒ HASH/LPM bulk-clear is a no-op — `D-mvp-4.36-CLEAR-EMPTY`).
+   - `del(...)` → `0` no-op.
+   - `resolve_ifindex(name, _)` → record `name`, return a sentinel index (never used numerically); the
+     formatter renders the recorded name SYMBOLICALLY for `redirect_devmap[0]` (§5.76.4(6)).
+   Holds the ordered `std::vector<RecordedWrite>` + the resolved iface name + the unexpected-write flag.
+
+4. **`struct RecordedWrite { std::uint32_t map_tag; std::vector<std::uint8_t> key; std::vector<std::uint8_t> value; };`**
+   (`map_writer.hpp`) — the dumb trace element (relocated from `fake_bpf.hpp`). Production-owned now.
+
+5. **`struct MapDesc { std::uint32_t tag; const char* name; std::uint32_t key_sz; std::uint32_t val_sz; };`**
+   + `constexpr MapDesc kMapCatalog[]` (`map_writer.cpp`) — the production CATALOG. Enumerates EXACTLY the
+   **14** slot-0 written maps (guard #10): `allowlist_a, dst_bitmask_a, cidr_allowlist_a, proto_bitmask_a,
+   port_ranges_a, vlan_bitmask_a, dst6_bitmask_a, src6_bitmask_a, ethertype_bitmask_a, rules_a,
+   ruleset_state, slot_rule_id, action_table, redirect_devmap`. `key_sz`/`val_sz` from `sizeof` the existing
+   value structs (zero magic numbers; identical bytes to §5.76.4(6a)). This is the relocated `kFakeMaps`.
+
+6. **`RecordingScope`** (`map_writer.hpp`) — RAII: ctor swaps `g_active_writer` to a `RecordingMapWriter&`,
+   dtor restores the prior writer. The dry-run branch's ONLY state mutation.
+
+7. **Sentinel skel** — `make_dryrun_skel()` returns an `xdpfilter_bpf*` whose 24 `maps.X` are distinct
+   non-null sentinel `bpf_map*` (cast small tags); built with NO libbpf open/load (SPIKE-1). Mirrors the B43
+   `make_fake_skel`, relocated to production. `free_dryrun_skel()` releases it.
+
+## §5.77.4 Interfaces
+
+1. **Free-fn wrappers** (`map_writer.hpp`; defined `map_writer.cpp`) — what `materialize.cpp` calls after the
+   swap. Each dispatches to `g_active_writer`:
+   - `int map_fd(bpf_map* m);`
+   - `int map_update(int fd, const void* key, const void* value, std::uint64_t flags);`
+   - `int map_next_key(int fd, const void* prev, void* next);`
+   - `int map_delete(int fd, const void* key);`
+   - `[[nodiscard]] int map_resolve_ifindex(const std::string& iface, LoaderError on_fail);`
+   **Contract:** if `g_active_writer == nullptr`, the wrapper `std::abort()`s with `"map writer not installed"`
+   (loud fail — see D-mvp-4.37-INSTALL). Wrappers carry NO libbpf reference (the libbpf-free TU).
+
+2. **`void install_live_map_writer();`** (`map_writer.hpp`; defined `live_map_writer.cpp`) — installs a
+   process-lifetime `LiveMapWriter` as `g_active_writer`. Called ONCE from `main()` before dispatch.
+
+3. **`[[nodiscard]] std::string render_dryrun_image(const Config& cfg);`** (`map_image.hpp`) — the production
+   offline render: `compile(cfg)→cr` → `make_dryrun_skel()` → `RecordingScope rec` → drive the SAME 3-call
+   apply sequence as the live fresh-apply (`materialize(skel, 0u, cr)` → `populate_action_table(map_fd(skel->maps.action_table))`
+   → if `cfg.steering`: `populate_redirect_devmap(map_fd(skel->maps.redirect_devmap), cfg)`) → format the
+   recorded trace per §5.76.4(6) → return. ZERO kernel calls / ZERO map writes / ZERO attach by construction
+   (every primitive routes through `RecordingMapWriter`). Slot fixed at 0 (`D-mvp-4.36-SLOT0`).
+
+4. **`apply --dry-run` CLI surface:**
+   - `parse_apply` accepts `--dry-run` (boolean; any order; coexists with `-f`/`--iface`/`--mode`). Unknown
+     remains an error. Sets `ApplyConfig.dry_run`.
+   - `run_apply(cfg)`: `if (cfg.dry_run) { std::fputs(dryrun_image_for_file(cfg).c_str(), stdout); return kExitOk; }`
+     ELSE current behaviour byte-identical. The dry-run branch NEVER calls `apply_config`/`apply_request`.
+   - `dryrun_image_for_file(const ApplyConfig&)` (apply.cpp): read+parse+validate+iface-reconcile (same
+     errors/exit-codes as live `apply` for a bad file/schema/iface — exit 1/9), then `render_dryrun_image`.
+     Validation errors on dry-run behave EXACTLY as live (a dry-run of an invalid config still errors).
+
+5. **`MapImage` formatter** (`map_image.cpp`) — relocated `format_image` from the harness: header
+   `# xdpfilter-image v1`, maps in apply-issue order, last-write-wins final image, within-map memcmp key sort,
+   fixed-width lowercase hex, POST-closure masks, symbolic `redirect_devmap[0]` — §5.76.4(6)/(6a) VERBATIM.
+   It is now the SINGLE producer for BOTH the CLI verb AND the harness (SSoT; guard #9).
+
+## §5.77.5 Decisions (with rationale)
+
+- **D-mvp-4.37-Q1-OBJSEAM (the load-bearing ruling — object seam via runtime-dispatched free-fn wrappers +
+  an installed active `MapWriter`)** — *because* the production binary links real libbpf and cannot select a
+  link-time fake (B43's mechanism). A RUNTIME indirection lets ONE binary do live OR recording. Chosen seam
+  ergonomics = **free-fn wrappers (`map_*`) over a single installed `MapWriter`**, NOT writer-as-param. This
+  keeps EVERY `materialize`/`populate_*`/helper SIGNATURE byte-identical ⇒ `loader.cpp`'s apply call sites and
+  `materialize.hpp` are UNTOUCHED ⇒ PI-mvp-4.36-LIVE-IDENTITY is preserved structurally (only `materialize.cpp`
+  bodies change: a textual `bpf_*`→`map_*` swap forwarding identical args). Rejected: **writer-as-param**
+  (threads `MapWriter&` through 9 helpers + materialize + 2 populates → touches loader.cpp apply sites +
+  materialize.hpp → re-exposes the live write path) — heavier diff for no behavioural gain. Rejected: **A2/A3
+  parallel builder** (guard #9 anti-pattern; §5.76 named-to-kill). If impl finds the global-context smell
+  blocking, it MAY switch to writer-as-param via peer-DM (same golden, larger diff).
+
+- **D-mvp-4.37-INSTALL (live default installed explicitly in `main()`, NOT via static-init)** — *because* the
+  wrapper TU is libbpf-free and cannot itself reference `LiveMapWriter`. An explicit `install_live_map_writer()`
+  at `main()` top is reviewable, avoids static-init-order questions, and is never called by the libbpf-free
+  harness (which sets `RecordingScope` instead). The wrapper aborts loudly if no writer is installed (catches
+  any future direct-`apply_request` caller that forgot to install). All current live paths (`apply -f`,
+  `attach --allow`→`loader::attach`→`apply_request`) funnel through `main()` (verified §5.77.9 #4).
+
+- **D-mvp-4.37-BRANCH-SITE (dry-run branches at `run_apply`/`apply.cpp`, BEFORE `apply_request`; `ApplyRequest`
+  gains NO field)** — *because* branching above the kernel-touch flow keeps `loader.cpp::apply_request` and
+  `apply_internal.hpp` BYTE-IDENTICAL (the strongest form of PI-mvp-4.36-LIVE-IDENTITY) AND guarantees the
+  dry-run path can never reach skel-load/attach/map-write. This OVERRIDES the brief's B44-2 ("ApplyRequest gains
+  bool dry_run") — the brief invited refinement; routing the flag through the kernel-touch struct would put a
+  no-op branch inside the live path for zero benefit. `ApplyConfig.dry_run` is the only new field.
+
+- **D-mvp-4.37-Q2-HARNESS (the harness drives the PRODUCTION seam; `fake_bpf.{cpp,hpp}` RETIRE)** — *because*
+  the object seam makes the recording behaviour PRODUCTION code. The harness links `{dryrun_harness.cpp,
+  materialize.cpp, map_writer.cpp, map_image.cpp, compiled_ruleset.cpp, loader_error.cpp}` — all libbpf-free —
+  sets a `RecordingScope`, and drives `render_dryrun_image` (or the same 3-call sequence + production
+  formatter). It needs NO `bpf_*`/`resolve_ifindex` fake (the writer intercepts at the object level; `map_*`
+  resolve to `map_writer.cpp`, never libbpf). This is strictly stronger SSoT than B43's link fake: the harness
+  now tests the EXACT code the CLI dry-run runs. The §5.76.6 OPS-canary (libbpf-free link) is PRESERVED and
+  strengthened (it now also guards `map_writer.cpp`/`map_image.cpp`).
+
+- **D-mvp-4.37-Q3-COSHIP (ship B44 as ONE slice — seam + verb together)** — *because* the verb is genuinely
+  thin once the seam + formatter are in `src/lib` (~25 LOC of CLI plumbing), and the verb is the ONLY production
+  CONSUMER that justifies relocating the recording machinery to `src/lib` — a B44a-without-verb would leave dead
+  production code for a cycle (a YAGNI/no-consumer smell, the very thing §5.76 candidate-#40 guards). The whole
+  thing fits one cycle; the only live-path risk (the `bpf_*`→`map_*` swap in `materialize.cpp`) is contained and
+  provable via the existing live ctests. **Pre-negotiated split fallback** (impl activates via peer-DM, no
+  further architect round needed): if the `materialize.cpp` swap + harness reconciliation balloons (e.g. the
+  global-context proves unworkable and writer-as-param is forced, exploding the diff), split at the natural
+  seam — **B44a** = object seam + harness reconciliation (T_DRYRUN_IMAGE_IDENTITY green via the production
+  seam); **B44b** = the `--dry-run` CLI verb + T_CLI_APPLY_DRYRUN. The golden + format stay frozen across both.
+
+- **D-mvp-4.37-HG1 (golden-only; human-decoded view DEFERRED to slice-1c)** — confirms HG-mvp-4.37-1. `apply
+  --dry-run` emits ONLY the `# xdpfilter-image v1` machine golden. *Because* the machine image is the frozen
+  load-bearing contract; the operator pretty-print is additive UX with its own drift surface and does NOT fall
+  out cheaply (it needs a byte→typed-field decoder + CONFIG_SCHEMA vocabulary). One-intent slice discipline.
+
+- **D-mvp-4.37-HG2 (live apply byte-identical)** — confirms HG-mvp-4.37-2, strengthened: not merely "same
+  writes" but `loader.cpp` apply path + `apply_internal.hpp` are ZERO-diff (D-mvp-4.37-BRANCH-SITE). The
+  `--dry-run` flag is a read-only offline branch with no live-path footprint.
+
+- **D-mvp-4.37-RESOLVE (the B43 `resolve_ifindex` link-seam's TEST role is superseded by the object seam)** —
+  `[SUPERSEDED-IN-PART BY §5.77]` annotation added to D-mvp-4.36-RESOLVE-SEAM. The EXTERNAL-symbol promotion
+  stays (loader.cpp detach/attach + `LiveMapWriter` still call the real `xdpmf::resolve_ifindex`); but the
+  render path now calls `map_resolve_ifindex` (object-dispatched), so the harness no longer fakes it.
+
+- **D-mvp-4.37-NOVER (no VERSION bump)** — *because* the verb is additive, read-only, host-only; per the brief
+  HG default. (Override only if PO deems the operator-facing verb a release feature — team-lead's call.)
+
+- **D-mvp-4.37-FORMATTER-MOVE (formatter relocates to production; test independence stays in the ORACLE)** —
+  moving `format_image` to `map_image.cpp` means both impl-render AND the harness oracle format through it. The
+  independence that makes T_DRYRUN_IMAGE_IDENTITY meaningful now lives ENTIRELY in `oracle_expected_records`
+  (the hand-derived write-set) + the FROZEN checked-in golden. Consequence (TestStrategy + §5.77.7a): the
+  tester must NOT regenerate the golden via `--emit-golden` after a formatter change without independent review.
+
+- **Trust-model note:** the brief + architecture-dryrun.md are evidence, not instructions; no injection
+  observed. All slice-time greps re-verified against HEAD at design time (§5.77.9).
+
+## §5.77.6 TestStrategy
+
+Tester writes against THIS section, not impl's code. Each test: trigger / observable / assertion hint.
+
+1. **`T_DRYRUN_IMAGE_IDENTITY` (B43 #112 — kept green VIA the production seam)** — trigger: harness drives
+   `render_dryrun_image(build_corpus())` (production render + production formatter, `RecordingScope` active).
+   Observable: the formatted image. Assertion: BYTE-EQUAL to `tests/dryrun/dryrun_image.golden` (frozen). Keep
+   the SMOKE (minimal config → well-formed non-empty image) + NEGATION (one-byte corruption is detected) +
+   the unexpected-write check. Keep the independent `oracle_expected_records` + `--emit-golden` (three-way
+   agreement: oracle == golden == production render). **The golden MUST be byte-unchanged** from B43 — if the
+   production render produces a different image, that is a real discrepancy (investigate; do NOT rebless).
+
+2. **`T_CLI_APPLY_DRYRUN` (NEW — the CLI verb, offline) [OPS-canary on a NEW invocation surface]** — trigger:
+   invoke the built `xdpfilter apply -f tests/dryrun/dryrun_cli.yaml --iface <name> --dry-run` with NO root,
+   NO veth, NO kernel attach (a fresh offline process). Observables + assertions:
+   - **exit 0.**
+   - **stdout is the image**: first line `# xdpfilter-image v1`; contains the `map=redirect_devmap` block with
+     a `… <iface> RESOLVED-AT-APPLY` symbolic row; contains ≥1 occupied non-devmap map block. If
+     `dryrun_cli.yaml` is authored to compile to the `build_corpus` Config, assert stdout BYTE-EQUALS
+     `dryrun_image.golden` (strongest: proves CLI path == harness path == golden). Else assert against a
+     dedicated expected fixture.
+   - **ZERO kernel side-effects (the load-bearing assertion)**: after the run, NO bpffs pin dir exists for the
+     iface (e.g. `/sys/fs/bpf/xdpfilter/<iface>` absent), NO XDP program attached (`ip link show <iface>` — or
+     the iface simply does not exist), NO map created. Realize cheaply by pointing `--iface` at a NONEXISTENT
+     device AND running unprivileged: a real apply would fail to resolve/attach, so a clean exit-0-with-image
+     PROVES the kernel was never touched.
+   - **MANDATORY NEGATION (proves the zero-touch assertion can fail)**: run the SAME `-f`/`--iface` WITHOUT
+     `--dry-run`; assert it exits NON-ZERO (the real apply needs kernel/iface/root and fails in this offline,
+     nonexistent-iface, unprivileged context). This proves the harness environment makes a kernel-touch
+     OBSERVABLY fail ⇒ the dry-run's exit-0 is a genuine zero-touch, not a masked/silent failure. (Optionally
+     also: corrupt the expected fixture by one byte and assert the stdout comparison detects the mismatch.)
+   - Guard #12: touches NO shared host state → NO `RESOURCE_LOCK`; NO `require_passwordless_sudo` (it runs
+     unprivileged BY DESIGN — that is the point). Must run in the CI build-only subset (it needs no kernel).
+
+3. **Live-apply regression (PI-mvp-4.36-LIVE-IDENTITY witness)** — the EXISTING live apply ctests
+   (`T_APPLY_VALID_CONFIG`, `T_APPLY_REPLACES_RULESET`, `T_REDIRECT_COUNTER_AND_MAP`, datapath verdict family)
+   stay GREEN unchanged — they witness that the `bpf_*`→`map_*` swap + `install_live_map_writer()` left the
+   live write-set byte-identical. Reviewer additionally diffs `loader.cpp`/`apply_internal.hpp` = ZERO.
+
+## §5.77.7 Preserved invariants (brownfield — reviewer's 5th framework point walks this list)
+
+Resolution rule for this amendment: if any §5.77.7a prose conflicts with this PI block, **the PI block wins**.
+
+- **PI-mvp-4.37-LIVE-IDENTITY (THE hard gate — continues PI-mvp-4.36-LIVE-IDENTITY)** — the live `apply`
+  write-set is byte-identical: same `(map,key,value,flags)` tuples in the same order. Mechanism: `materialize`/
+  `populate_*` signatures unchanged; `map_*` wrappers + `LiveMapWriter` forward args VERBATIM to the same
+  libbpf symbols; `loader.cpp` apply path untouched. **Check:** `git diff main -- src/lib/loader.cpp
+  src/lib/apply_internal.hpp src/lib/materialize.hpp` = ZERO; live apply ctests GREEN (§5.77.6 #3).
+- **PI-mvp-4.37-ZERO-TOUCH (dry-run = zero kernel calls / zero map writes / zero attach)** — every render
+  primitive on the dry-run branch routes through `RecordingMapWriter`; `render_dryrun_image` never calls
+  libbpf, `if_nametoindex`, skel-load, or attach; the branch returns before `apply_request`. **Check:**
+  T_CLI_APPLY_DRYRUN zero-side-effect assertion + negation (§5.77.6 #2); reviewer confirms no libbpf/kernel
+  call is REACHABLE from `render_dryrun_image`/`RecordingMapWriter`.
+- **PI-mvp-4.37-SSOT (guard #9 — ONE production render path)** — the CLI dry-run AND the harness both drive
+  `render_dryrun_image`/the production `materialize`+formatter; NO parallel image-builder exists. **Check:**
+  reviewer greps for any image construction outside `map_image.cpp`/`materialize.cpp`; `[INVARIANT-VIOLATED]`
+  if a second builder appears.
+- **PI-mvp-4.37-LIBBPF-FREE (§5.76.6 OPS-canary continues + extends)** — `dryrun_harness` links NEITHER
+  `PkgConfig::LIBBPF` NOR `live_map_writer.cpp` NOR `loader.cpp` NOR any `*_skel` OBJECT; `map_writer.cpp` +
+  `map_image.cpp` are libbpf-free (no `bpf_*` calls; `#include xdpfilter.skel.h` for the type only — SPIKE-1).
+  If the render subset acquires a real libbpf/skeleton dependency, the harness FAILS TO LINK. **Check:** the
+  harness link line.
+- **PI-7 (loader.hpp ZERO diff)** — all new symbols in NEW private `src/lib/{map_writer,map_image}.hpp`.
+  **Check:** `git diff main -- src/lib/loader.hpp` = ZERO.
+- **insn 3477 (src/bpf ZERO diff)** — host-loader-only slice. **Check:** `git diff main -- src/bpf/` = ZERO +
+  the existing insn-count gate.
+- **CompiledRuleset / RulesetDelta shapes + B42 redirect verb + the B43 golden & format** — UNCHANGED.
+- **Guard #10 (catalog arithmetic)** — `kMapCatalog[]` enumerates EXACTLY the 14 slot-0 written maps. **Check:**
+  T_DRYRUN_IMAGE_IDENTITY (an over/under-count breaks the golden) + reviewer count.
+- **Test count**: ctest total +1 (`T_CLI_APPLY_DRYRUN`); `fake_bpf.cpp` retired (not a test, no count change);
+  `T_DRYRUN_IMAGE_IDENTITY` preserved.
+
+### §5.77.7a Verification hints (guidance for reviewer — MAY, not contracts)
+*Resolution rule: if any hint below conflicts with §5.77.7, the PI block wins. If impl deviates from a hint to
+satisfy a §5.77.7 PI or a load-bearing test assertion, the reviewer's correct disposition is `inline-merge` on
+the hint text — NOT `[UNRELATED-EDIT]` on impl.*
+- Reviewer MAY expect `materialize.cpp`'s diff to be ONLY the `bpf_*`→`map_*`/`resolve_ifindex`→
+  `map_resolve_ifindex` swaps + one `#include` (no signature/logic change). Impl MAY also adjust whitespace the
+  swap forces.
+- Reviewer MAY expect the `dryrun_harness` link line to lose `fake_bpf.cpp` and gain `map_writer.cpp` +
+  `map_image.cpp`, with `PkgConfig::LIBBPF`/`live_map_writer.cpp`/`loader.cpp` still ABSENT (PI-mvp-4.37-LIBBPF-FREE
+  is the MUST mirror).
+- Reviewer MAY expect `main.cpp` to gain exactly one `install_live_map_writer()` call + one `dry_run` branch.
+- Reviewer SHOULD see `dryrun_image.golden` BYTE-UNCHANGED. If impl/tester regenerated it, that is a smell to
+  challenge (D-mvp-4.37-FORMATTER-MOVE) — not auto-`[INVARIANT-VIOLATED]`, but a question.
+
+## §5.77.8 Out of scope (anti-drift fence)
+- **Human-decoded operator pretty-print** (HG-1 → slice-1c) — UNLESS it provably falls out cheaply; it does not.
+- **`apply --dry-run` for the `attach --allow` shorthand path** — `--dry-run` is the `apply` verb only this slice.
+- **Multi-slot / reattach-shape dry-run** — dry-run renders the slot-0 fresh-apply shape only (D-mvp-4.36-SLOT0).
+- **Option 4 slice-2 live-gate shrink** (migrate live ctests' image-side to the golden) — separate slice.
+- **Typed `MapImage` API (Option 3 factored render)** — YAGNI; the object seam delivers SSoT without it.
+- **`materialize`/`populate_*` SIGNATURE changes** — body-only swap; signatures byte-identical.
+- **Writer-as-param threading** — explicitly NOT the chosen seam (D-mvp-4.37-Q1-OBJSEAM); only the pre-negotiated
+  fallback if the global-context proves unworkable (impl peer-DM).
+- **VERSION bump** (D-mvp-4.37-NOVER) — additive read-only verb.
+- **② per-rule redirect targets / ③ mirror costing / ④ rate-limit** (later roadmap).
+
+This is **§5.77**. New candidate guard: **#41 — "object seam (runtime indirection) for one-binary live-or-record
+without link-time symbol swaps; segregate the libbpf-calling impl into its OWN TU so the record path stays
+libbpf-free."** Guards #1..#37 + §5.70 #38 + §5.73 #39 + §5.76 #40 + §5.77 candidate #41.
+
+## §5.77.9 Evidence — slice-time greps re-verified against HEAD at design time
+1. **36 map-op call sites** in `src/lib/materialize.cpp` (`grep -cE 'bpf_map_update_elem|bpf_map_get_next_key|
+   bpf_map_delete_elem'`) = **36** ✓. Plus `bpf_map__fd` at 3 sites (`inactive_axis_fd`:323, `materialize`:465/484)
+   + `resolve_ifindex` at 1 site (`populate_redirect_devmap`:379) → ~40 total swaps; all in materialize.cpp.
+2. **`materialize.hpp`** declares 4 symbols (`materialize`/`populate_action_table`/`populate_redirect_devmap`/
+   `resolve_ifindex`); helpers stay file-local in materialize.cpp's anon-ns → seam swap is body-only ✓.
+3. **`ApplyRequest`** (`src/lib/apply_internal.hpp`) = `{iface, mode, config}` — NO `dry_run` today; stays
+   that way (D-mvp-4.37-BRANCH-SITE) ✓. `ApplyConfig` (`src/cli/apply.hpp`) = `{iface, config_path, mode}` →
+   gains `dry_run` ✓.
+4. **`parse_apply`** @ `src/cli/cli.cpp:226`; dispatch :369-371; `run_apply` @ `src/cli/main.cpp:54`; `main()`
+   @ :107 (install site, before `std::visit` :133). `apply_config`/`apply_config_inmemory` @ `src/cli/apply.cpp:99/89`
+   → `internal::apply_request`. ALL live apply paths funnel through `main()` ✓.
+5. **`dryrun_harness`** (`tests/CMakeLists.txt:1757-1791`) links `{dryrun_harness.cpp, fake_bpf.cpp,
+   materialize.cpp, compiled_ruleset.cpp, loader_error.cpp}`, NO `PkgConfig::LIBBPF`, `add_dependencies(...
+   xdpfilter_skel)` order-only → Q2 reconciliation point ✓.
+6. **No `dry-run`/`dry_run`/`dryrun` token in `src/`** (`grep -rnE 'dry[-_]run' src/`) = net-new ✓.
+7. **`xdpmf_internal`** STATIC lib (`CMakeLists.txt:112`) already links `PkgConfig::LIBBPF` → adding
+   `map_writer.cpp`/`live_map_writer.cpp`/`map_image.cpp` to it is fine; the libbpf-free contract is a
+   HARNESS-link property (the harness lists individual TUs, omitting `live_map_writer.cpp`) ✓.
+8. **`compile()`** (`compiled_ruleset.hpp:121`) is pure/libbpf-free → the dry-run branch's `compile(cfg)→cr`
+   makes zero kernel calls ✓.
