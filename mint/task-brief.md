@@ -1,193 +1,155 @@
-# Task brief — MVP-4.36 / B43: `dryrun_harness` — offline map-image golden (Option 1 "Recording-fake floor", GOLDEN-ONLY) (brownfield, test-infra + pure-move)
+# Task brief — MVP-4.37 / B44: `apply --dry-run` — production offline map-image render (brownfield)
 
 ## Goal
 
-Roadmap item ① slice 1 (PO Dmitry, locked 2026-06-05; design `mint/architecture-dryrun.md`,
-mint-hld round 2026-06-06, reviewer pass r2 / grounder clean-with-gates). Close the last
-host-side correctness gap: the step between `CompiledRuleset` and the kernel — `materialize()` —
-is today welded to a live `xdpfilter_bpf*` skeleton and so is tested ONLY live (netns+root+BPF).
-This slice renders the **map-image** (`compile()` → `materialize` write-set) **offline** and
-asserts it against a canonical golden, moving the "config → map-image" correctness class to a
-CI-green libbpf-free harness in the `compile_harness`/`ruleset_delta_harness` mold — advancing the
-B39 CI boundary one stage toward the kernel.
+Roadmap-① slice 1b (PO Dmitry): ship the literally-named **`apply --dry-run`** — print the would-be
+map-image OFFLINE (zero kernel calls, zero map writes, zero attach) and exit 0. B43/§5.76 shipped the
+offline GOLDEN + the extracted libbpf-free `materialize.cpp`, but it produces the image via a
+**TEST-ONLY link-seam** (the `dryrun_harness` links a fake `bpf_map__fd`/`bpf_map_*_elem` against
+`materialize.cpp`). The PRODUCTION CLI binary links REAL libbpf, so it **cannot reuse that link-seam** —
+it needs a PRODUCTION runtime mechanism to render the same `# xdpfilter-image v1` image without touching
+the kernel. **That render mechanism is the load-bearing design fork of this slice** (Q1); the CLI verb
+itself is thin on top of it.
 
-**PO ruling ① (baked):** slice 1 is **GOLDEN-ONLY, NO `apply --dry-run` CLI verb.** The CLI verb +
-human-decoded operator view share the same underlying image and are a zero-rework follow-on
-(slice 1b). Do NOT add a CLI verb or a human pretty-printer this slice.
-
-**SPIKE-1 = PASS (already discharged, 2026-06-06):** a C++ TU including the real
-`build/xdpfilter.skel.h` for the `xdpfilter_bpf` type + `skel->maps.*` derefs, exercising the full
-render libbpf surface, **links to a running executable with fake symbols and NO `-lbpf`** (skel's
-libbpf-calling fns are all `inline` → unreferenced include emits zero libbpf symbols). Option 1
-holds at low-risk; no degrade to the Option 3 factored-`render()` rewrite. The harness uses a
-**fake `xdpfilter_bpf*` + fake `bpf_map__fd`** (returning fd-tags), not a real skeleton.
+The output content is already fixed (B43 ruling B: faithful dense final map-image, `# xdpfilter-image v1`,
+§5.76.4(6a)). This slice does NOT redesign the format — it builds the production path that emits it and
+the `--dry-run` verb that triggers it, and reconciles the B43 harness to drive the SAME production path
+(stronger SSoT than B43's test-only fake).
 
 ## Context: prior work
 
-- Prior brief: MVP-4.35/B42 redirect verb → archived `mint/task-brief-mvp-4.35.md`.
-- Design to amend: `mint/design.md` (append a new §5.76); architecture `mint/architecture-dryrun.md`
-  (carries the full synthesis + discharge ledger + the SPIKE-1 PASS result).
-- Precedent harnesses: `tests/compile/compile_harness.cpp` (`T_COMPILE_LOWERING_IDENTITY`) and
-  `tests/delta/ruleset_delta_harness.cpp` (`T_RULESET_DELTA_TRUTHTABLE`) — bare-main, no gtest,
-  **libbpf-free link IS the contract**, independent oracle + mandatory NEGATION + SMOKE.
-- Brief-author Phase 2 greps (all confirmed against current code):
-  - NEW paths absent: `src/lib/materialize.{cpp,hpp}`, `tests/dryrun/` ✓
-  - The 3-call apply write-set sequence verified at BOTH apply branches:
-    `materialize` (loader.cpp:2136 / 2258) → `populate_action_table` (2146 / 2266) →
-    `populate_redirect_devmap` (2154 / 2273); `copy_rule_counters_forward` (2188 / 2293) is
-    OUTSIDE and EXCLUDED (reads the live old-active inner — irreducibly live).
-  - LPM closure: `const std::vector<std::uint64_t> closed = close_fn(prefixes)` at
-    `populate_bitvec_inner_slot` (loader.cpp:1266); `cr.<axis>.prefixes` carry the PRE-closure
-    bits → the golden MUST serialize POST-closure masks (this fact kills any "print
-    `CompiledRuleset`" oracle — confirmed `close_prefixes`/`close_prefixes6` still vector-of-u64).
-  - Error-machinery cluster (the extraction wrinkle): render helpers live in the loader.cpp
-    anon-namespace (`namespace {` at :78) and call `throw_loader` (:350) / `classify` (:341) on
-    map-op failure; those use `LoaderError` + `loader_error_category()` defined at
-    `LoaderCategory` (loader.cpp:319) / `loader_error_category()` (loader.cpp:1769) /
-    `loader.hpp:43-57`. This machinery is **host-only `std::error_category`, NOT libbpf** — but it
-    currently sits in loader.cpp, so materialize.cpp must reach it WITHOUT linking the rest of
-    loader.cpp (which would drag libbpf attach/load code). See Q1.
-  - Render subset (loader.cpp:1180-1715) touches **ZERO** `bpf_object__`/`skeleton`/
-    `bpf_program__` symbols — the only libbpf surface is flat map-op syscall wrappers
-    (`bpf_map__fd`, `bpf_map_update_elem`, `bpf_map_delete_elem`, `bpf_map_get_next_key`,
-    `bpf_map_lookup_elem`, `bpf_num_possible_cpus`) — all fakeable.
-  - insn baseline **3477** confirmed in `T_INSN_BASELINE_GATE.sh:73` + `T_PROD_VERIFIER_LOAD.sh:127`.
-  - NO VERSION bump this slice (additive test-infra + an internal host-side move; no datapath,
-    behavior, schema, or feature-surface change).
-- PI continuity: PI-7 loader.hpp zero-diff streak continues (keep the loader.hpp PUBLIC surface
-  stable — prefer the new `materialize.hpp`, Q2); PI-mvp-4.35-VERDICT-IDENTITY + insn-3477 +
-  CompiledRuleset/RulesetDelta shapes preserved.
+- Prior brief: MVP-4.36/B43 `dryrun_harness` → archived `mint/task-brief-mvp-4.36.md`.
+- Design to amend: `mint/design.md` (append §5.77); architecture `mint/architecture-dryrun.md` (the HLD
+  image-render lens already scored the render-mechanism options — carry forward, NO new `/mint-hld`).
+- Brief-author Phase 2 greps (confirmed against current code):
+  - `materialize.cpp` has **36 map-op call sites** (`bpf_map_update_elem`/`get_next_key`/`delete_elem`)
+    across 9 render helpers (`populate_hash/bitvec/port_inner_slot`, `write_ruleset_state`,
+    `populate_rules_inner_slot`, `write_slot_rule_id`, `inactive_axis_fd`, `populate_action_table`,
+    `populate_redirect_devmap`) + `materialize` — these are the seam insertion points the writer
+    abstraction must thread.
+  - `struct ApplyRequest` (`src/lib/apply_internal.hpp`) = `{iface, mode, config}` — **no `dry_run`
+    field today** (clean addition).
+  - `parse_apply` at `src/cli/cli.cpp:226`; dispatch at `:370`.
+  - `dryrun_harness` (tests/CMakeLists.txt) compiles `{dryrun_harness.cpp, fake_bpf.cpp,
+    materialize.cpp, compiled_ruleset.cpp, loader_error.cpp}` — the harness↔production-seam
+    reconciliation point.
+  - **No `dry-run`/`dry_run` token anywhere in `src/`** — net-new surface.
+- PI continuity: PI-7 (loader.hpp ∅), PI-mvp-4.36-LIVE-IDENTITY (live apply writes byte-identical),
+  insn 3477 (src/bpf ∅ — host-loader-only slice), the B43 golden + `T_DRYRUN_IMAGE_IDENTITY` (#112).
 
 ## Workflow rules (brownfield)
 
-- **Architect (Phase A):** read `mint/architecture-dryrun.md` (Option 1 + PO rulings + SPIKE-1
-  result + discharge ledger), `mint/design.md` §5.73 (CompiledRuleset/materialize) + §5.74
-  (RulesetDelta) + §6.5 invariants. Independently re-run the Phase 2 greps (esp. the error-machinery
-  cluster + the 3-call sequence). EDIT `design.md` in place, append **§5.76**. Resolve Q1/Q2/Q3 with
-  evidence; may override the HG golden-format defaults with rationale.
-- **Impl:** the FileList's ONLY production edit is the materialize/render extraction (a near-pure
-  move mirroring B40/B34b) + whatever shared error-machinery factoring Q1 settles. Everything else
-  is NEW test infra.
-- **Tester:** NEW `T_DRYRUN_IMAGE_IDENTITY` (libbpf-free ctest, no fixture/veth/root). Mandatory
-  SMOKE (a minimal config renders a sane image) + NEGATION (the comparator can actually FAIL).
-- **Reviewer:** 5-point brownfield. Special attention: (a) the move is byte-identity-preserving for
-  the LIVE path (loader.cpp's apply still produces the same writes — prove via the existing live
-  ctests + diff vs HEAD); (b) the harness link is genuinely libbpf-free (no `PkgConfig::LIBBPF`, no
-  `*_skel` dep); (c) the golden is deterministic (single source of truth — guard #9 — the harness
-  drives the SAME `materialize`+`populate_action_table`+`populate_redirect_devmap` the live path
-  calls, NOT a parallel image-builder).
+- **Architect (Phase A):** read `mint/architecture-dryrun.md` (image-render lens) + `mint/design.md`
+  §5.76 (materialize/B43) + §6.5 invariants. Re-run the Phase-2 greps (esp. the 36 call sites + the
+  harness link). EDIT `design.md`, append **§5.77**. Resolve Q1 (render mechanism) + Q2 (harness
+  reconciliation) + Q3 (slice a/b split or co-ship) with evidence. **Architect owns realizability —
+  the brief frames the fork; the architect picks the seam shape.**
+- **Impl:** the production render seam + the CLI verb per the resolved design. The live apply path must
+  stay byte-identical (the seam's live writer issues the SAME `bpf_map_update_elem (map,key,value)`
+  tuples).
+- **Tester:** keep `T_DRYRUN_IMAGE_IDENTITY` green (now ideally via the production seam); ADD a CLI-level
+  test of `apply --dry-run` (a no-kernel offline invocation asserting the printed image + exit 0 + that
+  NO map/attach happened — e.g. no bpffs pin created). MANDATORY: the dry-run-makes-zero-kernel-calls
+  assertion, plus a NEGATION proving the assertion can fail.
+- **Reviewer:** 5-point brownfield. Special attention: SSoT/guard-#9 (the production render drives the
+  SAME `materialize`, not a parallel image-builder — the CLI dry-run and the harness must both route
+  through the one production render path), PI-mvp-4.36-LIVE-IDENTITY (live writes byte-identical — diff
+  the live apply path), the dry-run path makes ZERO kernel calls (no `bpf_map_update_elem`/attach
+  reachable on the dry-run branch).
 
 ## Human-gate decisions (defaults applied — architect overrides at Phase A)
 
-### HG-mvp-4.36-1: golden format → **`# xdpfilter-image v1` canonical text** (default)
-Fixed apply-write-set **map order** (the live call order: the 9 match axes + ruleset_state + rules
-+ slot_rule_id as `materialize` issues them, THEN `action_table`, THEN `redirect_devmap`);
-**within-map** rows sorted by stored-key bytes; each row fixed-width hex of the stored key+value
-bytes; LPM masks are **POST-closure**; the devmap target ifindex is rendered **symbolically**
-(`<name> RESOLVED-AT-APPLY`), never a live ifindex. Occupied-writes-only (the bulk-clear
-`get_next_key`→`delete` traffic is excluded as kernel-state-dependent — confirm it carries no
-config→image truth). Architect may refine the exact textual shape but MUST preserve: post-closure
-masks, deterministic ordering, symbolic ifindex, zero kernel calls.
+### HG-mvp-4.37-1: output representation → **machine golden only** (`# xdpfilter-image v1`)
+`apply --dry-run` emits the B43 golden format to stdout (default). The HUMAN-decoded operator
+pretty-print (typed fields, CONFIG_SCHEMA vocabulary) is a SEPARATE concern → **defer to a thin
+slice-1c** to keep THIS slice one-intent (the production render mechanism is the real work), UNLESS the
+architect finds the human view falls out cheaply. Rationale: one-intent slice discipline; the machine
+golden is the load-bearing contract (already frozen by B43); the human view is additive UX with its own
+drift surface.
 
-### HG-mvp-4.36-2: image scope → **FULL apply write-set** (default, grounded)
-The golden covers `materialize`'s body PLUS `action_table` + `redirect_devmap` (issued at the apply
-call-sites, NOT inside materialize — verified 2146/2154/2266/2273). `copy_rule_counters_forward` is
-EXCLUDED (reads the live old-active inner). This is why the harness drives the 3-call sequence, not
-`materialize` alone.
+### HG-mvp-4.37-2: live apply behavior → **unchanged** (PO ruling)
+The `--dry-run` flag is a read-only offline branch. Non-dry-run `apply` behavior is byte-identical to
+today (the writer seam's live path = the current direct `bpf_map_update_elem` calls).
 
-## Open mechanism questions (architect decides; document in §5.76)
+## Open mechanism questions (architect decides; document in §5.77)
 
-### Q1: how materialize.cpp reaches the error-machinery without dragging libbpf
-- **A1 (recommended):** extract the host-only error machinery (`LoaderError` is already in
-  loader.hpp; move `LoaderCategory`/`loader_error_category()`/`throw_loader`/`classify` into a
-  shared **libbpf-free** TU, e.g. `src/lib/loader_error.{hpp,cpp}`), linked by loader.cpp AND
-  materialize.cpp AND the harness. Clean SSoT; no duplication (these are not values — guard #9's
-  duplicate-don't-share rule does NOT apply to a `std::error_category` singleton/throw helper).
-- **A2:** keep `throw_loader`/`classify` as a tiny inline header shim over `loader_error_category()`
-  (still needs the category symbol in the link set).
-- **A3 (reject):** link materialize.cpp against the whole loader.cpp object → drags libbpf attach
-  code → breaks the libbpf-free contract. Named only to kill.
-- **Recommendation:** A1 — smallest libbpf-free link set, mirrors the B40 `compiled_ruleset.cpp`
-  extraction discipline. The architect confirms exactly which symbols the render subset references
-  and sizes the shared TU.
+### Q1: the production offline-render mechanism (THE load-bearing fork)
+How does the production CLI render the image without the kernel (it cannot link the B43 test fake)?
+- **A1 — object-seam (recommended):** introduce a thin `MapWriter`/`MapSink` abstraction (fn-ptr struct
+  or small interface) that the 9 render helpers + `materialize` call instead of `bpf_map_update_elem`/
+  `get_next_key`/`delete_elem` directly (36 call sites). The **LIVE writer** forwards to the real
+  `bpf_map_*` (byte-identical writes → PI-mvp-4.36-LIVE-IDENTITY preserved); the **DRY-RUN writer**
+  records the ordered `(map,key,value)` trace. The recording writer + the image FORMATTER move into
+  `src/lib` (production) so BOTH the CLI dry-run AND the B43 harness consume ONE production render path.
+  Cost: ~36 call-site swaps + a signature thread through ~9 helpers + 2 writer impls. **Architect owns
+  the exact seam shape** (writer-as-param vs a threaded context vs a `map_update()` wrapper free-fn);
+  the brief does NOT prescribe the BPF/C++ mechanism.
+- **A2 — factored render→MapImage:** pure `render(cr, slot, ifindex) -> MapImage`; the live path
+  iterates the image issuing `bpf_map_update_elem`. Bigger refactor (HLD Option 3, deferred YAGNI);
+  re-exposes live write-order to re-proof.
+- **A3 — REJECT (parallel builder):** the CLI computes the image from `cr` via a reimplementation. This
+  is the guard-#9 anti-pattern (a fiction that drifts from `materialize`). Named only to kill.
+- **Recommendation:** A1 — smallest change that keeps the live path byte-identical AND unifies test+prod
+  render (SSoT win). Architect confirms the 36-site count + picks the seam ergonomics.
 
-### Q2: materialize.cpp public surface
-- **A1 (recommended):** new `src/lib/materialize.hpp` declaring `materialize`,
-  `populate_action_table`, `populate_redirect_devmap` (+ any helper the harness must call),
-  included by BOTH loader.cpp (live apply) and the harness. The populate_* render helpers stay
-  internal to materialize.cpp's anon-namespace except the three the apply sequence needs.
-- **A2:** declare them in loader.hpp. (Risks PI-7 loader.hpp zero-diff streak — prefer A1.)
-- **Recommendation:** A1, protecting the PI-7 streak.
+### Q2: B43 harness reconciliation
+With the production recording writer in `src/lib`, does the `dryrun_harness` retire/shrink its test-only
+`fake_bpf` and drive the production seam directly?
+- **Recommendation:** YES where the production seam subsumes the fake — the harness should test the
+  PRODUCTION render path (stronger than a test-only fake). Keep `T_DRYRUN_IMAGE_IDENTITY` green; the
+  `fake_bpf` may shrink to only what the production seam doesn't cover (e.g. the fake skel's `bpf_map__fd`
+  tag mapping, if still needed). Architect scopes the exact retirement.
 
-### Q3: fake-skel + fd-tag scheme
-- The fake `bpf_map__fd(skel->maps.X)` must return a stable per-map tag the recording sink decodes
-  back to a map name + key/value sizes. Architect designs the tag table (a fixed enum or a
-  `constexpr` map-descriptor array). The fake `xdpfilter_bpf` is a zeroed struct whose `maps.X`
-  pointers are set to sentinel tags. Recommendation: a single `constexpr` descriptor table
-  (`{tag → name, key_sz, val_sz}`) the sink and the fake `bpf_map__fd` share — guard #10 catalog
-  arithmetic applies (the table must enumerate exactly the maps the write-set touches).
+### Q3: slice a/b split vs co-ship
+The mechanism (Q1, ~90% of the work) and the thin `--dry-run` CLI verb could split:
+- **B44a** = the production render-seam + harness reconciliation (no CLI verb); **B44b** = the thin verb.
+- OR co-ship both as one slice if the verb is genuinely thin once the seam exists.
+- **Recommendation:** architect's call on sizing — co-ship IF the verb is thin once the seam lands; SPLIT
+  if the object-seam refactor (36 sites + harness) is already a full slice. Do NOT bundle the human view
+  (HG-1) regardless.
 
-## Scope (cycle B43 — concrete items)
+## Scope (cycle B44 — concrete items; architect refines)
 
-### Item B43-1 — extract `materialize` + render helpers into libbpf-free `src/lib/materialize.{hpp,cpp}`
-**Where:** NEW `src/lib/materialize.cpp` (+ `.hpp` per Q2-A1); EDIT `src/lib/loader.cpp` (remove the
-moved code, `#include "materialize.hpp"`, keep the apply call-sites calling the now-external
-symbols). Near-pure move (B40/B34b precedent): `materialize` (loader.cpp:1637) + the `populate_*` /
-`write_*` render helpers it calls + `populate_action_table` + `populate_redirect_devmap`. Per Q1,
-the error machinery moves to its own shared TU first. **The LIVE apply path must produce
-byte-identical writes** (prove via existing live ctests + `git diff` of the apply logic = pure
-relocation).
+### Item B44-1 — production offline-render seam (the Q1 mechanism)
+**Where**: `src/lib/materialize.{cpp,hpp}` (the writer abstraction + thread it through the 9 helpers +
+`materialize`), NEW production recording-writer + image formatter in `src/lib` (e.g.
+`map_image.{hpp,cpp}` or folded into materialize — architect's call). The LIVE path stays byte-identical.
 
-### Item B43-2 — `tests/dryrun/dryrun_harness.cpp` + fake-bpf sink
-**Where:** NEW `tests/dryrun/dryrun_harness.cpp`, NEW fake-bpf TU (recording
-`bpf_map_update_elem`/`delete_elem`/`get_next_key`/`bpf_map__fd`/`bpf_num_possible_cpus` +
-`resolve_ifindex` stub), NEW fd-tag descriptor table (Q3). The harness: builds an in-memory `Config`
-corpus (exercise LPM-closure, a same-key HASH aggregation, a port range, an unconstrained-axis
-wildcard, ≥1 Pass + ≥1 Drop, AND a `steering: redirect` rule so `action_table`+`redirect_devmap`
-are non-trivial), runs `compile()` → `cr`, then drives the **3-call sequence**
-`materialize(fake_skel, slot, cr)` → `populate_action_table(at_fd)` →
-`populate_redirect_devmap(dm_fd, config)`, captures the recorded write-set, formats it per the
-golden spec, and compares.
+### Item B44-2 — `apply --dry-run` CLI verb
+**Where**: `src/cli/cli.cpp` (`parse_apply` @:226 — accept `--dry-run`), `src/lib/apply_internal.hpp`
+(`ApplyRequest` gains `bool dry_run`), the apply entry (on dry-run: `compile()`→`cr`, run the render via
+the recording writer, format, print to stdout, exit 0 — BEFORE any skeleton load/attach/map write).
 
-### Item B43-3 — golden fixture + `T_DRYRUN_IMAGE_IDENTITY` ctest (libbpf-free)
-**Where:** NEW golden fixture (under `tests/dryrun/` or `tests/fixtures/`), EDIT
-`tests/CMakeLists.txt` (add the `dryrun_harness` executable + `T_DRYRUN_IMAGE_IDENTITY` test, wired
-EXACTLY like `compile_harness`: links `{materialize.cpp, compiled_ruleset.cpp, loader_error.cpp,
-fake-bpf TU}` ONLY, **no `PkgConfig::LIBBPF`, no `*_skel` dep, no `RESOURCE_LOCK`, no
-`XDPMF_CI_BUILD_ONLY` skip**). Mandatory SMOKE + NEGATION controls inside the harness.
+### Item B44-3 — harness reconciliation + CLI test
+**Where**: `tests/dryrun/*` + `tests/CMakeLists.txt` (Q2: harness drives the production seam, `fake_bpf`
+shrinks), NEW CLI-level ctest for `apply --dry-run` (offline, asserts printed image + exit 0 + zero
+kernel side-effects + NEGATION).
 
 ## Out of scope (explicit)
 
-- **`apply --dry-run` CLI verb + human-decoded operator view** (PO ruling ① → slice 1b follow-on;
-  same underlying image, zero rework).
-- **Option 4 slice-2 bounded gate-shrink** (migrate the image-side of genuinely-split live ctests —
-  `T_APPLY_VALID_CONFIG`/`T_APPLY_REPLACES_RULESET`/`T_REDIRECT_COUNTER_AND_MAP` — and thin them).
-  A separate slice AFTER the golden format freezes; this slice is purely ADDITIVE coverage,
-  touches NO existing live ctest.
-- **Typed `MapImage` API / factored `render()`** (Option 3 — YAGNI, no consumer; link-seam gives
-  SSoT). Not unless SPIKE-1 had failed (it passed).
-- **`copy_rule_counters_forward` in the image** (irreducibly live — reads old-active inner).
-- **VERSION bump** (no behavior/feature change).
+- **Human-decoded operator pretty-print** (HG-1 → slice-1c, unless it falls out cheaply).
+- **Option 4 slice-2 gate-shrink** (separate slice — migrate live ctests' image-side to the golden).
+- **② per-rule redirect targets**, **③ mirror costing**, **④ rate-limit/mirror** (later roadmap).
+- **VERSION bump** unless the architect deems the new CLI verb a user-facing feature warranting it
+  (HG: default no-bump; it's additive read-only — architect's call).
 
 ## Definition of done
 
-- §5.76 amendment in `mint/design.md` (Q1/Q2/Q3 resolved; HG defaults confirmed or overridden).
-- NEW `src/lib/materialize.{hpp,cpp}` (+ `loader_error.{hpp,cpp}` per Q1-A1); loader.cpp apply path
-  byte-identical (live ctests green + diff = pure relocation).
-- NEW `tests/dryrun/dryrun_harness.cpp` + fake-bpf TU + golden fixture; `T_DRYRUN_IMAGE_IDENTITY`
-  passes, links libbpf-free, with SMOKE + NEGATION.
-- PI continuity: PI-7 loader.hpp zero-diff (Q2-A1), PI-mvp-4.35-VERDICT-IDENTITY, insn 3477,
-  CompiledRuleset/RulesetDelta shapes, B42 redirect verb — all preserved.
-- Full local ctest suite green (the live datapath gate still passes — the move didn't change writes).
-- `mint/review.md` round-1 verdict = pass.
+- §5.77 amendment in `mint/design.md` (Q1/Q2/Q3 resolved).
+- Production render seam: live apply byte-identical (PI-mvp-4.36-LIVE-IDENTITY — live ctests green +
+  diff); the recording writer + formatter in `src/lib`.
+- `apply --dry-run` prints the `# xdpfilter-image v1` image offline, exit 0, ZERO kernel calls/map
+  writes/attach.
+- `T_DRYRUN_IMAGE_IDENTITY` green (ideally now via the production seam); NEW CLI dry-run ctest +
+  NEGATION.
+- PI continuity: PI-7 ∅, insn 3477 (src/bpf ∅), CompiledRuleset/RulesetDelta shapes, B42 redirect verb.
+- Full local ctest suite green; `mint/review.md` round-1 = pass.
 - One git commit per phase boundary.
 
 ## Dependencies
 
-- Build: clang-19 / libc++ / C++23 (existing). `<bpf/libbpf.h>` must be on the harness COMPILE
-  include path (the skel header `#include`s it) — at `/usr/include/bpf/libbpf.h`; treat the build
-  dir as `-isystem` per `bitvec_harness`. NOTHING from libbpf at LINK (SPIKE-1).
-- Runtime: none new — the harness is a bare-main offline binary (no root, no veth, no kernel).
+- Build: clang-19 / libc++ / C++23 (existing). No new deps (dry-run is host-only, no kernel).
+- Runtime: the dry-run path needs NO root/veth/kernel; the CLI test runs offline.
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 ```yaml
@@ -203,25 +165,38 @@ packs:
 
 ## Pre-brief sanity check (per mint-hld-scope-discipline)
 
-**Mechanical / single-axis → single-architect `/mint-dev` is correct.** The design space was just
-closed by the 2026-06-06 `/mint-hld` round (Option 1 selected, reviewer pass r2, grounder
-clean-with-gates); the one load-bearing uncertainty (SPIKE-1: does the fake skel link libbpf-free?)
-was DISCHARGED PASS this session. The 2 surviving PO-plate forks were ruled by the PO (golden-only,
-gate-shrink-as-separate-slice) and baked into the architecture doc. The 4 disguised-PO items were
-reclassified to engineering and re-grounded here. No multi-axis residue → NO further `/mint-hld`.
+**Single-axis design slice → single-architect `/mint-dev`, NO new `/mint-hld`.** The one design fork is
+the production render-mechanism (Q1: object-seam vs factored-render vs reject-parallel-builder) — ONE
+axis, already scored by the `mint/architecture-dryrun.md` image-render lens; the output format is frozen
+(B43), the CLI threading is mechanical. 2-3 bounded HLD-informed options on one axis ≠ multi-axis. The
+architect resolves Q1 with the 36-call-site grounding. (If the architect finds the object-seam refactor
+explodes scope, that's a Phase-A sizing escalation → Q3 a/b split, not a new HLD.)
 
 ## Notes for architect Phase A code-grep discipline
 
 Re-run independently (briefer ran these; verify + extend):
-- `grep -nE 'materialize\(|populate_action_table\(|populate_redirect_devmap\(|copy_rule_counters_forward\(' src/lib/loader.cpp` — confirm the 3-call sequence + the EXCLUDED copy-forward at BOTH apply branches (currently 2136-2154 / 2258-2273; line numbers volatile — anchor on names).
-- `grep -nE 'close_prefixes6?|close_fn\(|populate_bitvec_inner_slot' src/lib/loader.cpp` — confirm closure stays at `populate_bitvec_inner_slot` (~1266) and masks are post-closure ⇒ golden carries post-closure bits.
-- `grep -nE 'LoaderCategory|loader_error_category|throw_loader|classify' src/lib/loader.cpp src/lib/loader.hpp` — size the error-machinery cluster for the Q1 shared-TU extraction; confirm it is host-only (`std::error_category`, no libbpf).
-- `sed -n '1180,1715p' src/lib/loader.cpp | grep -cE 'bpf_object__|skeleton|bpf_program__'` — confirm render subset's only libbpf surface is flat map-op wrappers (briefer got 0 for the heavy symbols).
-- Confirm where `materialize` is currently DECLARED (header vs loader.cpp-local) to protect the PI-7 loader.hpp zero-diff streak under Q2.
+- `grep -cE 'bpf_map_update_elem|bpf_map_get_next_key|bpf_map_delete_elem' src/lib/materialize.cpp` —
+  confirm the seam call-site count (briefer got 36) the writer abstraction must thread; enumerate which
+  helpers take `int fd` vs derive it.
+- `grep -nE 'struct ApplyRequest' src/lib/apply_internal.hpp` + `parse_apply` @ `src/cli/cli.cpp:226` —
+  confirm the dry_run threading points (no field today; line numbers volatile — anchor on names).
+- `grep -nE 'dryrun_harness|fake_bpf' tests/CMakeLists.txt` — the harness link set, to plan the Q2
+  production-seam reconciliation (does the harness drive the production render after the seam lands).
+- Confirm the dry-run branch can run BEFORE any skeleton load/attach (compile()→cr is libbpf-free; the
+  render via the recording writer must not require a real skel — the object-seam must allow a
+  null/sentinel skel on the dry-run path).
+- `grep -rnE 'dry[-_]run' src/` — confirm net-new (briefer got zero).
 
 ### Anti-misdiagnosis guards applicable to this slice (per Phase 3)
-- **Guard #9 (helper-location: duplicate-over-extract for byte-identity / share-don't-duplicate for non-values):** the render extraction is a MOVE not a re-impl — the harness drives the SAME `materialize` the live path calls (single source of truth; a parallel image-builder is the explicit anti-pattern). For the error machinery (a `std::error_category` singleton + throw helper, NOT a value) SHARE via one TU; do NOT duplicate (ODR).
-- **Guard #10 (catalog arithmetic):** the fd-tag descriptor table (Q3) must enumerate EXACTLY the maps the apply write-set touches — count them against `materialize` + `populate_action_table` + `populate_redirect_devmap`.
-- **Guard #12 (RESOURCE_LOCK for shared host state):** `T_DRYRUN_IMAGE_IDENTITY` touches NO shared host state (no bpffs, iface, port, root) → it MUST NOT take `RESOURCE_LOCK xdp_fixture` (mirrors `compile_harness`/`ruleset_delta_harness`).
-- **Guard #36 (dumb-aggregate / value-type discipline):** the recorded write-set + the in-memory image are dumb value aggregates; keep formatting logic separate from capture.
-- **PI-7 (loader.hpp zero-diff streak):** prefer the new `materialize.hpp` over touching loader.hpp (Q2-A1).
+- **Guard #9 (SSoT, duplicate-over-extract / no parallel builder):** THE central guard — the production
+  dry-run render MUST drive the same `materialize` the live path uses (the recording writer is a seam,
+  NOT a reimplementation). The CLI dry-run + the B43 harness route through ONE production render path.
+  A parallel image-builder in the CLI is [INVARIANT-VIOLATED].
+- **Guard #36 (dumb-aggregate / value-type discipline):** the recording writer captures a dumb
+  `(map,key,value)` trace; the formatter (trace→`# xdpfilter-image v1`) is separate from capture.
+- **Guard #10 (catalog arithmetic):** if the fd-tag descriptor table moves to production, it must still
+  enumerate exactly the maps the write-set touches.
+- **PI-7 (loader.hpp zero-diff):** prefer materialize.hpp / new `src/lib` headers; do NOT touch
+  loader.hpp.
+- **PI-mvp-4.36-LIVE-IDENTITY:** the live writer's `(map,key,value)` writes are byte-identical to
+  today — prove via the live apply ctests + a diff of the live path.
