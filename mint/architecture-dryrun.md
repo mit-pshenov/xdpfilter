@@ -26,6 +26,17 @@ are ruled here (both had a defensible engineering answer — decided, not punted
   real libbpf**. PASS → Option 1 as-is. FAIL → degrade to Option 3 factored `render(cr)→MapImage` (sidesteps
   the skel via `CompiledRuleset`, costs a live write-path rewrite) OR a hand-rolled minimal fake-skel struct
   that does NOT `#include build/xdpfilter.skel.h`. A FAIL re-scopes slice 1; it does not kill the round.
+  - **✅ SPIKE-1 RESULT = PASS (2026-06-06, throwaway, reverted).** A C++23/libc++ TU including the REAL
+    `build/xdpfilter.skel.h` (for the `xdpfilter_bpf` type + `skel->maps.*` derefs), exercising the full render
+    libbpf surface `{bpf_map__fd, bpf_map_update_elem, bpf_map_delete_elem, bpf_map_get_next_key,
+    bpf_map_lookup_elem, bpf_num_possible_cpus}` + local `resolve_ifindex`, **links to a running executable with
+    ONLY fake symbol definitions and NO `-lbpf` (ldd shows no libbpf)**. The grounder's worry — "the skel header
+    `#include <bpf/libbpf.h>` drags the type's libbpf deps" — is DISCHARGED: every libbpf-calling skel function
+    (open/load/attach + the `xdpfilter_bpf::*` C++ methods) is `inline`/`static inline`, so an UNREFERENCED include
+    emits zero libbpf symbols; render references only flat syscall-wrapper map ops (all fakeable, none
+    `bpf_object__*`). `<bpf/libbpf.h>` must be on the COMPILE include path (exists at `/usr/include/bpf/libbpf.h`;
+    treat the build dir as `-isystem` per `bitvec_harness`), but NOTHING from libbpf is required at LINK.
+    **Option 1 holds at low-risk as designed — no degrade to Option 3.**
 - **4 reclassified-off-PO (resolved as engineering, surface as needs-grep in the briefer):** CLI-verb-in-scope
   (→ in-process harness needs no verb), full-apply-write-set vs materialize-body-only (→ action_table/devmap
   at apply sites 2146/2154/2266/2273, outside materialize → golden MUST include them), `resolve_ifindex`
