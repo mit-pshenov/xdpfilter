@@ -112,6 +112,26 @@ attach_rc=$?
 set -e
 sleep 0.3
 
+# ── Step 4b: dry-run (BOTH formats) via sanitized binary, capture stderr ──
+# §5.80 MVP-4.40/B48 (TEST-H2): the dry-run code path
+# (compile() + format_dryrun_human + render_dryrun_image + diff()) is
+# otherwise NEVER executed under ASAN/UBSAN. These two offline invocations
+# (no kernel touch) close that gap: the DEFAULT human view drives
+# format_dryrun_human; --format=golden drives render_dryrun_image/diff().
+# Both must exit 0 with non-empty stdout; stderr → the SAME STDERR_FILE the
+# step-181 ASAN/UBSAN grep already scans, so any sanitizer report in the
+# dry-run path is caught.
+echo "=== T_SANITIZER_BUILD: dry-run (sanitized) human view -f ${ANDV6_FIXTURE}"
+set +e
+out_h=$(${NSEXEC} "${SANITIZED_LOADER}" apply --iface "${IFACE_A}" \
+    -f "${ANDV6_FIXTURE}" --dry-run 2>>"${STDERR_FILE}")
+dryrun_h_rc=$?
+echo "=== T_SANITIZER_BUILD: dry-run (sanitized) golden view -f ${ANDV6_FIXTURE}"
+out_g=$(${NSEXEC} "${SANITIZED_LOADER}" apply --iface "${IFACE_A}" \
+    -f "${ANDV6_FIXTURE}" --dry-run --format=golden 2>>"${STDERR_FILE}")
+dryrun_g_rc=$?
+set -e
+
 # ── Step 5: inject the §5.59 3-vector matrix on veth_b (inject_l6.py) ─────
 # Vectors are the W1/W2/W6 oracle analogs of T_ANDV6_ORACLE_AGREEMENT. After
 # each inject, poll the cumulative classified-frame sum (§5.21 C1).
@@ -168,6 +188,15 @@ fail=0
     || { echo "FAIL: sanitized apply exit=${attach_rc} (expected 0)" >&2; fail=1; }
 [[ "${detach_rc}" == "0" ]] \
     || { echo "FAIL: sanitized detach exit=${detach_rc} (expected 0)" >&2; fail=1; }
+
+# §5.80/B48 (TEST-H2): the two dry-run invocations must exit 0 with non-empty
+# stdout (the human view + the golden view both rendered something). Combined
+# with the ASAN/UBSAN stderr grep below, this asserts the dry-run code path is
+# clean under sanitizers.
+[[ "${dryrun_h_rc}" == "0" && -n "${out_h}" ]] \
+    || { echo "FAIL: sanitized dry-run (human) exit=${dryrun_h_rc}, output empty=$([[ -z "${out_h}" ]] && echo yes || echo no)" >&2; fail=1; }
+[[ "${dryrun_g_rc}" == "0" && -n "${out_g}" ]] \
+    || { echo "FAIL: sanitized dry-run (golden) exit=${dryrun_g_rc}, output empty=$([[ -z "${out_g}" ]] && echo yes || echo no)" >&2; fail=1; }
 
 # Positive correctness check: the sanitized apply produced a working 9-axis
 # datapath (not just exited cleanly without doing work). §5.59: V1 (id0 full

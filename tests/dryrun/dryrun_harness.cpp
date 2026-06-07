@@ -133,6 +133,19 @@ std::string render_live(const Config& cfg)
     return render_dryrun_image(cfg);
 }
 
+// ─────────────────── drive the production human render ────────────────────────
+// Returns the DEFAULT human-decoded view (§5.78) of `cfg` — the EXACT string the
+// `apply --dry-run` CLI verb prints by default. Single source for both the
+// --emit-golden-human generator and test_human_identity, so the render path is
+// computed identically in both (D-mvp-4.40-HUMAN-GEN). Unlike the IMAGE golden,
+// the human golden has no independent map-image oracle — its independent spec is
+// §5.78.4(a) (the token contract) + the T_CLI_APPLY_DRYRUN substring greps; this
+// byte-golden is a complementary framing/whitespace/ordering drift pin.
+std::string render_human(const Config& cfg)
+{
+    return format_dryrun_human(cfg, compile(cfg));
+}
+
 // ─────────────────────── independent oracle (golden generator) ────────────────
 // The tester's SPEC-DERIVED expected write-set — built from the §5.73 slot model
 // + close_prefixes (production compile(), allowed) + the map struct layouts, with
@@ -398,6 +411,52 @@ void test_negation_control()
     }
 }
 
+// HUMAN IDENTITY (§5.80.6 #1): the PRODUCTION human render of the corpus ==
+// the checked-in human golden, byte-for-byte. FROZEN (§5.77.7): a diff is a REAL
+// human-render regression that still satisfies the loose CLI substring greps —
+// investigate, do NOT rebless.
+void test_human_identity(const std::string& human_golden_path)
+{
+    const Config cfg = build_corpus();
+    const std::string got  = render_human(cfg);
+    const std::string want = read_file(human_golden_path);
+
+    if (got != want) {
+        fail("rendered human != golden (" + human_golden_path + ")");
+        report_first_diff(got, want);
+    }
+}
+
+// HUMAN NEGATION CONTROL (§5.80.6 #2): prove the human byte-compare can FAIL.
+// Take the real rendered human view, corrupt exactly one data-bearing byte on the
+// first non-header line, and assert the comparator reports a mismatch — a one-byte
+// human-render regression therefore cannot pass green (the identity test is
+// non-vacuous). Mechanical mirror of test_negation_control.
+void test_human_negation_control()
+{
+    const Config cfg = build_corpus();
+    const std::string view = render_human(cfg);
+
+    // Skip the `# xdpfilter dry-run` header line; corrupt one [0-9a-z] char on
+    // the first non-header line (e.g. `default_action: drop`).
+    std::string corrupt = view;
+    const std::size_t nl = corrupt.find('\n');
+    bool mutated = false;
+    if (nl != std::string::npos) {
+        for (std::size_t i = nl + 1; i < corrupt.size(); ++i) {
+            char& ch = corrupt[i];
+            if (ch >= '0' && ch <= '9') { ch = (ch == '0') ? '1' : '0'; mutated = true; break; }
+            if (ch >= 'a' && ch <= 'z') { ch = (ch == 'a') ? 'b' : 'a'; mutated = true; break; }
+        }
+    }
+    if (!mutated) { fail("human negation: could not find a data byte to corrupt"); return; }
+
+    const bool mismatch_detected = (view != corrupt);
+    if (!mismatch_detected) {
+        fail("human negation: comparator FAILED to detect a one-byte-corrupted view");
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -412,6 +471,14 @@ int main(int argc, char** argv)
         return 0;
     }
 
+    if (argc >= 2 && std::strcmp(argv[1], "--emit-golden-human") == 0) {
+        // Generator for the human golden (D-mvp-4.40-EMIT): print the PRODUCTION
+        // human render of the corpus (NOT a hand-derived oracle — D-mvp-4.40-
+        // HUMAN-GEN; the tester REVIEWS it against §5.78.4(a) before freezing).
+        std::fputs(render_human(build_corpus()).c_str(), stdout);
+        return 0;
+    }
+
     if (argc >= 2 && std::strcmp(argv[1], "--emit-live") == 0) {
         // DEBUG affordance: print the PRODUCTION render of the corpus. Used to
         // diff production-render-vs-oracle.
@@ -422,15 +489,20 @@ int main(int argc, char** argv)
     // Golden path: ${TEST_DIR}/dryrun/dryrun_image.golden (TEST_DIR from ctest
     // ENVIRONMENT, like compile_harness). Fall back to the in-tree source path.
     std::string golden_path;
+    std::string human_golden_path;
     if (const char* td = std::getenv("TEST_DIR")) {
-        golden_path = std::string(td) + "/dryrun/dryrun_image.golden";
+        golden_path       = std::string(td) + "/dryrun/dryrun_image.golden";
+        human_golden_path = std::string(td) + "/dryrun/dryrun_human.golden";
     } else {
-        golden_path = "tests/dryrun/dryrun_image.golden";
+        golden_path       = "tests/dryrun/dryrun_image.golden";
+        human_golden_path = "tests/dryrun/dryrun_human.golden";
     }
 
     test_smoke_minimal();
     test_image_identity(golden_path);
     test_negation_control();
+    test_human_identity(human_golden_path);
+    test_human_negation_control();
 
     if (g_fails != 0) {
         std::fprintf(stderr, "dryrun_harness: %d assertion(s) FAILED\n", g_fails);

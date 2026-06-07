@@ -1,0 +1,26 @@
+# xdpfilter dry-run
+default_action: drop
+rules: 10
+steering: redirect_to=dpi0
+schema_version: 3
+rule id=1 slot=0 action=pass
+  match: dst_cidr=10.0.0.0/8
+rule id=2 slot=1 action=drop
+  match: dst_cidr=10.1.2.0/24
+rule id=3 slot=2 action=pass
+  match: protocol=6(tcp)
+rule id=4 slot=3 action=drop
+  match: protocol=6(tcp) dst_port=80-443
+rule id=5 slot=4 action=pass
+  match: mac=aa:bb:cc:dd:ee:ff
+rule id=6 slot=5 action=pass
+  match: vlan=100
+rule id=7 slot=6 action=drop
+  match: ethertype=0x0806(arp)
+rule id=8 slot=7 action=pass
+  match: dst_cidr6=2001:db8::/32
+rule id=9 slot=8 action=drop
+  match: src_cidr6=fe80::/10
+rule id=10 slot=9 action=redirect target=dpi0
+  match: mac=11:22:33:44:55:66
+redirect target 'dpi0' RESOLVED-AT-APPLY — verify the tap interface is up
