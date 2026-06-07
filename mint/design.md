@@ -20922,11 +20922,11 @@ captures the match line; this contiguity is CONTRACT, not latitude). Tokens:
 | `protocol` | **decimal** number | `protocol=6` (id3, id4) |
 | `dst_port` | inclusive range `lo-hi` (single port ⇒ `N-N`) | `dst_port=80-443` (id4) |
 | `vlan` | **decimal** number | `vlan=100` (id6) |
-| `ethertype` | **hex** `0x` + lowercase, no leading-zero pad (`0x{:x}`) | `ethertype=0x806` (id7) |
+| `ethertype` | **hex** `0x` + lowercase, **zero-padded to 4 digits** (`0x{:04x}`) — canonical EtherType width [B46/§5.79: reconciled UP from `0x806`] | `ethertype=0x0806` (id7) |
 
 - **MAY name-annotation (must NOT break the `axis=value` substring):** impl MAY append a trailing ` (<name>)`
-  AFTER the pinned value for protocol/ethertype — e.g. `protocol=6 (tcp)`, `ethertype=0x806 (arp)`. Because the
-  name is a SUFFIX, `grep 'protocol=6'` / `grep 'ethertype=0x806'` still match. **Tester: pin on the value form in
+  AFTER the pinned value for protocol/ethertype — e.g. `protocol=6 (tcp)`, `ethertype=0x0806 (arp)`. Because the
+  name is a SUFFIX, `grep 'protocol=6'` / `grep 'ethertype=0x0806'` still match. **Tester: pin on the value form in
   the table above (always present), NEVER on the parenthesized name (optional).**
 - **Slot values for the fixture:** ids 1..10 in config order → dense slots 0..9 (id1→slot0 … id10→slot9), per
   `dryrun_cli.yaml`'s build_corpus layout. Tester MAY pin exact `slot=<n>` per rule, or just assert `slot=` is
@@ -21114,3 +21114,232 @@ This is **§5.78**. No new guard candidate (reuses #9 SSoT, #36 capture-vs-forma
    `dryrun_cli.yaml`) — no other test pins the default dry-run stdout ✓.
 9. **`compile()`** (`compiled_ruleset.hpp:121`) pure/libbpf-free → human path `compile(parsed)` makes zero kernel
    calls ✓.
+
+---
+
+## §5.79 MVP-4.39 / B47: sanitary-day code-subtraction harvest (brownfield, PURE-SUBTRACTIVE, NO VERSION bump)
+
+Amendment block. Four small, independent items harvested from the 2026-06-07 `/mint-review` + `/mint-simplify`
+pass: three simplify-BEDROCK subtractions (dead-symbol delete, function merge, same-TU dup-block extract) + one
+PO-approved cosmetic polish (B46 ethertype canonical 4-digit hex, landing **in place**). No new capability, no
+schema change, no datapath touch. Net ≈ **−30 LOC + 1 file-local helper**, **−1 dead public symbol**, **−1
+lockstep drift hazard**. Stays VERSION 0.17.0 (mirrors B43–B45). Builds on §5.77 (map_writer seam) / §5.78
+(dry-run human view). Cross-references: §5.53 (cidr parse helpers), §5.29/§5.34/§5.35/§5.75 (loader apply
+populate blocks), §5.78.4(a) (ethertype value-form, edited in place by this amendment — see §5.79.4 item 4).
+
+### §5.79.1 Problem statement
+The review/simplify pass surfaced four discrete, mechanically-verified residues: (1) a dead public getter
+`active_writer()` with zero callers tree-wide; (2) two byte-identical-except-ceiling `parse_prefix`/`parse_prefix6`
+file-local helpers in `cidr.cpp` (a lockstep-drift hazard); (3) two duplicated `action_table`+`redirect_devmap`
+fd-get-and-populate blocks in `loader.cpp` (reattach + fresh paths); (4) the queued B46 polish to render
+ethertype as canonical 4-digit zero-padded hex (`0x0806`, not `0x806`). Each falls out of a 30-second grep with a
+single verified shape — this is the contract, not a redesign. Boundary: subtraction + 1 helper + a 2-line format
+change; explicitly NOT a shared-formatter extraction (see D-mvp-4.39-NOEXTRACT).
+
+### §5.79.2 FileList (DIFF)
+
+**NEW** — none (no new files this slice).
+
+**EDITED**
+| Path | Role / change (one line) | Language | LOC est |
+|---|---|---|---|
+| `src/lib/map_writer.cpp` | B47-1: delete `MapWriter* active_writer() { return g_active_writer; }` (cur `:57`). | C++23 | −2 |
+| `src/lib/map_writer.hpp` | B47-1: delete decl `MapWriter* active_writer();` (cur `:63`); trim comment `:60-61` (drop "/inspect"). | C++23 | −2 |
+| `src/lib/cidr.cpp` | B47-2: merge `parse_prefix`(`:42`,ceil 32) + `parse_prefix6`(`:57`,ceil 128) → one `parse_prefix(std::string_view, int ceiling)`; callers `:110`/`:195` pass `32`/`128`. | C++23 | −10 |
+| `src/lib/loader.cpp` | B47-3: extract file-local `populate_shared_maps(skel, cfg)` from the two dup blocks (`~:1676-1691` reattach, `~:1797-1810` fresh); `copy_rule_counters_forward`+`materialize` stay EXPLICIT at both call sites (guard #15). | C++23 | −18 net (+1 helper) |
+| `src/lib/map_image.cpp` | B47-4: `fmt_ethertype` (`:96`) BOTH format strings `0x{:x}`→`0x{:04x}`; rewrite `:88-89` comment (canonical-4-digit rationale, keep §5.78.4(a) anchor). | C++23 | ±0 |
+| `tests/T_CLI_APPLY_DRYRUN.sh` | B47-4: `0x806`→`0x0806` at **THREE** sites — `(3j)` comment `:233`, grep regex `:234`, **and the FAIL diagnostic `:235`** (Phase-A grep catch; brief cited only `:233`/`:234`). | bash | ±0 |
+| `mint/design.md §5.78.4(a)` | B47-4: ethertype value-form prose — table row + MAY-annotation example + grep example, `0x806`→`0x0806`, `0x{:x}`→`0x{:04x}`. **Already landed by the architect in this amendment** (3 occurrences edited in place); impl/tester do NOT touch design.md. | md | (done) |
+
+**UNCHANGED-BUT-AFFECTED** (must stay byte-identical; reviewer asserts zero git-diff)
+| Path | Why it must not change |
+|---|---|
+| `src/lib/loader.hpp` | PI-7: same-TU extraction; helper is file-local in `loader.cpp`, no header. `git diff` MUST be ∅. |
+| `src/lib/materialize.{hpp,cpp}` | `populate_action_table`/`populate_redirect_devmap` callees unchanged; only their call ARRANGEMENT in loader.cpp changes. |
+| `src/lib/live_map_writer.cpp` | B47-1 keeps `set_active_writer` (its `:59` caller); only the unrelated getter is deleted. |
+| `src/bpf/*` | insn 3477 — no datapath touch. |
+| `tests/dryrun/dryrun_image.golden` | B46 touches only the human view; golden `:81` is `map=ethertype_bitmask_a …` machine metadata (NO human hex render). BYTE-UNCHANGED. |
+| `src/lib/sidecar.cpp` | the OTHER ethertype renderer (already `0x{:04x}`); NOT touched (D-mvp-4.39-NOEXTRACT — only 2 consumers). |
+
+Anything not in these three categories is off-limits for impl. If impl needs to touch a file not listed → design
+gap → SendMessage architect.
+
+### §5.79.3 DataStructures
+None cross a module/file boundary this slice. Both new/merged symbols are file-local:
+- `parse_prefix` is anonymous-namespace in `cidr.cpp` (no external/test consumer).
+- `populate_shared_maps` is file-local (static / anonymous-namespace) in `loader.cpp`.
+No struct/layout/type changes; no map key/value/size changes.
+
+### §5.79.4 Interfaces (deltas only)
+
+1. **B47-1 — removed symbol.** `MapWriter* active_writer();` is DELETED (decl `map_writer.hpp:63`, def
+   `map_writer.cpp:57`). KEEP `MapWriter* set_active_writer(MapWriter* w)` (3 live callers: RecordingScope
+   ctor/dtor `map_writer.hpp:123-124`, `install_live_map_writer` `live_map_writer.cpp:59`). Verified ZERO callers
+   of `active_writer()` tree-wide (the only refs are the def/decl + historical `mint/impl-notes.md` prose, which is
+   a non-code note and NOT in scope to edit). Comment `:60-61` trims to "Install the process-global active writer…".
+
+2. **B47-2 — merged signature.** `[[nodiscard]] int parse_prefix(std::string_view s, int ceiling) noexcept`
+   (anon-namespace, `cidr.cpp`). Body = the existing loop with `if (v > ceiling) return -1;`. `parse_prefix6` is
+   DELETED. Callers: `parse_cidr_v4` body (`:110`) → `parse_prefix(prefix_part, 32)`; `parse_cidr_v6` body
+   (`:195`) → `parse_prefix(prefix_part, 128)`. **Diagnostics live caller-side** — the distinct "empty prefix" vs
+   "out of range" ConfigError messages are thrown by the callers, NOT the helper → message catalogue BYTE-IDENTICAL
+   (guard #13: no test pins these; `parse_prefix*` is file-local). Keep a merged comment noting both ceilings.
+
+3. **B47-3 — extracted helper.** Signature (architect's call):
+   `static void populate_shared_maps(xdpfilter_bpf* skel, const Config& cfg)` (file-local in `loader.cpp`). Body =
+   for `action_table`: `bpf_map__fd(skel->maps.action_table)` → null-check throw `LoaderError::LoadFailed` →
+   `populate_action_table(at_fd)`; then for `redirect_devmap`: `bpf_map__fd(skel->maps.redirect_devmap)` →
+   null-check throw → `populate_redirect_devmap(dm_fd, cfg)`. Call sites pass `skel.get(), req.config`. Covers ONLY
+   the two STATIC SHARED maps. **guard #15 boundary**: `materialize(...)` and `copy_rule_counters_forward(...)` stay
+   EXPLICIT at BOTH call sites — NOT pulled into the helper (PRESERVE-across-apply semantics, D-3.4d-3 /
+   D-mvp-4.8-BOUNDARY). **guard #33**: preserve the grep-able §5.29/§5.34/§5.75 anchor comments — relocate them
+   into the helper (or keep one canonical copy at the helper) rather than dropping them. Error strings per
+   D-mvp-4.39-ERRSTR (HG-mvp-4.39-1) below.
+
+4. **B47-4 — ethertype value-form.** `fmt_ethertype` (`map_image.cpp:96`): BOTH `std::format` literals
+   `"0x{:x}({})"` → `"0x{:04x}({})"` and `"0x{:x}"` → `"0x{:04x}"`. Rewrite the `:88-89` comment from "NO
+   fixed-width leading zeros (`0x806`, not `0x0806`)" → canonical-4-digit rationale (e.g. "canonical EtherType
+   width: zero-pad to 4 hex digits → `0x0806`, matching `sidecar.cpp`'s `0x{:04x}`"); keep the §5.78.4(a) anchor.
+   The §5.78.4(a) CONTRACT (table row + MAY example + grep example) is already updated to `0x0806`/`0x{:04x}` by
+   this amendment.
+
+### §5.79.5 Decisions (with rationale)
+
+- **D-mvp-4.39-NOEXTRACT — DECLINE the shared `axis_format` module extraction (review ARCH-H1/CQ-H1 "High").**
+  **Because** there are exactly **2** consumers of the axis-formatter spellings (`sidecar.cpp` and
+  `map_image.cpp`), below the rule-of-three escape valve (D-3.4f-1); guard #9 (duplication-over-premature-
+  extraction) is cited INLINE at `map_image.cpp:49-51` ("mirror sidecar.cpp's spellings… NO re-lowering — guard
+  #9"). Extracting a shared module at 2 consumers would be premature abstraction (a worse drift-vs-coupling trade
+  than the documented duplication). B46 therefore lands **in place** in `map_image.cpp`. **Re-charge the extraction
+  when a 3rd consumer appears.** Recorded explicitly so the next reviewer does NOT re-raise ARCH-H1/CQ-H1.
+  (HG-mvp-4.39-2, locked.)
+
+- **D-mvp-4.39-ERRSTR — CANONICALIZE both populate-block `LoadFailed` strings to one form** (resolves
+  HG-mvp-4.39-1). The two blocks throw divergent strings (reattach: `"action_table fd unavailable (reattach)"` /
+  `"redirect_devmap fd unavailable (reattach)"`; fresh: `"action_table map fd unavailable"` /
+  `"redirect_devmap map fd unavailable"`) — differing in BOTH the word `map` and the `(reattach)` suffix.
+  **Verified NO test pins these** (`grep -rn "fd unavailable" tests/` → empty; guard #13 clear). The extracted
+  helper throws a SINGLE canonical form per map: `"action_table map fd unavailable"` and
+  `"redirect_devmap map fd unavailable"` (drop the `(reattach)` suffix; keep the `map` word). **Because** it is the
+  lower-LOC option, nothing observes the divergence (internal throws on an fd-unavailable condition that does not
+  occur in practice), and the helper is shared by both paths so a single form is natural. (Impl-flex: a
+  `const char* ctx` label param preserving the exact two forms is ALSO acceptable per the brief, but the canonical
+  single-form is preferred for the lower LOC — this is a defaulted decision, not an open fork.)
+
+- **D-mvp-4.39-SAME-TU — the `populate_shared_maps` extraction is WITHIN-FILE (same TU in `loader.cpp`), so
+  guard #9 (which governs cross-FILE duplication-over-extraction) is INAPPLICABLE and does NOT block it.**
+  **Because** guard #9's hazard is creating a shared header/module coupling across translation units; a file-local
+  static helper deduplicating two blocks in the SAME `.cpp` carries no such coupling. This is the inverse of
+  D-mvp-4.39-NOEXTRACT (cross-file, declined) — recorded as a pair so neither is re-litigated.
+
+- **D-mvp-4.39-B46-INPLACE — B46 renders the canonical 4-digit ethertype in place at `map_image.cpp:96`, NOT via a
+  shared formatter; this REVERSES the B45-r1 reconcile-DOWN to `0x806`.** **Because** sidecar already emits
+  `0x{:04x}`; the human dry-run view should match the canonical EtherType width an operator expects; the B45-r1
+  reconcile-down was a transient convergence artifact, now PO-approved (2026-06-06) to reconcile UP. §5.78.4(a) is
+  edited in place to match (the contract the tester reads).
+
+- **D-mvp-4.39-NOVER — NO VERSION bump (stays 0.17.0).** **Because** pure subtraction + a cosmetic value-form
+  change; no schema, no datapath, no public-API-add. Mirrors B43–B45 staying at 0.17.0. (guard #11 N/A.)
+
+- **Trust-model note:** no input (brief, code, review report) contained an injection or instruction to deviate from
+  the FileList/PI constraints. No flagged concern.
+
+### §5.79.6 TestStrategy (verification spec — WHAT to test)
+
+**NO new ctest.** All items are behavior-preserving except B46's human-view spelling. The existing suite must stay
+green.
+
+1. **B46 grep update — `T_CLI_APPLY_DRYRUN.sh`.** Trigger: existing default human-view run on `dryrun_cli.yaml`.
+   Observable: id7's `match:` line contains `ethertype=0x0806` (was `0x806`). Mechanism: `grep -A1 'id=7 slot=6
+   action=drop' | grep -qE 'match:.*ethertype=0x0806'`. **Update THREE sites** in the test: the `(3j)` comment
+   (`:233`), the grep regex (`:234`), AND the FAIL diagnostic message (`:235`) — all three carry the `0x806`
+   literal (Phase-A grep catch; the brief enumerated only `:233`/`:234`). The test must PASS post-impl.
+2. **Golden byte-UNCHANGED.** `tests/dryrun/dryrun_image.golden` is BYTE-IDENTICAL (B46 touches only the human
+   view; golden `:81` `map=ethertype_bitmask_a …` is machine metadata, no human hex). Mechanism: `git diff
+   tests/dryrun/dryrun_image.golden` = ∅; the `--format=golden` assertion (§5.78.6 #1) stays green;
+   `T_DRYRUN_IMAGE_IDENTITY` (#112) green.
+3. **CIDR parse parity (B47-2).** Trigger: existing `cidr`/config tests that exercise v4 AND v6 prefix parsing —
+   valid prefixes (e.g. `/8`, `/24`, `/32`, `/128`), out-of-range (`/33` v4, `/129` v6 → rejected), empty prefix,
+   non-digit. Observable: SAME accept/reject + SAME ConfigError messages ("empty prefix" / "out of range") as
+   pre-merge — the caller-side message catalogue is byte-identical. Mechanism: existing config/cidr ctests stay
+   green (no new test). If no existing test covers `/33`/`/129` boundary rejection, that is acceptable — the merge
+   preserves the exact ceiling constants (32/128) so behavior is provably identical by inspection.
+4. **Loader apply parity (B47-3).** Trigger: existing apply/attach ctests (fresh attach + reattach paths).
+   Observable: action_table + redirect_devmap populated identically; `copy_rule_counters_forward` PRESERVE behavior
+   unchanged (guard #15 — counters carried forward across apply); the canonicalized error strings are not pinned by
+   any test (verified empty). Mechanism: existing apply suite green; reviewer reads both call sites to confirm
+   `materialize`+`copy_rule_counters_forward` stay EXPLICIT outside the helper.
+5. **Dead-symbol delete (B47-1).** Trigger: full build + suite. Observable: clean compile/link with
+   `active_writer()` gone (no unresolved ref); `set_active_writer` + RecordingScope + install path unaffected.
+   Mechanism: build green; `grep -rn 'active_writer\b' src/ tests/ include/` shows ZERO `active_writer()` (no-arg)
+   refs post-delete (only `set_active_writer`).
+6. **Whole-suite regression.** The existing ctest suite stays green (pre-existing env-fails #48/#63 exporter
+   excepted, per handoff). Mechanism: re-run + diff against prior `test-run.log`.
+
+**OPS-canary note:** this slice introduces NO new runtime invocation environment (same offline / unprivileged /
+same-uid invocations as the existing suite; no new capability mask / namespace / uid). The load-bearing-OPS-canary
+heuristic does NOT trigger → no OPS canary required.
+
+### §5.79.7 Preserved invariants (brownfield)
+
+| ID | Property | Check mechanism |
+|---|---|---|
+| **PI-7** (carried) | `src/lib/loader.hpp` zero-diff streak preserved — B47-3 is same-TU, helper file-local, NO header change. | `git diff src/lib/loader.hpp` = ∅. |
+| **PI-mvp-4.37-FAILCLOSED** (carried, RE-SCOPED) | The `map_*` wrappers still hard-abort if no writer installed. **NOTE: this slice EDITS `map_writer.cpp`/`.hpp`** (B47-1 deletes the dead getter) — so the prior B45 check `git diff map_writer.cpp = ∅` NO LONGER APPLIES. Re-scoped: the fail-closed wrapper bodies (`map_fd`/`map_update`/`map_next_key`/`map_delete`/`map_resolve_ifindex` null-check-then-`no_writer_installed`) + `set_active_writer` + `g_active_writer` stay BYTE-IDENTICAL; only `active_writer()` (def `:57`, decl `:63`) + the comment-trim are removed. | Reviewer reads the `map_writer.{cpp,hpp}` diff: it contains ONLY the getter-delete + comment-trim; the wrapper null-check bodies are untouched. |
+| **insn 3477** (carried) | `src/bpf/*` untouched → datapath insn count unchanged. | `git diff src/bpf` = ∅; existing insn gate. |
+| **PI-mvp-4.38-GOLDEN-UNCHANGED** (carried) | `tests/dryrun/dryrun_image.golden` byte-unchanged; `format_dryrun_image`/`render_dryrun_image` bodies untouched (B46 touches only `fmt_ethertype` for the HUMAN view). | `git diff` of the golden + those two fn bodies = ∅; §5.78.6 #1 green; #112 green. |
+| **PI-mvp-4.38-LIVE-IDENTITY** (carried, RE-SCOPED) | The live apply path stays behaviorally identical. **NOTE: `loader.cpp` IS edited** (B47-3 extraction) and `map_writer.{cpp,hpp}` ARE edited (B47-1) — so the prior "ZERO git-diff" form is replaced by: the apply SEQUENCE (materialize → populate shared maps → copy-forward → flip) is behaviorally identical; `materialize.{cpp,hpp}`, `live_map_writer.cpp`, `apply_internal.hpp` retain ZERO git-diff. | `git diff` of materialize/live_map_writer/apply_internal = ∅; apply suite green; reviewer confirms call ordering preserved. |
+| **CIDR message catalogue** (B47-2) | The v4/v6 prefix-parse ConfigError messages ("empty prefix" / "out of range") are byte-identical (thrown caller-side, not in the merged helper). | Reviewer reads `parse_cidr_v4`/`parse_cidr_v6` throw sites; config/cidr ctests green. |
+
+Reviewer's framework point 5 walks this list and reports `[INVARIANT-VIOLATED]` per failed check.
+
+### §5.79.7a Verification hints (guidance for reviewer — MAY, not contracts)
+*Resolution rule: if any hint here conflicts with §5.79.7, the PI block wins. If impl deviates from a hint to
+satisfy a PI or a load-bearing test assertion, the reviewer's correct disposition is `inline-merge` on the hint
+text — NOT `[UNRELATED-EDIT]` on impl.*
+- Reviewer SHOULD see `map_writer.{cpp,hpp}` diff = exactly the getter-delete (`:57` def, `:63` decl) + the
+  `:60-61` comment-trim. Anything else is a smell to question.
+- Reviewer SHOULD see `cidr.cpp` lose `parse_prefix6` entirely, `parse_prefix` gain an `int ceiling` param, and the
+  two callers pass `32`/`128`. The "empty prefix" / "out of range" caller throws MUST be byte-identical.
+- Reviewer SHOULD see `loader.cpp` gain ONE file-local helper and the two dup blocks collapse to two
+  `populate_shared_maps(skel.get(), req.config);` calls, with `materialize` + `copy_rule_counters_forward` still
+  EXPLICIT at both sites (guard #15).
+- Reviewer SHOULD see `map_image.cpp` diff = the two `0x{:x}`→`0x{:04x}` format literals + the `:88-89` comment
+  rewrite; nothing in `format_dryrun_image`/`render_dryrun_image`.
+- Reviewer SHOULD see `T_CLI_APPLY_DRYRUN.sh` update all three `0x806`→`0x0806` sites (`:233`/`:234`/`:235`) and
+  the golden BYTE-UNCHANGED.
+
+### §5.79.8 Out of scope (anti-drift fence)
+- **Shared `axis_format` module extraction** (review ARCH-H1/CQ-H1) — DECLINED this pass (2 consumers <
+  rule-of-three; guard #9; D-mvp-4.39-NOEXTRACT). Re-charge at a 3rd consumer. NEW FENCE.
+- **SEC-L1** exporter systemd sandbox (deployment-gated, defense-in-depth) — own slice.
+- **PERF-M1** bound exporter scrape loops by live rule count (no forcing-function) — own slice.
+- **TEST-H1/H2** `dryrun_human.golden` + sanitizer `--dry-run` coverage — Batch C, separate ADDITIVE slice (this
+  is the SUBTRACTION slice; no new ctest here).
+- **Any VERSION bump** (D-mvp-4.39-NOVER), schema change, datapath touch, or live/seam behavior change.
+- **Editing `mint/impl-notes.md`'s historical `active_writer()` prose** — it is a non-code note; leave as audit
+  history (not in scope).
+
+This is **§5.79**. No new guard candidate (pure subtraction; reuses #9 SSoT/rule-of-three, #13 emit-site ripple,
+#15 copy-forward boundary, #33 anchor preservation). Guards #1..#37 + §5.70 #38 + §5.73 #39 + §5.76 #40 + §5.77
+candidate #41.
+
+### §5.79.9 Evidence — slice-time greps re-verified against HEAD at design time
+1. **B47-1** — `active_writer()` (no-arg): def `map_writer.cpp:57`, decl `map_writer.hpp:63`, comment `:60-61`.
+   ZERO callers tree-wide (only def/decl + `mint/impl-notes.md:39-43` prose). `set_active_writer` has 3 live
+   callers (RecordingScope `map_writer.hpp:123-124`, `live_map_writer.cpp:59`) ✓.
+2. **B47-2** — `parse_prefix` `:42` (ceiling 32 `:49`), `parse_prefix6` `:57` (ceiling 128 `:64`); bodies identical
+   except the ceiling constant + comment. Callers: `parse_cidr_v4` `:110`, `parse_cidr_v6` `:195`. Both file-local
+   (anon namespace `:48`-`:69`) ✓.
+3. **B47-3** — reattach block `loader.cpp:1676-1691`, fresh block `:1797-1810`. `populate_action_table(int)` +
+   `populate_redirect_devmap(int, const Config&)` live in `materialize.{hpp,cpp}` (`:38`/`:42`). `req.config` is the
+   Config; `skel` is `BpfSkeleton` (`skel.get()` → `xdpfilter_bpf*`). `copy_rule_counters_forward` sits OUTSIDE
+   both blocks (reattach `:1724`, fresh `:1829`) — guard #15 boundary intact. `grep -rn "fd unavailable" tests/` =
+   empty → canonicalize safe ✓.
+4. **B47-4** — `map_image.cpp:96` has BOTH `"0x{:x}({})"` and `"0x{:x}"`; comment `:88-89`. Test sites: `:233`
+   comment, `:234` grep, `:235` FAIL message (THREE, not two). `dryrun_image.golden:81` = `map=ethertype_bitmask_a
+   key_sz=4 val_sz=8 rows=1` (machine metadata, NO human hex) → golden unchanged. §5.78.4(a) ethertype prose had 3
+   `0x806` occurrences (table `:20925`, MAY example `:20928`, grep example `:20929`) — all edited to `0x0806` in
+   this amendment ✓.
+5. **PI-7** — B47-3 helper is file-local in `loader.cpp`; `loader.hpp` not referenced → `git diff loader.hpp` MUST
+   be ∅ post-impl ✓.
