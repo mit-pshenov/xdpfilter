@@ -1,159 +1,107 @@
-# Task brief — MVP-4.38 / B45: `apply --dry-run` human-decoded operator view (brownfield)
+# Task brief — MVP-4.39 / B47: sanitary-day code-subtraction harvest (brownfield)
 
 ## Goal
 
-Roadmap-① slice 1c (PO Dmitry, confirmed): the last piece that makes `apply --dry-run` fully
-usable by an OPERATOR — a **human-decoded view** that lets ops SEE what's wrong with a config
-before applying it. B44/§5.77 shipped the production render seam + the machine `# xdpfilter-image v1`
-golden, but that golden is a raw hex map-dump — a test oracle, useless to an operator who needs to
-verify "did my config compile to what I meant?" (wrong redirect target, a CIDR that lowered to
-unexpected bits, an unintended default action, a rule that matches nothing). This slice adds the
-readable, vocabulary-correct decode that turns dry-run from a test tool into an ops debugging tool.
+A **pure-subtractive** sanitary-day slice harvesting four small, independent
+items from the 2026-06-07 `/mint-review` + `/mint-simplify` pass. Three are
+simplify BEDROCK subtractions (dead-symbol delete, function merge, dup-block
+extract); one is the PO-approved queued B46 cosmetic polish (review TEST-C1).
+No new capability, no schema change, no datapath touch, **no VERSION bump**
+(mirrors B43–B45 staying at 0.17.0). Net target ≈ **−30 LOC + 1 small
+file-local helper**, **−1 dead public symbol**, **−1 lockstep drift hazard**.
 
-**BAKED PO DECISION (not a fork):** the human view becomes the **DEFAULT** output of
-`apply --dry-run` (the operator is the audience). The machine golden moves behind an explicit
-`--format=golden` (alias `--format=image` if the architect wants). This is host-side
-output-formatting ONLY — zero datapath/live change.
+This slice deliberately does NOT extract a shared `axis_format` module (the
+review ARCH-H1/CQ-H1 "High"): that was declined this pass on rule-of-three /
+guard #9 grounds — the two axis-formatter copies (`sidecar.cpp`,
+`map_image.cpp`) are exactly **2** consumers, below the rule-of-three escape
+valve (D-3.4f-1). B46 lands **in place** instead. Re-charge the extraction
+when a 3rd consumer appears.
 
 ## Context: prior work
 
-- Prior brief: MVP-4.37/B44 `apply --dry-run` → archived `mint/task-brief-mvp-4.37.md`.
-- Design to amend: `mint/design.md` (append **§5.78**); highest prior = §5.77. Architecture
-  `mint/architecture-dryrun.md` (image-format lens touched the human-vs-golden representation).
-- Brief-author Phase 2 greps (confirmed against current code):
-  - B44 seam: `ApplyConfig.dry_run` (`src/cli/apply.hpp:33`); `render_dryrun_image(parsed)` called
-    at `src/cli/apply.cpp:136`; `[[nodiscard]] std::string render_dryrun_image(const Config& cfg)`
-    + `format_dryrun_image(const std::vector<RecordedWrite>& recs, …)` in `src/lib/map_image.hpp`
-    (render does compile→record→**format** internally and returns the golden STRING today — see Q2,
-    it must be split so the CLI can pick the formatter); `cfg.dry_run = true` set at
-    `src/cli/cli.cpp:249` (the `--dry-run` parse).
-  - `RecordedWrite` = the dumb `(map,key,value)` trace in CALL order (`src/lib/map_writer.hpp:72`);
-    `kMapCatalog` maps tag→{name,key_sz,val_sz}. **The trace carries the GLOBAL lowered structure
-    (per-axis maps, the action_table keyed by action_type, the devmap), NOT an ordered per-rule
-    view** — `action_table` is identity-keyed by action_type (the B42 single-tap model), so a clean
-    "rule N → its match + action" reconstruction from the trace alone is lossy/fiddly (see Q1).
-  - `T_CLI_APPLY_DRYRUN.sh` (#113) currently asserts on the DEFAULT `apply --dry-run` stdout:
-    first line `== "# xdpfilter-image v1"` (`:76`), `grep '^map=redirect_devmap '` (`:85`),
-    `grep 'dpi0 RESOLVED-AT-APPLY'` (`:89`), NODEV absent (`:94`). These golden assertions MUST
-    move behind `--format=golden`; the default-output assertions become human-view greps.
-  - `docs/CONFIG_SCHEMA.md` vocabulary: `default_action: drop|pass`, `rules[].action:
-    pass|drop|redirect`, `match: {…}`, `steering: { redirect_to: <iface> }` — the operator-facing
-    names the human view should use.
-  - `T_DRYRUN_IMAGE_IDENTITY` (#112) calls `format_dryrun_image` directly → UNAFFECTED by the
-    default-format change.
-- PI continuity: PI-mvp-4.36/4.37-LIVE-IDENTITY (live apply byte-identical — this slice touches no
-  live/materialize/seam code), PI-mvp-4.37-FAILCLOSED, PI-mvp-4.37-SSOT, PI-7, insn 3477, the
-  golden byte-UNCHANGED.
+- All prior briefs: archived in `mint/task-brief-*.md` (prior = `task-brief-mvp-4.38.md`, B45 human view).
+- Existing design: `mint/design.md` §5.78 (B45 dry-run human view) is the most recent section; §5.78.4(a) defines the ethertype value-form B46 amends.
+- Source of items: `/mint-review` report + `/mint-simplify` synth verdict (2026-06-07). simplify BEDROCK #1/#2/#3 + review TEST-C1/B46.
+- Phase-2 brief-author grep verification: ran below (see Phase 2 output); every literal CONFIRMED, zero discrepancies.
+- PI continuity: **PI-7** (loader.hpp byte-equivalence) continues — item 3 is same-TU in `loader.cpp`, no header change. **PI-mvp-4.37-FAILCLOSED** continues — item 1 deletes only the unused `active_writer()` getter, never the fail-closed wrappers. BPF datapath byte-identity (**insn 3477**) holds trivially (no `src/bpf` touch). dryrun golden byte-identity holds (B46 touches only the human view, not the machine map-dump golden).
 
 ## Workflow rules (brownfield)
 
-- **Architect (Phase A):** read `mint/architecture-dryrun.md` (image-format lens) + design.md §5.77
-  (B44 seam) + §6.5 invariants. Re-run the Phase-2 greps. EDIT `design.md`, append **§5.78**.
-  Resolve Q1 (human-view render SOURCE) + Q2 (split render_dryrun_image so the CLI picks the
-  formatter) + the HG-2 diagnostic-depth call. **Architect owns realizability** — the brief frames
-  the source fork; the architect picks + grounds it.
-- **Impl:** the human formatter + the `--format` flag, per the resolved design. NO change to the
-  live apply path, the materialize seam, or `format_dryrun_image` (the golden formatter).
-- **Tester:** switch `T_CLI_APPLY_DRYRUN`'s golden assertions to `--format=golden`; ADD assertions
-  on the DEFAULT human output (greps for readable per-rule lines + default_action + the redirect
-  target). MANDATORY: a NEGATION — a config with a deliberate issue (e.g. a rule whose match is
-  empty / a redirect with no steering target) → the human view surfaces it, AND a comparator-can-
-  fail control.
-- **Reviewer:** 5-point brownfield. Special attention: PI-LIVE-IDENTITY (this slice is pure
-  host-side formatting — `git diff` of the live path/materialize/map_writer must be ∅), PI-SSOT
-  (the human formatter does NOT become a parallel image-builder / a reimplementation of the
-  lowering — it renders from a TESTED source per Q1), golden byte-UNCHANGED (now via
-  `--format=golden`), the `--format` default is human.
+- **Architect**: read `mint/design.md` §5.77–§5.78 + the guard catalogue (#9, #13, #15); EDIT design.md in place; append a §5.79 amendment covering the four items + the explicit `axis_format`-extraction-declined decision (record as a D-* with the rule-of-three/guard-#9 rationale so the next reviewer doesn't re-raise it). Resolve HG-mvp-4.39-1 (item-3 error-string handling).
+- **Impl**: FileList below; pure subtraction + 1 helper + the B46 2-line format change. NO new abstractions beyond the file-local helper.
+- **Tester**: NO new ctest needed (all items are behavior-preserving except B46's human-view spelling). EDIT `tests/T_CLI_APPLY_DRYRUN.sh` for the B46 grep (two sites). Confirm the existing suite stays green; confirm `dryrun_image.golden` is UNCHANGED (machine image untouched).
+- **Reviewer**: 5-point brownfield framework. Special attention: (a) `active_writer()` truly has zero callers post-delete; (b) `parse_prefix` merge preserves the caller-side message catalogue byte-identical; (c) the `loader.cpp` extraction keeps both populate paths behaviorally identical AND leaves `copy_rule_counters_forward` EXPLICIT (guard #15); (d) B46 changed every `fmt_ethertype` format string + its comment + both test sites + the §5.78.4(a) design prose, and the golden is unchanged; (e) PI-7 — `git diff` on `loader.hpp` is EMPTY.
 
 ## Human-gate decisions (defaults applied — architect overrides at Phase A)
 
-### HG-mvp-4.38-1: default output format → **human** (BAKED, PO)
-`apply --dry-run` with no `--format` prints the human view. `--format=golden` prints the
-`# xdpfilter-image v1` machine image (byte-unchanged from B44). Not a fork — the operator is the
-audience.
+### HG-mvp-4.39-1: item-3 populate-block error-string handling → **canonicalize both forms to one**
+The two duplicated blocks throw slightly-divergent `LoadFailed` strings:
+- reattach: `"action_table fd unavailable (reattach)"` / `"redirect_devmap fd unavailable (reattach)"`
+- fresh:    `"action_table map fd unavailable"` / `"redirect_devmap map fd unavailable"`
+They differ in BOTH the word `map` and the `(reattach)` suffix — not a clean stem+suffix.
+**Verified: NO test pins these strings** (`grep -rn "fd unavailable" tests/` → empty). So the extracted `populate_shared_maps()` may canonicalize both to a single form (e.g. `"<map> map fd unavailable"`) — simplest, and these are internal throws on an fd-unavailable condition that does not occur in practice. **Default: canonicalize.** Architect MAY instead preserve the exact two forms via a `const char* ctx` label param if they judge the diagnostic divergence worth keeping — either is acceptable since nothing observes them; prefer the lower-LOC option.
 
-### HG-mvp-4.38-2: diagnostic depth → **useful-but-bounded** (default)
-The human view does a faithful per-rule / per-axis decode in operator vocabulary + the
-redirect-target-resolution note (`redirect_to=<iface> → RESOLVED-AT-APPLY (verify it's up)`) + a
-cheap "rule N matches nothing / empty axis" hint where it falls out for free. DEFER heavier linting
-(rule-overlap/shadowing analysis, unreachable-rule proofs) to a future slice. Architect sets the
-exact depth; the bar is "an operator can spot a config mistake," not "a full linter."
+### HG-mvp-4.39-2: B46 rendering site → **in place in `map_image.cpp`, NOT via a shared formatter** (locked)
+The shared-`axis_format` extraction is declined this pass (rule-of-three: 2 consumers < 3; guard #9 duplication-over-extraction is cited inline at `map_image.cpp:49-51`). This is settled, not an open question — architect records it as a D-* so it is not re-litigated. B46 = a 2-line format-string change where the renderer already lives.
 
-## Open mechanism questions (architect decides; document in §5.78)
+## Open mechanism questions (architect decides; document in §5.79)
 
-### Q1: what does the human view render FROM? (the SSoT-honesty fork)
-- **A1 — from the validated `Config` / `CompiledRuleset`** (the semantic pre-image): cr already
-  carries per-rule id→slot→bit→action + the match (from Config) in named, ordered form — the
-  natural source for a readable "your rule X → compiled to Y" view. SSoT note: this is the
-  compile-output view (pre-materialize), distinct from the golden's post-materialize bytes — BUT
-  `compile()` is already offline-tested (`compile_harness`/`T_COMPILE_LOWERING_IDENTITY`) to
-  produce the correct cr, so it renders from a TESTED-correct source, not a fresh reimplementation.
-- **A2 — decode the recorded `(map,key,value)` trace** (the same one the golden formatter consumes):
-  maximally faithful to what materialize WROTE, single source with the golden. BUT (grounded above)
-  the trace is the GLOBAL lowered structure with action_table identity-keyed — reconstructing an
-  ordered per-rule semantic view from it is lossy/fiddly and needs to cross-join the Config anyway.
-- **A3 — hybrid:** render the per-rule semantic view from Config/cr (A1) AND cross-check/annotate
-  against the trace ("rule 7 → slot 2 bit 0x04, present in the written image") for faithfulness.
-- **Recommendation:** the grounding favors **A1** (render from Config/cr) for genuine readability —
-  the trace (A2) is lossy for the ordered per-rule view ops want, and cr is a tested source so the
-  guard-#9 / SSoT concern is mild (the golden retains the byte-faithful role; the human view's job
-  is operator readability). The architect confirms cr carries everything needed (match + action +
-  target + slot) and rules on A1-vs-A3. **Do NOT build a fresh lowering reimplementation** (that
-  would be the real guard-#9 violation) — render from cr/Config, the existing tested compile output.
+None rise to a Q-tier mechanism choice — every item is mechanical with a verified single shape. (HG-mvp-4.39-1 is the only genuine fork and it is defaulted with grep evidence.)
 
-### Q2: split `render_dryrun_image` so the CLI can choose the formatter
-`render_dryrun_image(const Config&)` currently does compile→record→format→returns the golden
-string. The CLI needs to render once then pick human|golden.
-- **Recommendation:** factor render (compile→record→**trace**) from format; the CLI calls the
-  chosen formatter (`format_dryrun_image` for golden / the new human formatter for human). Keep
-  `format_dryrun_image` byte-identical. For A1, the human formatter also needs the Config/cr (pass
-  it through). Architect picks the exact signature; `render_dryrun_image`'s public name/semantics
-  may shift — PI-7 does NOT apply (it's not loader.hpp), but keep the harness's `format_dryrun_image`
-  entry stable (T_DRYRUN_IMAGE_IDENTITY links it).
+## Scope (cycle 1 — concrete items)
 
-## Scope (cycle B45 — concrete items; architect refines)
+### Item B47-1 — delete dead `active_writer()` getter
+**Where**: `src/lib/map_writer.cpp` (def), `src/lib/map_writer.hpp` (decl + comment).
+- Delete the def `MapWriter* active_writer() { return g_active_writer; }` (currently `map_writer.cpp:57`).
+- Delete the decl `MapWriter* active_writer();` (currently `map_writer.hpp:63`).
+- Trim the comment at `map_writer.hpp:60-61`: `"Install/inspect the process-global active writer..."` → `"Install the process-global active writer..."` (the inspect getter is gone).
+- **KEEP** `set_active_writer` (3 live callers: `map_writer.hpp:123-124` RecordingScope ctor/dtor, `live_map_writer.cpp:59` install). **Verified zero callers** of `active_writer()` tree-wide.
+~−2 LOC, −1 dead public symbol.
 
-### Item B45-1 — human formatter
-**Where**: `src/lib/map_image.{hpp,cpp}` (a `format_dryrun_human` sibling to `format_dryrun_image`,
-consuming the source Q1 settles) + whatever Q2 render-split needs. Per-rule readable decode +
-default_action + redirect target + the bounded diagnostic (HG-2).
+### Item B47-2 — merge `parse_prefix` / `parse_prefix6`
+**Where**: `src/lib/cidr.cpp` (anonymous-namespace helpers + 2 call sites).
+- The two helpers (currently `:42` v4 ceiling 32, `:57` v6 ceiling 128) are byte-identical except the ceiling constant and a comment. Merge into one `parse_prefix(std::string_view s, int ceiling) noexcept`.
+- Callers: `parse_cidr_v4` (currently `:110`) passes `32`; `parse_cidr_v6` (currently `:195`) passes `128`.
+- Diagnostics live caller-side (the callers throw the distinct "empty prefix" vs "out of range" messages) → **message catalogue preserved byte-identical**. These helpers are file-local (anon namespace); no external/test consumer.
+~−10 LOC.
 
-### Item B45-2 — `--format=human|golden` flag (default human)
-**Where**: `src/cli/cli.cpp` (`parse_apply` — accept `--format=`), `src/cli/apply.hpp`
-(`ApplyConfig` gains a `format` enum, default human), `src/cli/apply.cpp` (the dry-run branch picks
-the formatter). The B44 `--dry-run` branch already exists.
+### Item B47-3 — extract file-local `populate_shared_maps()` in `loader.cpp`
+**Where**: `src/lib/loader.cpp` — the two duplicated `action_table` + `redirect_devmap` fd-get-and-populate blocks (reattach path currently `~:1676-1691`, fresh path currently `~:1797-1810`).
+- Extract a file-local helper `populate_shared_maps(skel, cfg)` (exact signature architect's call) that does the `bpf_map__fd` + null-check + `populate_action_table` + `populate_redirect_devmap` for both shared maps.
+- **Same TU** → guard #9 (cross-file duplication-over-extraction) is INAPPLICABLE; this is a within-file dedup, allowed.
+- **guard #15**: `copy_rule_counters_forward` and `materialize` stay EXPLICIT at both call sites — they are NOT pulled into the helper (PRESERVE-semantic boundary). The helper covers ONLY the two static shared maps.
+- Error strings per HG-mvp-4.39-1.
+- **PI-7**: no `loader.hpp` change — `git diff loader.hpp` must be EMPTY.
+~−18 LOC net (+1 helper).
 
-### Item B45-3 — test switch + human-output coverage
-**Where**: `tests/T_CLI_APPLY_DRYRUN.sh` (golden assertions → `--format=golden`; NEW default-human
-assertions; NEGATION on a config-with-an-issue), possibly a NEW fixture under `tests/dryrun/` for
-the diagnostic-negation config. `tests/CMakeLists.txt` only if a new fixture/test is added.
+### Item B47-4 — B46 ethertype canonical 4-digit hex (in place)
+**Where**: `src/lib/map_image.cpp` `fmt_ethertype` + comment; `tests/T_CLI_APPLY_DRYRUN.sh`; `mint/design.md` §5.78.4(a).
+- `map_image.cpp:96`: BOTH format strings `0x{:x}` → `0x{:04x}` (the name-suffix form `"0x{:x}({})"` AND the bare `"0x{:x}"`). Rewrite the `:88-89` comment that currently says `"NO fixed-width leading zeros (0x806, not 0x0806)"` → the canonical-4-digit rationale.
+- `tests/T_CLI_APPLY_DRYRUN.sh`: two sites — the `(3j)` comment at `:233` and the grep at `:234` (`ethertype=0x806` → `ethertype=0x0806`).
+- `mint/design.md` §5.78.4(a): the ethertype value-form prose/table → 4-digit zero-padded (reverses the B45-r1 reconcile-DOWN to `0x806`).
+- **Verified no collateral**: the only other `ethertype=` render sites are name-based (sidecar/prom emit `arp`) or already `0x{:04x}` (sidecar); `dryrun_image.golden:81` is the machine map-dump (`map=ethertype_bitmask_a` metadata) and does NOT render the human hex → **golden UNCHANGED**.
 
 ## Out of scope (explicit)
 
-- **② per-rule redirect targets**, **Option-4 gate-shrink**, **mirror/rate-limit** (later roadmap).
-- **Heavy config-linting** beyond the bounded HG-2 diagnostic (rule-overlap/shadowing/unreachable
-  analysis → a future slice if wanted).
-- **Any live/datapath/materialize change** — this is host-side formatting only.
-- **VERSION bump** — architect's call (completes a user-facing feature); default no-bump.
+- **Shared `axis_format` module extraction** (review ARCH-H1/CQ-H1) — declined this pass (2 consumers < rule-of-three; guard #9). Re-charge at 3rd consumer.
+- **SEC-L1** exporter systemd sandbox (deployment-gated, defense-in-depth).
+- **PERF-M1** bound exporter scrape loops by live rule count (no forcing-function; own slice).
+- **TEST-H1/H2** dryrun_human.golden + sanitizer `--dry-run` coverage — Batch C, separate additive slice (NOT this subtraction slice).
+- Any VERSION bump (pure subtraction + cosmetic).
 
 ## Definition of done
 
-- §5.78 amendment in `mint/design.md` (Q1/Q2 + HG-2 resolved).
-- `apply --dry-run` default = human view; `--format=golden` = the byte-unchanged machine image.
-- Human formatter renders a readable per-rule/per-axis decode + default_action + redirect target +
-  the bounded diagnostic, from a TESTED source (no fresh lowering reimpl).
-- `T_CLI_APPLY_DRYRUN` updated (golden → `--format=golden`; new human assertions + NEGATION);
-  `T_DRYRUN_IMAGE_IDENTITY` still green; golden byte-UNCHANGED.
-- PI continuity: PI-LIVE-IDENTITY (live path/materialize/map_writer git-diff ∅), PI-FAILCLOSED,
-  PI-SSOT, PI-7, insn 3477.
-- Full local ctest suite green; `mint/review.md` round-1 = pass.
+- §5.79 amendment in `mint/design.md` (the 4 items + the D-* recording the declined extraction).
+- PI continuity held: PI-7 (loader.hpp ∅), PI-mvp-4.37-FAILCLOSED, BPF insn 3477, dryrun golden unchanged.
+- Existing ctest suite green; `T_CLI_APPLY_DRYRUN.sh` updated (B46 grep) and passing; `dryrun_image.golden` byte-unchanged.
+- `active_writer()` gone (zero refs); `parse_prefix` single-arg→two-arg merged; `populate_shared_maps` extracted; B46 4-digit live.
+- `mint/review.md` round-1 verdict = pass.
 - One git commit per phase boundary.
 
 ## Dependencies
 
-- Build: clang-19 / libc++ / C++23 (existing). No new deps (host-side formatting; dry-run stays
-  ZERO kernel calls).
-- Runtime: the human view + the CLI test run offline (no root/veth/kernel).
+- Build: clang-19 / libc++-19 / libbpf (unchanged).
+- Runtime/kernel: none new.
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 ```yaml
@@ -169,33 +117,24 @@ packs:
 
 ## Pre-brief sanity check (per mint-hld-scope-discipline)
 
-**Single-axis design slice → single-architect `/mint-dev`, NO new `/mint-hld`.** The one fork is the
-human-view render SOURCE (Q1: from Config/cr vs the trace) — ONE axis, the image-format lens already
-touched human-vs-golden, and the grounding points clearly at A1 (render from the tested cr). The
-human-is-default decision is PO-baked (not a fork). Q2 (render split) is a mechanical refactor. The
-diagnostic depth (HG-2) is a bounded engineering call. No multi-axis residue → no HLD.
+**MECHANICAL.** Not multi-axis: each of the 4 items has a single verified shape that falls out of the simplify/review findings + a 30-second grep. No expensive-to-undo choice, no ≥3-option design space. The one fork (item-3 error strings) is defaulted with grep evidence (HG-mvp-4.39-1). No `/mint-hld` needed; single-architect `/mint-dev` is correct. NOT derived from a prior hld ladder → no ladder to re-discharge; PO-filter applied (no decision is on the user's plate — the declined extraction is engineering-doctrine, the error-string fork is internal).
 
 ## Notes for architect Phase A code-grep discipline
 
-Re-run independently (briefer ran these; verify + extend):
-- `grep -nE 'render_dryrun_image|format_dryrun_image|RecordedWrite' src/lib/map_image.hpp src/lib/map_writer.hpp` — the seam the human formatter is a sibling to + the render-split point (Q2).
-- `grep -nE 'dry_run|format' src/cli/apply.hpp src/cli/apply.cpp src/cli/cli.cpp` — the `--format` threading points (ApplyConfig + parse_apply + the dry-run branch).
-- Confirm the `CompiledRuleset` (compiled_ruleset.hpp) carries per-rule match + action + target + slot needed for A1 — i.e. the human view can render the operator-meaningful view WITHOUT a fresh lowering reimplementation (the guard-#9 line).
-- `grep -nE 'xdpfilter-image|--format|first_line' tests/T_CLI_APPLY_DRYRUN.sh` — the current golden assertions to migrate behind `--format=golden`.
-- `docs/CONFIG_SCHEMA.md` — the operator vocabulary (default_action/action/match/steering.redirect_to) the human view should mirror.
+Brief author already ran these (all CONFIRMED 2026-06-07); architect re-verifies + extends:
+- `grep -rn "active_writer" src/ tests/ include/` — confirm `active_writer()` (no args) has ZERO callers; `set_active_writer` has 3 (RecordingScope ×2, install_live_map_writer). Verify again post-delete.
+- `sed -n '42,68p' src/lib/cidr.cpp` — confirm the two `parse_prefix*` bodies differ ONLY by ceiling (32/128) + comment; callers at the `parse_cidr_v4`/`parse_cidr_v6` bodies pass the ceiling.
+- `grep -n "populate_action_table\|populate_redirect_devmap" src/lib/loader.cpp` — the two call blocks; confirm `copy_rule_counters_forward` sits OUTSIDE them (guard #15 boundary).
+- `grep -rn "fd unavailable" tests/` — empty (HG-mvp-4.39-1 canonicalize is safe).
+- `grep -n "0x{:x}\|ethertype" src/lib/map_image.cpp` + `grep -n "ethertype=0x" tests/T_CLI_APPLY_DRYRUN.sh` + `find tests -name dryrun_image.golden` — confirm golden has no human-hex ethertype line.
+- Post-impl: `git diff --stat src/lib/loader.hpp` MUST be empty (PI-7).
 
 ### Anti-misdiagnosis guards applicable to this slice (per Phase 3)
-- **Guard #9 (SSoT / no parallel builder):** THE central guard — the human formatter must render from
-  a TESTED source (the existing `CompiledRuleset` compile output, or the recorded trace), NOT a fresh
-  reimplementation of the lowering. A second hand-rolled config→image computation is
-  [INVARIANT-VIOLATED]. The golden (`format_dryrun_image`) stays the byte-faithful SSoT.
-- **Guard #36 (capture-vs-format split):** the human view is another FORMATTER over the same captured
-  result; keep format logic separate from the render/capture (mirrors the B44 format_dryrun_image
-  split).
-- **Guard #8 (interactive-vs-log / output-surface distinction):** the human view is operator-facing
-  stdout, not a log event — keep it out of the structured-log catalog; it's a CLI render.
-- **PI-mvp-4.36/4.37-LIVE-IDENTITY:** verify `git diff` of the live apply path / materialize.cpp /
-  map_writer.cpp / live_map_writer.cpp = ∅ (this slice adds a formatter + a flag, touches no live
-  code).
-- **Guard #11 (VERSION-bump test-literal propagation):** only if the architect elects a VERSION bump
-  (default no-bump) — then grep the version literal sites.
+
+- **guard #5** (Phase A code-grep discipline) — always; architect repeats the greps above independently.
+- **guard #9** (helper-location duplication-over-extraction via rule-of-three) — HEADLINE. (a) Item 3 is SAME-TU dedup → guard #9 (which governs cross-FILE duplication) does NOT block it. (b) The declined `axis_format` extraction IS a guard-#9 call: 2 consumers < 3, extraction premature. Record both as D-* so neither is re-litigated.
+- **guard #13** (retired emit-site string ripple) — B46: the `ethertype=0x806` literal lives in `T_CLI_APPLY_DRYRUN.sh` (2 sites) — update both. Item-3 strings: verified no test ripple.
+- **guard #15** (`copy_rule_counters_forward` PRESERVE boundary) — item 3 must leave the copy-forward + materialize EXPLICIT at both call sites; the helper covers ONLY the two static shared maps.
+- **guard #33** (anchor preservation on comment moves) — item 3 moves §-tagged comments into the helper; keep the grep-able §5.29/§5.75 anchors. B46 rewrites the §5.78.4(a) comment; keep the §-tag.
+
+(N/A this slice: guard #11 — no VERSION bump; guards #27/#28 — no cross-arm/header-walk axis change.)
