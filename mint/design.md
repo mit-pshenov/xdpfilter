@@ -21343,3 +21343,255 @@ candidate #41.
    this amendment ✓.
 5. **PI-7** — B47-3 helper is file-local in `loader.cpp`; `loader.hpp` not referenced → `git diff loader.hpp` MUST
    be ∅ post-impl ✓.
+
+## §5.80 MVP-4.40 / B48: harden the DEFAULT dry-run output — human-view golden + sanitizer coverage (brownfield, PURE-ADDITIVE TEST-DEPTH, NO VERSION bump)
+
+Amendment block. Batch C of the 2026-06-07 sanitary day — an **additive test-depth** slice closing the
+`/mint-review` 2026-06-07 TEST-H1 (High) + TEST-H2 (High) findings: the human `apply --dry-run` view (the DEFAULT
+operator output, §5.78) is today the weakest-tested of the three formats — `format_dryrun_human` has ZERO
+offline-harness coverage (only ~25 loose substring greps in `T_CLI_APPLY_DRYRUN.sh`) and is NEVER executed under
+ASAN/UBSAN (`T_SANITIZER_BUILD` runs only `apply`+`detach`, never `--dry-run`). This slice (1) adds a byte-exact
+`dryrun_human.golden` driven through the existing libbpf-free offline harness, and (2) adds a `--dry-run`
+invocation (both formats) to the sanitizer test. **No `src/` behavior change, no schema/datapath touch, no VERSION
+bump (test-only).** Natural follow-up to §5.79/B47 (just shipped, landed B46) — so the new human golden bakes the
+canonical `0x0806` ethertype form. Builds on §5.76 (dryrun_harness), §5.77 (CLI verb + map_writer seam + the
+libbpf-free OPS-canary), §5.78 (human view + the §5.78.4(a) token contract).
+
+### §5.80.1 Problem statement
+Two discrete, mechanically-verified test-depth gaps. (1) TEST-H1: the human formatter `format_dryrun_human(const
+Config&, const CompiledRuleset&)` (map_image.hpp:32, def map_image.cpp:219) is rendered by the CLI verb but has no
+offline byte-exact golden — a framing/whitespace/ordering regression that still satisfies the loose substring
+greps would slip through. Fix: render it through the EXISTING libbpf-free `dryrun_harness` and byte-compare to a
+NEW frozen `dryrun_human.golden`, mirroring the proven image-golden trio (`test_smoke_minimal` /
+`test_image_identity` / `test_negation_control` + `--emit-golden`). (2) TEST-H2: the dry-run code path
+(`compile()` + `format_dryrun_human` + `render_dryrun_image` + delta `diff()`) never runs under ASAN/UBSAN. Fix:
+add a `apply … --dry-run` step (default human + `--format=golden`) to `T_SANITIZER_BUILD.sh` against the
+already-sanitized binary. Each gap closes by extending a well-established existing pattern — this is the contract,
+not a redesign. Boundary: ADD a golden + 2 harness sub-tests + a shell step; NOTHING subtractive, no `src/` edit.
+
+### §5.80.2 FileList (DIFF)
+
+**NEW**
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `tests/dryrun/dryrun_human.golden` | FROZEN byte-exact golden of `format_dryrun_human(build_corpus(), compile(build_corpus()))`; bakes the §5.78.4(a) token contract incl. `ethertype=0x0806` (B46). **Tester-authored, then frozen (§5.77.7).** | text | ~30–45 |
+
+**EDITED**
+| Path | Role / change (one line) | Language | LOC est | Owner |
+|---|---|---|---|---|
+| `tests/dryrun/dryrun_harness.cpp` | Add `--emit-golden-human` argv branch + `render_human(cfg)` helper + `test_human_identity(path)` + `test_human_negation_control()` + human-golden path resolution + main() wiring (alongside the existing image tests). | C++23 | +45 | impl (D-mvp-4.40-OWNERSHIP) |
+| `tests/T_SANITIZER_BUILD.sh` | Add a `--dry-run` step after the existing sanitized `apply`: run `apply … --dry-run` (default human) AND `apply … --dry-run --format=golden` against the instrumented binary; assert rc==0 + non-empty stdout; stderr → `STDERR_FILE` so the existing ASAN/UBSAN grep covers it. | bash | +15 | tester |
+
+**UNCHANGED-BUT-AFFECTED** (must stay byte-identical; reviewer asserts zero git-diff)
+| Path | Why it must not change |
+|---|---|
+| `tests/CMakeLists.txt` | **Load-bearing libbpf-free contract carrier.** No new source, no new link dep, no new ctest — the human golden + 2 sub-tests run INSIDE the existing `dryrun_harness` main / `T_DRYRUN_IMAGE_IDENTITY` ctest, and the new golden is located via the existing `TEST_DIR` env. The `add_executable(dryrun_harness …)` link list (`:1765-1772`) + `T_DRYRUN_IMAGE_IDENTITY` registration (`:1802-1813`) stay byte-identical. `git diff` MUST be ∅ (D-mvp-4.40-NOCMAKE). |
+| `tests/dryrun/dryrun_image.golden` | PI-mvp-4.38-GOLDEN-UNCHANGED — image golden frozen; this slice only ADDS a human golden alongside. `git diff` MUST be ∅. |
+| `src/lib/map_image.{hpp,cpp}` | `format_dryrun_human` / `format_dryrun_image` / `render_dryrun_image` consumed AS-IS — test-only slice, no `src/` edit. `git diff` ∅. |
+| `src/lib/compiled_ruleset.{hpp,cpp}` | `compile()` consumed as-is. `git diff` ∅. |
+| `src/lib/loader.hpp`, all `src/`, all `src/bpf/*` | PI-7 (loader.hpp ∅) + insn 3477 (`src/bpf` ∅) — test-only slice. `git diff src/ src/bpf` ∅. |
+| `tests/dryrun/dryrun_cli.yaml` | The CLI verb's corpus, lock-step with `build_corpus()` (§5.77.6 #2). NOT touched — the harness renders `build_corpus()` (C++), not the yaml. (Documented so the lock-step is not mistaken for a needed edit.) |
+
+Anything not in these three categories is off-limits for impl/tester. If impl/tester needs to touch a file not
+listed → design gap → SendMessage architect.
+
+### §5.80.3 DataStructures
+None cross a module/file boundary this slice. `format_dryrun_human(const Config&, const CompiledRuleset&)` and
+`compile(const Config&) → CompiledRuleset` are EXISTING, UNCHANGED signatures consumed from the already-linked
+`map_image.hpp` / `compiled_ruleset.hpp`. The new `dryrun_human.golden` is a flat text artifact (no in-memory
+struct). No struct/layout/type/map changes.
+
+### §5.80.4 Interfaces (deltas only — all test-side)
+
+1. **`--emit-golden-human` argv branch (Q1 = A1).** In `dryrun_harness.cpp` `main()`, mirroring the existing
+   `--emit-golden`/`--emit-live` convention: `if (argc>=2 && strcmp(argv[1],"--emit-golden-human")==0)` →
+   `std::fputs(render_human(build_corpus()).c_str(), stdout); return 0;`. Generator-only; produces the frozen
+   golden. (Distinct from `--emit-golden`, which emits the IMAGE oracle — see D-mvp-4.40-HUMAN-GEN.)
+
+2. **`std::string render_human(const Config& cfg)` helper** (file-local, mirrors `render_live`): returns
+   `format_dryrun_human(cfg, compile(cfg))`. Single source for both the emit branch and the identity test, so the
+   render path is computed identically in both.
+
+3. **`void test_human_identity(const std::string& human_golden_path)`** — render `render_human(build_corpus())`,
+   read the golden, byte-compare via string `!=`, call `report_first_diff(got, want)` on mismatch (reuses the
+   existing helpers). Mirrors `test_image_identity`.
+
+4. **`void test_human_negation_control()`** — render `render_human(build_corpus())`, corrupt EXACTLY ONE byte of a
+   data-bearing position (deterministic; e.g. flip one `[0-9a-z]` char on the first non-header line), assert
+   `rendered != corrupt` (the comparator catches it). Mirrors `test_negation_control`. Proves a one-byte human-view
+   regression cannot pass green.
+
+5. **Human-golden path resolution** — mirror the image golden: `if (const char* td = std::getenv("TEST_DIR"))
+   golden = std::string(td)+"/dryrun/dryrun_human.golden"; else "tests/dryrun/dryrun_human.golden";`.
+
+6. **`main()` wiring** — call `test_human_identity(human_golden_path)` + `test_human_negation_control()` alongside
+   the existing `test_smoke_minimal()` / `test_image_identity()` / `test_negation_control()`; the existing
+   `g_fails` aggregator + exit logic is reused unchanged (still ONE ctest: `T_DRYRUN_IMAGE_IDENTITY`).
+
+7. **`T_SANITIZER_BUILD.sh` `--dry-run` step** — after the existing step-4 sanitized `apply` (and reusing
+   `${NSEXEC}`, `${SANITIZED_LOADER}`, `${IFACE_A}`, `${ANDV6_FIXTURE}`):
+   - `out_h=$(${NSEXEC} "${SANITIZED_LOADER}" apply --iface "${IFACE_A}" -f "${ANDV6_FIXTURE}" --dry-run 2>>"${STDERR_FILE}")` — assert rc==0 AND `-n "${out_h}"` (non-empty human output).
+   - `out_g=$(${NSEXEC} "${SANITIZED_LOADER}" apply --iface "${IFACE_A}" -f "${ANDV6_FIXTURE}" --dry-run --format=golden 2>>"${STDERR_FILE}")` — assert rc==0 AND `-n "${out_g}"` (non-empty golden output).
+   - stderr appended to `STDERR_FILE` so the EXISTING `grep -E 'AddressSanitizer|UndefinedBehavior'` assertion
+     covers the dry-run path. This drives `compile()` + `format_dryrun_human` + `render_dryrun_image` + `diff()`
+     under ASAN/UBSAN. (Exact placement/var-names are tester latitude; the two rc==0 + non-empty assertions and the
+     stderr-capture are the contract.)
+
+### §5.80.5 Decisions (with rationale)
+
+- **D-mvp-4.40-H1-HARNESS (resolves HG-mvp-4.40-1).** H1 (human golden) lives in the offline `dryrun_harness`
+  (DEFAULT), NOT as a CLI-level golden compare in `T_CLI_APPLY_DRYRUN.sh`. **Because** the harness path is
+  libbpf-free, offline, byte-exact, and reuses the proven image-golden pattern; the harness ALREADY links
+  `map_image.cpp` (`format_dryrun_human`) + `compiled_ruleset.cpp` (`compile()`), so NO new link deps — the
+  libbpf-free OPS-canary (PI-mvp-4.37) is preserved. Same `build_corpus()` config the image golden uses (carries
+  the ethertype axis → exercises B46's `0x0806`). The CLI-level alternative couples to the CLI env and is not
+  libbpf-free — REJECTED.
+- **D-mvp-4.40-H2-SANITIZER (resolves HG-mvp-4.40-2).** H2 (sanitizer coverage) = a `--dry-run` step (BOTH formats)
+  added to `T_SANITIZER_BUILD.sh` against the already-built instrumented binary. **Because** it is cheap (a few
+  seconds), drives the REAL sanitized binary, and gives high coverage of the dry-run code path. The default human
+  format drives `format_dryrun_human`; `--format=golden` drives `render_dryrun_image`/`format_dryrun_image`/`diff()`.
+- **D-mvp-4.40-EMIT (resolves Q1 = A1).** The generator affordance is a dedicated `--emit-golden-human` argv branch.
+  **Because** lowest-surprise — it mirrors the existing `--emit-golden`/`--emit-live` argv convention EXACTLY
+  (A2, overloading a single `--emit-golden <which>`, would change the existing arg's shape for no benefit).
+- **D-mvp-4.40-HUMAN-GEN — `--emit-golden-human` emits the PRODUCTION render, not a hand-derived oracle.** Unlike
+  the IMAGE golden (whose `--emit-golden` emits the independent `oracle_expected_records` → THREE-WAY agreement),
+  the human golden is generated from `format_dryrun_human(build_corpus(), compile(build_corpus()))` directly.
+  **Because** the human view has no independent map-image oracle; its INDEPENDENT spec is **§5.78.4(a)** (the
+  load-bearing token contract) PLUS the ~25 substring greps in `T_CLI_APPLY_DRYRUN.sh` which ALREADY assert those
+  tokens independently of any golden. The byte-exact `dryrun_human.golden` ADDS, on top of that token spec, a
+  no-silent-drift pin on framing/whitespace/ordering. **Independence step (mandatory, tester-owned):** the tester
+  MUST REVIEW the emitted golden against the §5.78.4(a) contract (header `# xdpfilter dry-run`; `default_action:
+  drop`; `rules: 10`; `steering: redirect_to=dpi0`; each `id=N slot=M action=…` rule line; `id=10 slot=9
+  action=redirect target=dpi0`; `ethertype=0x0806` on id7; canonical mac/cidr/cidr6/protocol/port forms) BEFORE
+  freezing. Frozen thereafter (§5.77.7 — never auto-regenerate to "make it pass"). This is deliberately
+  weaker-independence than the image golden and is acceptable for a COMPLEMENTARY byte-drift pin.
+- **D-mvp-4.40-NOCMAKE — NO `tests/CMakeLists.txt` change.** **Because** the human golden + 2 sub-tests run inside
+  the EXISTING `dryrun_harness` main / `T_DRYRUN_IMAGE_IDENTITY` ctest; no new source file, no new link dep, no new
+  ctest registration; the new golden is found via the existing `TEST_DIR` env (the dir already ships to the harness
+  via `TEST_ENV`). Reviewer asserts `git diff tests/CMakeLists.txt` = ∅ — which DIRECTLY corroborates
+  PI-mvp-4.37-LIBBPF-FREE (the link line is provably unchanged).
+- **D-mvp-4.40-NOHARNESS-SAN — DECLINE the HG-2 alternative of adding `-fsanitize=address,undefined` to the
+  `dryrun_harness` target.** **Because** the `T_SANITIZER_BUILD` `--dry-run` step already exercises
+  `compile()`/`format_dryrun_human`/`render_dryrun_image`/`diff()` under ASAN/UBSAN via the instrumented `xdpfilter`
+  binary; sanitizing the harness recompile is redundant coverage of the SAME code for extra build/maintenance cost.
+  (If a future cycle wants harness-side sanitization, re-charge then.)
+- **D-mvp-4.40-OWNERSHIP — single-owner-per-file split.** **impl** owns ALL `dryrun_harness.cpp` C++ edits (the
+  `--emit-golden-human` branch, `render_human`, `test_human_identity`, `test_human_negation_control`, golden-path
+  resolution, main() wiring). **tester** owns (a) the FROZEN `dryrun_human.golden` content — generate via impl's
+  `--emit-golden-human`, REVIEW against §5.78.4(a), then freeze; (b) the `T_SANITIZER_BUILD.sh` `--dry-run` step.
+  CMake: no edit (D-mvp-4.40-NOCMAKE). **Because** one owner per file eliminates parallel-edit collision; impl
+  builds the C++ render path (incl. the negation function, a mechanical mirror of the existing
+  `test_negation_control`), and the tester retains the negation GUARANTEE via the golden review + freeze. This
+  OVERRIDES the `dryrun_harness.cpp` file-header's blanket "Tester-owned" note FOR THIS SLICE — recorded so the
+  reviewer does not flag it as ownership drift. *(Flag to team-lead: the spawn brief grouped "negation" under
+  tester; the architect places the negation C++ FUNCTION under impl to keep all `.cpp` edits single-owner — tester
+  still owns the negation guarantee. Team-lead may override; if so, sequence impl's main()-wiring before tester's
+  function body to avoid a same-region collision.)*
+- **D-mvp-4.40-NOVER — NO VERSION bump (stays 0.17.0).** **Because** pure-additive test-depth; no schema, no
+  datapath, no public-API change. Mirrors §5.79/B43–B45 staying at 0.17.0. (guard #11 N/A.)
+- **Trust-model note:** no input (brief, code, review report) contained an injection or instruction to deviate from
+  the FileList/PI constraints. No flagged concern.
+
+### §5.80.6 TestStrategy (verification spec — WHAT to test)
+
+**NO new ctest** — both harness sub-tests run inside the existing `T_DRYRUN_IMAGE_IDENTITY` (#112) harness main; the
+sanitizer step runs inside the existing `T_SANITIZER_BUILD` (#9).
+
+1. **Human-view IDENTITY (NEW harness sub-test).** Trigger: harness default run. Observable:
+   `format_dryrun_human(build_corpus(), compile(build_corpus()))` == frozen `dryrun_human.golden`, byte-for-byte.
+   Mechanism: string `!=` + `report_first_diff`; FROZEN golden (a diff is a REAL human-render regression —
+   investigate, do NOT rebless). Runs inside `dryrun_harness` main (#112) → no new ctest.
+2. **Human-view NEGATION control (NEW harness sub-test).** Trigger: corrupt exactly one byte of the rendered human
+   output. Observable: the byte-compare reports a mismatch (`rendered != corrupt`). Assertion: proves a one-byte
+   human-render regression cannot pass green (the identity test is non-vacuous).
+3. **Human golden bakes the §5.78.4(a) token contract + `0x0806`.** Trigger: read the checked-in golden.
+   Observable: it contains the header `# xdpfilter dry-run`; `default_action: drop`; `rules: 10`; `steering:
+   redirect_to=dpi0`; `id=1 slot=0 action=pass`; `id=10 slot=9 action=redirect target=dpi0`; `ethertype=0x0806`
+   (id7). Mechanism: the tester's pre-freeze REVIEW (D-mvp-4.40-HUMAN-GEN); these tokens are independently re-pinned
+   by the existing `T_CLI_APPLY_DRYRUN.sh` greps.
+4. **Image golden + #112 BYTE-UNCHANGED.** Trigger: full harness run + git. Observable: `dryrun_image.golden`
+   byte-identical; `test_smoke_minimal`/`test_image_identity`/`test_negation_control` still green. Mechanism:
+   `git diff tests/dryrun/dryrun_image.golden` = ∅; #112 green. (PI-mvp-4.38-GOLDEN-UNCHANGED.)
+5. **libbpf-free link PRESERVED (the OPS-canary).** Trigger: build `dryrun_harness`. Observable: the binary links
+   clean with NO `PkgConfig::LIBBPF`, NO `live_map_writer.cpp`, NO `loader.cpp`, NO `*_skel` object; the human
+   render reuses ALREADY-LINKED `map_image.cpp` + `compiled_ruleset.cpp`. Mechanism: `git diff tests/CMakeLists.txt`
+   = ∅ (D-mvp-4.40-NOCMAKE) → the `add_executable(dryrun_harness …)` link list is provably unchanged; the binary
+   links. (PI-mvp-4.37-LIBBPF-FREE.)
+6. **Sanitizer `--dry-run` coverage (TEST-H2).** Trigger: `T_SANITIZER_BUILD` runs `apply … --dry-run` (default
+   human) AND `--dry-run --format=golden` against the instrumented binary. Observable: both exit 0 with non-empty
+   stdout; captured stderr has ZERO `AddressSanitizer|UndefinedBehavior` matches. Assertion: drives
+   `compile()`/`format_dryrun_human`/`render_dryrun_image`/`diff()` under ASAN/UBSAN. This step IS the ASAN/UBSAN
+   canary for the dry-run code path — the offline `dryrun_harness` ctest is NOT built with sanitizers, so it cannot
+   catch memory/UB bugs in those functions; the instrumented `--dry-run` invocation can.
+7. **Whole-suite regression.** The existing ctest suite stays green (documented env-flakes #1/#9/#48/#63 excepted
+   per handoff; #9 = the pre-existing `T_SANITIZER_BUILD` timeout, BACKLOG B16 — OOS to fix). Mechanism: re-run +
+   diff against prior `test-run.log`.
+
+**OPS-canary note (load-bearing-OPS-canary heuristic):** this slice does NOT introduce a new runtime invocation
+ENVIRONMENT in the capability/namespace/uid sense — the sanitizer `--dry-run` runs at the SAME uid/caps/namespace
+as the existing sanitized `apply` (offline, no kernel touch). So no SEPARATE OPS canary is required. The new
+coverage is an INSTRUMENTATION canary (ASAN/UBSAN over previously-uninstrumented code), which is exactly TEST-H2
+above — not a stripped-down-context canary.
+
+### §5.80.7 Preserved invariants (brownfield)
+
+| ID | Property | Check mechanism |
+|---|---|---|
+| **PI-mvp-4.37-LIBBPF-FREE** (carried, THE load-bearing one) | The `dryrun_harness` link stays libbpf-free after adding the human render path — no `PkgConfig::LIBBPF`, no `live_map_writer.cpp`, no `loader.cpp`, no `*_skel` object; the human render reuses already-linked `map_image.cpp`/`compiled_ruleset.cpp`. | `git diff tests/CMakeLists.txt` = ∅ (the `add_executable(dryrun_harness …)` link list `:1765-1772` unchanged); the harness binary links. |
+| **PI-mvp-4.38-GOLDEN-UNCHANGED** (carried) | `tests/dryrun/dryrun_image.golden` + the image sub-tests (#112) BYTE-UNCHANGED — this slice only ADDS a human golden alongside. | `git diff tests/dryrun/dryrun_image.golden` = ∅; `test_image_identity`/`test_smoke_minimal`/`test_negation_control` green. |
+| **PI-7** (carried) | `src/lib/loader.hpp` zero-diff streak preserved — test-only slice, NO `src/` touch at all. | `git diff src/` = ∅. |
+| **insn 3477** (carried) | `src/bpf/*` untouched → datapath insn count unchanged. | `git diff src/bpf` = ∅; existing insn gate. |
+| **§5.78.4(a) token contract** (carried) | The human-view token forms (header, `default_action`, `rules`, `steering`, per-rule `id=/slot=/action=/target=`, axis value forms incl. `ethertype=0x0806`) are unchanged — the frozen golden bakes EXACTLY these. | Tester pre-freeze review (D-mvp-4.40-HUMAN-GEN) + existing `T_CLI_APPLY_DRYRUN.sh` greps green. |
+
+Reviewer's framework point 5 walks this list and reports `[INVARIANT-VIOLATED]` per failed check.
+
+### §5.80.7a Verification hints (guidance for reviewer — MAY, not contracts)
+*Resolution rule: if any hint here conflicts with §5.80.7 (the PI block), the PI block WINS. If impl/tester
+deviates from a hint to satisfy a PI or a load-bearing assertion, the reviewer's correct disposition is
+`inline-merge` on the hint text — NOT `[UNRELATED-EDIT]`.*
+- Reviewer SHOULD see `tests/dryrun/dryrun_harness.cpp` gain ONLY: the `--emit-golden-human` branch, a
+  `render_human` helper, `test_human_identity`, `test_human_negation_control`, human-golden path resolution, and two
+  new calls in `main()`. The existing image render path + oracle + image sub-tests are untouched.
+- Reviewer SHOULD see a NEW `tests/dryrun/dryrun_human.golden` whose first line is `# xdpfilter dry-run` (NOT the
+  image golden's `# xdpfilter-image v1`) and which contains `ethertype=0x0806` (B46) + `id=10 slot=9
+  action=redirect target=dpi0`.
+- Reviewer SHOULD see `tests/T_SANITIZER_BUILD.sh` gain two `--dry-run` invocations (human + `--format=golden`)
+  with rc==0 + non-empty assertions and stderr captured into the existing `STDERR_FILE`.
+- Reviewer SHOULD see `git diff tests/CMakeLists.txt` = ∅ and `git diff tests/dryrun/dryrun_image.golden` = ∅ and
+  `git diff src/ src/bpf` = ∅.
+
+### §5.80.8 Out of scope (anti-drift fence)
+- **ANY change to `dryrun_image.golden` or #112** (frozen; this slice only ADDS the human golden).
+- **Fixing the #9 `T_SANITIZER_BUILD` timeout** (BACKLOG B16, environmental) — the two `--dry-run` invocations add a
+  few seconds; do NOT attempt to re-architect the test's runtime.
+- **Adding `-fsanitize` to the `dryrun_harness` target** (HG-2 alternative) — DECLINED (D-mvp-4.40-NOHARNESS-SAN).
+- **Any `src/` or `src/bpf` change** (test-only slice; PI-7, insn 3477).
+- **VERSION bump** (D-mvp-4.40-NOVER).
+- **The shared `axis_format` extraction** — still declined per D-mvp-4.39-NOEXTRACT (2 consumers < rule-of-three).
+- **SEC-L1 / PERF-M1** — separate slices.
+- **A hand-derived independent oracle for the human golden** — DECLINED (D-mvp-4.40-HUMAN-GEN): the human view's
+  independent spec is §5.78.4(a) + the existing CLI substring greps; the byte-golden is a complementary drift pin.
+
+This is **§5.80**. No new guard candidate (pure-additive test depth; reuses #9 SSoT/rule-of-three, #12
+no-shared-host-state for the offline harness, §5.77.7 frozen-golden discipline, the §5.76.6 libbpf-free OPS-canary).
+Guards #1..#37 + §5.70 #38 + §5.73 #39 + §5.76 #40 + §5.77 candidate #41.
+
+### §5.80.9 Evidence — slice-time greps re-verified against HEAD at design time
+1. **TEST-H1 sig** — `format_dryrun_human(const Config&, const CompiledRuleset&)` decl `map_image.hpp:32`, def
+   `map_image.cpp:219`; first human line `# xdpfilter dry-run` (DISTINCT from golden `# xdpfilter-image v1`,
+   map_image.hpp:30-31) ✓.
+2. **Harness pattern to mirror** — `dryrun_harness.cpp`: `--emit-golden` (`:405`) / `--emit-live` (`:415`) argv
+   convention; `render_live` (`:131`); the `test_smoke_minimal`/`test_image_identity`/`test_negation_control` trio
+   (`:352`/`:338`/`:377`); `build_corpus()` (`:97`) carries the ethertype axis (id7 `m.ethertype = 0x0806` `:114`),
+   the redirect rule (id10 `:117`), `steering = Steering{"dpi0"}` (`:119`) ✓.
+3. **Link line (libbpf-free)** — `tests/CMakeLists.txt:1765-1772` `add_executable(dryrun_harness …)` links
+   `dryrun_harness.cpp + materialize.cpp + map_writer.cpp + map_image.cpp + compiled_ruleset.cpp + loader_error.cpp`;
+   DELIBERATELY no `PkgConfig::LIBBPF`/`loader.cpp`/`*_skel` (`:1792-1793`). `T_DRYRUN_IMAGE_IDENTITY` registered
+   `:1802-1813` with `ENVIRONMENT "${TEST_ENV}"` (carries `TEST_DIR`). `format_dryrun_human` (map_image.cpp) +
+   `compile()` (compiled_ruleset.cpp) ALREADY linked → no new dep ✓.
+4. **TEST-H2 reuse target** — `T_SANITIZER_BUILD.sh`: `${SANITIZED_LOADER}` (`:86`), `ANDV6_FIXTURE=…
+   config_valid_andv6.yaml` (`:106`), step-4 `apply --iface ${IFACE_A} -f ${ANDV6_FIXTURE}` (`:109`),
+   `STDERR_FILE` (`:53`), the ASAN/UBSAN grep (`:181`), `${NSEXEC}` prefix ✓.
+5. **NEW golden absent** — `test -e tests/dryrun/dryrun_human.golden` → ABSENT (only `dryrun_image.golden` exists) ✓.
+6. **Post-impl gates** — `git diff tests/dryrun/dryrun_image.golden` MUST be ∅; `git diff tests/CMakeLists.txt`
+   MUST be ∅; `git diff src/ src/bpf` MUST be ∅ (test-only slice).
