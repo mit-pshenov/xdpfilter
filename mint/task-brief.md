@@ -1,107 +1,90 @@
-# Task brief — MVP-4.39 / B47: sanitary-day code-subtraction harvest (brownfield)
+# Task brief — MVP-4.40 / B48: harden the DEFAULT dry-run output (human-view golden + sanitizer coverage) (brownfield)
 
 ## Goal
 
-A **pure-subtractive** sanitary-day slice harvesting four small, independent
-items from the 2026-06-07 `/mint-review` + `/mint-simplify` pass. Three are
-simplify BEDROCK subtractions (dead-symbol delete, function merge, dup-block
-extract); one is the PO-approved queued B46 cosmetic polish (review TEST-C1).
-No new capability, no schema change, no datapath touch, **no VERSION bump**
-(mirrors B43–B45 staying at 0.17.0). Net target ≈ **−30 LOC + 1 small
-file-local helper**, **−1 dead public symbol**, **−1 lockstep drift hazard**.
+An **additive test-depth** sanitary-day slice (Batch C of 2026-06-07) closing the
+review's two High findings that the **human `apply --dry-run` view — the DEFAULT
+operator output — is the weakest-tested of the three formats**. Today
+`format_dryrun_human` has ZERO offline-harness coverage (its only test is ~25
+loose substring greps in `T_CLI_APPLY_DRYRUN.sh`), and it is never executed under
+ASAN/UBSAN (the sanitizer test runs only `apply`+`detach`, never `--dry-run`).
+This slice adds (1) a byte-exact `dryrun_human.golden` driven through the existing
+libbpf-free offline harness, and (2) a `--dry-run` invocation under the sanitizer.
 
-This slice deliberately does NOT extract a shared `axis_format` module (the
-review ARCH-H1/CQ-H1 "High"): that was declined this pass on rule-of-three /
-guard #9 grounds — the two axis-formatter copies (`sidecar.cpp`,
-`map_image.cpp`) are exactly **2** consumers, below the rule-of-three escape
-valve (D-3.4f-1). B46 lands **in place** instead. Re-charge the extraction
-when a 3rd consumer appears.
+NOT subtractive. No `src/` behavior change, no schema/datapath touch, **no VERSION
+bump** (test-only). Natural follow-up to B47/MVP-4.39 (just shipped) which landed
+B46 — so the new human golden bakes the canonical `0x0806` ethertype form.
 
 ## Context: prior work
 
-- All prior briefs: archived in `mint/task-brief-*.md` (prior = `task-brief-mvp-4.38.md`, B45 human view).
-- Existing design: `mint/design.md` §5.78 (B45 dry-run human view) is the most recent section; §5.78.4(a) defines the ethertype value-form B46 amends.
-- Source of items: `/mint-review` report + `/mint-simplify` synth verdict (2026-06-07). simplify BEDROCK #1/#2/#3 + review TEST-C1/B46.
-- Phase-2 brief-author grep verification: ran below (see Phase 2 output); every literal CONFIRMED, zero discrepancies.
-- PI continuity: **PI-7** (loader.hpp byte-equivalence) continues — item 3 is same-TU in `loader.cpp`, no header change. **PI-mvp-4.37-FAILCLOSED** continues — item 1 deletes only the unused `active_writer()` getter, never the fail-closed wrappers. BPF datapath byte-identity (**insn 3477**) holds trivially (no `src/bpf` touch). dryrun golden byte-identity holds (B46 touches only the human view, not the machine map-dump golden).
+- All prior briefs: archived in `mint/task-brief-*.md` (prior = `task-brief-mvp-4.39.md`).
+- Existing design: `mint/design.md` §5.78 (B45 human view), §5.79 (B47 subtraction), §5.76/§5.77 (B43/B44 dryrun harness + CLI verb).
+- Source: `/mint-review` 2026-06-07 TEST-H1 (High) + TEST-H2 (High).
+- Phase-2 brief-author grep verification ran (below); every literal CONFIRMED, zero discrepancies.
+- PI continuity: PI-mvp-4.37-LIBBPF-FREE (harness stays libbpf-free — the OPS-canary), PI-mvp-4.38-GOLDEN-UNCHANGED (image golden + #112 untouched — this ADDS a human golden alongside), PI-7 (loader.hpp ∅ — no `src/` touch), insn 3477 (no `src/bpf` touch).
 
 ## Workflow rules (brownfield)
 
-- **Architect**: read `mint/design.md` §5.77–§5.78 + the guard catalogue (#9, #13, #15); EDIT design.md in place; append a §5.79 amendment covering the four items + the explicit `axis_format`-extraction-declined decision (record as a D-* with the rule-of-three/guard-#9 rationale so the next reviewer doesn't re-raise it). Resolve HG-mvp-4.39-1 (item-3 error-string handling).
-- **Impl**: FileList below; pure subtraction + 1 helper + the B46 2-line format change. NO new abstractions beyond the file-local helper.
-- **Tester**: NO new ctest needed (all items are behavior-preserving except B46's human-view spelling). EDIT `tests/T_CLI_APPLY_DRYRUN.sh` for the B46 grep (two sites). Confirm the existing suite stays green; confirm `dryrun_image.golden` is UNCHANGED (machine image untouched).
-- **Reviewer**: 5-point brownfield framework. Special attention: (a) `active_writer()` truly has zero callers post-delete; (b) `parse_prefix` merge preserves the caller-side message catalogue byte-identical; (c) the `loader.cpp` extraction keeps both populate paths behaviorally identical AND leaves `copy_rule_counters_forward` EXPLICIT (guard #15); (d) B46 changed every `fmt_ethertype` format string + its comment + both test sites + the §5.78.4(a) design prose, and the golden is unchanged; (e) PI-7 — `git diff` on `loader.hpp` is EMPTY.
+- **Architect**: read §5.76/§5.77/§5.78 + the dryrun_harness structure; EDIT design.md in place; append a §5.80 amendment. Resolve HG-mvp-4.40-1 (H1 location) + HG-mvp-4.40-2 (H2 approach). FileList is a DIFF (NEW golden + EDIT harness + EDIT tests/CMakeLists.txt + EDIT T_SANITIZER_BUILD.sh). Include a §6.5-style Preserved-invariants note.
+- **Impl**: NOTE — most of this slice is TEST-side (harness C++, a golden file, a shell test, CMake). The impl agent owns the C++ harness render-path + CMake wiring; the tester owns the golden content + the shell-test `--dry-run` step + negation. Architect splits ownership in §5.80 (the harness .cpp is impl-or-tester per project convention — flag it; dryrun_harness.cpp is test infra, likely tester-owned, but it's a build target so impl may own the CMake). Keep the harness **libbpf-free** (no `bpf_*`, no libbpf link, no loader.cpp/skeleton-object dep) — the clean link IS the contract.
+- **Tester**: the human golden is FROZEN once checked in (mirror §5.77.7 "do NOT regenerate after the fact"). Author it via the generator affordance, then freeze. Mandatory: SMOKE + byte-exact IDENTITY + NEGATION-control (one-byte corruption must FAIL), mirroring the existing `test_image_identity`/`test_negation_control`. The golden MUST bake the `0x0806` ethertype form (B46).
+- **Reviewer**: 5-point brownfield. Special attention: (a) harness still links NO libbpf (grep the link line; PI-mvp-4.37-LIBBPF-FREE); (b) image golden `dryrun_image.golden` + #112 BYTE-UNCHANGED (this slice only ADDS); (c) the human golden has a working negation control (deliberately-wrong golden FAILS); (d) the `--dry-run` sanitizer step actually runs both formats against the instrumented binary; (e) no `src/` or `src/bpf` diff (PI-7, insn 3477).
 
 ## Human-gate decisions (defaults applied — architect overrides at Phase A)
 
-### HG-mvp-4.39-1: item-3 populate-block error-string handling → **canonicalize both forms to one**
-The two duplicated blocks throw slightly-divergent `LoadFailed` strings:
-- reattach: `"action_table fd unavailable (reattach)"` / `"redirect_devmap fd unavailable (reattach)"`
-- fresh:    `"action_table map fd unavailable"` / `"redirect_devmap map fd unavailable"`
-They differ in BOTH the word `map` and the `(reattach)` suffix — not a clean stem+suffix.
-**Verified: NO test pins these strings** (`grep -rn "fd unavailable" tests/` → empty). So the extracted `populate_shared_maps()` may canonicalize both to a single form (e.g. `"<map> map fd unavailable"`) — simplest, and these are internal throws on an fd-unavailable condition that does not occur in practice. **Default: canonicalize.** Architect MAY instead preserve the exact two forms via a `const char* ctx` label param if they judge the diagnostic divergence worth keeping — either is acceptable since nothing observes them; prefer the lower-LOC option.
+### HG-mvp-4.40-1: H1 (human golden) location → **extend the offline `dryrun_harness`** (default)
+Render `format_dryrun_human(build_corpus(), compile(build_corpus()))` in `tests/dryrun/dryrun_harness.cpp` and byte-compare against a NEW `tests/dryrun/dryrun_human.golden`, adding `test_human_identity` + `test_human_negation_control` + an `--emit-golden-human` generator affordance, mirroring the existing image-golden trio. **Strongest**: libbpf-free, offline, byte-exact, reuses the proven pattern; the harness ALREADY links `map_image.cpp` (`format_dryrun_human`) + `compiled_ruleset.cpp` (`compile()`), so no new link deps. Same `build_corpus()` config the image golden uses (which carries the ethertype axis → exercises B46's `0x0806`). **Alternative** the architect may weigh: a CLI-level golden compare added to `T_CLI_APPLY_DRYRUN.sh` (simpler but not libbpf-free, and couples to CLI env). Prefer the harness path.
 
-### HG-mvp-4.39-2: B46 rendering site → **in place in `map_image.cpp`, NOT via a shared formatter** (locked)
-The shared-`axis_format` extraction is declined this pass (rule-of-three: 2 consumers < 3; guard #9 duplication-over-extraction is cited inline at `map_image.cpp:49-51`). This is settled, not an open question — architect records it as a D-* so it is not re-litigated. B46 = a 2-line format-string change where the renderer already lives.
+### HG-mvp-4.40-2: H2 (sanitizer coverage) approach → **add a `--dry-run` step to `T_SANITIZER_BUILD.sh`** (default)
+After the existing sanitized `apply`, add an invocation of the already-built sanitized `xdpfilter apply --iface … -f <config> --dry-run` for BOTH formats (default human + `--format=golden`) so `compile()` + `format_dryrun_human` + `render_dryrun_image` + `diff()` execute under ASAN/UBSAN against a real config. **Cheap, high coverage** (drives the real instrumented binary; a few seconds added). **Alternative**: also add `-fsanitize=address,undefined` to the `dryrun_harness` target when `XDPMF_SANITIZERS=ON` (sanitizes the harness recompile too) — architect may add this if low-cost, but the `T_SANITIZER_BUILD` step is the primary. Do NOT attempt to fix the pre-existing #9 T_SANITIZER_BUILD timeout (BACKLOG B16) — OOS.
 
-## Open mechanism questions (architect decides; document in §5.79)
+## Open mechanism questions (architect decides; document in §5.80)
 
-None rise to a Q-tier mechanism choice — every item is mechanical with a verified single shape. (HG-mvp-4.39-1 is the only genuine fork and it is defaulted with grep evidence.)
+### Q1: human-golden generator affordance shape
+- **A1**: a `--emit-golden-human` argv branch (mirrors `--emit-golden`), printing `format_dryrun_human(build_corpus(), compile(build_corpus()))`.
+- **A2**: reuse a single `--emit-golden <which>` arg.
+- **Recommendation**: A1 — lowest-surprise, mirrors the existing `--emit-golden`/`--emit-live` argv convention exactly.
 
 ## Scope (cycle 1 — concrete items)
 
-### Item B47-1 — delete dead `active_writer()` getter
-**Where**: `src/lib/map_writer.cpp` (def), `src/lib/map_writer.hpp` (decl + comment).
-- Delete the def `MapWriter* active_writer() { return g_active_writer; }` (currently `map_writer.cpp:57`).
-- Delete the decl `MapWriter* active_writer();` (currently `map_writer.hpp:63`).
-- Trim the comment at `map_writer.hpp:60-61`: `"Install/inspect the process-global active writer..."` → `"Install the process-global active writer..."` (the inspect getter is gone).
-- **KEEP** `set_active_writer` (3 live callers: `map_writer.hpp:123-124` RecordingScope ctor/dtor, `live_map_writer.cpp:59` install). **Verified zero callers** of `active_writer()` tree-wide.
-~−2 LOC, −1 dead public symbol.
+### Item B48-1 — human-view offline golden (TEST-H1)
+**Where**: `tests/dryrun/dryrun_harness.cpp` (EDIT — add render path + 2 tests + emit affordance), `tests/dryrun/dryrun_human.golden` (NEW, FROZEN).
+- Add `test_human_identity(golden_path)`: render `format_dryrun_human(build_corpus(), compile(build_corpus()))`, byte-compare to `dryrun_human.golden`.
+- Add `test_human_negation_control()`: corrupt one byte of the rendered human output, assert the comparator detects the mismatch.
+- Add the generator affordance (Q1) to produce the frozen golden.
+- Wire both into `main()` alongside the existing image tests.
+- The golden bakes the corpus render incl. ethertype `0x0806` (B46).
 
-### Item B47-2 — merge `parse_prefix` / `parse_prefix6`
-**Where**: `src/lib/cidr.cpp` (anonymous-namespace helpers + 2 call sites).
-- The two helpers (currently `:42` v4 ceiling 32, `:57` v6 ceiling 128) are byte-identical except the ceiling constant and a comment. Merge into one `parse_prefix(std::string_view s, int ceiling) noexcept`.
-- Callers: `parse_cidr_v4` (currently `:110`) passes `32`; `parse_cidr_v6` (currently `:195`) passes `128`.
-- Diagnostics live caller-side (the callers throw the distinct "empty prefix" vs "out of range" messages) → **message catalogue preserved byte-identical**. These helpers are file-local (anon namespace); no external/test consumer.
-~−10 LOC.
+### Item B48-2 — sanitizer coverage of the human view + diff() (TEST-H2)
+**Where**: `tests/T_SANITIZER_BUILD.sh` (EDIT — add a `--dry-run` step), optionally `tests/CMakeLists.txt`/`CMakeLists.txt` (architect's call on HG-2 alt).
+- After the existing sanitized `apply`, run the sanitized binary `apply … --dry-run` (default human) AND `apply … --dry-run --format=golden` against a real config (reuse the existing sanitized-apply config, e.g. `config_valid_andv6.yaml`), asserting exit 0 + non-empty output. This drives `compile()` + `format_dryrun_human` + `render_dryrun_image` + `diff()` under ASAN/UBSAN.
 
-### Item B47-3 — extract file-local `populate_shared_maps()` in `loader.cpp`
-**Where**: `src/lib/loader.cpp` — the two duplicated `action_table` + `redirect_devmap` fd-get-and-populate blocks (reattach path currently `~:1676-1691`, fresh path currently `~:1797-1810`).
-- Extract a file-local helper `populate_shared_maps(skel, cfg)` (exact signature architect's call) that does the `bpf_map__fd` + null-check + `populate_action_table` + `populate_redirect_devmap` for both shared maps.
-- **Same TU** → guard #9 (cross-file duplication-over-extraction) is INAPPLICABLE; this is a within-file dedup, allowed.
-- **guard #15**: `copy_rule_counters_forward` and `materialize` stay EXPLICIT at both call sites — they are NOT pulled into the helper (PRESERVE-semantic boundary). The helper covers ONLY the two static shared maps.
-- Error strings per HG-mvp-4.39-1.
-- **PI-7**: no `loader.hpp` change — `git diff loader.hpp` must be EMPTY.
-~−18 LOC net (+1 helper).
-
-### Item B47-4 — B46 ethertype canonical 4-digit hex (in place)
-**Where**: `src/lib/map_image.cpp` `fmt_ethertype` + comment; `tests/T_CLI_APPLY_DRYRUN.sh`; `mint/design.md` §5.78.4(a).
-- `map_image.cpp:96`: BOTH format strings `0x{:x}` → `0x{:04x}` (the name-suffix form `"0x{:x}({})"` AND the bare `"0x{:x}"`). Rewrite the `:88-89` comment that currently says `"NO fixed-width leading zeros (0x806, not 0x0806)"` → the canonical-4-digit rationale.
-- `tests/T_CLI_APPLY_DRYRUN.sh`: two sites — the `(3j)` comment at `:233` and the grep at `:234` (`ethertype=0x806` → `ethertype=0x0806`).
-- `mint/design.md` §5.78.4(a): the ethertype value-form prose/table → 4-digit zero-padded (reverses the B45-r1 reconcile-DOWN to `0x806`).
-- **Verified no collateral**: the only other `ethertype=` render sites are name-based (sidecar/prom emit `arp`) or already `0x{:04x}` (sidecar); `dryrun_image.golden:81` is the machine map-dump (`map=ethertype_bitmask_a` metadata) and does NOT render the human hex → **golden UNCHANGED**.
+### Item B48-3 — CMake/ctest wiring (if harness gains a sub-test or the architect adds harness sanitization)
+**Where**: `tests/CMakeLists.txt` — the human golden runs inside the existing `T_DRYRUN_IMAGE_IDENTITY` harness binary (no NEW ctest needed; the harness `main` runs all sub-tests), so likely NO ctest registration change — confirm. If the architect splits a separate ctest, register it with the same TEST_ENV/TIMEOUT pattern + Guard #12 note (no shared host state).
 
 ## Out of scope (explicit)
 
-- **Shared `axis_format` module extraction** (review ARCH-H1/CQ-H1) — declined this pass (2 consumers < rule-of-three; guard #9). Re-charge at 3rd consumer.
-- **SEC-L1** exporter systemd sandbox (deployment-gated, defense-in-depth).
-- **PERF-M1** bound exporter scrape loops by live rule count (no forcing-function; own slice).
-- **TEST-H1/H2** dryrun_human.golden + sanitizer `--dry-run` coverage — Batch C, separate additive slice (NOT this subtraction slice).
-- Any VERSION bump (pure subtraction + cosmetic).
+- ANY change to `dryrun_image.golden` or #112 (frozen; this slice only ADDS).
+- Fixing the #9 T_SANITIZER_BUILD timeout (BACKLOG B16, environmental).
+- Any `src/` or `src/bpf` change (test-only slice).
+- VERSION bump.
+- The shared `axis_format` extraction (still declined per D-mvp-4.39-NOEXTRACT).
+- SEC-L1 / PERF-M1 (separate slices).
 
 ## Definition of done
 
-- §5.79 amendment in `mint/design.md` (the 4 items + the D-* recording the declined extraction).
-- PI continuity held: PI-7 (loader.hpp ∅), PI-mvp-4.37-FAILCLOSED, BPF insn 3477, dryrun golden unchanged.
-- Existing ctest suite green; `T_CLI_APPLY_DRYRUN.sh` updated (B46 grep) and passing; `dryrun_image.golden` byte-unchanged.
-- `active_writer()` gone (zero refs); `parse_prefix` single-arg→two-arg merged; `populate_shared_maps` extracted; B46 4-digit live.
+- §5.80 amendment in `mint/design.md`.
+- NEW `tests/dryrun/dryrun_human.golden` (frozen, bakes `0x0806`); harness renders + byte-compares it with a working negation control.
+- `T_SANITIZER_BUILD.sh` exercises `--dry-run` (both formats) under ASAN/UBSAN.
+- PIs held: PI-mvp-4.37-LIBBPF-FREE (harness link still libbpf-free), PI-mvp-4.38-GOLDEN-UNCHANGED (image golden + #112 ∅), PI-7 (loader.hpp ∅), insn 3477 (src/bpf ∅).
+- Existing suite green (modulo the documented env-flakes #1/#9/#48/#63); #112 still green; the harness binary now also passes the human-golden sub-tests.
 - `mint/review.md` round-1 verdict = pass.
 - One git commit per phase boundary.
 
 ## Dependencies
-
-- Build: clang-19 / libc++-19 / libbpf (unchanged).
-- Runtime/kernel: none new.
+- Build: clang-19 / libc++-19 (unchanged). Harness stays libbpf-free.
+- Runtime: ASAN/UBSAN build (XDPMF_SANITIZERS=ON) for the T_SANITIZER_BUILD step (existing).
+- Kernel/platform: none new (harness is offline; the sanitizer apply uses the existing veth fixture).
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 ```yaml
@@ -117,24 +100,23 @@ packs:
 
 ## Pre-brief sanity check (per mint-hld-scope-discipline)
 
-**MECHANICAL.** Not multi-axis: each of the 4 items has a single verified shape that falls out of the simplify/review findings + a 30-second grep. No expensive-to-undo choice, no ≥3-option design space. The one fork (item-3 error strings) is defaulted with grep evidence (HG-mvp-4.39-1). No `/mint-hld` needed; single-architect `/mint-dev` is correct. NOT derived from a prior hld ladder → no ladder to re-discharge; PO-filter applied (no decision is on the user's plate — the declined extraction is engineering-doctrine, the error-string fork is internal).
+**MECHANICAL (single-architect).** Not multi-axis: both items extend WELL-ESTABLISHED existing patterns (the dryrun_harness image-golden trio for H1; the T_SANITIZER_BUILD apply step for H2). The two HG forks each have a clearly-dominant recommended option that mirrors existing code; not ≥3 viable options, not expensive-to-undo (test code). No `/mint-hld` needed. NOT hld-derived → no ladder to re-discharge. PO-filter applied: both HG decisions are engineering test-architecture choices with clear recommendations — neither is on the user's plate.
 
 ## Notes for architect Phase A code-grep discipline
 
-Brief author already ran these (all CONFIRMED 2026-06-07); architect re-verifies + extends:
-- `grep -rn "active_writer" src/ tests/ include/` — confirm `active_writer()` (no args) has ZERO callers; `set_active_writer` has 3 (RecordingScope ×2, install_live_map_writer). Verify again post-delete.
-- `sed -n '42,68p' src/lib/cidr.cpp` — confirm the two `parse_prefix*` bodies differ ONLY by ceiling (32/128) + comment; callers at the `parse_cidr_v4`/`parse_cidr_v6` bodies pass the ceiling.
-- `grep -n "populate_action_table\|populate_redirect_devmap" src/lib/loader.cpp` — the two call blocks; confirm `copy_rule_counters_forward` sits OUTSIDE them (guard #15 boundary).
-- `grep -rn "fd unavailable" tests/` — empty (HG-mvp-4.39-1 canonicalize is safe).
-- `grep -n "0x{:x}\|ethertype" src/lib/map_image.cpp` + `grep -n "ethertype=0x" tests/T_CLI_APPLY_DRYRUN.sh` + `find tests -name dryrun_image.golden` — confirm golden has no human-hex ethertype line.
-- Post-impl: `git diff --stat src/lib/loader.hpp` MUST be empty (PI-7).
+Brief author already ran these (CONFIRMED 2026-06-07); architect re-verifies + extends:
+- `grep -n format_dryrun_human src/lib/map_image.hpp src/lib/map_image.cpp` — sig `format_dryrun_human(const Config&, const CompiledRuleset&)` (hpp:32, def map_image.cpp:219); already linked by the harness.
+- `sed -n '/int main/,$p' tests/dryrun/dryrun_harness.cpp` — confirm the `--emit-golden`/`--emit-live` argv convention + the `test_smoke_minimal`/`test_image_identity`/`test_negation_control` trio to mirror; `build_corpus()` is the shared config (lock-step with `tests/dryrun/dryrun_cli.yaml`).
+- `sed -n '1765,1815p' tests/CMakeLists.txt` — the `dryrun_harness` target links materialize/map_writer/map_image/compiled_ruleset/loader_error + **NO** PkgConfig::LIBBPF / loader.cpp / skel object (the libbpf-free OPS-canary). Adding the human render keeps this — verify the link line is unchanged in kind.
+- `grep -n "apply\|--dry-run\|config_valid" tests/T_SANITIZER_BUILD.sh` — confirm the sanitized-apply config to reuse for the `--dry-run` step.
+- `test -e tests/dryrun/dryrun_human.golden` — must be absent (NEW).
+- Post-impl: `git diff tests/dryrun/dryrun_image.golden` MUST be empty (image golden frozen); `git diff --stat src/ src/bpf` MUST be empty (test-only slice).
 
 ### Anti-misdiagnosis guards applicable to this slice (per Phase 3)
 
-- **guard #5** (Phase A code-grep discipline) — always; architect repeats the greps above independently.
-- **guard #9** (helper-location duplication-over-extraction via rule-of-three) — HEADLINE. (a) Item 3 is SAME-TU dedup → guard #9 (which governs cross-FILE duplication) does NOT block it. (b) The declined `axis_format` extraction IS a guard-#9 call: 2 consumers < 3, extraction premature. Record both as D-* so neither is re-litigated.
-- **guard #13** (retired emit-site string ripple) — B46: the `ethertype=0x806` literal lives in `T_CLI_APPLY_DRYRUN.sh` (2 sites) — update both. Item-3 strings: verified no test ripple.
-- **guard #15** (`copy_rule_counters_forward` PRESERVE boundary) — item 3 must leave the copy-forward + materialize EXPLICIT at both call sites; the helper covers ONLY the two static shared maps.
-- **guard #33** (anchor preservation on comment moves) — item 3 moves §-tagged comments into the helper; keep the grep-able §5.29/§5.75 anchors. B46 rewrites the §5.78.4(a) comment; keep the §-tag.
+- **guard #5** (Phase A code-grep discipline) — always; architect repeats the greps above.
+- **guard #12** (RESOURCE_LOCK for shared host state) — the human golden runs INSIDE the existing offline harness (no bpffs/iface/port) → no lock, like #112. The `--dry-run` step in T_SANITIZER_BUILD runs inside that test's existing isolated /tmp build + veth fixture → no NEW shared-state surface. Confirm no NEW ctest with host state.
+- **§5.77.7 frozen-golden discipline** — the human golden, once emitted + checked in, is FROZEN; the `--emit-golden-human` affordance is generator-only, never auto-regenerated to "make it pass".
+- **PI-mvp-4.37-LIBBPF-FREE** — the load-bearing invariant: the harness link must stay libbpf-free after adding the human render path.
 
-(N/A this slice: guard #11 — no VERSION bump; guards #27/#28 — no cross-arm/header-walk axis change.)
+(N/A: guard #11 — no VERSION bump; guard #13/#16 — no retired string/pin; guard #15 — no stateful-map promotion.)
