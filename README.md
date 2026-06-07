@@ -5,8 +5,9 @@
 `xdpfilter` is a Linux XDP packet filter for L2/L3 traffic selection.
 It classifies inbound Ethernet frames on a network interface against a
 runtime-supplied rule set and renders a per-frame verdict (`XDP_PASS` /
-`XDP_DROP`). It is designed as a pre-filter that **selects and steers**
-traffic for downstream processing, not only as a terminal allow/drop gate.
+`XDP_DROP` / `XDP_REDIRECT`). It is designed as a pre-filter that
+**selects and steers** traffic for downstream processing, not only as a
+terminal allow/drop gate.
 
 The match model is **9 AND-composed axes**, evaluated as a bit-vector
 classifier across three family arms (IPv4 / IPv6 / non-IP):
@@ -24,8 +25,11 @@ classifier across three family arms (IPv4 / IPv6 / non-IP):
 | Inner EtherType | exact | `ethertype` |
 
 Rules are evaluated first-match-by-`id`; each rule carries an `action`
-(`pass` / `drop`); a `default_action` covers frames matching no rule.
-IPv6 matching walks extension headers to read the true L4 header.
+(`pass` / `drop` / `redirect`); a `default_action` covers frames matching
+no rule. A `redirect` rule steers matched traffic to one operator-configured
+DPI-feed interface via a top-level `steering: { redirect_to: <iface> }` block
+(`schema_version: 3`). IPv6 matching walks extension headers to read the true
+L4 header.
 
 Counters are exposed two ways: a per-iface BPF stats map (read out-of-band
 with `bpftool map dump`) and a Prometheus `/metrics` endpoint served by the
@@ -99,7 +103,7 @@ built unmodified (`clang -target bpf` has no userspace ASAN runtime).
 ```sh
 sudo build/xdpfilter attach --iface <IFNAME> [--allow <MAC>[,<MAC>...] ...] [--mode <M>]
 sudo build/xdpfilter detach --iface <IFNAME>
-sudo build/xdpfilter apply  --iface <IFNAME> -f <PATH> [--mode <M>]
+sudo build/xdpfilter apply  --iface <IFNAME> -f <PATH> [--mode <M>] [--dry-run [--format human|golden]]
 sudo build/xdpfilter bypass --iface <IFNAME> [--unsafe] [--reason "<text>"]
 sudo build/xdpfilter reset-counters --iface <IFNAME> [--rule-id <N>]
 sudo build/xdpfilter --help | --version
@@ -109,8 +113,13 @@ sudo build/xdpfilter --help | --version
   is colon-separated hex (`XX:XX:XX:XX:XX:XX`), up to 64 unique. An empty
   allow-list is valid → drops everything.
 - **`apply`** — load + attach (or hot-swap, no drop window) from a YAML
-  config file driving the full 9-axis rule model. Schema version 2; max
-  1 MiB. See [`docs/CONFIG_SCHEMA.md`](docs/CONFIG_SCHEMA.md).
+  config file driving the full 9-axis rule model. Schema version 2 or 3
+  (3 enables the `steering:` redirect block); max 1 MiB. See
+  [`docs/CONFIG_SCHEMA.md`](docs/CONFIG_SCHEMA.md). With `--dry-run` the
+  resulting rules are rendered offline and the command exits **without
+  touching the kernel** — default is a human-decoded per-rule view;
+  `--format=golden` emits the byte-faithful `# xdpfilter-image v1` machine
+  image instead.
 - **`bypass`** — temporarily pass-all (`--unsafe` required non-interactively;
   `--reason` is audit-logged).
 - **`reset-counters`** — zero all rule counters, or a single slot with
@@ -208,7 +217,7 @@ short Ethernet frames before XDP sees them — that's expected.
 | File | Purpose |
 |---|---|
 | `README.md` | This file — overview, build, run, exit codes, env vars |
-| `docs/CONFIG_SCHEMA.md` | YAML config schema reference (schema_version 2, 9 axes) |
+| `docs/CONFIG_SCHEMA.md` | YAML config schema reference (schema_version 2/3, 9 axes) |
 | `docs/FLEET_DEPLOYMENT.md` | Fleet rollout: trust model, systemd, Prometheus, audit |
 
 **Contributor docs:**

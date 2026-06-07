@@ -94,7 +94,7 @@ std::string usage_text()
         "                              Format: XX:XX:XX:XX:XX:XX (hex).\n"
         "                              Empty allow-list drops all frames.\n"
         "  -f <PATH>                   YAML config file (apply only). Schema\n"
-        "                              version 1. Max 1 MiB.\n"
+        "                              version 2 or 3. Max 1 MiB.\n"
         "  --mode {{generic|native|offload}}\n"
         "                              XDP attach mode (attach / apply only;\n"
         "                              default generic). detach auto-detects\n"

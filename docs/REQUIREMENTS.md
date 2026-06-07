@@ -1,6 +1,6 @@
 # Requirements — line-rate L2/L3 GGSN–Gi traffic filter
 
-> **Source-of-truth product spec.** Provided by the product owner 2026-05-28. This is the canonical statement of what the tool is meant to be. The codebase currently implements the *harness* around filtering (config, atomic hot-reload, fleet deploy, observability) plus a **bootstrap match model** (MAC + source-CIDR, allow/drop only); the full rule model below is the forward target. See "Implementation status & strategy" at the end.
+> **Source-of-truth product spec.** Provided by the product owner 2026-05-28. This is the canonical statement of what the tool is meant to be. The codebase implements the *harness* around filtering (config, atomic hot-reload, fleet deploy, observability) plus the **full 9-axis AND-composed match model** (MAC / VLAN / EtherType / IPv4+IPv6 src+dst CIDR / L4 protocol / L4 port) across three family arms, with `pass` / `drop` / `redirect` actions. The genuine forward gap is now the **high-performance datapath** (DPDK / AF_XDP) and its perf validation (IXIA / TRex), plus mirror / rate-limit / tag actions and watchdog/hot-standby. See "Implementation status & strategy" at the end (refreshed 2026-06-07).
 
 ## Statement
 
@@ -56,7 +56,7 @@ A stable, high-performance L2 filtering layer operating transparently between GG
 
 ---
 
-## Implementation status & strategy (2026-05-28)
+## Implementation status & strategy (2026-05-28; status refreshed 2026-06-07)
 
 **Strategy**: prototype and validate the *model* — rule hierarchy, config schema, statistics semantics, action semantics — on **eBPF/XDP** (fast to iterate, runs in the existing netns test harness). Defer the high-performance datapath (DPDK or AF_XDP, per-core workers pinned to NIC queues, zero-copy) and the perf-validation (IXIA/TRex, 40 Gbps / ≤500 µs / <0.01 % loss) to a **later phase**. eBPF validates *function + model + UX*, not the perf numbers — those require the real datapath. The management/config/stats layer is kept decoupled from the enforcement mechanism so the eventual datapath swap (the spec requires *both* DPDK and AF_XDP compatibility) reuses it.
 
@@ -69,21 +69,25 @@ A stable, high-performance L2 filtering layer operating transparently between GG
 - Manual bypass primitive (partial fail-safe)
 - Security hardening (path-traversal / symlink defenses, log-injection escaping)
 
-**Bootstrap match model (placeholder — the forward gap):**
+**Match model & actions — SHIPPED (9-axis AND-composed, 3 family arms):**
 
 | Spec axis | Status |
 |---|---|
 | L2: interface | ✅ per-interface attach |
-| L2: MAC | ✅ (the bootstrap axis) |
-| L2: VLAN ID, EtherType | ❌ not implemented |
-| L3: **source** IP/subnet | ✅ `src_cidr` (IPv4, LPM_TRIE) |
-| L3: **destination** IP/subnet | ❌ not implemented — *services are dst-identified; this is the top gap* |
-| L3: routing domain, IPv6 | ❌ not implemented |
-| L4: port-based | ❌ not implemented |
+| L2: MAC | ✅ `mac` (family-blind: IPv4 / IPv6 / non-IP) |
+| L2: VLAN ID | ✅ `vlan` (outer 802.1Q VID) |
+| L2: EtherType | ✅ `ethertype` |
+| L3: **source** IP/subnet | ✅ `src_cidr` (IPv4) + `src_cidr6` (IPv6), LPM_TRIE |
+| L3: **destination** IP/subnet | ✅ `dst_cidr` (IPv4) + `dst_cidr6` (IPv6), LPM_TRIE |
+| L3: IPv6 | ✅ full extension-header walk to the true L4 header |
+| L3: routing domain | ❌ not a modeled concept |
+| L4: port-based | ✅ `dst_port` (inclusive range) |
 | Actions: allow, drop | ✅ |
-| Actions: mirror, rate-limit, tag, redirect | ❌ `action_table` is identity-map only |
+| Actions: redirect | ✅ `action: redirect` + `steering: { redirect_to }` (Option-1 single global DPI tap, schema_version 3) |
+| Actions: mirror, rate-limit, tag | ❌ not implemented (mirror needs TC/TCX; per-rule targets are Option-2) |
+| Operator preview | ✅ `apply --dry-run [--format human\|golden]` (offline render, zero kernel touch) |
 | Perf datapath (DPDK/AF_XDP, 40 G) | ❌ eBPF/XDP (intentional — model-validation vehicle) |
 | Perf validation (IXIA/TRex) | ❌ functional netns tests only |
 | Safety: watchdog / hot-standby | ⚠️ bypass primitive only |
 
-**Next (forward target)**: build out the real rule model on eBPF — destination IP/subnet + L4 port + VLAN + EtherType match axes (turning the source-allowlist into the spec's "interface → IP range → action" hierarchy), and the richer action set (mirror / rate-limit / tag / redirect). This is a multi-slice arc that needs a design pass first.
+**Next (forward target)**: the rule model + operator UX are validated on eBPF; the remaining arc is the **high-performance datapath** (DPDK or AF_XDP, per-core workers pinned to NIC queues, zero-copy) and its perf validation (IXIA/TRex: 40 Gbps / ≤500 µs / <0.01 % loss), plus the richer action set (mirror / rate-limit / tag) and watchdog/hot-standby. These need design passes first; the management/config/stats layer is already decoupled so the eventual datapath swap reuses it.

@@ -14,23 +14,31 @@ operators want `README.md`, `docs/CONFIG_SCHEMA.md`, and
 | `task-brief.md` | The currently-active task brief (latest MVP slice). |
 | `impl-notes.md` | Implementation deviation log (e.g. the libc++/`<format>` C++23 dependency). |
 
-## Standing reference docs
+## Standing reference + design-round inputs
 
-| File | What it is |
-|---|---|
-| `selection-scenarios.md` | The traffic-selection scenarios catalog driving the rule model. |
-| `architecture-rule-model.md` | Architecture for the OR→AND rule-model shift. |
-| `architecture-l2l3-gate.md` | Architecture for the L2/L3 gate ladder (the family-arm rework). |
-| `perf.md` | Performance envelope measurements (Tier-0 BPF_PROG_TEST_RUN data, Tier-1 notes). |
-| `review.md` | **Current-slice** mint-review verdict — per-cycle scratch, overwritten each `/mint-dev`. Historical verdicts live in `CHANGELOG.md` + the `design.md` §5.x ledger, not here. |
-| `hybrid-review.md` | Frozen MVP-1 hybrid review (cross-lens kill-chain synthesis; cited by `tests/T_ATTACH_ALIEN_REFUSAL.sh` — load-bearing, keep). |
+Per-topic design material is discoverable by glob rather than hand-listed
+here — the prior enumerations drifted (disk carries more `architecture-*.md`
+and `design-brief*.md` files than any list tracked):
 
-## Design briefs (`design-brief-*.md`)
+- **`architecture-*.md`** — per-topic architecture deep-dives (the `-v2`
+  baseline, plus the rule-model / l2l3-gate / loader-datamodel / dryrun /
+  mirror-redirect reworks). Each captures the design state for one arc.
+- **`design-brief*.md`** — one brief per `/mint-hld` design round: the
+  *question framing* for an exploration, **not** the outcome. The outcome of
+  each lands back in `design.md`.
+- **`selection-scenarios.md`** — the traffic-selection scenarios catalog
+  driving the rule model.
+- **`perf.md`** — performance-envelope measurements (Tier-0
+  `BPF_PROG_TEST_RUN` data, Tier-1 notes).
 
-Inputs to `/mint-hld` design rounds — the question framing for a design
-exploration, not the outcome. `design-brief.md` (original), then
-`-architecture-v2`, `-l2l3-gate`, `-l2l3-gate-v2`, `-mvp3.4-counters`,
-`-s4-cidr6`. The *outcome* of each lands back in `design.md`.
+Two reference docs carry special lifecycle and are **not** interchangeable
+glob boilerplate:
+
+- **`review.md`** — current-slice mint-review verdict; **overwritten each
+  `/mint-dev`**. Historical verdicts live in `CHANGELOG.md` + the `design.md`
+  §5.x ledger, not here.
+- **`hybrid-review.md`** — frozen MVP-1 hybrid review; **load-bearing** (cited
+  by `tests/T_ATTACH_ALIEN_REFUSAL.sh`) — keep.
 
 ## Task briefs (`task-brief-mvp*.md`)
 

@@ -1,7 +1,7 @@
 /*
  * apply.hpp — apply orchestrator (design §5.26 Q4 G1).
  *
- * `apply -f <path>` reads a YAML config, validates against schema_version 1,
+ * `apply -f <path>` reads a YAML config, validates against schema_version 2 or 3,
  * reconciles with --iface (interface-mismatch → ConfigError exit 9), and
  * applies via the §5.26 Q2 A1 atomic-swap mechanism.
  *
