@@ -54,8 +54,6 @@ MapWriter* set_active_writer(MapWriter* w)
     return prev;
 }
 
-MapWriter* active_writer() { return g_active_writer; }
-
 int map_fd(bpf_map* m)
 {
     if (g_active_writer == nullptr) { no_writer_installed(); }

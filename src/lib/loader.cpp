@@ -1438,6 +1438,33 @@ std::uint32_t detach(const std::string& iface)
 
 namespace internal {
 
+/* §5.79 (MVP-4.39 / B47-3): the two STATIC SHARED maps populated identically on
+ * BOTH the reattach and fresh-attach paths, deduplicated into one file-local
+ * helper (D-mvp-4.39-SAME-TU — within-TU, guard #9 cross-file hazard N/A).
+ *   §5.29 (MVP-3.4) step 8.5: `action_table` STAYS SHARED per §5.34 HG-3.4b-c2-3
+ *   / D-3.4b-c2-6 — values are static {PASS=0, DROP=1}, never mutate at runtime;
+ *   atomic-swap meaningless.
+ *   §5.75 (MVP-4.35) D-mvp-4.35-DEVMAP-SHARED: fill the single global redirect tap
+ *   in-place before the flip, like action_table (resolved steering target, fail-
+ *   closed on miss).
+ * guard #15 boundary: materialize(...) + copy_rule_counters_forward(...) stay
+ * EXPLICIT at BOTH call sites — NOT pulled in here (PRESERVE-across-apply,
+ * D-3.4d-3 / D-mvp-4.8-BOUNDARY). Error strings per D-mvp-4.39-ERRSTR. */
+static void populate_shared_maps(xdpfilter_bpf* skel, const Config& cfg)
+{
+    const int at_fd = bpf_map__fd(skel->maps.action_table);
+    if (at_fd < 0) {
+        throw_loader(LoaderError::LoadFailed, "action_table map fd unavailable");
+    }
+    populate_action_table(at_fd);
+
+    const int dm_fd = bpf_map__fd(skel->maps.redirect_devmap);
+    if (dm_fd < 0) {
+        throw_loader(LoaderError::LoadFailed, "redirect_devmap map fd unavailable");
+    }
+    populate_redirect_devmap(dm_fd, cfg);
+}
+
 /* §5.26 + EDIT-1 atomic apply (single source of truth for the swap flow):
  * see design §5.26 attach() flow update + Phase B EDIT-1 internal-helper
  * contract. Both loader::attach() and apply::apply_config_inmemory() route
@@ -1670,25 +1697,10 @@ std::uint32_t apply_request(const ApplyRequest& req)
         // static) + copy_rule_counters_forward (PRESERVE) stay EXPLICIT below
         // (guard #15 / D-mvp-4.8-BOUNDARY).
         materialize(skel.get(), inactive, cr);
-        // §5.29 (MVP-3.4) step 8.5: `action_table` STAYS SHARED per
-        // §5.34 HG-3.4b-c2-3 / D-3.4b-c2-6 — values are static
-        // {PASS=0, DROP=1}, never mutate at runtime; atomic-swap meaningless.
-        {
-            const int at_fd = bpf_map__fd(skel->maps.action_table);
-            if (at_fd < 0) {
-                throw_loader(LoaderError::LoadFailed,
-                             "action_table fd unavailable (reattach)");
-            }
-            populate_action_table(at_fd);
-            // §5.75 (MVP-4.35) D-mvp-4.35-DEVMAP-SHARED: fill the single global
-            // redirect tap in-place before the flip, like action_table.
-            const int dm_fd = bpf_map__fd(skel->maps.redirect_devmap);
-            if (dm_fd < 0) {
-                throw_loader(LoaderError::LoadFailed,
-                             "redirect_devmap fd unavailable (reattach)");
-            }
-            populate_redirect_devmap(dm_fd, req.config);
-        }
+        // §5.79 B47-3: action_table + redirect_devmap (the two STATIC SHARED
+        // maps) populated via the shared file-local helper. materialize +
+        // copy_rule_counters_forward stay EXPLICIT (guard #15).
+        populate_shared_maps(skel.get(), req.config);
 
         // §5.35 (MVP-3.4d) D-3.4d-3: copy-forward per-CPU rule_counters
         // values from the OLD-active inner to the INACTIVE inner BEFORE
@@ -1792,22 +1804,10 @@ std::uint32_t apply_request(const ApplyRequest& req)
     // the `_a` inners (inactive_axis_fd). populate_action_table + the self-copy
     // copy_rule_counters_forward stay EXPLICIT below (guard #15).
     materialize(skel.get(), 0u, cr);
-    // §5.29 (MVP-3.4) step 8.5: `action_table` STAYS SHARED per §5.34
-    // HG-3.4b-c2-3 / D-3.4b-c2-6 — static {PASS=0, DROP=1} mapping.
-    {
-        const int at_fd = bpf_map__fd(skel->maps.action_table);
-        if (at_fd < 0) {
-            throw_loader(LoaderError::LoadFailed, "action_table map fd unavailable");
-        }
-        populate_action_table(at_fd);
-        // §5.75 (MVP-4.35) D-mvp-4.35-DEVMAP-SHARED: fill the redirect tap on
-        // fresh attach too (resolved steering target, fail-closed on miss).
-        const int dm_fd = bpf_map__fd(skel->maps.redirect_devmap);
-        if (dm_fd < 0) {
-            throw_loader(LoaderError::LoadFailed, "redirect_devmap map fd unavailable");
-        }
-        populate_redirect_devmap(dm_fd, req.config);
-    }
+    // §5.79 B47-3: action_table + redirect_devmap (the two STATIC SHARED maps)
+    // populated via the same shared file-local helper used on reattach.
+    // materialize + copy_rule_counters_forward stay EXPLICIT (guard #15).
+    populate_shared_maps(skel.get(), req.config);
 
     // §5.35 (MVP-3.4d) D-3.4d-3: fresh-attach uniform code path — copy-
     // forward from rule_counters_a to itself (self-copy, semantically no-op

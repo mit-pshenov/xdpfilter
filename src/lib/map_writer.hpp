@@ -57,10 +57,9 @@ int map_next_key(int fd, const void* prev, void* next);
 int map_delete(int fd, const void* key);
 [[nodiscard]] int map_resolve_ifindex(const std::string& iface, LoaderError on_fail);
 
-/* Install/inspect the process-global active writer. set_active_writer returns the
+/* Install the process-global active writer. set_active_writer returns the
  * PREVIOUS writer (RecordingScope restores it). */
 MapWriter* set_active_writer(MapWriter* w);
-MapWriter* active_writer();
 
 /* §5.77.4(2): installs a process-lifetime LiveMapWriter as the active writer.
  * Defined in live_map_writer.cpp (the ONLY new TU that references libbpf); called

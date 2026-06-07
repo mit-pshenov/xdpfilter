@@ -85,15 +85,16 @@ std::string fmt_protocol(std::uint8_t p)
     return name ? std::format("{}({})", p, name) : std::to_string(p);
 }
 
-// §5.78.4(a): ethertype "as the number" — lowercase hex, NO fixed-width leading
-// zeros (`0x806`, not `0x0806`), value-first with an optional well-known name suffix.
+// §5.78.4(a) [B46/§5.79]: ethertype "as the number" — lowercase hex, canonical
+// EtherType width: zero-pad to 4 hex digits → `0x0806` (not `0x806`), matching
+// sidecar.cpp's `0x{:04x}`. Value-first with an optional well-known name suffix.
 std::string fmt_ethertype(std::uint16_t et)
 {
     const char* name = (et == 0x0800u) ? "ipv4"
                      : (et == 0x86DDu) ? "ipv6"
                      : (et == 0x0806u) ? "arp"
                      : nullptr;
-    return name ? std::format("0x{:x}({})", et, name) : std::format("0x{:x}", et);
+    return name ? std::format("0x{:04x}({})", et, name) : std::format("0x{:04x}", et);
 }
 
 // single port (lo==hi) → "p"; a range → "lo-hi" (the config grammar's spelling).

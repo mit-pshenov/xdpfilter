@@ -230,9 +230,9 @@ if ! grep -A1 -E 'id=6 slot=5 action=pass' "${human_file}" | grep -qE 'match:.*v
     fail=1
 fi
 
-# (3j) id=7 → ethertype=0x806 (hex, lowercase, no fixed width).
-if ! grep -A1 -E 'id=7 slot=6 action=drop' "${human_file}" | grep -qE 'match:.*ethertype=0x806'; then
-    echo "FAIL[3j]: id=7 match line missing 'ethertype=0x806'" >&2
+# (3j) id=7 → ethertype=0x0806 (hex, lowercase, canonical 4-digit zero-padded — B46/§5.79).
+if ! grep -A1 -E 'id=7 slot=6 action=drop' "${human_file}" | grep -qE 'match:.*ethertype=0x0806'; then
+    echo "FAIL[3j]: id=7 match line missing 'ethertype=0x0806'" >&2
     fail=1
 fi
 

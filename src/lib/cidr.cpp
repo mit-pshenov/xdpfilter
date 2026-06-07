@@ -35,33 +35,19 @@ namespace {
     throw std::system_error(make_error_code(LoaderError::ConfigError), std::move(what));
 }
 
-/* Parse a decimal u32 0..32 prefix length. Returns -1 on any malformed
- * input (empty, non-digit, overflow above 32). Negatives caught by the
- * caller scanning for '-' BEFORE calling here — keeps the message
+/* §5.79 (B47-2): one parser for both families, parameterized by the prefix
+ * ceiling (32 for IPv4, 128 for IPv6 — passed by the caller). Returns -1 on any
+ * malformed input (empty, non-digit, overflow above `ceiling`). Negatives are
+ * caught by the caller scanning for '-' BEFORE calling here — keeps the message
  * catalogue distinct between "empty prefix" and "out of range". */
-[[nodiscard]] int parse_prefix(std::string_view s) noexcept
+[[nodiscard]] int parse_prefix(std::string_view s, int ceiling) noexcept
 {
     if (s.empty()) return -1;
     int v = 0;
     for (char c : s) {
         if (c < '0' || c > '9') return -1;
         v = v * 10 + (c - '0');
-        if (v > 32) return -1;  // 32 is the v4 ceiling; bail early
-    }
-    return v;
-}
-
-/* §5.53: parse a decimal prefix length 0..128 (IPv6 ceiling). Returns -1 on
- * any malformed input (empty, non-digit, overflow above 128). Sign handling
- * is the caller's, mirroring parse_prefix. */
-[[nodiscard]] int parse_prefix6(std::string_view s) noexcept
-{
-    if (s.empty()) return -1;
-    int v = 0;
-    for (char c : s) {
-        if (c < '0' || c > '9') return -1;
-        v = v * 10 + (c - '0');
-        if (v > 128) return -1;  // 128 is the v6 ceiling; bail early
+        if (v > ceiling) return -1;  // family ceiling; bail early
     }
     return v;
 }
@@ -107,7 +93,7 @@ xdpmf_cidr_v4 parse_cidr_v4(std::string_view s,
                   std::format("malformed CIDR: prefix length out of range [0,32]: '{}'", s));
     }
 
-    const int prefix = parse_prefix(prefix_part);
+    const int prefix = parse_prefix(prefix_part, 32);
     if (prefix < 0) {
         throw_cfg(file, line, col,
                   std::format("malformed CIDR: prefix length out of range [0,32]: '{}'", s));
@@ -186,13 +172,13 @@ xdpmf_cidr_v6 parse_cidr_v6(std::string_view s,
                   std::format("malformed IPv6 CIDR: empty prefix length: '{}'", s));
     }
 
-    // Reject explicit signs before parse_prefix6 sees only digits.
+    // Reject explicit signs before parse_prefix sees only digits.
     if (prefix_part.front() == '-' || prefix_part.front() == '+') {
         throw_cfg(file, line, col,
                   std::format("malformed IPv6 CIDR: prefix length out of range [0,128]: '{}'", s));
     }
 
-    const int prefix = parse_prefix6(prefix_part);
+    const int prefix = parse_prefix(prefix_part, 128);
     if (prefix < 0) {
         throw_cfg(file, line, col,
                   std::format("malformed IPv6 CIDR: prefix length out of range [0,128]: '{}'", s));
