@@ -86,7 +86,12 @@ compute_id_to_slot(const std::vector<Rule>& rules)
 /* §5.61 B30: the slot→id inverse over the full [0,64) slot space — slot_to_id
  * [slot] = the id occupying `slot`, or XDPMF_SLOT_ID_EMPTY for the unoccupied
  * tail [count,64). Drives both the `slot_rule_id` map write (occupied prefix)
- * and the copy-forward-by-id remap (new-side mapping). */
+ * and the copy-forward-by-id remap (new-side mapping).
+ *
+ * §5.81 (MVP-4.41) guard #26 PRODUCER (leg a): the exporter's bounded scan
+ * (rule_counters_reader.cpp read_generation) early-`break`s at the FIRST
+ * sentinel it reads — it load-bears on this dense-prefix shape (occupied =
+ * exactly [0,count), sentinel tail). Do not make the occupied slots sparse. */
 [[nodiscard]] std::array<std::uint32_t, XDPMF_RULE_COUNTERS_MAX>
 compute_slot_to_id(const std::vector<Rule>& rules,
                    const std::unordered_map<std::uint32_t, std::uint32_t>& id_to_slot)

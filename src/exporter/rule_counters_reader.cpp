@@ -5,8 +5,9 @@
  * §5.35 atomic-swap rule_counters pins: reads `active_idx[0]` to pick which
  * inner is live ({0,1} → suffix `_a`/`_b`), opens that inner via
  * bpf_obj_get() (RO fd), uses libbpf_num_possible_cpus() +
- * bpf_map_lookup_elem() to sum each of the XDPMF_RULE_COUNTERS_MAX (= 64)
- * slots across CPUs.
+ * bpf_map_lookup_elem() to sum the occupied slot prefix `[0, count)` across
+ * CPUs (§5.81 bounded scan — the dense-prefix invariant makes the tail dead
+ * work; a legacy no-slot_rule_id iface keeps the full 64-slot walk).
  *
  * §5.35 PI-3.4d-EXPORTER: the rule_counters axis is split into
  * `rule_counters_a`/`_b`/`_outer`; the exporter selects the live inner via
@@ -78,10 +79,18 @@ inline constexpr std::size_t kRuleCountersGenRetryMax = 3;
 }
 
 /* §5.64 (MVP-4.24) D-mvp-4.24-WINDOW: read ONE full generation for `active` —
- * open `rule_counters_<active>`, PERCPU-sum all 64 slots into sample.counters,
- * then read `slot_rule_id`'s active half into sample.slot_to_id. BOTH buffers
- * are keyed by the SAME `active` so the committed sample pairs counters + ids
- * from one generation.
+ * open `rule_counters_<active>`, read `slot_rule_id`'s active half into
+ * sample.slot_to_id, then PERCPU-sum the occupied prefix into sample.counters.
+ * BOTH buffers are keyed by the SAME `active` so the committed sample pairs
+ * counters + ids from one generation.
+ *
+ * §5.81 (MVP-4.41) D-mvp-4.41-Q1-A1: the id-scan runs FIRST so its sentinel
+ * boundary bounds the PERCPU walk to `[0, bound)` — the §5.61 dense-prefix
+ * invariant makes slots past the first sentinel dead work (their counters are
+ * never rendered: prom_format skips sentinel slots). Tail entries stay at
+ * their value-init defaults (0 / sentinel) — observationally identical to the
+ * old full walk. The counters pin still opens FIRST so the failure path below
+ * gains no syscalls and keeps its WARN ordering (D-mvp-4.41-OPEN-ORDER).
  *
  * Returns false (and emits the pre-existing `rule_counters_open_failed` WARN)
  * when the inner pin open fails — the seqlock does NOT suppress that fall-
@@ -125,17 +134,16 @@ inline constexpr std::size_t kRuleCountersGenRetryMax = 3;
 
     sample.iface = std::string{iface};
     for (std::uint32_t k = 0; k < XDPMF_RULE_COUNTERS_MAX; ++k) {
-        sample.counters[k] = percpu_sum_u64(fd, k, num_cpus, percpu_buf);
-    }
-    (void)::close(fd);
-
-    /* §5.61 (MVP-4.21) B30: counters above are SLOT-keyed; recover each slot's
-     * stable operator id from `slot_rule_id`'s active half so prom_format can
-     * label `rule_match_total` by stable id. PI-32 graceful-empty: a pre-§5.61
-     * iface has no slot_rule_id pin → leave slot_to_id all-sentinel. */
-    for (std::uint32_t k = 0; k < XDPMF_RULE_COUNTERS_MAX; ++k) {
         sample.slot_to_id[k] = XDPMF_SLOT_ID_EMPTY;
     }
+
+    /* §5.61 (MVP-4.21) B30: counters are SLOT-keyed; recover each slot's
+     * stable operator id from `slot_rule_id`'s active half so prom_format can
+     * label `rule_match_total` by stable id. PI-32 graceful-empty: a pre-§5.61
+     * iface has no slot_rule_id pin → leave slot_to_id all-sentinel (and keep
+     * today's full 64-slot PERCPU walk — the bound is unknowable there,
+     * D-mvp-4.41-HG1-LEGACY-FULLWALK). */
+    std::uint32_t bound = XDPMF_RULE_COUNTERS_MAX;
     const std::string sri_pin = iface_dir + XDPMF_MAP_SLOT_RULE_ID_NAME;
     const int         sri_fd  = ::bpf_obj_get(sri_pin.c_str());
     if (sri_fd >= 0) {
@@ -144,12 +152,33 @@ inline constexpr std::size_t kRuleCountersGenRetryMax = 3;
         for (std::uint32_t slot = 0; slot < XDPMF_RULE_COUNTERS_MAX; ++slot) {
             const std::uint32_t key = base + slot;
             std::uint32_t       id  = XDPMF_SLOT_ID_EMPTY;
-            if (::bpf_map_lookup_elem(sri_fd, &key, &id) == 0) {
-                sample.slot_to_id[slot] = id;
+            if (::bpf_map_lookup_elem(sri_fd, &key, &id) != 0) {
+                /* Per-element miss (exotic for an ARRAY map): says nothing
+                 * about slots past it — never a boundary, never shrinks the
+                 * bound (D-mvp-4.41-Q2-MISS-CONTINUE). */
+                continue;
             }
+            if (id == XDPMF_SLOT_ID_EMPTY) {
+                /* Guard #26 CONSUMER: a successfully-READ sentinel VALUE is
+                 * the dense-prefix boundary — compute_slot_to_id writes ids
+                 * to exactly [0,count) and a sentinel tail (leg a), and
+                 * config.cpp rejects the sentinel as an operator id (leg b),
+                 * so a real rule can never sit past this slot. */
+                bound = slot;
+                break;
+            }
+            sample.slot_to_id[slot] = id;
         }
         (void)::close(sri_fd);
     }
+
+    /* §5.81 bounded PERCPU walk: tail counters stay value-init 0 and are
+     * never rendered (prom_format skips sentinel slots) — byte-identical
+     * scrape output (PI-mvp-4.41-OUTPUT-IDENTITY). */
+    for (std::uint32_t k = 0; k < bound; ++k) {
+        sample.counters[k] = percpu_sum_u64(fd, k, num_cpus, percpu_buf);
+    }
+    (void)::close(fd);
     return true;
 }
 

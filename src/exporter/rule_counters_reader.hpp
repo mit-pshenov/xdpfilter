@@ -23,7 +23,8 @@ namespace xdpmf::exporter {
 
 /* Per-iface PERCPU-summed counter snapshot. `counters[k]` is the summed
  * count for the rule occupying SLOT k across all CPUs at scrape time. Slots
- * for non-applied rules stay 0 (PERCPU init).
+ * for non-applied rules stay 0 (value-init; §5.81 the bounded scan does not
+ * read the unoccupied tail's PERCPU zeros).
  *
  * §5.61 (MVP-4.21) B30: the counter index is the internal `slot` (id-sorted
  * rank), NOT the operator id. `slot_to_id[k]` carries the stable operator id
@@ -35,8 +36,9 @@ namespace xdpmf::exporter {
 struct RuleCountersSample {
     std::string   iface;
     std::uint64_t counters[XDPMF_RULE_COUNTERS_MAX]   = {};
-    /* read_rule_counters() fills ALL XDPMF_RULE_COUNTERS_MAX entries (sentinel
-     * for unoccupied / pre-§5.61 ifaces) before returning; never read unfilled. */
+    /* Every entry is sentinel-or-real on return: the occupied prefix carries
+     * real ids/sums; the tail is well-defined by value-init + the explicit
+     * sentinel-fill (§5.81 — no longer by per-slot reads of dead slots). */
     std::uint32_t slot_to_id[XDPMF_RULE_COUNTERS_MAX] = {};
 };
 

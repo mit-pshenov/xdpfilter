@@ -1830,3 +1830,23 @@ set_tests_properties(T_CLI_APPLY_DRYRUN PROPERTIES
     ENVIRONMENT "${TEST_ENV}"
     TIMEOUT 20
 )
+
+# ─────────────────────────────────────────────────────────────────────────
+# MVP-4.41 (§5.81 / PERF-M1): exporter bounded-scan output-invariance.
+# T_EXPORTER_BOUNDED_SCAN_INVARIANT (§5.81.6 TS-1): a small-N sparse-id
+#   config (ids 7 / 1000 / 4294967294) scrapes to EXACTLY N
+#   xdpfilter_rule_match_total series; the XDPMF_SLOT_ID_EMPTY sentinel
+#   (4294967295) never leaks as a rule_id label; no rule_counters WARN;
+#   shrink re-apply (N=3 → 1) drops the vacated ids (negation control).
+#   Takes BOTH xdp_fixture AND exporter_port_9417 RESOURCE_LOCKs.
+add_test(
+    NAME T_EXPORTER_BOUNDED_SCAN_INVARIANT
+    COMMAND bash ${TEST_DIR}/T_EXPORTER_BOUNDED_SCAN_INVARIANT.sh
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+set_tests_properties(T_EXPORTER_BOUNDED_SCAN_INVARIANT PROPERTIES
+    ENVIRONMENT "${TEST_ENV}"
+    RESOURCE_LOCK "xdp_fixture;exporter_port_9417"
+    TIMEOUT 90
+    SKIP_RETURN_CODE 77
+)

@@ -413,7 +413,8 @@ Config validate(const yaml::Node& root, std::string_view file)
                  * decoupled from the internal `slot` (id-sorted rank). Every u32
                  * id is legal EXCEPT the reserved slot_rule_id EMPTY sentinel
                  * (D-mvp-4.21-SENTINEL), so that marker stays unambiguous; the
-                 * ≤64 limit is the slot-count cap below. */
+                 * ≤64 limit is the slot-count cap below.
+                 * §5.81 guard #26 (leg b): the exporter's early-`break` load-bears on this rejection. */
                 if (id == XDPMF_SLOT_ID_EMPTY) {
                     throw_cfg("rule id reserved", file, id_node->line, id_node->col,
                               std::format("rule.id {} is reserved (XDPMF_SLOT_ID_EMPTY sentinel)",
