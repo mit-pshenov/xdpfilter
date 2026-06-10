@@ -21595,3 +21595,139 @@ Guards #1..#37 + §5.70 #38 + §5.73 #39 + §5.76 #40 + §5.77 candidate #41.
 5. **NEW golden absent** — `test -e tests/dryrun/dryrun_human.golden` → ABSENT (only `dryrun_image.golden` exists) ✓.
 6. **Post-impl gates** — `git diff tests/dryrun/dryrun_image.golden` MUST be ∅; `git diff tests/CMakeLists.txt`
    MUST be ∅; `git diff src/ src/bpf` MUST be ∅ (test-only slice).
+
+## §5.81 MVP-4.41 / PERF-M1: bound exporter scrape loops by the live rule count (brownfield; EXPORTER read-side only; NO schema / axis / map / loader / datapath / VERSION change; xdp section stays **3477 insns ×3 arms**; scrape `/metrics` output BYTE-IDENTICAL; 2026-06-10)
+
+### §5.81.1 Problem statement
+
+The exporter's per-scrape BPF syscall cost in `read_generation` (`src/exporter/rule_counters_reader.cpp`) is fixed at `2 × XDPMF_RULE_COUNTERS_MAX (=64)` lookups per iface — 64 PERCPU sums (`:127`) + up to 64 `slot_rule_id` reads (`:144`) — regardless of the live rule count. The §5.61 (B30) **dense-prefix slot invariant** makes most of that walk dead work: occupied slots are exactly `[0, count)` (id-sorted rank, D-mvp-4.21-Q3) with an `XDPMF_SLOT_ID_EMPTY` (=`0xFFFFFFFFu`) tail written by `compute_slot_to_id` (`compiled_ruleset.cpp:86-100`). This slice reorders the two loops (ids FIRST, early-`break` at the first successfully-read sentinel, then PERCPU-sum only `[0, count)`), cutting per-iface syscalls from ~130 to ~`2·count + 3` on the modern path (~14× at count=3). Review finding **PERF-M1** (2026-06-07 sanitary day, deferred-with-rationale → charged now). Perf-hygiene, NOT envelope-critical.
+
+**Headline reviewer invariant: scrape output is byte-identical.** `prom_format.cpp:128-130` already skips `XDPMF_SLOT_ID_EMPTY` slots, and skipped slots' counter values are never read (`:137` is only reached for non-sentinel ids) — so not reading dead slots is observationally invisible. This slice operates entirely INSIDE one §5.64 seqlock generation window (guard #32: the `active_idx` pre/post checks and `kRuleCountersGenRetryMax=3` are untouched).
+
+### §5.81.2 FileList (brownfield DIFF — NEW / EDITED / UNCHANGED-BUT-AFFECTED)
+
+**NEW**
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `tests/T_EXPORTER_BOUNDED_SCAN_INVARIANT.sh` (name = tester's prerogative; T_EXPORTER family) | TS-1 output-invariance ctest: small-count scrape emits exactly the config's per-rule series, no sentinel leak, no WARN | bash | ~80 |
+
+**EDITED**
+
+| Path | Role (one line) | Language | LOC est |
+|---|---|---|---|
+| `src/exporter/rule_counters_reader.cpp` | `read_generation` reorder: counters-pin open first (unchanged failure precedence) → id-scan with sentinel early-`break` → PERCPU-sum `[0, bound)`; guard #26 CONSUMER comment at the `break`; file-header comment touch (`:7-9` "sum each of the 64 slots" wording) | C++ | ~25 Δ |
+| `src/exporter/rule_counters_reader.hpp` | COMMENT-ONLY: `RuleCountersSample` doc (`:24-26`, `:38-39`) — tail entries now well-defined by value-init, not by explicit read/store; contract "every entry sentinel-or-real on return" unchanged | C++ | ~4 |
+| `src/lib/compiled_ruleset.cpp` | COMMENT-ONLY: guard #26 PRODUCER leg-(a) forward-defense at `compute_slot_to_id` (`:86-100`) — name the exporter early-`break` dependency on dense-prefix + sentinel tail | C++ | ~4 |
+| `src/lib/config.cpp` | COMMENT-ONLY: ONE line appended to the existing D-mvp-4.21-SENTINEL block (`:412-421`) — leg-(b) back-reference: the exporter's early-`break` (§5.81, guard #26) depends on this rejection | C++ | ~1 |
+| `tests/CMakeLists.txt` | register the NEW ctest — `RESOURCE_LOCK "xdp_fixture;exporter_port_9417"` + `SKIP_RETURN_CODE 77` per the `T_EXPORTER_RULE_LABELS` precedent (`:685`, `:703-705`) | cmake | ~12 |
+
+**UNCHANGED-BUT-AFFECTED** (impl/tester must NOT touch; reviewer asserts zero git-diff)
+
+| Path | Why affected / why untouched |
+|---|---|
+| `src/exporter/prom_format.cpp` | The byte-identity argument RELIES on its EMPTY-skip (`:128-130`) + counter-read-only-for-real-ids (`:137`). Host-array iteration, NOT syscalls — its 64-loop stays. ZERO diff. |
+| `src/exporter/percpu_read.hpp` | Guard #9: NO helper extraction at 1 consumer (D-mvp-4.41-NOEXTRACT). ZERO diff. |
+| `src/exporter/stats_reader.cpp` | Its loop is `STAT_MAX (=5)`-bounded — no win; OOS. ZERO diff. |
+| `src/common/xdpfilter.h` | ABI-frozen — `static_assert(sizeof(struct xdpmf_ruleset_state) == 80)` at `:358` fences Q1/A3. ZERO diff. |
+| `src/lib/loader.cpp` + `src/lib/loader.hpp` | No loader touch; PI-7 zero-diff streak continues. ZERO diff. |
+| `src/bpf/**` | Datapath untouched — xdp section stays **3477 insns ×3 arms** (PI-mvp-4.27-DATAPATH-IDENTICAL; `T_INSN_BASELINE_GATE`). ZERO diff. |
+| `tests/T_EXPORTER_*.sh` (7 files) + `tests/T_RULE_COUNTER_MAC_HIT_BUMPS.sh` + `tests/T_RULE_COUNTER_SURVIVES_REORDER.sh` | The output-invariance net — ZERO EDITED ctests expected (brief Workflow rule); all stay green unmodified. |
+
+Anything not in these three categories is off-limits; an impl edit elsewhere = design gap → SendMessage architect.
+
+### §5.81.3 DataStructures
+
+**No new or changed structures.** `RuleCountersSample` (`rule_counters_reader.hpp:35-41`) is byte-for-byte UNCHANGED: `std::string iface; std::uint64_t counters[64] = {}; std::uint32_t slot_to_id[64] = {};`. Its contract is PRESERVED by construction: every entry is well-defined on return — occupied prefix `[0, count)` carries real sums + real ids; the tail `[bound, 64)` carries `0` (counters, via `= {}` value-init, no longer via reading PERCPU zeros) and `XDPMF_SLOT_ID_EMPTY` (slot_to_id, via the existing explicit sentinel-fill). "Never read unfilled" holds — there are no unfilled entries. Only the hpp doc-comment WORDING changes (EDITED row).
+
+### §5.81.4 Interfaces
+
+**Public surface: ZERO change.** `read_rule_counters(std::string_view bpffs_root) noexcept → std::vector<RuleCountersSample>` signature, semantics, and the outer §5.64 seqlock loop (`active_pre` → `read_generation` → `active_post`, retry ≤ `kRuleCountersGenRetryMax`) are untouched.
+
+**Internal contract — `read_generation` new shape** (anon-namespace; same signature `(iface, iface_dir, active, num_cpus, percpu_buf, sample) → bool`); impl owns the bodies, this ordering is the contract:
+
+1. **Open `rule_counters_<active>` inner pin FIRST** (unchanged position). On failure: emit the existing `rule_counters_open_failed` WARN (text byte-identical, guard #19 — no new WARN lines this slice) + `return false` — BEFORE any `slot_rule_id` syscall. Failure-path syscall pattern stays identical to today (half-attached ifaces are the common case; they must not gain syscalls). [D-mvp-4.41-OPEN-ORDER]
+2. **Sentinel-fill `sample.slot_to_id`** (host loop, unchanged).
+3. **Id-scan with early-`break`** — open the `slot_rule_id` pin:
+   - open FAILS (legacy pre-§5.61 iface, `bpf_obj_get` < 0) → `bound = XDPMF_RULE_COUNTERS_MAX` (full 64-slot PERCPU walk, today's behavior unchanged; `slot_to_id` stays all-sentinel). [HG-1 / D-mvp-4.41-HG1-LEGACY-FULLWALK]
+   - open OK → for `slot` in `[0, 64)`, lookup key `active·XDPMF_ALLOWLIST_MAX + slot`:
+     - lookup rc ≠ 0 → **`continue`** — per-element miss; slot keeps sentinel; does NOT establish a boundary, the scan and the bound extend past it. [Q2 / D-mvp-4.41-Q2-MISS-CONTINUE]
+     - rc == 0 ∧ value == `XDPMF_SLOT_ID_EMPTY` → **`bound = slot; break`** — the dense-prefix boundary (guard #26 boundary sentinel).
+     - rc == 0 ∧ real id → `sample.slot_to_id[slot] = value`.
+     - loop exhausts with no sentinel read → `bound = 64` (full config).
+     Close the `slot_rule_id` fd. The guard #26 CONSUMER comment lives at this `break`.
+4. **PERCPU-sum `[0, bound)`**: `sample.counters[k] = percpu_sum_u64(fd, k, num_cpus, percpu_buf)` for `k < bound`; tail stays `{}`. Close the counters fd; `return true`.
+
+Syscall accounting (modern path, live count N): `2 obj_get + (N+1) id lookups + N PERCPU lookups` vs today's `2 obj_get + 64 + 64` — at N=3: 9 vs 130. All reads stay between the caller's `active_pre`/`active_post` checks, keyed by the SAME `active` (guard #32 honored).
+
+**New ctest surface**: standard `TEST_ENV`/`TEST_DIR` environment, sudo + bpffs (mirrors `T_EXPORTER_RULE_LABELS.sh` harness pattern). No new CLI flags, env vars, or events.
+
+### §5.81.5 Decisions (with rationale)
+
+- **D-mvp-4.41-Q1-A1 — reorder-within-`read_generation` + sentinel early-`break`** — because it needs no new map, no ABI, no new syscall class, and stays inside the existing seqlock window. **A2 (`BPF_MAP_LOOKUP_BATCH`) REJECTED** — introduces a new syscall class against PI-31's letter ("only `bpf_obj_get` + lookup"), adds kernel-version surface, and saves little once A1 bounds the loop. **A3 (publish count in `xdpmf_ruleset_state`) REJECTED** — that struct is ABI-frozen (`sizeof==80` static_assert, `xdpfilter.h:358`); touching datapath header + loader for an exporter-side nicety is disproportionate.
+- **D-mvp-4.41-Q2-MISS-CONTINUE — only a SUCCESSFULLY-READ sentinel VALUE is the boundary; a lookup FAILURE is a per-element miss → `continue`, never `break`, never shrinks the bound** — because guard #26's boundary-vs-per-element distinction is a hard fence: a transient miss on slot `i` says nothing about slots `> i`. Note: `slot_rule_id` is an ARRAY map (`xdpfilter.h:328`), so in-range lookups essentially cannot ENOENT — the miss arm is exotic, but the fence holds regardless and costs one branch.
+- **D-mvp-4.41-HG1-LEGACY-FULLWALK — legacy no-`slot_rule_id`-pin iface keeps today's full 64-slot PERCPU walk** — brief default ACCEPTED: the bound is unknowable there; skip-entirely would change `RuleCountersSample` contents on a path with no test coverage. Zero behavior delta on the legacy edge.
+- **D-mvp-4.41-OPEN-ORDER — the `rule_counters_<active>` pin is opened FIRST (before any `slot_rule_id` syscall), preserving today's failure precedence exactly** — because the counters-pin-open-fail path (WARN + `return false`, iface skipped, PI-32) must neither gain syscalls nor change WARN ordering; the counters fd is simply held across the id-scan (trivial lifetime extension vs today's earlier close).
+- **D-mvp-4.41-HG2-ORACLE — primary test oracle = output-invariance, NOT syscall count** — brief default ACCEPTED: a `strace -c -e trace=bpf` count assertion is environment-fragile; tester MAY run it as a local-gate-only sanity probe, never as the committed ctest oracle.
+- **D-mvp-4.41-CONFIG-BACKREF — `config.cpp` gets a ONE-line leg-(b) back-reference (third comment anchor, beyond the brief's two-file enumeration)** — because guard #26 names leg (b) as "the one most easily missed": a future editor relaxing the `id == XDPMF_SLOT_ID_EMPTY` rejection (`config.cpp:417-421`) would silently make a real rule masquerade as the boundary sentinel and truncate the exporter's scan. The existing D-mvp-4.21-SENTINEL comment explains WHY the value is reserved but not that an early-`break` now LOAD-BEARS on it. One line, zero risk, completes the defense triangle.
+- **D-mvp-4.41-NOEXTRACT — any bound-scan helper stays local to `rule_counters_reader.cpp`; NO `percpu_read.hpp` growth** — guard #9 at 1 consumer (same call as D-mvp-4.39-NOEXTRACT; re-charge only at a 3rd consumer).
+- **D-mvp-4.41-NOVERSION — no VERSION bump** — internal perf hygiene; zero operator-visible surface change. VERSION stays 0.17.0.
+
+### §5.81.6 TestStrategy (verification spec — WHAT to test)
+
+Tester writes against THIS section, not impl's code. Impl runs **TARGETED tests only** (`ctest -R T_EXPORTER`), tester owns the full run (2026-06-07 contention lesson).
+
+- **TS-1 (NEW ctest, the HG-2 oracle)** — *trigger*: veth fixture; `apply` a config with small N (2–3 rules) using **sparse, non-contiguous ids** (e.g., 7 and 1000 — exercises guard #29 slot≠id and the id-sorted-rank density edge); start exporter; curl `/metrics`. *Observable*: (a) exactly N `xdpfilter_rule_match_total` series for the iface, rule_id set == the config's id set; (b) NO series with `rule_id="4294967295"` (sentinel must never leak); (c) NO `rule_counters` WARN on stderr; (d) other metric families present (scrape not truncated). *Mechanism*: grep-count over the curl body, mirroring `T_EXPORTER_RULE_LABELS.sh`; locks `"xdp_fixture;exporter_port_9417"`; `SKIP_RETURN_CODE 77`. *Guard #31*: the test must explicitly SKIP(77) (or fail) when root/bpffs is unavailable — it must NOT silently pass in the CI build-only env, and must NOT blindly inherit the #48/#63 EACCES env-dependency pattern. *MAY sub-case*: if an empty-rules config is valid per `config.cpp`, also apply count=0 and assert zero per-rule series + no WARN (exercises `break` at slot 0); tester verifies legality first — NOT a required assertion.
+- **TS-2 (regression net, ZERO edits)** — all 7 `T_EXPORTER_*.sh` + `T_RULE_COUNTER_MAC_HIT_BUMPS.sh` + `T_RULE_COUNTER_SURVIVES_REORDER.sh` (the B30 moved-keeps-counter reorder-density edge) stay green UNMODIFIED. Any needed edit to these = output changed = the headline invariant is broken → stop and escalate, don't patch the test.
+- **TS-3 (MAY, local-gate only)** — `strace -c -e trace=bpf` (or `-e bpf`) one-scrape syscall-count comparison demonstrating the ~`2·count+3` bound. Environment-fragile; run manually / as tester's local sanity probe; do NOT commit as a ctest.
+- **TS-4 (full suite)** — tester runs full `ctest`; green minus the 4 documented env-flakes (#1/#9 timeout, #48/#63 EACCES); `T_INSN_BASELINE_GATE` confirms 3477.
+- **OPS canary**: N/A — no new invocation path; the exporter binary, caps, and launch pattern are unchanged (same daemon, same scrape).
+
+Reviewer special attention (per brief): guard #26 two-leg comments present at BOTH ends (+ the config.cpp back-ref); seqlock window untouched (`active_pre`/`active_post` + `kRuleCountersGenRetryMax` byte-identical); the byte-identity argument (prom EMPTY-skip + counters-unread-for-sentinel-slots) restated and checked; PI-31 grep over `src/exporter/` (no `bpf_map_update_elem`/`delete`/pin/link/prog_load).
+
+### §5.81.7 Preserved invariants (brownfield)
+
+| Invariant | Statement | Check mechanism |
+|---|---|---|
+| **PI-mvp-4.41-OUTPUT-IDENTITY** | `/metrics` scrape text byte-identical for ANY live count ≤ 64 (incl. 64 and the legacy no-pin path) | TS-1 + TS-2 unmodified-green + reviewer argument walk (prom_format `:128-130`/`:137`) |
+| **PI-31** (CONTINUES) | exporter syscall surface = `bpf_obj_get` + `bpf_map_lookup_elem` ONLY | reviewer grep over `src/exporter/` |
+| **PI-32** (CONTINUES) | graceful per-iface WARN-and-continue; counters-pin-fail → WARN + skip with ZERO `slot_rule_id` syscalls (as today); legacy no-pin → full-walk, all-sentinel ids | code walk + TS-2 |
+| **PI-7** (CONTINUES) | `loader.hpp` zero-diff | `git diff src/lib/loader.hpp` = ∅ |
+| **PI-mvp-4.27-DATAPATH-IDENTICAL** | xdp section **3477 insns ×3 arms**; no `src/bpf` touch | `git diff src/bpf` = ∅ + `T_INSN_BASELINE_GATE` |
+| **§5.64 seqlock semantics** | D-mvp-4.24-SEQNUM / -TEAR-HONESTY / -Q1 intact: pre/post `active_idx` checks unchanged, `kRuleCountersGenRetryMax=3` unchanged, both buffer reads keyed by one `active` inside one window | reviewer read of `read_rule_counters` outer loop (expected ZERO diff outside `read_generation`) |
+| **PI-mvp-4.41-BASELINE** | full ctest green minus the 4 documented env-flakes (#1/#9, #48/#63); ≥1 NEW exporter ctest added; ZERO EDITED ctests | tester full run + diff vs prior `test-run.log` |
+| **VERSION** | stays 0.17.0 (no bump) | `git diff VERSION` = ∅ |
+
+Reviewer's framework point 5 walks this list; report `[INVARIANT-VIOLATED]` per failed check.
+
+### §5.81.7a Verification hints (guidance for reviewer — MAY, not contracts)
+
+- `rule_counters_reader.cpp` diff expected ~25 lines, confined to `read_generation` + the file-header comment; the outer seqlock loop SHOULD show zero diff.
+- `config.cpp` diff expected ONE comment line inside the `:412-421` block; `compiled_ruleset.cpp` diff comment-only at `compute_slot_to_id`.
+- Loop-shape specifics (a named `bound` local, exact comment wording, whether the id-scan is a helper lambda) are impl's — the §5.81.4 ordering + Q2 arms are the contract.
+- **Resolution rule**: prose-vs-invariants conflicts within this amendment → the §5.81.7 PI rows and the §5.81.4 numbered contract win, prose loses. If impl deviates from a hint to satisfy a PI or a load-bearing test assertion, disposition is `inline-merge`, NOT `[UNRELATED-EDIT]`.
+
+### §5.81.8 Out of scope (anti-drift fence)
+
+- **`stats_reader.cpp`** — `STAT_MAX (=5)`-bounded; no win; ZERO diff.
+- **`BPF_MAP_LOOKUP_BATCH`** (Q1/A2) — rejected; not explored.
+- **Any datapath / `src/bpf` / loader / `xdpfilter.h` ABI change** — fences Q1/A3.
+- **SEC-L1 exporter sandboxing** — separate deferred, deployment-gated finding.
+- **T_EXPORTER #48/#63 env-fail cleanup** — B16-adjacent backlog; not this slice.
+- **Helper extraction into `percpu_read.hpp`** — guard #9 at 1 consumer (D-mvp-4.41-NOEXTRACT).
+- **Syscall-count assertion as a committed ctest oracle** — local-gate-only MAY (D-mvp-4.41-HG2-ORACLE).
+- **count=0 empty-config assertion as a REQUIRED test** — MAY sub-case only (legality unverified at design time).
+- "While I'm here" edits to files not in NEW/EDITED — the FileList is the complete footprint.
+
+### §5.81.9 Evidence — slice-time greps re-verified against HEAD at design time (guard #5)
+
+1. `grep -rn XDPMF_RULE_COUNTERS_MAX src/exporter/` → syscall loops ONLY at `rule_counters_reader.cpp:127` (PERCPU), `:136` (host sentinel-fill), `:144` (id reads); `prom_format.cpp:128` is host-array iteration ✓.
+2. `XDPMF_SLOT_ID_EMPTY = 0xFFFFFFFFu` (`xdpfilter.h:332`); `slot_rule_id` = "ARRAY[XDPMF_RULESET_COUNT·XDPMF_ALLOWLIST_MAX] of __u32" (`:328`); `XDPMF_RULE_COUNTERS_MAX = XDPMF_ALLOWLIST_MAX = 64` (`:88`/`:320`); `XDPMF_RULESET_COUNT = 2` (`:98`) ✓.
+3. Guard #26 leg (a): `compute_slot_to_id` (`compiled_ruleset.cpp:90-100`) — `fill(XDPMF_SLOT_ID_EMPTY)` then dense write via `id_to_slot` (id-sorted rank `:77-82` → occupied = exactly `[0, count)`) ✓.
+4. Guard #26 leg (b): `config.cpp:417-421` — `id == XDPMF_SLOT_ID_EMPTY` REJECTED at parse (D-mvp-4.21-SENTINEL comment `:412-416`) ✓.
+5. Output-invariance ground: `prom_format.cpp:128-130` skips sentinel slots; `:137` reads `s.counters[k]` only for non-sentinel ids ✓.
+6. Seqlock anatomy: `rule_counters_reader.cpp` — `kRuleCountersGenRetryMax=3` (`:62`), `lookup_active` fd-reuse (`:69-78`), pre/post + retry loop (`:231-249`), legacy no-`active_idx` path (`:206-217`), counters-open-fail WARN + `return false` BEFORE `slot_rule_id` (`:102-124` vs `:139-152`) ✓.
+7. ABI fence: `static_assert(sizeof(struct xdpmf_ruleset_state) == 80…)` at `xdpfilter.h:358` ✓.
+8. Test net: 7 × `tests/T_EXPORTER_*.sh` (glob-confirmed); lock precedent `"xdp_fixture;exporter_port_9417"` (`tests/CMakeLists.txt:685`, `T_EXPORTER_RULE_LABELS` doc `:703-705`); reorder-density net = `T_RULE_COUNTER_SURVIVES_REORDER.sh` ✓.
+9. Insn baseline: brief's "3477" cross-checked against §5.75 re-baseline (`XDPMF_PROD_INSN_BASELINE` 3437→3477, Δ+40 redirect branch) — prior sections' 3658/3437 are historical, 3477 is current ✓.
+10. Post-impl gates: `git diff src/bpf src/lib/loader.hpp src/common/xdpfilter.h src/exporter/prom_format.cpp src/exporter/percpu_read.hpp src/exporter/stats_reader.cpp VERSION` MUST be ∅; `git diff tests/T_EXPORTER_*.sh tests/T_RULE_COUNTER_*.sh` MUST be ∅.
