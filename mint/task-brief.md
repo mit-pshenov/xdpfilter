@@ -1,90 +1,71 @@
-# Task brief — MVP-4.40 / B48: harden the DEFAULT dry-run output (human-view golden + sanitizer coverage) (brownfield)
+# Task brief — MVP-4.41 / PERF-M1: bound exporter scrape loops by the live rule count (brownfield)
 
 ## Goal
+Cut the exporter's per-scrape BPF syscall count from a fixed `2 × XDPMF_RULE_COUNTERS_MAX (=64)` lookups per iface down to ~`count` (the live rule count), by exploiting the existing **dense-prefix slot invariant**: occupied slots are `[0, count)` with an `XDPMF_SLOT_ID_EMPTY` tail (established by B30 §5.61 `compute_slot_to_id`, D-mvp-4.21-Q3 id-sorted rank). The win is ~10× syscall reduction at small-config × many-iface scale (review finding **PERF-M1**, 2026-06-07 sanitary-day review, deferred-with-rationale → now charged as its own slice). No forcing-function pressure — this is a bounded perf-hygiene slice, NOT an envelope-critical change.
 
-An **additive test-depth** sanitary-day slice (Batch C of 2026-06-07) closing the
-review's two High findings that the **human `apply --dry-run` view — the DEFAULT
-operator output — is the weakest-tested of the three formats**. Today
-`format_dryrun_human` has ZERO offline-harness coverage (its only test is ~25
-loose substring greps in `T_CLI_APPLY_DRYRUN.sh`), and it is never executed under
-ASAN/UBSAN (the sanitizer test runs only `apply`+`detach`, never `--dry-run`).
-This slice adds (1) a byte-exact `dryrun_human.golden` driven through the existing
-libbpf-free offline harness, and (2) a `--dry-run` invocation under the sanitizer.
-
-NOT subtractive. No `src/` behavior change, no schema/datapath touch, **no VERSION
-bump** (test-only). Natural follow-up to B47/MVP-4.39 (just shipped) which landed
-B46 — so the new human golden bakes the canonical `0x0806` ethertype form.
+**Scrape output MUST stay byte-identical**: `prom_format.cpp` already skips `XDPMF_SLOT_ID_EMPTY` slots (`prom_format.cpp:128-130`), so reading fewer dead slots is observationally invisible. This output-invariance is the slice's headline reviewer invariant.
 
 ## Context: prior work
-
-- All prior briefs: archived in `mint/task-brief-*.md` (prior = `task-brief-mvp-4.39.md`).
-- Existing design: `mint/design.md` §5.78 (B45 human view), §5.79 (B47 subtraction), §5.76/§5.77 (B43/B44 dryrun harness + CLI verb).
-- Source: `/mint-review` 2026-06-07 TEST-H1 (High) + TEST-H2 (High).
-- Phase-2 brief-author grep verification ran (below); every literal CONFIRMED, zero discrepancies.
-- PI continuity: PI-mvp-4.37-LIBBPF-FREE (harness stays libbpf-free — the OPS-canary), PI-mvp-4.38-GOLDEN-UNCHANGED (image golden + #112 untouched — this ADDS a human golden alongside), PI-7 (loader.hpp ∅ — no `src/` touch), insn 3477 (no `src/bpf` touch).
+- All prior briefs: archived in `mint/task-brief-*.md` (prior = `task-brief-mvp-4.40.md`).
+- Existing design: `mint/design.md` §5.80 (B48) most recent; the read-side seqlock this slice operates inside = §5.64 (MVP-4.24); the dense-prefix slot model = §5.61 (B30).
+- Architecture doc: not row-anchored — slice originates from the 2026-06-07 `/mint-review` finding PERF-M1 (recorded in session handoff; deferred list).
+- Brief-author Phase 2 verification: see "Notes for architect" footer — all literals grep-verified against HEAD `25c6c44`.
+- PI continuity: **PI-31** (exporter syscall surface = `bpf_obj_get` + `bpf_map_lookup_elem` ONLY — no update/delete/pin/link/prog_load) CONTINUES; **PI-32** (graceful empty/partial per-iface WARN-and-continue) CONTINUES; **PI-7** (`loader.hpp` zero-diff) trivially holds (no loader touch); **BPF insn 3477** trivially holds (no `src/bpf` touch); §5.64 seqlock semantics (D-mvp-4.24-SEQNUM / -TEAR-HONESTY / -Q1 retry bound) PRESERVED.
 
 ## Workflow rules (brownfield)
-
-- **Architect**: read §5.76/§5.77/§5.78 + the dryrun_harness structure; EDIT design.md in place; append a §5.80 amendment. Resolve HG-mvp-4.40-1 (H1 location) + HG-mvp-4.40-2 (H2 approach). FileList is a DIFF (NEW golden + EDIT harness + EDIT tests/CMakeLists.txt + EDIT T_SANITIZER_BUILD.sh). Include a §6.5-style Preserved-invariants note.
-- **Impl**: NOTE — most of this slice is TEST-side (harness C++, a golden file, a shell test, CMake). The impl agent owns the C++ harness render-path + CMake wiring; the tester owns the golden content + the shell-test `--dry-run` step + negation. Architect splits ownership in §5.80 (the harness .cpp is impl-or-tester per project convention — flag it; dryrun_harness.cpp is test infra, likely tester-owned, but it's a build target so impl may own the CMake). Keep the harness **libbpf-free** (no `bpf_*`, no libbpf link, no loader.cpp/skeleton-object dep) — the clean link IS the contract.
-- **Tester**: the human golden is FROZEN once checked in (mirror §5.77.7 "do NOT regenerate after the fact"). Author it via the generator affordance, then freeze. Mandatory: SMOKE + byte-exact IDENTITY + NEGATION-control (one-byte corruption must FAIL), mirroring the existing `test_image_identity`/`test_negation_control`. The golden MUST bake the `0x0806` ethertype form (B46).
-- **Reviewer**: 5-point brownfield. Special attention: (a) harness still links NO libbpf (grep the link line; PI-mvp-4.37-LIBBPF-FREE); (b) image golden `dryrun_image.golden` + #112 BYTE-UNCHANGED (this slice only ADDS); (c) the human golden has a working negation control (deliberately-wrong golden FAILS); (d) the `--dry-run` sanitizer step actually runs both formats against the instrumented binary; (e) no `src/` or `src/bpf` diff (PI-7, insn 3477).
+- Architect: read §5.61, §5.64, §5.71 (percpu_read extraction), guard #26 (§5.49 tail) + guard #32 (§5.64 notes); EDIT `mint/design.md` in place; append **§5.81**.
+- Impl: FileList per §5.81; run **TARGETED tests only** (T_EXPORTER_*), NOT full ctest — tester owns the full run (2026-06-07 contention lesson).
+- Tester: NEW ctests target ≥1 (see HG-2); EDITED ctests expected ZERO (output-invariance).
+- Reviewer: 5-point brownfield framework; special attention = guard #26 two-leg discipline (comments at BOTH ends), seqlock window untouched, scrape-output byte-identity argument.
 
 ## Human-gate decisions (defaults applied — architect overrides at Phase A)
 
-### HG-mvp-4.40-1: H1 (human golden) location → **extend the offline `dryrun_harness`** (default)
-Render `format_dryrun_human(build_corpus(), compile(build_corpus()))` in `tests/dryrun/dryrun_harness.cpp` and byte-compare against a NEW `tests/dryrun/dryrun_human.golden`, adding `test_human_identity` + `test_human_negation_control` + an `--emit-golden-human` generator affordance, mirroring the existing image-golden trio. **Strongest**: libbpf-free, offline, byte-exact, reuses the proven pattern; the harness ALREADY links `map_image.cpp` (`format_dryrun_human`) + `compiled_ruleset.cpp` (`compile()`), so no new link deps. Same `build_corpus()` config the image golden uses (which carries the ethertype axis → exercises B46's `0x0806`). **Alternative** the architect may weigh: a CLI-level golden compare added to `T_CLI_APPLY_DRYRUN.sh` (simpler but not libbpf-free, and couples to CLI env). Prefer the harness path.
+### HG-mvp-4.41-1: legacy no-`slot_rule_id`-pin path → **preserve the full 64-slot walk**
+A pre-§5.61 iface (no `slot_rule_id` pin; `rule_counters_reader.cpp:140-141` open fails) has NO id information → the bound is unknowable there. Default: that path keeps today's full-walk behavior unchanged (conservative, zero behavior delta on the legacy edge). Architect MAY instead argue skip-entirely (prom emits nothing for all-EMPTY ids anyway) — but that changes the `RuleCountersSample` contents on a path with no test coverage; default is the no-delta option.
 
-### HG-mvp-4.40-2: H2 (sanitizer coverage) approach → **add a `--dry-run` step to `T_SANITIZER_BUILD.sh`** (default)
-After the existing sanitized `apply`, add an invocation of the already-built sanitized `xdpfilter apply --iface … -f <config> --dry-run` for BOTH formats (default human + `--format=golden`) so `compile()` + `format_dryrun_human` + `render_dryrun_image` + `diff()` execute under ASAN/UBSAN against a real config. **Cheap, high coverage** (drives the real instrumented binary; a few seconds added). **Alternative**: also add `-fsanitize=address,undefined` to the `dryrun_harness` target when `XDPMF_SANITIZERS=ON` (sanitizes the harness recompile too) — architect may add this if low-cost, but the `T_SANITIZER_BUILD` step is the primary. Do NOT attempt to fix the pre-existing #9 T_SANITIZER_BUILD timeout (BACKLOG B16) — OOS.
+### HG-mvp-4.41-2: NEW ctest oracle → **output-invariance, not syscall-count**
+Default oracle: a scrape with `count < 64` live rules produces byte-identical `/metrics` text before/after (or vs a golden), plus the existing T_EXPORTER family stays green. A syscall-COUNT assertion (e.g. `strace -c -e bpf`) is attractive but environment-fragile; tester MAY add it as a local-gate-only assert if it proves stable, NOT as the primary oracle. (Note: T_EXPORTER tests #48/#63 are documented env-fails (EACCES) — don't let the new test inherit that env-dependency blindly; see guard #31 green-on-SKIP floor.)
 
-## Open mechanism questions (architect decides; document in §5.80)
+## Open mechanism questions (architect decides; document in §5.81)
 
-### Q1: human-golden generator affordance shape
-- **A1**: a `--emit-golden-human` argv branch (mirrors `--emit-golden`), printing `format_dryrun_human(build_corpus(), compile(build_corpus()))`.
-- **A2**: reuse a single `--emit-golden <which>` arg.
-- **Recommendation**: A1 — lowest-surprise, mirrors the existing `--emit-golden`/`--emit-live` argv convention exactly.
+### Q1: how the reader learns the bound
+- **A1 (recommended)**: reorder within `read_generation` — read `slot_rule_id` FIRST, early-`break` at the first `XDPMF_SLOT_ID_EMPTY` (guard #26 boundary sentinel), then PERCPU-sum only slots `[0, count)`. No new maps, no ABI, no new syscall class; stays inside the same seqlock generation window (§5.64 pre/post `active_idx` check unchanged).
+- **A2**: `BPF_MAP_LOOKUP_BATCH` to fetch all 64 `slot_rule_id` entries in one syscall. REJECT-leaning: introduces a new syscall class against PI-31's letter ("only bpf_obj_get + PERCPU lookup"), kernel-version surface, and saves little once A1 bounds the loop anyway.
+- **A3**: publish the live count in a map the exporter reads (e.g. widen `xdpmf_ruleset_state`). REJECT: `xdpmf_ruleset_state` is ABI-frozen (sizeof==80 static_assert, `xdpfilter.h:358-359`), touches datapath header + loader for an exporter-side nicety — disproportionate.
+- **Recommendation**: A1. Guard #26's two legs are ALREADY satisfied upstream: (a) dense-at-front — `compute_slot_to_id` fills `[0,count)` and sentinel-fills the tail (`compiled_ruleset.cpp:87-99`); (b) no real entry masquerades as sentinel — `config.cpp:417-419` REJECTS `rule.id == XDPMF_SLOT_ID_EMPTY` at parse time. Architect documents the cross-file dependency comment at BOTH ends per guard #26 forward-defense.
 
-## Scope (cycle 1 — concrete items)
+### Q2: what the early-exit does to the per-slot `bpf_map_lookup_elem` MISS case
+Per guard #26's boundary-vs-per-element distinction: a **lookup failure** on a `slot_rule_id` key (transient ENOENT) is a per-element miss — it MUST stay `continue`-equivalent (slot keeps sentinel), NOT a `break`; ONLY the successfully-read `XDPMF_SLOT_ID_EMPTY` value is the dense-prefix boundary. Architect rules the exact loop shape; the distinction itself is a hard fence.
 
-### Item B48-1 — human-view offline golden (TEST-H1)
-**Where**: `tests/dryrun/dryrun_harness.cpp` (EDIT — add render path + 2 tests + emit affordance), `tests/dryrun/dryrun_human.golden` (NEW, FROZEN).
-- Add `test_human_identity(golden_path)`: render `format_dryrun_human(build_corpus(), compile(build_corpus()))`, byte-compare to `dryrun_human.golden`.
-- Add `test_human_negation_control()`: corrupt one byte of the rendered human output, assert the comparator detects the mismatch.
-- Add the generator affordance (Q1) to produce the frozen golden.
-- Wire both into `main()` alongside the existing image tests.
-- The golden bakes the corpus render incl. ethertype `0x0806` (B46).
+## Scope (cycle MVP-4.41 — concrete items)
 
-### Item B48-2 — sanitizer coverage of the human view + diff() (TEST-H2)
-**Where**: `tests/T_SANITIZER_BUILD.sh` (EDIT — add a `--dry-run` step), optionally `tests/CMakeLists.txt`/`CMakeLists.txt` (architect's call on HG-2 alt).
-- After the existing sanitized `apply`, run the sanitized binary `apply … --dry-run` (default human) AND `apply … --dry-run --format=golden` against a real config (reuse the existing sanitized-apply config, e.g. `config_valid_andv6.yaml`), asserting exit 0 + non-empty output. This drives `compile()` + `format_dryrun_human` + `render_dryrun_image` + `diff()` under ASAN/UBSAN.
+### Item PERF-M1-1 — bound the two 64-iteration loops in `read_generation`
+**Where**: `src/exporter/rule_counters_reader.cpp` (the per-scrape operational codepath — loops at `:127` (PERCPU sums) and `:144` (slot_rule_id reads); reorder + bound per Q1/A1).
+Today: 64 PERCPU sums + up to 64 id lookups per iface per scrape regardless of live count. After: ~`count`+1 id reads + `count` PERCPU sums on the modern path; legacy path per HG-1. The `RuleCountersSample` struct contract (`rule_counters_reader.hpp:37-40` — arrays value-initialized, "fills ALL entries (sentinel/zero)") is PRESERVED by construction (unread tail stays `{}`); the hpp doc-comment wording may need a touch — that's an EDIT, list it.
 
-### Item B48-3 — CMake/ctest wiring (if harness gains a sub-test or the architect adds harness sanitization)
-**Where**: `tests/CMakeLists.txt` — the human golden runs inside the existing `T_DRYRUN_IMAGE_IDENTITY` harness binary (no NEW ctest needed; the harness `main` runs all sub-tests), so likely NO ctest registration change — confirm. If the architect splits a separate ctest, register it with the same TEST_ENV/TIMEOUT pattern + Guard #12 note (no shared host state).
+### Item PERF-M1-2 — guard #26 cross-file forward-defense comments
+**Where**: consumer `src/exporter/rule_counters_reader.cpp` (at the new break) AND producer `src/lib/compiled_ruleset.cpp` (`compute_slot_to_id`) — name the dense-prefix + sentinel-rejection dependency at both ends, citing `config.cpp` id-sentinel rejection as leg (b). Comment-only on the producer side (NO loader/compile logic change).
+
+### Item PERF-M1-3 — test coverage per HG-2
+**Where**: `tests/` — ≥1 NEW ctest (tester names it; T_EXPORTER family); ZERO EDITED ctests expected. If the new test touches bpffs/iface/exporter port → RESOURCE_LOCK per guard #12.
 
 ## Out of scope (explicit)
-
-- ANY change to `dryrun_image.golden` or #112 (frozen; this slice only ADDS).
-- Fixing the #9 T_SANITIZER_BUILD timeout (BACKLOG B16, environmental).
-- Any `src/` or `src/bpf` change (test-only slice).
-- VERSION bump.
-- The shared `axis_format` extraction (still declined per D-mvp-4.39-NOEXTRACT).
-- SEC-L1 / PERF-M1 (separate slices).
+- `stats_reader.cpp` — its loop is `STAT_MAX (=5)`-bounded, not a 64-walk; no win there.
+- Any datapath / `src/bpf` / loader / `xdpfilter.h` ABI change (kills A3 by fence).
+- `BPF_MAP_LOOKUP_BATCH` exploration (Q1/A2) unless architect overturns with evidence.
+- SEC-L1 exporter sandboxing (separate deferred finding; deployment-gated).
+- The documented env-fail cleanup of T_EXPORTER #48/#63 (BACKLOG B16-adjacent; not this slice).
 
 ## Definition of done
-
-- §5.80 amendment in `mint/design.md`.
-- NEW `tests/dryrun/dryrun_human.golden` (frozen, bakes `0x0806`); harness renders + byte-compares it with a working negation control.
-- `T_SANITIZER_BUILD.sh` exercises `--dry-run` (both formats) under ASAN/UBSAN.
-- PIs held: PI-mvp-4.37-LIBBPF-FREE (harness link still libbpf-free), PI-mvp-4.38-GOLDEN-UNCHANGED (image golden + #112 ∅), PI-7 (loader.hpp ∅), insn 3477 (src/bpf ∅).
-- Existing suite green (modulo the documented env-flakes #1/#9/#48/#63); #112 still green; the harness binary now also passes the human-golden sub-tests.
-- `mint/review.md` round-1 verdict = pass.
-- One git commit per phase boundary.
+- §5.81 amendment in `mint/design.md` (problem, Q1/Q2 resolution, D-decisions, guard walk).
+- PI-31 + PI-32 + §5.64 seqlock semantics explicitly re-affirmed in §5.81 invariants.
+- Scrape `/metrics` output byte-identical for `count < 64` configs (reviewer-checked argument + test).
+- ctest: full suite green minus the 4 documented env-flakes (#1/#9 timeout, #48/#63 EACCES); ≥1 NEW exporter ctest.
+- NO VERSION bump (internal perf hygiene, no operator-visible surface change).
+- `mint/review.md` round-1 verdict = pass; one git commit per phase boundary.
 
 ## Dependencies
-- Build: clang-19 / libc++-19 (unchanged). Harness stays libbpf-free.
-- Runtime: ASAN/UBSAN build (XDPMF_SANITIZERS=ON) for the T_SANITIZER_BUILD step (existing).
-- Kernel/platform: none new (harness is offline; the sanitizer apply uses the existing veth fixture).
+- Build: existing (libbpf, clang-19, libc++). Runtime: root for exporter ctests (bpffs reads). No new deps.
 
 ## Packs to load (orchestrator: inject into spawn prompts)
 ```yaml
@@ -98,25 +79,24 @@ packs:
 
 ---
 
-## Pre-brief sanity check (per mint-hld-scope-discipline)
+## Pre-brief sanity check (per [[mint-hld-scope-discipline]])
+Mechanical: single design axis (how the reader learns the bound), answer falls out of the existing dense-prefix invariant + guard #26; cheap to undo (exporter-only); NOT hld-shaped. Stateful-map PRESERVE-vs-RESET: N/A (no map promotion; reader-only). PO-filter: no PO-tier decisions — both HGs are engineering defaults.
 
-**MECHANICAL (single-architect).** Not multi-axis: both items extend WELL-ESTABLISHED existing patterns (the dryrun_harness image-golden trio for H1; the T_SANITIZER_BUILD apply step for H2). The two HG forks each have a clearly-dominant recommended option that mirrors existing code; not ≥3 viable options, not expensive-to-undo (test code). No `/mint-hld` needed. NOT hld-derived → no ladder to re-discharge. PO-filter applied: both HG decisions are engineering test-architecture choices with clear recommendations — neither is on the user's plate.
-
-## Notes for architect Phase A code-grep discipline
-
-Brief author already ran these (CONFIRMED 2026-06-07); architect re-verifies + extends:
-- `grep -n format_dryrun_human src/lib/map_image.hpp src/lib/map_image.cpp` — sig `format_dryrun_human(const Config&, const CompiledRuleset&)` (hpp:32, def map_image.cpp:219); already linked by the harness.
-- `sed -n '/int main/,$p' tests/dryrun/dryrun_harness.cpp` — confirm the `--emit-golden`/`--emit-live` argv convention + the `test_smoke_minimal`/`test_image_identity`/`test_negation_control` trio to mirror; `build_corpus()` is the shared config (lock-step with `tests/dryrun/dryrun_cli.yaml`).
-- `sed -n '1765,1815p' tests/CMakeLists.txt` — the `dryrun_harness` target links materialize/map_writer/map_image/compiled_ruleset/loader_error + **NO** PkgConfig::LIBBPF / loader.cpp / skel object (the libbpf-free OPS-canary). Adding the human render keeps this — verify the link line is unchanged in kind.
-- `grep -n "apply\|--dry-run\|config_valid" tests/T_SANITIZER_BUILD.sh` — confirm the sanitized-apply config to reuse for the `--dry-run` step.
-- `test -e tests/dryrun/dryrun_human.golden` — must be absent (NEW).
-- Post-impl: `git diff tests/dryrun/dryrun_image.golden` MUST be empty (image golden frozen); `git diff --stat src/ src/bpf` MUST be empty (test-only slice).
+## Notes for architect Phase A code-grep discipline (per architect spec rules)
+Brief author ran (HEAD `25c6c44`); architect re-verifies independently per guard #5:
+- `grep -rn 'XDPMF_RULE_COUNTERS_MAX' src/exporter/` → syscall loops ONLY in `rule_counters_reader.cpp:127,136,144` + `prom_format.cpp:128` (the latter is host-array iteration, NOT syscalls — leave it).
+- `grep -n 'XDPMF_SLOT_ID_EMPTY' src/lib/config.cpp` → `:417-419` sentinel-id REJECTED at parse (guard #26 leg b).
+- `sed -n '85,100p' src/lib/compiled_ruleset.cpp` → `compute_slot_to_id` dense-prefix `[0,count)` + sentinel tail (guard #26 leg a).
+- `grep -n 'static_assert(sizeof(struct xdpmf_ruleset_state)' src/common/xdpfilter.h` → `:358` ABI-frozen 80B (fences Q1/A3).
+- `prom_format.cpp:128-130` — EMPTY-skip already in place → output-invariance claim grounded.
+- Exporter ctest cohort: 7 × `tests/T_EXPORTER_*.sh`; `rule_match_total` asserted in `T_EXPORTER_RULE_LABELS.sh` + `T_EXPORTER_SCRAPE_CONSISTENCY.sh`; counter semantics in `T_RULE_COUNTER_MAC_HIT_BUMPS.sh` + `T_RULE_COUNTER_SURVIVES_REORDER.sh` (B30 moved-keeps-counter — the reorder-density edge's existing net).
+- Counts here are operative-semantic SHOULD-hints, not literal contracts; impl deviations mirroring precedent → `inline-merge` per design's resolution rule.
 
 ### Anti-misdiagnosis guards applicable to this slice (per Phase 3)
-
-- **guard #5** (Phase A code-grep discipline) — always; architect repeats the greps above.
-- **guard #12** (RESOURCE_LOCK for shared host state) — the human golden runs INSIDE the existing offline harness (no bpffs/iface/port) → no lock, like #112. The `--dry-run` step in T_SANITIZER_BUILD runs inside that test's existing isolated /tmp build + veth fixture → no NEW shared-state surface. Confirm no NEW ctest with host state.
-- **§5.77.7 frozen-golden discipline** — the human golden, once emitted + checked in, is FROZEN; the `--emit-golden-human` affordance is generator-only, never auto-regenerated to "make it pass".
-- **PI-mvp-4.37-LIBBPF-FREE** — the load-bearing invariant: the harness link must stay libbpf-free after adding the human render path.
-
-(N/A: guard #11 — no VERSION bump; guard #13/#16 — no retired string/pin; guard #15 — no stateful-map promotion.)
+- **Guard #26** (sentinel-array early-break, §5.49) — THE core guard: two-leg invariant (a) dense-at-front (b) sentinel-unreachable-for-real-data, comments at BOTH ends, boundary-break vs per-element-continue distinction (→ Q2).
+- **Guard #32** (§5.64 read-side seqlock) — the reorder stays INSIDE one generation window; do not move reads across the `active_idx` pre/post checks; retry bound `kRuleCountersGenRetryMax` untouched.
+- **Guard #29** (§5.61 slot/id decouple) — slot ≠ operator id; the bound is over SLOTS; never assume id ordering.
+- **Guard #9** (duplication-over-extraction) — any new helper stays local to `rule_counters_reader.cpp`; do NOT extract into `percpu_read.hpp` at 1 consumer.
+- **Guard #12** (RESOURCE_LOCK) — if the NEW ctest touches bpffs/iface/port shared state.
+- **Guard #19** (WARN text convention) — only if any new WARN line is added (none expected).
+- **Guard #31** (green-on-SKIP floor) — the NEW ctest must not silently SKIP-pass in the CI build-only env.
